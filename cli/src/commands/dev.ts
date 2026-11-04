@@ -182,20 +182,33 @@ export function devCommand(): Command {
 
   cmd
     .description(
-      "Run a sandbox locally via Docker for development. Same policies, same model routing, on your laptop."
+      "Run a local Core sandbox, or bootstrap the Bridge Kind beta with --beta-config."
     )
     .addHelpText("before", `
-Requires either:
-  • An existing Azure AI Foundry / Azure OpenAI deployment, OR
-  • A GitHub PAT with \`models:read\` scope, which routes inference through
-    GitHub Models — no Azure subscription needed.
+Choose one of three inference providers:
+  • GitHub Copilot with an active subscription (device-code login), OR
+  • GitHub Models with a PAT with \`models:read\` scope, OR
+  • An existing Azure AI Foundry / Azure OpenAI deployment.
 
-On first run, you'll be prompted to choose between the two providers and
+GitHub Copilot and GitHub Models do not require an Azure subscription.
+On first run, you'll be prompted to choose a provider and
 your choice (and credentials) will be saved to ~/.kars/. Subsequent
 runs reuse the saved provider — no flags required.
 
 Use --github-token for a one-off, ephemeral GitHub Models run that does
 NOT overwrite your saved credentials.
+
+Without --beta-config, --target local-k8s starts standalone Core and sandbox chat, not the Bridge
+beta workspace (Teams, Missions, Inbox and catalogue). Use --release --target local-k8s
+--beta-config <file> to bootstrap fresh Kind, Cilium, OIDC trust and the
+maintained two-release Helm installation and its identity/enrollment inputs:
+https://github.com/Azure/kars/blob/kars-bridge/bridge/docs/public-beta-helm.md
+Kind beta asks for missing Foundry/Azure OpenAI endpoint, API key and default model,
+or reuses compatible saved credentials. Reviewed Core values take precedence.
+Its qualified bootstrap currently supports only Foundry/Azure OpenAI; the standalone
+provider choices above remain unchanged. Bridge inherits the Core configuration.
+For existing Core, install only the separate Bridge Helm release; do not rerun
+cold Kind/Core setup. Removing Bridge must leave Core and its workloads intact.
 `)
     // ── Identity ───────────────────────────────────────────────────────
     .option("--name <name>", "Sandbox name", "dev-agent")
@@ -211,6 +224,7 @@ NOT overwrite your saved credentials.
       "Where to run the sandbox: docker (default, fast) | local-k8s (kind+helm, mirrors AKS layout)",
       "docker"
     )
+    .option("--beta-config <file>", "Reviewed cold Kind beta inputs (requires bare --release --target local-k8s; keeps UI tunnels in foreground)")
     .option(
       "--cluster-name <name>",
       "Kind cluster name (only used with --target local-k8s)",
@@ -351,6 +365,19 @@ Notes:
         if (!imagePassed) {
           options.image = releaseImage("openclaw-sandbox", releaseVersion!);
         }
+      }
+
+      if (options.betaConfig) {
+        const permitted = new Set(["betaConfig", "release", "target", "clusterName"]);
+        const conflicting = cmd.options.filter(option => cmd.getOptionValueSource(option.attributeName()) === "cli"
+          && !permitted.has(option.attributeName()));
+        if (options.release !== true || options.target !== "local-k8s" || conflicting.length) {
+          throw new Error("Kind beta requires bare --release --target local-k8s --beta-config <file>; only --cluster-name may be added. Put reviewed product inputs in the values files, not standalone flags.");
+        }
+        const { runLocalK8s } = await import("./dev/local-k8s.js");
+        await runLocalK8s({ name: "dev-agent", clusterName: options.clusterName, image: "", ephemeral: false,
+          noBuild: true, betaConfig: options.betaConfig });
+        return;
       }
 
       // ── First-run target prompt ──────────────────────────────────
@@ -1808,6 +1835,17 @@ Notes:
         console.error(chalk.red(`  ${message}\n`));
         process.exit(1);
       }
+    });
+
+  cmd.command("setup-providers")
+    .description("Finish or resume secure provider setup on an existing Kind beta installation")
+    .requiredOption("--kind-cluster <name>", "Existing Kind beta cluster")
+    .requiredOption("--kubeconfig <file>", "Dedicated Kind kubeconfig")
+    .requiredOption("--state-directory <directory>", "Private setup directory; reuse it when resuming an attempt")
+    .action(async (options: { kindCluster: string; kubeconfig: string; stateDirectory: string }) => {
+      const { setupLocalKindBetaProviders } = await import("./dev/local-k8s.js");
+      await setupLocalKindBetaProviders({ clusterName: options.kindCluster, kubeconfig: options.kubeconfig, stateDirectory: options.stateDirectory });
+      console.log("Provider management is ready. Use Bridge Configuration to connect additional providers.");
     });
 
   // `kars dev down [--target local-k8s] [--keep-cluster]`

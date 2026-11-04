@@ -360,11 +360,150 @@ async fn granted_token_is_stored_before_authorized_and_late_failures_never_claim
             assert_eq!(status, StatusCode::OK);
             assert_eq!(body, contract()["authorized"]);
             assert!(api.secret["data"]["COPILOT_GITHUB_TOKEN"].is_string());
+            assert_copilot_route(&api.secret, PRIVATE);
         } else {
             assert_eq!(status, StatusCode::CONFLICT);
             assert_eq!(body, contract()["storage_unconfirmed"]);
             assert!(api.secret["data"].get("COPILOT_GITHUB_TOKEN").is_none());
+            assert!(api.secret["data"].get("KARS_PROVIDER_GITHUB_COPILOT_TOKEN").is_none());
+            assert!(api.secret["data"].get("KARS_PROVIDER_GITHUB_COPILOT_ENDPOINT").is_none());
             assert!(!api.calls.iter().any(|(_, p)| p == MODELS));
+        }
+    }
+}
+
+fn assert_copilot_route(secret: &Value, token: &str) {
+    use base64::Engine;
+    let encoded = |value: &str| base64::engine::general_purpose::STANDARD.encode(value);
+    assert_eq!(secret["data"]["COPILOT_GITHUB_TOKEN"], encoded(token));
+    assert_eq!(secret["data"]["KARS_PROVIDER_GITHUB_COPILOT_TOKEN"], encoded(token));
+    assert_eq!(
+        secret["data"]["KARS_PROVIDER_GITHUB_COPILOT_ENDPOINT"],
+        encoded("https://api.githubcopilot.com")
+    );
+    assert!(secret["data"].get("KARS_PROVIDER_GITHUB_COPILOT_API_KEY").is_none());
+    assert_eq!(secret["data"]["UNRELATED"], "cHJlc2VydmVk");
+}
+
+#[tokio::test]
+async fn copilot_explicit_save_binds_historical_connections_and_removal_retires_both_routes() {
+    use super::super::additional_providers::{
+        AdditionalProviderRequest, delete_additional_provider, put_additional_provider,
+    };
+    use base64::Engine;
+    for replacement in [None, Some("ROTATED_TEST_TOKEN")] {
+        let f = fixture().await;
+        {
+            let mut api = f.api.lock().unwrap();
+            api.secret["data"]["COPILOT_GITHUB_TOKEN"] =
+                base64::engine::general_purpose::STANDARD.encode(PRIVATE).into();
+            api.secret["data"]["KARS_PROVIDER_GITHUB_COPILOT_API_KEY"] =
+                base64::engine::general_purpose::STANDARD.encode("obsolete-key").into();
+        }
+        let state = AppState::for_test_client(f.client.clone(), "kars-system");
+        let Json(result) = put_additional_provider(
+            State(state.clone()),
+            Json(AdditionalProviderRequest {
+                tag: "github-copilot".into(),
+                endpoint: None,
+                api_key: replacement.map(str::to_string),
+                models: Some("gpt-5-mini,gpt-4.1".into()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["configured"], true);
+        assert!(!result.to_string().contains(PRIVATE));
+        {
+            let api = f.api.lock().unwrap();
+            assert_copilot_route(&api.secret, replacement.unwrap_or(PRIVATE));
+            assert_eq!(
+                api.secret["data"]["KARS_PROVIDER_GITHUB_COPILOT_MODELS"],
+                base64::engine::general_purpose::STANDARD.encode("gpt-5-mini,gpt-4.1"),
+            );
+        }
+        let Json(removed) = delete_additional_provider(State(state), axum::extract::Path("github-copilot".into()))
+            .await
+            .unwrap();
+        assert_eq!(removed, json!({"removed":true,"tag":"github-copilot"}));
+        assert_eq!(f.api.lock().unwrap().secret["data"], json!({"UNRELATED":"cHJlc2VydmVk"}));
+    }
+}
+
+#[tokio::test]
+async fn copilot_discovery_reads_enrolled_credentials_without_exposing_or_mutating_them() {
+    use super::super::providers::copilot_discovery_token;
+    use base64::Engine;
+
+    for key in ["COPILOT_GITHUB_TOKEN", "KARS_PROVIDER_GITHUB_COPILOT_TOKEN"] {
+        let f = fixture().await;
+        f.api.lock().unwrap().secret["data"][key] =
+            base64::engine::general_purpose::STANDARD.encode(PRIVATE).into();
+        let state = AppState::for_test_client(f.client.clone(), "kars-system");
+        for supplied in [None, Some(" ")] {
+            assert_eq!(copilot_discovery_token(&state, supplied).await.unwrap(), PRIVATE);
+        }
+        let api = f.api.lock().unwrap();
+        assert!(api.calls.iter().any(|(_, path)| path == SECRET));
+        assert!(api.calls.iter().all(|(method, _)| *method == Method::GET));
+        assert_eq!(api.secret["data"]["UNRELATED"], "cHJlc2VydmVk");
+    }
+}
+
+#[tokio::test]
+async fn copilot_discovery_prefers_named_credentials_and_preserves_explicit_token_discovery() {
+    use super::super::providers::copilot_discovery_token;
+    use base64::Engine;
+
+    let f = fixture().await;
+    {
+        let mut api = f.api.lock().unwrap();
+        api.secret["data"]["COPILOT_GITHUB_TOKEN"] =
+            base64::engine::general_purpose::STANDARD.encode("older-token").into();
+        api.secret["data"]["KARS_PROVIDER_GITHUB_COPILOT_TOKEN"] =
+            base64::engine::general_purpose::STANDARD.encode(PRIVATE).into();
+    }
+    let state = AppState::for_test_client(f.client.clone(), "kars-system");
+    assert_eq!(copilot_discovery_token(&state, None).await.unwrap(), PRIVATE);
+    {
+        let mut api = f.api.lock().unwrap();
+        api.calls.clear();
+        api.missing_grant = true;
+    }
+    assert_eq!(
+        copilot_discovery_token(&state, Some(" supplied-token ")).await.unwrap(),
+        "supplied-token",
+    );
+    assert!(f.api.lock().unwrap().calls.is_empty());
+}
+
+#[tokio::test]
+async fn copilot_discovery_missing_or_unenrolled_credentials_fail_without_oauth() {
+    use super::super::providers::copilot_discovery_token;
+    use base64::Engine;
+
+    for fault in ["missing_token", "missing_grant", "disabled_grant"] {
+        let f = fixture().await;
+        {
+            let mut api = f.api.lock().unwrap();
+            if fault != "missing_token" {
+                api.secret["data"]["COPILOT_GITHUB_TOKEN"] =
+                    base64::engine::general_purpose::STANDARD.encode(PRIVATE).into();
+            }
+            api.missing_grant = fault == "missing_grant";
+            if fault == "disabled_grant" {
+                api.grant["spec"]["enabled"] = false.into();
+            }
+        }
+        let state = AppState::for_test_client(f.client.clone(), "kars-system");
+        let error = copilot_discovery_token(&state, None).await.unwrap_err();
+        let (status, _) = response(error).await;
+        assert!(status.is_client_error() || status.is_server_error());
+        let api = f.api.lock().unwrap();
+        assert!(api.calls.iter().all(|(method, path)|
+            *method == Method::GET && path != SEAT && path != MODELS));
+        if fault != "missing_token" {
+            assert!(!api.calls.iter().any(|(_, path)| path == SECRET));
         }
     }
 }

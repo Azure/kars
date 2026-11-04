@@ -105,6 +105,7 @@ fn test_state() -> AppState {
         policy_status,
         inference_policy: kars_inference_router::inference_policy_loader::empty_handle(),
         memory_binding: kars_inference_router::memory_binding_loader::empty_handle(),
+        memory_updates: Default::default(),
         egress_allowlist: kars_inference_router::egress_allowlist_loader::empty_handle(),
         deployment_health: Arc::new(
             kars_inference_router::deployment_health::DeploymentHealthRegistry::new(),
@@ -159,6 +160,59 @@ async fn send(app: &Router, method: &str, uri: &str) -> (StatusCode, Value) {
         .unwrap();
     let json = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     (status, json)
+}
+
+#[tokio::test]
+async fn memory_rest_denials_precede_provider_io_and_cannot_use_foreign_updates() {
+    use kars_inference_router::memory_binding_loader::LoadedMemoryBinding;
+    use serde_json::json;
+    let provider = wiremock::MockServer::start().await;
+    let mut state = test_state();
+    let config = Arc::get_mut(&mut state.config).unwrap();
+    config.foundry_endpoint = Some(provider.uri());
+    config.foundry_project_endpoint = Some(provider.uri());
+    *state.memory_binding.write().await = Ok(Some(LoadedMemoryBinding {
+        digest: "test".into(), source_path: "binding.json".into(), store_name: "bound".into(),
+        scope: "private".into(), shared_scopes: vec!["team".into()], raw: json!({}),
+    }));
+    let app = app(state);
+    let mut cases = vec![
+        ("GET", "/memory_stores".to_string(), json!({})),
+        ("GET", "/memory_stores/other".to_string(), json!({})),
+        ("DELETE", "/memory_stores/bound".to_string(), json!({})),
+        ("GET", "/memory_stores/bound/updates/foreign-id".to_string(), json!({})),
+        ("POST", "/memory_stores".to_string(), json!({"name":"other"})),
+    ];
+    for op in ["search_memories", "update_memories", "delete_scope"] {
+        for scope in ["other-sandbox", "tenant:other-tenant", "system", "*", "../other", "%70rivate", " private", "team/child"] {
+            cases.push(("POST", format!("/memory_stores/bound:{op}"), json!({"scope":scope})));
+        }
+        cases.push(("POST", format!("/memory_stores/other:{op}"), json!({"scope":"private"})));
+    }
+    for (method, uri, body) in cases {
+        let response = app.clone().oneshot(Request::builder().method(method).uri(&uri)
+            .header("content-type", "application/json").header("x-kars-platform-mcp", "1")
+            .body(Body::from(body.to_string())).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {uri} {body}");
+        assert_eq!(response.headers()["x-kars-decision-by"], "KarsMemory");
+        assert_eq!(
+            response.headers()["x-kars-decision-reason"].to_str().unwrap().contains("scope"),
+            uri.starts_with("/memory_stores/bound:"),
+            "wrong-store or update-ownership denials must not qualify scope isolation: {method} {uri}"
+        );
+    }
+    assert!(provider.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn memory_rest_unavailable_binding_never_falls_back_or_claims_policy_denial() {
+    let state = test_state();
+    *state.memory_binding.write().await = Err("invalid memory scope binding".into());
+    let response = app(state).oneshot(Request::builder().method("POST")
+        .uri("/memory_stores/memory-sb-test:search_memories")
+        .body(Body::from(r#"{"scope":"agent_sb-test"}"#)).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(!response.headers().contains_key("x-kars-decision"));
 }
 
 /// Every inference-bearing Foundry route must refuse a guardrail
@@ -241,7 +295,7 @@ async fn guardrail_policy_leaves_non_inference_foundry_routes_unguarded() {
     install_policy(&state, None, true).await;
     let app = app(state);
 
-    for uri in ["/openai/files", "/memory_stores", "/evaluations"] {
+    for uri in ["/openai/files", "/evaluations"] {
         let (status, body) = send(&app, "POST", uri).await;
         assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "POST {uri}: {body}");
         assert_eq!(
@@ -357,7 +411,7 @@ async fn slash_variants_of_guarded_families_never_reach_proxy_body() {
 /// customers have always used must NOT be rejected by the path guard,
 /// even under an active guardrail policy (they are exempt) and even
 /// with no policy at all. They collapse to canonical form and reach the
-/// proxy body (here the network-free github-models 501). Paths carry a
+/// proxy body, or the memory access guard for a foreign store. Paths carry a
 /// real segment before the slash so they match the `{*path}` wildcard
 /// route (a bare `/openai/files/` 404s at axum routing, which is
 /// pre-existing and orthogonal to the guard).
@@ -379,11 +433,16 @@ async fn benign_trailing_slash_paths_are_not_rejected() {
                 Some("invalid_path"),
                 "POST {uri} (guardrails={guardrails}) must not be rejected by the path guard: {status} {body}"
             );
-            assert_eq!(
-                body["error"]["type"].as_str(),
-                Some("unsupported_for_provider"),
-                "POST {uri} (guardrails={guardrails}) should reach the proxy body: {status} {body}"
-            );
+            if uri.starts_with("/memory_stores/") {
+                assert_eq!(status, StatusCode::FORBIDDEN);
+                assert_eq!(body["error"]["type"], "kars_memory_denial");
+            } else {
+                assert_eq!(
+                    body["error"]["type"].as_str(),
+                    Some("unsupported_for_provider"),
+                    "POST {uri} (guardrails={guardrails}) should reach the proxy body: {status} {body}"
+                );
+            }
         }
     }
 }

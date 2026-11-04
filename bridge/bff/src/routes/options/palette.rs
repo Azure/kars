@@ -83,9 +83,29 @@ pub(crate) fn provider_for(
     }
 }
 
+#[derive(Default, serde::Deserialize)]
+pub struct OptionsQuery {
+    #[serde(default)]
+    catalogue_only: bool,
+}
+
 /// `GET /api/options` — the composable launch-package palette, from live state.
-pub async fn get_options(State(state): State<AppState>) -> AppResult<Json<Options>> {
+pub async fn get_options(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<OptionsQuery>,
+) -> AppResult<Json<Options>> {
     let cluster = require_cluster(&state)?;
+    if query.catalogue_only {
+        let mut options = build_available_options(cluster).await?;
+        // Configuration can repair a missing/malformed selection without advertising
+        // the bootstrap fallback as the operator's saved default.
+        for model in &mut options.models {
+            model.is_default = false;
+        }
+        options.provider = None;
+        options.default_model = None;
+        return Ok(Json(options));
+    }
     Ok(Json(build_options(cluster).await?))
 }
 
@@ -94,6 +114,91 @@ pub async fn get_options(State(state): State<AppState>) -> AppResult<Json<Option
 /// ever proposes models, tool policies, MCP servers, isolation levels, and
 /// memory stores that genuinely exist on this cluster.
 pub async fn build_options(cluster: &crate::kars::cluster::Cluster) -> AppResult<Options> {
+    let mut options = build_available_options(cluster).await?;
+    if let Some(selected) = cluster.model_default().await.map_err(upstream)? {
+        apply_model_default(&mut options.models, &selected)?;
+        options.default_model = Some(selected.deployment);
+        options.provider = Some(ProviderInfo {
+            id: selected.provider.clone(),
+            label: selected.provider,
+            note:
+                "Default for new missions and teams; existing explicit model routes are unchanged."
+                    .into(),
+        });
+    }
+    Ok(options)
+}
+
+fn apply_model_default(
+    models: &mut [ModelOption],
+    selected: &crate::kars::task::TaskModel,
+) -> AppResult<()> {
+    let selected_index = models.iter().position(|model|
+        model.provider == selected.provider && model.deployment == selected.deployment
+    ).ok_or_else(|| AppError::BadRequest(
+        "The saved default model is no longer configured; select another configured model in Configuration.".into()
+    ))?;
+    for (index, model) in models.iter_mut().enumerate() {
+        model.is_default = index == selected_index;
+    }
+    Ok(())
+}
+
+#[test]
+fn model_default_selection_is_provider_qualified_and_preserves_every_configured_route() {
+    use crate::kars::task::TaskModel;
+    let mut models = Vec::new();
+    append_model(&mut models, "shared".into(), "azure-foundry".into(), true);
+    append_model(&mut models, "shared".into(), "github-copilot".into(), false);
+    append_model(&mut models, "flash".into(), "github-copilot".into(), false);
+    let routes: Vec<_> = models
+        .iter()
+        .map(|m| (m.provider.clone(), m.deployment.clone()))
+        .collect();
+    for (provider, deployment, index) in [
+        ("github-copilot", "shared", 1),
+        ("github-copilot", "flash", 2),
+        ("azure-foundry", "shared", 0),
+    ] {
+        apply_model_default(
+            &mut models,
+            &TaskModel {
+                provider: provider.into(),
+                deployment: deployment.into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(models.iter().filter(|m| m.is_default).count(), 1);
+        assert!(models[index].is_default);
+        assert_eq!(
+            models
+                .iter()
+                .map(|m| (m.provider.clone(), m.deployment.clone()))
+                .collect::<Vec<_>>(),
+            routes
+        );
+    }
+    for (provider, deployment) in [
+        ("github-copilot", "unconfigured"),
+        ("absent", "shared"),
+        ("", ""),
+    ] {
+        assert!(
+            apply_model_default(
+                &mut models,
+                &TaskModel {
+                    provider: provider.into(),
+                    deployment: deployment.into()
+                }
+            )
+            .is_err()
+        );
+        assert!(models[0].is_default);
+        assert_eq!(models.len(), 3);
+    }
+}
+
+pub(crate) async fn build_available_options(cluster: &crate::kars::cluster::Cluster) -> AppResult<Options> {
     // Models: the controller-configured default + catalog, deduped against any
     // distinct models already pinned on existing InferencePolicies (real,
     // in-use facts). Order: default first, then catalog, then discovered.
@@ -429,6 +534,7 @@ pub async fn build_options(cluster: &crate::kars::cluster::Cluster) -> AppResult
     };
 
     Ok(Options {
+        per_run_qualification_available: super::qualification::per_run_qualification_available(),
         models,
         default_model,
         provider,

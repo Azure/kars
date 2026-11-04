@@ -45,7 +45,8 @@ pub struct VerifyCheck {
 /// real bytes the verdict was computed over.
 #[derive(Debug, Serialize, Default)]
 pub struct Evidence {
-    /// The exact in-toto Statement the signature covers (the signed payload).
+    /// The decoded in-toto Statement. Re-serialization is not the original
+    /// DSSE payload byte sequence used for signature verification.
     pub signed_statement: Option<Value>,
     /// Base64 Ed25519 signature over the DSSE PAE of the statement.
     pub signature_b64: Option<String>,

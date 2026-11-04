@@ -207,6 +207,16 @@ pub async fn teams_decision(
         ));
     }
 
+    if matches!(req.verdict.as_str(), "deny" | "request-changes") {
+        super::teams::preflight_checkpoint_rejection(
+            cluster,
+            &req.approval_namespace,
+            &current,
+            req.reason.as_deref(),
+        )
+        .await?;
+    }
+
     // ── Apply decision ────────────────────────────────────────────────────────
     let decision = ApprovalDecision {
         verdict: if req.verdict == "request-changes" {

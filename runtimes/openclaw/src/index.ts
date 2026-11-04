@@ -239,23 +239,21 @@ function fireInboxWakers(): void {
  * resolves to true on wake, false on timeout. The waker is auto-removed
  * either way.
  */
-export function waitForInbox(timeoutMs: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    let settled = false;
-    const wake = (): void => {
-      if (settled) return;
-      settled = true;
+export function waitForInbox(timeoutMs: number, signal?: AbortSignal): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    signal?.throwIfAborted();
+    const finish = (woke: boolean, aborted = false): void => {
       inboxWakers.delete(wake);
       clearTimeout(timer);
-      resolve(true);
+      signal?.removeEventListener("abort", cancel);
+      if (aborted) reject(signal?.reason ?? new Error("Inbox wait aborted"));
+      else resolve(woke);
     };
+    const wake = () => finish(true);
+    const cancel = () => finish(false, true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
     inboxWakers.add(wake);
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      inboxWakers.delete(wake);
-      resolve(false);
-    }, timeoutMs);
+    signal?.addEventListener("abort", cancel, { once: true });
     if (typeof timer.unref === "function") timer.unref();
   });
 }
@@ -362,14 +360,18 @@ async function notifyInboxToMemory(log: { info: (m: string) => void; warn: (m: s
   return _notifyInboxToMemory(agtInbox, log);
 }
 import { discoverFoundryProject, type FoundryProjectInfo } from "./core/foundry-discovery.js";
-import { resolveMemoryStoreName, resolveMemoryScope } from "./core/memory-binding.js";
+import { callFoundryMemory, memoryUpdateSummary } from "./core/foundry-memory.js";
 import { delegateToNativeAgent } from "./core/agt-task-delegate.js";
 import { meshSendWithIdentity, meshHandleTransportMessage, pendingTransfers, MESH_CHUNK_THRESHOLD, MESH_CHUNK_SIZE, MESH_MAX_CHUNKS, MESH_TRANSFER_TTL, type PendingMeshTransfer } from "./core/mesh-transport.js";
 import { TASK_TOOLS } from "./core/agt-task-tools.js";
 import { recordMeshSession as _recordMeshSession, agtReconnect as _agtReconnect, notifyInboxToMemory as _notifyInboxToMemory, startTaskProgressHeartbeat } from "./core/agt-heartbeat.js";
 import { runOffloadTask as _runOffloadTask, startProactiveOffloadIfNeeded as _startProactiveOffloadIfNeeded } from "./core/agt-offload.js";
-import { processTaskWithTools as _processTaskWithTools, executeTaskWithEvidence, type TaskLoopDeps } from "./core/agt-task-loop.js";
+import { processTaskWithTools as _processTaskWithTools, type TaskLoopDeps } from "./core/agt-task-loop.js";
+import { createNativeMissionExecutor, type NativeMissionExecutor } from "./core/native-mission.js";
+import { createSystemPromptHook } from "./core/system-prompt.js";
+import type { NativeMissionApi, NativeToolFactory } from "./core/native-mission-api.js";
 import { MissionReceiver } from "./core/mission-receiver.js";
+import { createMissionPeers, ordinaryPeerMessage } from "./core/mission-peer.js";
 import { RequiredMeshAuth, meshAuthRequest, requiredMeshAuth, validateMeshVerification } from "./core/mesh-auth.js";
 let requiredAuth: RequiredMeshAuth<any> | undefined;
 
@@ -403,6 +405,7 @@ import { isMissionMessage } from "@kars/mesh/dist/mission-protocol.js";
 import { authorizeTaskAction } from "./core/task-policy.js";
 import { runHandoffOrchestration as _runHandoffOrchestrationCore } from "./core/agt-handoff.js";
 import { registerHttpFetchTool } from "./core/agt-tools/http-fetch.js";
+import { registerAccessRequestTool } from "./core/agt-tools/access-request.js";
 import { registerGitHubActionsTool } from "./core/agt-tools/github-actions.js";
 import { registerMcpBridgeTools } from "./core/agt-tools/mcp-bridge.js";
 import { registerFoundryTools } from "./core/agt-tools/foundry.js";
@@ -497,7 +500,7 @@ async function startProactiveOffloadIfNeeded(
   return _startProactiveOffloadIfNeeded(_offloadDeps(), log);
 }
 
-async function initAGT(log: { info: (m: string) => void; warn: (m: string) => void }) {
+async function initAGT(log: { info: (m: string) => void; warn: (m: string) => void }, executeNativeMission?: NativeMissionExecutor) {
   let required: boolean;
   try { required = requiredMeshAuth(); }
   catch { stopRequiredMesh(log); return; }
@@ -855,7 +858,12 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       }
     });
 
-    const missionReceiver = missionBinding ? new MissionReceiver({
+    const assertPeerSingleton = () => {
+      auth?.assertUsable();
+      if (!agtMeshClient?.isConnected || (process as any)[AGT_CLIENT_KEY] !== agtMeshClient
+        || (process as any)[AGT_IDENTITY_KEY] !== agtIdentity) throw new Error("Native peer singleton authority changed");
+    };
+    const missionReceiver: MissionReceiver | null = missionBinding ? new MissionReceiver({
       target: missionBinding.target,
       expectedContract: missionBinding.contract,
       admission: missionBinding.admission,
@@ -870,9 +878,17 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
         auth?.assertUsable();
         return decision;
       },
-      execute: (content, onEvidence, artifactsEnabled, reviewedPhase, inputArtifacts, liveActivityEnabled, requiredOutputs) => {
+      execute: (_content, onEvidence, _artifactsEnabled, _reviewedPhase, _inputArtifacts, _liveActivityEnabled, _requiredOutputs, assignment) => {
         auth?.assertUsable();
-        return executeTaskWithEvidence(content, { ...taskLoopDeps(), onEvidence, liveActivityEnabled }, log, artifactsEnabled, reviewedPhase, inputArtifacts, requiredOutputs);
+        if (!executeNativeMission || !assignment) throw new Error("Correlated OpenClaw native Mission execution is unavailable");
+        const assertCurrent = () => { assertPeerSingleton(); missionReceiver!.assertActiveAssignment(assignment); };
+        assertCurrent();
+        return executeNativeMission(assignment, onEvidence, assertCurrent, createMissionPeers({
+          client: agtMeshClient!, sandboxName: agtSandboxName,
+          registry: getMeshRegistry(routerUrl), inbox: agtInbox, partition: missionReceiver!.peerInbox(assignment),
+          assertCurrent, waitForInbox,
+          markRead: ids => { inboxStats.read_total += ids.length; inboxStats.last_read_at = new Date().toISOString(); },
+        }));
       },
       send: (to, reply) => agtMeshClient!.send(to, reply),
       warn: (message) => log.warn(message),
@@ -880,12 +896,14 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
 
     // Set up message handler — stores received messages in the AGT inbox buffer
     // AND auto-replies to task_request messages via AGT relay (E2E encrypted reply)
-    agtMeshClient.onMessage(async (fromAmid: string, message: any, security: "encrypted" | "plaintext" | "unknown" = "unknown") => {
+    agtMeshClient.onMessage(async (fromAmid: string, message: any, security: "encrypted" | "plaintext" | "unknown" = "unknown", ingress?: unknown) => {
       if (isMissionMessage(message)) {
         try { await missionReceiver?.handle(fromAmid, message, security); }
         catch { log.warn("Rejected invalid mission protocol message"); }
         return;
       }
+      const peerIngress = security === "encrypted" && ordinaryPeerMessage(message) && typeof ingress === "function"
+        ? ingress as (entry: object) => void : undefined;
       // Resolve sender name — check local cache first, then look up via registry
       let fromName = amidToName.get(fromAmid) || "";
       if (!fromName && message?.from_agent) {
@@ -977,6 +995,10 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
         timestamp: new Date().toISOString(),
         id: `agt-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`,
       };
+      if (peerIngress && transportResult === undefined && ordinaryPeerMessage(message)) {
+        try { assertPeerSingleton(); peerIngress(entry); }
+        catch { /* A delayed callback must not move an old message into a newer assignment. */ }
+      }
       pushInbox(entry);
       log.info(`AGT relay message from ${sanitizeLog(fromName, 50)} (${fromAmid.slice(0, 12)}...): ${sanitizeLog(JSON.stringify(content), 200)}`);
 
@@ -1797,8 +1819,6 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
               }
 
               // 2. Store handoff event in Foundry Memory (includes conversation ID for startup recall)
-              const store = resolveMemoryStoreName(agentName);
-              const memScope = resolveMemoryScope(agentName);
               const recentSummary = chatMessages.slice(-5).map((m: any) =>
                 `${m.role}: ${String(m.content || "").slice(0, 200)}`
               ).join("\n");
@@ -1813,12 +1833,8 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
               ].filter(Boolean).join(" ");
 
               try {
-                await _routerCall("POST", `/memory_stores/${store}:update_memories?${apiVer}`, {
-                  scope: memScope,
-                  items: [{ type: "message", role: "assistant", content: [{ type: "input_text", text: memoryText }] }],
-                  update_delay: 0,
-                });
-                log.info("🧠 Handoff: stored handoff event in Foundry Memory");
+                const update = await callFoundryMemory({ operation: "update", text: memoryText, role: "assistant" });
+                log.info(`🧠 Handoff: Foundry Memory update ${memoryUpdateSummary(update)}`);
               } catch (e: any) {
                 log.warn(`Handoff: Foundry Memory update failed (non-fatal): ${e.message}`);
               }
@@ -2219,6 +2235,9 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           } catch { /* best effort */ }
         }
       }
+    }, () => {
+      assertPeerSingleton();
+      return missionReceiver?.capturePeerIngress();
     });
 
     // ── Connect to the mesh (handlers are registered, safe to receive) ──
@@ -2425,7 +2444,7 @@ async function initFoundry(log: { info: (m: string) => void; warn: (m: string) =
   // Allow re-initialization per session (register() is called once per session)
   if (foundryInitialized) return;
   foundryInitialized = true;
-  foundryProject = await discoverFoundryProject(_routerCall, ensureMemoryStore, log);
+  foundryProject = await discoverFoundryProject(_routerCall, log);
 }
 
 // ---------------------------------------------------------------------------
@@ -2437,29 +2456,6 @@ let memorySyncToolCount = 0;
 let memorySyncBuffer: string[] = [];
 let memorySyncInFlight = false;
 
-async function ensureMemoryStore(store: string): Promise<void> {
-  const apiVer = "api-version=2025-11-15-preview";
-  try {
-    await _routerCall("GET", `/memory_stores/${store}?${apiVer}`);
-  } catch {
-    const chatModel = process.env.OPENCLAW_MODEL || "gpt-4.1";
-    await _routerCall("POST", `/memory_stores?${apiVer}`, {
-      name: store,
-      description: `Persistent memory for agent ${store.replace("memory-", "")}`,
-      definition: {
-        kind: "default",
-        chat_model: chatModel,
-        embedding_model: "text-embedding-3-small",
-        options: {
-          user_profile_enabled: true,
-          user_profile_details: "Store user preferences, decisions, and project context",
-          chat_summary_enabled: true,
-        },
-      },
-    });
-  }
-}
-
 async function syncToFoundryMemory(
   content: string,
   log: { info: (m: string) => void; warn: (m: string) => void },
@@ -2467,29 +2463,10 @@ async function syncToFoundryMemory(
   if (memorySyncInFlight) return; // Prevent overlapping syncs
   memorySyncInFlight = true;
   try {
-    const agentName = process.env.SANDBOX_NAME || process.env.HOSTNAME || "default";
-    const store = resolveMemoryStoreName(agentName);
-    const scope = resolveMemoryScope(agentName);
-    try {
-      await _routerCall("POST", `/memory_stores/${store}:update_memories?api-version=2025-11-15-preview`, {
-        scope,
-        items: [{ type: "message", role: "assistant", content: [{ type: "input_text", text: content }] }],
-        update_delay: 0,
-      });
-      log.info(`Foundry memory sync: persisted ${content.length} chars`);
-    } catch (e: any) {
-      if (e?.message?.includes("404")) {
-        await ensureMemoryStore(store);
-        await _routerCall("POST", `/memory_stores/${store}:update_memories?api-version=2025-11-15-preview`, {
-          scope,
-          items: [{ type: "message", role: "assistant", content: [{ type: "input_text", text: content }] }],
-          update_delay: 0,
-        });
-        log.info(`Foundry memory sync: created store + persisted ${content.length} chars`);
-      }
-    }
-  } catch {
-    // Best effort — don't disrupt agent workflow
+    const update = await callFoundryMemory({ operation: "update", text: content, role: "assistant" });
+    log.info(`Foundry memory sync: ${memoryUpdateSummary(update)} (${content.length} chars)`);
+  } catch (error) {
+    log.warn(`Foundry memory sync failed: ${error instanceof Error ? error.message : String(error)}`);
   } finally {
     memorySyncInFlight = false;
   }
@@ -2674,8 +2651,10 @@ interface OpenClawPluginApi {
   registerCommand: (command: PluginCommandDefinition) => void;
   registerCli: (registrar: (ctx: PluginCliContext) => void, opts?: { commands?: string[] }) => void;
   registerProvider: (provider: ProviderPlugin) => void;
-  registerTool: (tool: ToolDefinition) => void;
-  on?: (hookName: "before_prompt_build", handler: () => { systemPrompt: string }) => void;
+  registerTool: (tool: ToolDefinition | NativeToolFactory, options?: { names: string[]; optional: true }) => void;
+  runtime?: NativeMissionApi["runtime"];
+  registerWebFetchProvider?: NativeMissionApi["registerWebFetchProvider"];
+  on?: NativeMissionApi["on"] & ((hookName: "before_prompt_build", handler: ReturnType<typeof createSystemPromptHook>) => void);
   resolvePath: (input: string) => string;
   // OpenClaw 2026.4.x registration modes. register() is called once per mode
   // ("full" | "discovery" | "setup-only" | "setup-runtime" | "cli-metadata").
@@ -2769,7 +2748,7 @@ const azureClawPlugin = definePluginEntry({
       if (typeof api.on !== "function") {
         throw new Error("Kars system prompt requires the OpenClaw before_prompt_build hook API");
       }
-      api.on("before_prompt_build", () => ({ systemPrompt: config.systemPrompt }));
+      api.on("before_prompt_build", createSystemPromptHook(config.systemPrompt));
     }
 
     // ── Startup banner ─────────────────────────────────────────────────
@@ -2834,8 +2813,17 @@ const azureClawPlugin = definePluginEntry({
       // Reset per-session initialization guards so new sessions rediscover state
       foundryInitialized = false;
 
+      let executeNativeMission: NativeMissionExecutor | undefined;
+      if (process.env.KARS_MISSION_DISPATCH_ENABLED === "true") {
+        if (!api.runtime?.agent?.runEmbeddedAgent || !api.runtime.agent.session?.getSessionEntry || !api.on || !api.registerWebFetchProvider) {
+          throw new Error("Mission dispatch requires the pinned OpenClaw native runtime, session and lifecycle APIs");
+        }
+        executeNativeMission = createNativeMissionExecutor({ id: api.id, runtime: api.runtime,
+          registerWebFetchProvider: api.registerWebFetchProvider.bind(api),
+          registerTool: api.registerTool.bind(api), on: api.on.bind(api) });
+      }
       // Initialize AGT SDK (identity, policy, trust, audit, mesh)
-      initAGT(log).catch((e: any) => log.warn(`AGT init error: ${e.message}`));
+      initAGT(log, executeNativeMission).catch((e: any) => log.warn(`AGT init error: ${e.message}`));
 
       // Initialize Foundry project discovery (models, connections, indexes)
       initFoundry(log).catch((e: any) => log.warn(`Foundry init error: ${e.message}`));
@@ -2914,7 +2902,8 @@ const azureClawPlugin = definePluginEntry({
     }
 
     const _origRegisterTool = api.registerTool.bind(api);
-    api.registerTool = (tool: ToolDefinition) => {
+    api.registerTool = (tool: ToolDefinition | NativeToolFactory, options) => {
+      if ("contextVersion" in tool) { _origRegisterTool(tool, options); return; }
       const origExecute = tool.execute;
       _origRegisterTool({
         ...tool,
@@ -3031,6 +3020,7 @@ const azureClawPlugin = definePluginEntry({
     // unchanged; the registration helpers receive a Deps bag for late-bound
     // foundryProject + log + config access.
     registerHttpFetchTool(api);
+    registerAccessRequestTool(api);
     registerGitHubActionsTool(api);
     registerMcpBridgeTools(api);
     // Skip Foundry tool catalog when running against GH-token providers

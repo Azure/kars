@@ -25,6 +25,7 @@ function owned(spec: Record<string, unknown> = minimal) {
       annotations: {
         "meta.helm.sh/release-name": "kars-bridge",
         "meta.helm.sh/release-namespace": "bridge-ui",
+        "helm.sh/resource-policy": "keep",
       },
     }, spec,
   };
@@ -38,6 +39,7 @@ interface Options {
   enabled?: string;
   client?: boolean;
   upgrade?: boolean;
+  kindBeta?: boolean;
 }
 async function render(options: Options = {}) {
   const requests: string[] = [];
@@ -103,6 +105,7 @@ async function render(options: Options = {}) {
       "template", "kars-bridge", target, "--namespace", "bridge-ui", "--set", "namespace=bridge-ui",
       "--kubeconfig", kubeconfig, `--dry-run=${options.client ? "client" : "server"}`,
       "--disable-openapi-validation",
+      ...(options.kindBeta ? ["-f", join(chart, "values-kind-beta.yaml")] : []),
       ...(options.upgrade ? ["--is-upgrade"] : []),
       ...(options.namespace ? ["--set", `workspaceEnrollment.namespace=${namespace}`] : []),
       ...(options.enabled === "default" ? [] : ["--set", `workspaceEnrollment.enabled=${options.enabled ?? "true"}`]),
@@ -124,6 +127,17 @@ describe("Helm credential-free workspace enrollment (real Helm lookup)", () => {
     expect(resources).toEqual([]);
     expect(requests).toEqual([]);
   });
+  it.each(["kars-system", "team-workspace"])("enrolls credential-free Kind beta workspace %s by default", async namespace => {
+    const { resources } = await render({ kindBeta: true, enabled: "default", namespace });
+    expect(resources).toHaveLength(1);
+    expect(resources[0].metadata.namespace).toBe(namespace);
+    expect(resources[0].spec).toEqual(minimal);
+  });
+  it("allows operator-managed Kind beta workspaces to opt out without lookup or mutation", async () => {
+    const { resources, requests } = await render({ kindBeta: true, enabled: "false", client: true });
+    expect(resources).toEqual([]);
+    expect(requests).toEqual([]);
+  });
   it.each([false, true])("renders only UID-pinned empty authority on upgrade=%s", async upgrade => {
     const { resources } = await render({ upgrade });
     expect(resources).toHaveLength(1);
@@ -138,9 +152,14 @@ describe("Helm credential-free workspace enrollment (real Helm lookup)", () => {
     expect(resources[0].metadata.namespace).toBe("team-workspace");
     expect(resources[0].spec.workspaceUid).toBe("workspace-uid");
   });
-  it("preserves the declaration on an owned minimal grant upgrade", async () => {
+  it("leaves an existing kept grant out of Helm upgrades rather than rewriting authority", async () => {
     const { resources } = await render({ grant: owned(), upgrade: true });
-    expect(resources[0].spec).toEqual(minimal);
+    expect(resources).toEqual([]);
+  });
+  it("refuses to release bootstrap ownership without a keep policy", async () => {
+    const grant = owned();
+    grant.metadata.annotations["helm.sh/resource-policy"] = "delete";
+    await expect(render({ grant, upgrade: true })).rejects.toThrow(/keep policy/);
   });
   it.each([{ namespaceMissing: true }, { terminatingNamespace: true }, { client: true }])(
     "refuses absent/terminating namespace or offline enrollment: %j", async options => {
@@ -166,8 +185,8 @@ describe("Helm credential-free workspace enrollment (real Helm lookup)", () => {
     { legacyImports: [{}] }, { observationTargets: [{}] }, { githubConnections: [{}] },
     { privateActivation: {} }, { controller: { name: "kars-controller", uid: "controller-uid" } },
     { bridgeConsumers: {} }, { futureAuthority: [] },
-  ])("refuses to clear expanded authority: %j", async change => {
-    await expect(render({ grant: owned({ ...minimal, ...change }) })).rejects.toThrow(/refuses to overwrite expanded grant authority/);
+  ])("preserves expanded authority without rendering a replacement: %j", async change => {
+    expect((await render({ grant: owned({ ...minimal, ...change }), upgrade: true })).resources).toEqual([]);
   });
   it("rejects a non-boolean enrollment switch", async () => {
     await expect(render({ enabled: "yes", client: true })).rejects.toThrow(/must be a boolean/);

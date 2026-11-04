@@ -320,7 +320,7 @@ pub enum GuardrailApplyTo {
 }
 
 /// Status of an `InferencePolicy` reconcile.
-#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct InferencePolicyStatus {
     #[serde(default)]
@@ -345,7 +345,8 @@ pub struct InferencePolicyStatus {
     #[serde(default)]
     pub version_hash: Option<String>,
 
-    /// Last time the policy was compiled and pushed.
+    /// Last time a changed compilation result was published to status.
+    /// Unchanged periodic verification preserves this timestamp.
     #[serde(default)]
     pub last_compiled_at: Option<String>,
 

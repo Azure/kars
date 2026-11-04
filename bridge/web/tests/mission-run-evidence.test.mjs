@@ -53,6 +53,28 @@ test("failure messages retain separate runtime errors and partial output without
   assert.equal(evidence.missionFailureMessage(null), "No failure message was recorded for this revision.");
 });
 
+test("reviewed failure diagnostics supplement missing results without overriding committed or active evidence", () => {
+  const diagnostic = "Native per-round usage verification failed: count mismatch (assistants=18, calls=15, turns=15)";
+  const phase = { state: "failed", result: null, task_name: "builder", task_uid: "uid",
+    run_nonce: "rev-2", failure_diagnostic: diagnostic };
+  const fallback = evidence.missionFailureMessage(null);
+  assert.equal(evidence.reviewedPhaseFailureMessage(phase), diagnostic);
+  for (const extra of [
+    { failure_diagnostic: undefined }, { failure_diagnostic: null }, { failure_diagnostic: "  " },
+    { task_name: null }, { task_uid: "" }, { run_nonce: null },
+    ...["active", "stopped", "uncertain", "held", "completed", "pending", "unavailable"].map(state => ({ state })),
+  ]) assert.equal(evidence.reviewedPhaseFailureMessage({ ...phase, ...extra }), fallback);
+  for (const output of ["Completed the interrupted work without restarting it.", ""]) {
+    for (const error of [diagnostic, "Another recorded failure", "  ", null, undefined]) {
+      const committed = result({ error, output, status: "failed", reviewable: false });
+      const before = JSON.stringify(committed);
+      assert.equal(evidence.reviewedPhaseFailureMessage({ ...phase, result: committed }),
+        error?.trim() || fallback);
+      assert.equal(JSON.stringify(committed), before, "retained evidence remains unchanged");
+    }
+  }
+});
+
 test("failure advice does not turn admission errors or generic messages into proven causes", () => {
   const admission = evidence.missionFailureAdvice("Governed inference budget wire request bounds unavailable/denied");
   assert.match(admission.cause, /does not establish token-budget exhaustion/);
@@ -90,6 +112,53 @@ test("only eligible useful success in the exact revision is ready for review", (
   const pending = missionRunState({ current_run_nonce: "rev-3", result: result(), assignment: { task_id: "rev-2", state: "Completed" } });
   assert.equal(pending.awaitingAssignment, true);
   assert.equal(pending.assignmentInFlight, true);
+});
+
+test("retained failed Mission Activity survives terminal assignment projections without becoming delivery", () => {
+  for (const runtime of ["Hermes", "OpenClaw"]) {
+    for (const assignment of [null, { task_id: "rev-1", state: "Running" }, { task_id: "rev-2", state: "Running" }]) {
+      const state = missionRunState({
+        current_run_nonce: "rev-2", assignment, router_activity: observations,
+        result: result({
+          status: "failed", source: "durable_agent", output: "", reviewable: false,
+          error: "Required exports missing",
+          run_evidence: { run_nonce: "rev-2", status: "failed", runtime },
+        }),
+      });
+      assert.equal(state.routerActivity, observations);
+      assert.equal(state.failed, true);
+      assert.equal(state.realDelivery, false);
+      assert.equal(state.assignmentInFlight, false);
+    }
+  }
+});
+
+test("terminal router Activity requires paired status, durable source and exact revision", () => {
+  for (const status of ["ok", "failed", "rejected", "error", "running", null]) {
+    for (const recordedStatus of ["succeeded", "failed", "rejected", "running", undefined]) {
+      const state = missionRunState({
+        current_run_nonce: "rev-2", assignment: null, router_activity: observations,
+        result: result({ status, source: "durable_agent", run_evidence: {
+          run_nonce: "rev-2", status: recordedStatus,
+        } }),
+      });
+      const allowed = (status === "ok" && recordedStatus === "succeeded")
+        || (status === "failed" && recordedStatus === "failed");
+      assert.equal(state.routerActivity, allowed ? observations : null, `${status}/${recordedStatus}`);
+    }
+  }
+  for (const extra of [
+    { source: "synthetic" }, { source: undefined }, { assignment_nonce: "rev-1" },
+    { run_evidence: null }, { run_evidence: { run_nonce: "rev-1", status: "failed" } },
+  ]) {
+    const state = missionRunState({
+      current_run_nonce: "rev-2", assignment: null, router_activity: observations,
+      result: result({ status: "failed", source: "durable_agent",
+        run_evidence: { run_nonce: "rev-2", status: "failed" }, ...extra }),
+    });
+    assert.equal(state.routerActivity, null);
+    assert.equal(state.realDelivery, false);
+  }
 });
 
 test("activity accepts only well-formed exact-revision frames", () => {
@@ -132,6 +201,54 @@ test("stream and artifact URLs require explicit identity and encode every compon
   assert.equal(revisionArtifactUrl("ns", "task", "", "rev"), undefined);
   assert.equal(revisionArtifactUrl("n/s", "t ?", "briefing #.md", "r&2"), "/api/namespaces/n%2Fs/tasks/t%20%3F/artifact/briefing%20%23.md?run_nonce=r%262");
   assert.equal(revisionStreamUrl("n/s", "t ?", "r&2"), "/api/namespaces/n%2Fs/tasks/t%20%3F/stream?run_nonce=r%262");
+});
+
+test("artifact links resolve only captured, unambiguous paths to revision-pinned downloads", () => {
+  const context = { namespace: "ns", task: "task", runNonce: "rev-2", artifacts: [
+    { name: "brief.md", source_path: "/sandbox/brief.md" },
+    { name: "role-checklist.md", source_path: "/sandbox/reports/pilot checklist.md" },
+  ] };
+  const resolve = url => evidence.resolveRevisionArtifactLink(url, context);
+  for (const path of ["brief.md", "./brief.md", "/sandbox/brief.md", "sandbox:/sandbox/brief.md"]) {
+    assert.equal(resolve(path), revisionArtifactUrl("ns", "task", "brief.md", "rev-2"));
+  }
+  assert.equal(resolve("sandbox:/sandbox/reports/pilot%20checklist.md"), revisionArtifactUrl("ns", "task", "role-checklist.md", "rev-2"));
+  for (const path of ["sandbox:/sandbox/missing.md", "sandbox:/sandbox/../brief.md", "sandbox:/sandbox/%2e%2e/brief.md",
+    "sandbox:/sandbox/reports/../brief.md", "sandbox:/sandbox/brief.md?run_nonce=old", "sandbox://evil/brief.md",
+    "sandbox:/etc/brief.md", "sandbox:/sandbox/brief%00.md", "sandbox:/sandbox/reports\\\\brief.md",
+    "javascript:alert(1)", "https://example.com/brief.md", "//evil/brief.md", "sandbox:/sandbox/%bad", "pilot checklist.md"]) {
+    assert.equal(resolve(path), undefined, path);
+  }
+  assert.equal(evidence.resolveRevisionArtifactLink("brief.md"), undefined);
+  assert.equal(evidence.resolveRevisionArtifactLink("brief.md", { ...context, runNonce: null }), undefined);
+  assert.equal(evidence.resolveRevisionArtifactLink("brief.md", { ...context, artifacts: [] }), undefined);
+  assert.equal(evidence.resolveRevisionArtifactLink("brief.md", { ...context, artifacts: [...context.artifacts,
+    { name: "other.md", source_path: "/sandbox/brief.md" },
+  ] }), undefined);
+});
+
+test("flat native export links retain exact capture and revision boundaries", () => {
+  const context = { namespace: "ns", task: "task", runNonce: "rev-2", artifacts: [
+    { name: "approval-check.md", source_path: null },
+    { name: "pilot checklist.md" },
+    { name: "explicit.md", source_path: "/sandbox/reports/explicit.md" },
+  ] };
+  const resolve = url => evidence.resolveRevisionArtifactLink(url, context);
+  for (const path of ["exports/approval-check.md", "./exports/approval-check.md",
+    "/sandbox/exports/approval-check.md", "sandbox:/sandbox/exports/approval-check.md"]) {
+    assert.equal(resolve(path), revisionArtifactUrl("ns", "task", "approval-check.md", "rev-2"));
+  }
+  assert.equal(resolve("exports/pilot%20checklist.md"), revisionArtifactUrl("ns", "task", "pilot checklist.md", "rev-2"));
+  for (const path of ["inputs/approval-check.md", "other/approval-check.md", "exports/nested/approval-check.md",
+    "exports/missing.md", "exports/explicit.md", "exports/../approval-check.md", "exports/%2e%2e/approval-check.md",
+    "exports/approval-check.md?run_nonce=old", "exports/approval-check.md#part", "exports/approval-check.md%00"]) {
+    assert.equal(resolve(path), undefined, path);
+  }
+  assert.equal(evidence.resolveRevisionArtifactLink("exports/approval-check.md", { ...context, runNonce: null }), undefined);
+  assert.equal(evidence.resolveRevisionArtifactLink("exports/approval-check.md", { ...context, artifacts: [] }), undefined);
+  assert.equal(evidence.resolveRevisionArtifactLink("exports/approval-check.md", { ...context, artifacts: [
+    ...context.artifacts, { name: "other.md", source_path: "/sandbox/exports/approval-check.md" },
+  ] }), undefined);
 });
 
 test("router snapshots require exact revision, bounded identities and truthful raw shape", () => {

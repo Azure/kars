@@ -219,13 +219,37 @@ spec:
                 nullable: true
                 type: string
               writerCrbName:
-                description: |-
-                  Name of the one-shot ClusterRoleBinding the controller minted
-                  for the writer SA on approval. Cleaned up post-execution.
-                  Persisted in status so the cleanup reconciler can find it
-                  after a controller restart.
+                description: Legacy reference used only to detect unresolved authority; new executions never create a CRB.
                 nullable: true
                 type: string
+              execution:
+                description: Durable single-attempt execution claim; never cleared or replayed. Contains no credentials.
+                nullable: true
+                type: object
+                required:
+                - startedAt
+                - deadline
+                - namespace
+                - namespaceUid
+                - authorityName
+                - targetUid
+                - cleanupPending
+                properties:
+                  startedAt:
+                    type: string
+                  deadline:
+                    description: Other replicas wait until this deadline before crash cleanup.
+                    type: string
+                  namespace:
+                    type: string
+                  namespaceUid:
+                    type: string
+                  authorityName:
+                    type: string
+                  targetUid:
+                    type: string
+                  cleanupPending:
+                    type: boolean
             type: object
         required:
         - spec

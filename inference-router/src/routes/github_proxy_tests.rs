@@ -12,9 +12,7 @@ use wiremock::{
 async fn fixture(api: &str) -> (tempfile::TempDir, Service) {
     let (directory, config) = crate::github_services::tests::fixture(api).await;
     let blocklist = Arc::new(crate::blocklist::Blocklist::disabled());
-    blocklist
-        .replace_allowlist(vec!["github.com".into(), "127.0.0.1".into()])
-        .await;
+    blocklist.replace_allowlist(vec!["127.0.0.1".into()]).await;
     (
         directory,
         Service {
@@ -53,9 +51,9 @@ async fn text(response: Response) -> String {
 }
 
 #[tokio::test]
-async fn github_http_peer_scope_egress_and_retired_token_have_specific_denials() {
+async fn github_http_peer_scope_threat_and_retired_token_have_specific_denials() {
     let server = MockServer::start().await;
-    let (_directory, service) = fixture(&server.uri()).await;
+    let (directory, mut service) = fixture(&server.uri()).await;
     for (peer, uri, status) in [
         (
             "10.0.0.2:12",
@@ -78,7 +76,9 @@ async fn github_http_peer_scope_egress_and_retired_token_have_specific_denials()
         let response = call(&service, peer, uri, Method::GET, Body::empty()).await;
         assert_eq!(response.status(), status, "{uri}");
     }
-    service.blocklist.replace_allowlist(vec![]).await;
+    let seed = directory.path().join("blocked-domains");
+    std::fs::write(&seed, "api.github.com\n").unwrap();
+    service.blocklist = Arc::new(crate::blocklist::Blocklist::new(seed.to_str()).await);
     let response = call(
         &service,
         "127.0.0.1:12",
@@ -138,6 +138,94 @@ async fn github_real_exchange_and_dispatch_inject_only_router_credential() {
     for name in ["cookie", "proxy-authorization", "x-secret", "connection"] {
         assert!(!sent.headers.contains_key(name), "{name}");
     }
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn github_stateless_token_dispatch_is_opaque_for_rest_and_git() {
+    use base64::Engine;
+    for git in [false, true] {
+        let server = MockServer::start().await;
+        let token = crate::github_app::tests::stateless_token();
+        let mut response = minted("owner/repo");
+        response["token"] = serde_json::json!(token);
+        exchange(&server, "owner/repo", response, 1).await;
+        let route = if git {
+            "/owner/repo.git/info/refs"
+        } else {
+            "/repos/owner/repo"
+        };
+        let result = if git {
+            "public-result"
+        } else {
+            r#"{"result":"public-result"}"#
+        };
+        Mock::given(method("GET"))
+            .and(path(route))
+            .respond_with(ResponseTemplate::new(200).set_body_string(result))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_directory, service) = fixture(&server.uri()).await;
+        let app = service.config.current().await.unwrap().unwrap();
+        let acquired = app.token("owner/repo").await.unwrap();
+        let target = Target {
+            repo: "owner/repo".into(),
+            url: format!("{}{route}", server.uri()),
+            git,
+            logs: false,
+        };
+        let (parts, _) = Request::builder().body(()).unwrap().into_parts();
+        let response = dispatch(
+            &service,
+            &app,
+            &target,
+            parts,
+            bytes::Bytes::new(),
+            &acquired,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(text(response).await, result);
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 3);
+        let expected = if git {
+            format!(
+                "Basic {}",
+                base64::engine::general_purpose::STANDARD.encode(format!("x-access-token:{token}"))
+            )
+        } else {
+            format!("Bearer {token}")
+        };
+        assert_eq!(
+            requests[2].headers["authorization"].to_str().unwrap(),
+            expected
+        );
+        server.verify().await;
+    }
+}
+
+#[tokio::test]
+async fn github_invalid_token_returns_generic_502_without_dispatch() {
+    let server = MockServer::start().await;
+    let mut response = minted("owner/repo");
+    response["token"] = serde_json::json!("sensitive-token\r\nheader-injection");
+    exchange(&server, "owner/repo", response, 1).await;
+    let (_directory, service) = fixture(&server.uri()).await;
+    let response = call(
+        &service,
+        "127.0.0.1:12",
+        "/gh-api/repos/owner/repo",
+        Method::GET,
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(
+        text(response).await,
+        "GitHub installation authentication failed"
+    );
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
     server.verify().await;
 }
 
@@ -445,7 +533,7 @@ async fn github_log_tail_and_response_bounds_have_exact_outcomes() {
         .send()
         .await
         .unwrap();
-    let result = finish(response, LOG_LIMIT, true).await;
+    let result = finish(response, LOG_LIMIT, true, false).await;
     assert_eq!(result.headers()["x-kars-log-truncated"], "true");
     assert_eq!(
         to_bytes(result.into_body(), LOG_TAIL).await.unwrap().len(),
@@ -457,12 +545,54 @@ async fn github_log_tail_and_response_bounds_have_exact_outcomes() {
         .send()
         .await
         .unwrap();
-    let result = finish(response, 16, false).await;
+    let result = finish(response, 16, false, true).await;
     assert_eq!(result.status(), StatusCode::BAD_GATEWAY);
     assert_eq!(
         text(result).await,
         "GitHub response exceeds the service limit"
     );
+}
+
+#[tokio::test]
+async fn github_rest_json_filter_fails_closed_and_preserves_safe_responses() {
+    for (body, expected_status, expected_body) in [
+        (
+            r#"{"temp_clone_token":"fixture-malformed-credential""#,
+            StatusCode::BAD_GATEWAY,
+            "GitHub returned invalid JSON",
+        ),
+        (
+            r#"[{"temp_clone_token":"fixture-array-credential","id":42}]"#,
+            StatusCode::OK,
+            r#"[{"id":42}]"#,
+        ),
+        (
+            "{ \"id\": 42, \"name\": \"repo\" }",
+            StatusCode::OK,
+            "{ \"id\": 42, \"name\": \"repo\" }",
+        ),
+        ("", StatusCode::NO_CONTENT, ""),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(path("/rest"))
+            .respond_with(
+                ResponseTemplate::new(if body.is_empty() { 204 } else { 200 })
+                    .set_body_string(body),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let upstream = github_app::client()
+            .unwrap()
+            .get(format!("{}/rest", server.uri()))
+            .send()
+            .await
+            .unwrap();
+        let response = finish(upstream, API_LIMIT, false, true).await;
+        assert_eq!(response.status(), expected_status);
+        assert_eq!(text(response).await, expected_body);
+        server.verify().await;
+    }
 }
 
 #[test]

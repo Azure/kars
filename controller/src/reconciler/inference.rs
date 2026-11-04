@@ -8,6 +8,7 @@ use kube::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 const PROVIDERS_SECRET: &str = "kars-inference-providers";
@@ -97,7 +98,13 @@ pub(super) fn provider_env_from() -> Value {
     json!([{"secretRef": {"name": PROVIDERS_SECRET, "optional": true}}])
 }
 
-/// A resource-version annotation restarts router pods when environment credentials change.
+fn provider_revision(secret: &Secret) -> String {
+    let input = serde_json::to_vec(&(&secret.metadata.uid, &secret.data))
+        .expect("Secret identity and data serialize");
+    format!("{:x}", Sha256::digest(input))
+}
+
+/// Restart routers for changed credentials or source identity, not selection metadata.
 pub(super) async fn mirror_providers(
     client: &Client,
     source_ns: &str,
@@ -143,12 +150,41 @@ pub(super) async fn mirror_providers(
         "InferenceProviders",
     )
     .await?;
-    Ok(secret.metadata.resource_version)
+    Ok(Some(provider_revision(&secret)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_revision_preserves_running_routes_when_only_default_metadata_changes() {
+        let mut secret: Secret = serde_json::from_value(json!({
+            "metadata": {"uid": "registry", "resourceVersion": "1"},
+            "data": {"KARS_PROVIDER_GITHUB_COPILOT_TOKEN": "cHJlc2VydmVk"}
+        }))
+        .unwrap();
+        let before = provider_revision(&secret);
+        secret.metadata.resource_version = Some("2".into());
+        secret.metadata.annotations = Some(BTreeMap::from([(
+            "kars.azure.com/default-model".into(),
+            "selected-model".into(),
+        )]));
+        assert_eq!(provider_revision(&secret), before);
+        let original = secret.clone();
+        secret
+            .data
+            .as_mut()
+            .unwrap()
+            .get_mut("KARS_PROVIDER_GITHUB_COPILOT_TOKEN")
+            .unwrap()
+            .0
+            .push(1);
+        assert_ne!(provider_revision(&secret), before);
+        secret = original;
+        secret.metadata.uid = Some("replacement".into());
+        assert_ne!(provider_revision(&secret), before);
+    }
 
     #[test]
     fn policy_model_inherits_configured_default_only_when_preference_is_absent() {

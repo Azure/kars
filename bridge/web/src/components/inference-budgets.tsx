@@ -40,7 +40,7 @@ function fmt(n: number): string {
 
 export async function persistBudget(
   url: string,
-  body: SaveBody | { clear: true } | { daily_tokens: number },
+  body: SaveBody | { clear: true } | { daily_tokens: number; clear_all?: boolean },
   method: "PUT" | "PATCH" = "PUT",
 ): Promise<void> {
   if ("daily_tokens" in body && (!Number.isSafeInteger(body.daily_tokens) || body.daily_tokens < 0)) {
@@ -61,6 +61,18 @@ export async function persistBudget(
     throw new Error("Couldn't confirm the budget update. Check the current status before retrying.");
   }
   if (!response.ok) {
+    if (response.status === 422) {
+      let message: string | undefined;
+      try {
+        const detail = (await response.json())?.error;
+        if (detail?.code === "rejected" && typeof detail.message === "string" && detail.message.trim()) {
+          message = detail.message;
+        }
+      } catch {
+        // Non-JSON proxy failures retain the generic unconfirmed-write message.
+      }
+      if (message) throw new Error(message);
+    }
     throw new Error(response.status === 403
       ? "Only a cluster or org admin can change this setting."
       : `Budget update was not confirmed (HTTP ${response.status}). Check the current status before retrying.`);
@@ -574,6 +586,21 @@ export function InferenceBudgetEdit({ name, current }: { name: string; current: 
   const [saved, setSaved] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  async function save(clearAll = false) {
+    setBusy(true);
+    setError(null);
+    try {
+      await persistBudget(`/api/operator/inferencepolicies/${encodeURIComponent(name)}`,
+        clearAll ? { daily_tokens: 0, clear_all: true } : { daily_tokens: val }, "PATCH");
+      setEditing(false);
+      setSaved(clearAll ? 0 : val);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Couldn't confirm the policy budget update.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (!editing) {
     return (
       <button
@@ -604,22 +631,19 @@ export function InferenceBudgetEdit({ name, current }: { name: string; current: 
       <button
         type="button"
         disabled={busy}
-        onClick={async () => {
-          setBusy(true);
-          setError(null);
-          try {
-            await persistBudget(`/api/operator/inferencepolicies/${encodeURIComponent(name)}`, { daily_tokens: val }, "PATCH");
-            setEditing(false);
-            setSaved(val);
-          } catch (error) {
-            setError(error instanceof Error ? error.message : "Couldn't confirm the policy budget update.");
-          } finally {
-            setBusy(false);
-          }
-        }}
+        onClick={() => save()}
         className="rounded bg-signal px-1.5 py-0.5 text-[10px] font-semibold text-signal-fg disabled:opacity-50"
       >
         {busy ? "…" : "Save"}
+      </button>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => save(true)}
+        title="Remove this policy's daily, monthly and per-request limits. Funding authorization and usage accounting remain unchanged."
+        className="rounded border border-border px-1.5 py-0.5 text-[10px] text-foreground-muted disabled:opacity-50"
+      >
+        Remove all token caps
       </button>
       <button
         type="button"

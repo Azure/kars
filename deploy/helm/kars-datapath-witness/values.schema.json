@@ -3,7 +3,7 @@
   "$comment": "Copyright (c) Microsoft Corporation. Licensed under the MIT License.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["managed", "enabled", "aggregator", "sandboxes", "gadget"],
+  "required": ["managed", "enabled", "aggregator", "scope", "sandboxes", "gadget"],
   "properties": {
     "managed": { "type": "boolean" },
     "global": { "type": "object" },
@@ -23,9 +23,14 @@
         "intervalSeconds": { "type": "integer", "minimum": 5, "maximum": 60 }
       }
     },
+    "scope": { "type": "string", "enum": ["all", "selected"] },
     "sandboxes": {
       "type": "array", "uniqueItems": true, "maxItems": 50,
       "items": { "type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", "maxLength": 58 }
+    },
+    "nodes": {
+      "type": "array", "uniqueItems": true, "maxItems": 50,
+      "items": { "type": "string", "pattern": "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$", "maxLength": 253 }
     },
     "gadget": {
       "type": "object", "additionalProperties": false,
@@ -41,7 +46,16 @@
   "if": { "properties": { "enabled": { "const": true } } },
   "then": { "properties": {
     "aggregator": { "properties": { "image": { "minLength": 1 } } },
-    "gadget": { "properties": { "image": { "minLength": 1 } } },
-    "sandboxes": { "minItems": 1 }
-  } }
+    "gadget": { "properties": { "image": { "minLength": 1 } } }
+  } },
+  "allOf": [
+    {
+      "if": { "properties": { "scope": { "const": "all" } } },
+      "then": { "properties": { "sandboxes": { "maxItems": 0 } } }
+    },
+    {
+      "if": { "properties": { "scope": { "const": "selected" }, "enabled": { "const": true } } },
+      "then": { "properties": { "sandboxes": { "minItems": 1 } } }
+    }
+  ]
 }

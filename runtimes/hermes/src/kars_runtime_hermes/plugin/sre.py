@@ -62,8 +62,8 @@ Slice 1 tool surface (all read-only, no approval gates):
                                 Slice 3.
   ============================  ================================================
 
-Each tool returns a dict; the Hermes plugin context serialises it
-to the LLM. The tool implementation MUST never raise on apiserver
+Implementations return dicts; registered handlers serialize them to JSON text
+for Hermes. The tool implementation MUST never raise on apiserver
 errors — those become ``{"error": "..."}`` entries in the returned
 dict so the LLM can reason over them. Hard raises are reserved for
 "this tool is misconfigured" issues that aren't agent-recoverable.
@@ -71,14 +71,15 @@ dict so the LLM can reason over them. Hard raises are reserved for
 
 from __future__ import annotations
 
+import json
 import logging
 import os
-from datetime import datetime, timezone
 from typing import Any
 
 import httpx
 
 from . import sre_kube
+from .sre_tools import register_sre_tool
 
 logger = logging.getLogger("kars.hermes.sre")
 
@@ -217,22 +218,24 @@ OOTB_CORPUS: list[dict[str, str]] = [
 def _summarise_cr(item: dict[str, Any], kind: str) -> dict[str, Any]:
     """Reduce a CR's full JSON to the fields the agent cares about."""
     meta = item.get("metadata", {})
-    status = item.get("status", {})
+    status = item.get("status") or {}
     return {
         "kind": kind,
         "namespace": meta.get("namespace"),
         "name": meta.get("name"),
         "phase": status.get("phase"),
+        "generation": meta.get("generation"),
         "observedGeneration": status.get("observedGeneration"),
-        "lastReconciled": status.get("lastReconciled"),
         "conditions": [
             {
                 "type": c.get("type"),
                 "status": c.get("status"),
                 "reason": c.get("reason"),
                 "message": c.get("message"),
+                "observedGeneration": c.get("observedGeneration"),
+                "lastTransitionTime": c.get("lastTransitionTime"),
             }
-            for c in status.get("conditions", [])
+            for c in (status.get("conditions") or [])
         ],
     }
 
@@ -242,8 +245,9 @@ def _impl_sre_describe_state(**_kwargs: Any) -> dict[str, Any]:
 
     Returns a dict keyed by CR kind whose values are lists of summarised
     instances. Each instance carries name + namespace + phase +
-    observedGeneration + lastReconciled + conditions — enough for the
-    agent to spot Degraded/Failed/stale CRs without re-fetching.
+    generation + observedGeneration + conditions — enough for the agent
+    to spot Degraded/Failed CRs or status that predates the current spec.
+    Condition transition times are not reconciliation heartbeats.
     """
     kube = sre_kube.client()
     out: dict[str, Any] = {}
@@ -320,7 +324,7 @@ def _impl_sre_diagnose(**_kwargs: Any) -> dict[str, Any]:
       - crds_present: every CRD the controller expects is installed?
       - degraded_sandboxes: KarsSandboxes whose .status.phase ∉ {Ready,Running}
       - degraded_policies: governance CRs in non-Ready phases
-      - stale_reconciles: CRs whose lastReconciled is > 5min old
+      - stale_reconciles: CRs whose observedGeneration predates metadata.generation
     """
     kube = sre_kube.client()
     report: dict[str, Any] = {
@@ -368,8 +372,7 @@ def _impl_sre_diagnose(**_kwargs: Any) -> dict[str, Any]:
         unknown("crds", exc)
 
     # 3) Sandbox/policy phase scan — reuse describe_state results
-    state = sre_describe_state()
-    now = datetime.now(timezone.utc)
+    state = _impl_sre_describe_state()
     for kind, items in state.items():
         if isinstance(items, dict) and "error" in items:
             unknown(kind, items["error"])
@@ -384,15 +387,15 @@ def _impl_sre_diagnose(**_kwargs: Any) -> dict[str, Any]:
                     "degraded_sandboxes" if kind == "KarsSandbox" else "degraded_policies"
                 )
                 report[bucket].append(it)
-            reconciled = it.get("lastReconciled")
-            try:
-                observed = datetime.fromisoformat(str(reconciled).replace("Z", "+00:00"))
-                if observed.tzinfo is None or observed > now:
-                    raise ValueError("Timestamp must have a timezone and cannot be in the future")
-                if (now - observed).total_seconds() > 300:
-                    report["stale_reconciles"].append(it)
-            except (TypeError, ValueError):
-                unknown(scope, "Reconcile freshness unknown: absent or invalid lastReconciled")
+            generation = it.get("generation")
+            observed = it.get("observedGeneration")
+            if (
+                type(generation) is not int or generation < 1
+                or type(observed) is not int or observed < 0 or observed > generation
+            ):
+                unknown(scope, "Reconcile generation unknown: absent or invalid generation/observedGeneration")
+            elif observed < generation:
+                report["stale_reconciles"].append(it)
 
     # 3b) Workload-availability cross-check — KarsSandbox.status.phase
     # reflects controller reconcile state, not actual pod readiness.
@@ -477,6 +480,10 @@ def _impl_sre_propose_fix(
     rationale: str | None = None,
     ttl_minutes: int | None = None,
     action_type: str | None = None,
+    replicas: int | None = None,
+    container: str | None = None,
+    image: str | None = None,
+    rollout_restart: bool = False,
     **_kwargs: Any,
 ) -> dict[str, Any]:
     """Tool: propose a typed action AND create a KarsSREAction CR (Slice 3).
@@ -489,10 +496,9 @@ def _impl_sre_propose_fix(
     ``.spec.approval.state="Approved"`` via ``kars sre approve <id>``
     (or directly in ``kubectl edit``) to authorise execution.
 
-    On approval, the controller mints a one-shot ClusterRoleBinding,
-    executes the typed action, tears the binding down, and watches the
-    target workload for recovery. The whole flow is one CR per
-    incident; the agent never executes anything directly.
+    On approval, the controller claims execution durably, uses short-lived
+    credentials scoped to the named resource and operation, and removes the
+    per-action authority. The agent never executes anything directly.
 
     Args:
         diagnosis: short string describing what the agent concluded.
@@ -507,6 +513,10 @@ def _impl_sre_propose_fix(
                    (audit-grade). When unset, a sensible default is
                    used per action kind.
         ttl_minutes: optional proposal TTL (default 15, max 60).
+        replicas: desired Deployment replicas (0–50); required for scaling.
+        container: Deployment container name; required for an image patch.
+        image: proposed container image; required for an image patch.
+        rollout_restart: infer RolloutRestart when no action_type is supplied.
 
     Returns the proposal envelope. When a CR was successfully created,
     the envelope includes ``action_id`` (the CR name) and ``cr_created=True``;
@@ -536,7 +546,7 @@ def _impl_sre_propose_fix(
         "target": {**target, "kind": target_kind} if target_kind else target,
         "action": None,
         "rationale": rationale,
-        "execution_status": "proposed (awaiting operator approval — run `kars sre approve <action_id>`)",
+        "execution_status": "not proposed (no pending action persisted)",
         "cr_created": False,
         "action_id": None,
     }
@@ -561,14 +571,14 @@ def _impl_sre_propose_fix(
     elif action_type == "PatchDeploymentImage" or (
         action_type is None
         and target_kind in {"Deployment", "StatefulSet", "DaemonSet"}
-        and "image" in _kwargs
+        and image is not None
     ):
         proposal["action"] = {
             "type": "PatchDeploymentImage",
             "namespace": target.get("namespace"),
             "name": target.get("name"),
-            "container": _kwargs.get("container"),
-            "image": _kwargs.get("image"),
+            "container": container,
+            "image": image,
         }
         if not proposal["rationale"]:
             proposal["rationale"] = (
@@ -579,20 +589,20 @@ def _impl_sre_propose_fix(
     elif action_type == "ScaleDeployment" or (
         action_type is None
         and target_kind in {"Deployment", "StatefulSet"}
-        and "replicas" in _kwargs
+        and replicas is not None
     ):
         proposal["action"] = {
             "type": "ScaleDeployment",
             "namespace": target.get("namespace"),
             "name": target.get("name"),
-            "replicas": _kwargs.get("replicas"),
+            "replicas": replicas,
         }
         if not proposal["rationale"]:
             proposal["rationale"] = "Scale the workload's replica count."
     elif action_type == "RolloutRestart" or (
         action_type is None
         and target_kind in {"Deployment", "StatefulSet", "DaemonSet"}
-        and _kwargs.get("rollout_restart")
+        and rollout_restart is True
     ):
         proposal["action"] = {
             "type": "RolloutRestart",
@@ -641,11 +651,34 @@ def _impl_sre_propose_fix(
         if not proposal["rationale"]:
             proposal["rationale"] = proposal["cr_error"]
 
-    # Slice 3 — if we have a typed action, create the KarsSREAction CR
-    # so the operator has an approve surface. Failures here are
-    # non-fatal: the agent still returns the proposal text and the
-    # operator can fall back to the manual runbook.
     if proposal["action"] is not None:
+        action = proposal["action"]
+        allowed_kinds = {
+            "DeleteResourceQuota": {"ResourceQuota"},
+            "DeletePod": {"Pod"},
+            "ScaleDeployment": {"Deployment"},
+            "PatchDeploymentImage": {"Deployment"},
+            "RolloutRestart": {"Deployment", "StatefulSet", "DaemonSet"},
+        }
+        error = None
+        if target_kind not in allowed_kinds[action["type"]]:
+            error = f"{action['type']} does not support target.kind={target_kind}"
+        elif any(not isinstance(action.get(key), str) or not action[key].strip()
+                 for key in ("namespace", "name")):
+            error = "target.namespace and target.name must be nonempty strings"
+        elif action["type"] == "ScaleDeployment" and (
+            type(replicas) is not int or not 0 <= replicas <= 50
+        ):
+            error = "ScaleDeployment requires replicas as an integer from 0 to 50"
+        elif action["type"] == "PatchDeploymentImage" and any(
+            not isinstance(value, str) or not value.strip() for value in (container, image)
+        ):
+            error = "PatchDeploymentImage requires nonempty container and image strings"
+        if error:
+            proposal["cr_error"] = error
+            proposal["execution_status"] = "not proposed (invalid action parameters)"
+            return proposal
+
         try:
             action_id, created = _create_karssreaction_cr(
                 action=proposal["action"],
@@ -658,6 +691,9 @@ def _impl_sre_propose_fix(
             proposal["cr_reused"] = not created
             proposal["approve_command"] = f"kars sre approve {action_id}"
             proposal["reject_command"] = f"kars sre reject {action_id}"
+            proposal["execution_status"] = (
+                f"proposed (awaiting operator approval — run `kars sre approve {action_id}`)"
+            )
         except Exception as e:  # noqa: BLE001 — surface the error in the envelope
             proposal["cr_created"] = False
             proposal["cr_error"] = str(e)
@@ -763,6 +799,30 @@ def is_enabled() -> bool:
     return os.environ.get("SRE_ENABLED", "").lower() in {"true", "1", "yes"}
 
 
+SRE_DEFAULT_OUTPUT_TOKENS = 8192
+
+
+def _bound_inference_request(
+    request: dict[str, Any], api_mode: str = "", **_context: Any,
+) -> dict[str, Any] | None:
+    """Give native SRE requests a finite default without replacing explicit bounds."""
+    fields = {
+        "codex_responses": ("max_output_tokens",),
+        "chat_completions": ("max_completion_tokens", "max_tokens"),
+    }.get(api_mode)
+    if fields is None:
+        return None
+    extra_body = request.get("extra_body")
+    if any(field in request or isinstance(extra_body, dict) and field in extra_body
+           for field in fields):
+        return None
+    return {
+        "request": {**request, fields[0]: SRE_DEFAULT_OUTPUT_TOKENS},
+        "source": "kars-sre",
+        "reason": "Explicit default output bound; account admission still applies",
+    }
+
+
 def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
     """Register the SRE tool surface on the Hermes plugin context.
 
@@ -775,7 +835,10 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
         logger.warning("Hermes ctx has no register_tool — SRE plugin not registered")
         return
 
-    register_tool(
+    ctx.register_middleware("llm_request", _bound_inference_request)
+
+    register_sre_tool(
+        ctx,
         name="sre_describe_state",
         toolset="sre",
         description=(
@@ -783,15 +846,17 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
             "namespace (KarsSandbox, InferencePolicy, ToolPolicy, "
             "EgressApproval, KarsMemory, KarsEval, TrustGraph, KarsPairing, "
             "A2AAgent, McpServer, KarsAuthConfig). Each CR carries name, "
-            "namespace, phase, observedGeneration, lastReconciled, and "
-            "conditions. Use this as the first call when starting an "
+            "namespace, phase, generation, observedGeneration, and "
+            "conditions. Compare generations for spec reconciliation; "
+            "condition transition times are not heartbeats. Use this as the first call when starting an "
             "incident investigation."
         ),
         schema={"type": "object", "properties": {}, "required": []},
         handler=sre_describe_state,
     )
 
-    register_tool(
+    register_sre_tool(
+        ctx,
         name="sre_logs",
         toolset="sre",
         description=(
@@ -819,7 +884,8 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
         handler=sre_logs,
     )
 
-    register_tool(
+    register_sre_tool(
+        ctx,
         name="sre_diagnose",
         toolset="sre",
         description=(
@@ -833,7 +899,8 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
         handler=sre_diagnose,
     )
 
-    register_tool(
+    register_sre_tool(
+        ctx,
         name="sre_explain_error",
         toolset="sre",
         description=(
@@ -855,7 +922,8 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
         handler=sre_explain_error,
     )
 
-    register_tool(
+    register_sre_tool(
+        ctx,
         name="sre_propose_fix",
         toolset="sre",
         description=(
@@ -913,10 +981,30 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
                         "(e.g. Deployment → Scale vs PatchImage vs RolloutRestart)."
                     ),
                 },
+                "replicas": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 50,
+                    "description": "Required for ScaleDeployment: desired replica count (0–50).",
+                },
+                "container": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Required for PatchDeploymentImage: exact Deployment container name.",
+                },
+                "image": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Required for PatchDeploymentImage: proposed container image reference.",
+                },
+                "rollout_restart": {
+                    "type": "boolean",
+                    "description": "Infer RolloutRestart when true and action_type is omitted.",
+                },
                 "rationale": {
                     "type": "string",
                     "description": (
-                        "Optional operator-facing rationale (≤ 2048 chars). "
+                        "Optional operator-facing rationale (≤ 2048 chars)."
                         "Falls back to a per-action default if unset."
                     ),
                 },
@@ -950,24 +1038,24 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
 def sre_explain_error(args=None, **_ctx):  # noqa: ANN001 — Hermes call shape
     if args is None:
         args = {}
-    return _impl_sre_explain_error(**args)
+    return json.dumps(_impl_sre_explain_error(**args))
 
 def sre_describe_state(args=None, **_ctx):  # noqa: ANN001 — Hermes call shape
     if args is None:
         args = {}
-    return _impl_sre_describe_state(**args)
+    return json.dumps(_impl_sre_describe_state(**args))
 
 def sre_diagnose(args=None, **_ctx):  # noqa: ANN001 — Hermes call shape
     if args is None:
         args = {}
-    return _impl_sre_diagnose(**args)
+    return json.dumps(_impl_sre_diagnose(**args))
 
 def sre_propose_fix(args=None, **_ctx):  # noqa: ANN001 — Hermes call shape
     if args is None:
         args = {}
-    return _impl_sre_propose_fix(**args)
+    return json.dumps(_impl_sre_propose_fix(**args))
 
 def sre_logs(args=None, **_ctx):  # noqa: ANN001 — Hermes call shape
     if args is None:
         args = {}
-    return _impl_sre_logs(**args)
+    return json.dumps(_impl_sre_logs(**args))

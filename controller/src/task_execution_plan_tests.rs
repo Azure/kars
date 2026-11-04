@@ -35,6 +35,12 @@ fn execution_plan_roundtrips_and_every_reviewed_field_changes_authority() {
         original["blueprint"]["executionPlan"]
     );
     let digest = spec.authorization_digest_with_model(&model);
+    for pointer in ["/blueprint/executionPlan/roles/0/phases/0", "/blueprint/executionPlan/synthesis"] {
+        let mut changed = original.clone();
+        changed.pointer_mut(pointer).unwrap()["executionMode"] = json!("native");
+        let changed: KarsTaskSpec = serde_json::from_value(changed).unwrap();
+        assert_ne!(digest, changed.authorization_digest_with_model(&model), "{pointer}/executionMode");
+    }
     for (pointer, value) in [
         ("schema", json!("future-version")),
         ("maxParallel", json!(2)),
@@ -229,8 +235,32 @@ fn execution_plan_is_bounded_in_generated_task_and_team_schemas() {
                 .and_then(|properties| properties.get("executionPlan"))
             {
                 *count += 1;
+                assert_eq!(plan["properties"]["roles"]["minItems"], 0);
                 assert_eq!(plan["properties"]["roles"]["maxItems"], 8);
+                assert_eq!(
+                    plan["properties"]["roles"]["items"]["properties"]["phases"]["minItems"],
+                    1
+                );
+                assert_eq!(
+                    plan["properties"]["roles"]["items"]["properties"]["phases"]["items"]["properties"]
+                        ["requiredToolCalls"]["items"]["properties"]["name"]["enum"],
+                    json!(["github_actions_job_logs", "http_fetch"])
+                );
                 assert_eq!(plan["properties"]["deliverables"]["maxItems"], 16);
+                let phase = &plan["properties"]["roles"]["items"]["properties"]["phases"]["items"]
+                    ["properties"];
+                for field in ["minToolCalls", "maxToolCalls"] {
+                    assert_eq!(phase[field]["maximum"].as_f64(), Some(f64::from(i32::MAX)));
+                    assert_eq!(phase[field]["minimum"].as_f64(), Some(0.0));
+                }
+                assert_eq!(
+                    plan["properties"]["synthesis"]["properties"]["maxToolCalls"]["maximum"].as_f64(),
+                    Some(f64::from(i32::MAX))
+                );
+                assert_eq!(plan["properties"]["roles"]["items"]["properties"]["phases"]["items"]["properties"]
+                    ["executionMode"], json!({"type":"string","enum":["native"]}));
+                assert_eq!(plan["properties"]["synthesis"]["properties"]["executionMode"],
+                    json!({"type":"string","enum":["native"]}));
                 assert_eq!(
                     plan["properties"]["roles"]["items"]["properties"]["phases"]["maxItems"],
                     8

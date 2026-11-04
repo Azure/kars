@@ -24,7 +24,9 @@ foundry_download_file) reach the LLM via the platform MCP path.
 
 Registration is gated on ``KARS_PROVIDER``: skipped when value is
 ``github-models`` or ``github-copilot`` (slim modes — no Foundry
-project bound).
+project bound). Otherwise memory remains available without a Foundry
+endpoint: the router selects the governed binding, including built-in
+private memory. The other native tools require a Foundry project.
 """
 
 from __future__ import annotations
@@ -96,6 +98,9 @@ def _call_platform_tool(name: str, arguments: dict[str, Any]) -> str:
         return json.dumps({"error": f"{name}: {reason}"})
     result = payload.get("result") if isinstance(payload, dict) else None
     content = result.get("content") if isinstance(result, dict) else None
+    # Preserve tool-level refusal even when its text looks like successful JSON.
+    if isinstance(result, dict) and result.get("isError") is True:
+        return json.dumps(result)
     if isinstance(content, list):
         texts = [
             c["text"]
@@ -133,13 +138,12 @@ def _foundry_memory(args: dict[str, Any], **_kwargs: Any) -> str:
 _FOUNDRY_MEMORY_SCHEMA = {
     "name": "foundry_memory",
     "description": (
-        "Persistent agent memory backed by Azure AI Foundry Memory Store. "
-        "Operations: 'search' (semantic search over past memories matching "
-        "scope), 'update' (write a new memory), 'delete_scope' (wipe all "
-        "memories under a scope). The store name follows the kars convention "
-        "memory-${SANDBOX_NAME} and is auto-provisioned on first use. The "
-        "scope defaults to agent_${SANDBOX_NAME}; pass scope to namespace "
-        "memories per-session or per-user."
+        "Governed persistent agent memory. The router selects the bound "
+        "backend: built-in private memory or Azure AI Foundry Memory Store. "
+        "Operations: 'search' (search past memories), 'update' (write a new "
+        "memory), 'delete_scope' (wipe a scope when supported and authorized). "
+        "Omit scope to use the bound private-memory scope. Backend binding, "
+        "authorization, and isolation are enforced by the router."
     ),
     "parameters": {
         "type": "object",
@@ -164,10 +168,9 @@ _FOUNDRY_MEMORY_SCHEMA = {
             "scope": {
                 "type": "string",
                 "description": (
-                    "Memory namespace (default: agent_${SANDBOX_NAME}). "
-                    "Use 'session_<id>' for per-conversation memory, "
-                    "'user_<id>' for per-user memory across sessions. "
-                    "Use '_' as the separator — colons are rejected by the API."
+                    "Omit to use the router-bound private-memory scope. "
+                    "An explicit scope is accepted only when the binding and "
+                    "backend authorize it; it cannot select another agent's store."
                 ),
             },
         },
@@ -484,12 +487,6 @@ def register(ctx: Any) -> None:  # noqa: ANN401
             provider,
         )
         return
-    if not os.environ.get("FOUNDRY_PROJECT_ENDPOINT"):
-        logger.info(
-            "Foundry tools skipped (no FOUNDRY_PROJECT_ENDPOINT bound)"
-        )
-        return
-
     ctx.register_tool(
         name="foundry_memory",
         toolset="foundry",
@@ -497,6 +494,13 @@ def register(ctx: Any) -> None:  # noqa: ANN401
         handler=_foundry_memory,
         description=_FOUNDRY_MEMORY_SCHEMA["description"],
     )
+    if not os.environ.get("FOUNDRY_PROJECT_ENDPOINT"):
+        logger.info(
+            "Governed memory registered; other Foundry tools skipped "
+            "(no FOUNDRY_PROJECT_ENDPOINT bound)"
+        )
+        return
+
     ctx.register_tool(
         name="foundry_web_search",
         toolset="foundry",

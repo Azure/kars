@@ -3,6 +3,9 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { sreCommand } from "./sre.js";
+import { prepareCoreHelmSchemas } from "../lib/core-helm-schemas.js";
+import { PrivateRootUpgradeBlocked } from "../lib/private-root-upgrade-guard.js";
+import { sreInferenceFlags } from "../lib/sre-helm.js";
 
 const { execute } = vi.hoisted(() => ({
   execute: vi.fn<(file: string, args: readonly string[], options?: unknown) => Promise<{ stdout: string }>>(),
@@ -61,11 +64,146 @@ let currentRelease = "kars";
 beforeEach(() => {
   currentRelease = "kars";
   execute.mockReset();
+  vi.mocked(prepareCoreHelmSchemas).mockReset().mockResolvedValue({ schemas: 0, published: true });
   vi.spyOn(console, "log").mockImplementation(() => {});
 });
 afterEach(() => vi.restoreAllMocks());
 
 describe("SRE controller upgrade namespace preflight", () => {
+  it.each([
+    ["install", "protected"], ["install", "unavailable"],
+    ["uninstall", "protected"], ["uninstall", "unavailable"],
+  ] as const)("reports the safe %s/%s root refusal without attempting Helm upgrade", async (operation, reason) => {
+    execute.mockImplementation(async (file, args) => {
+      if (file === "helm" && args[0] === "list") return { stdout: releases };
+      if (file === "kubectl" && args.includes("karssandboxes")) return { stdout: '{"items":[]}' };
+      const result = authority(args);
+      if (operation === "uninstall" && !args.includes("crd") && args.includes("karssreregistrations.kars.azure.com")) {
+        const retired = JSON.parse(result.stdout);
+        retired.spec.enabled = false;
+        retired.status.phase = "Retired";
+        return { stdout: JSON.stringify(retired) };
+      }
+      return result;
+    });
+    const failure = Object.assign(new PrivateRootUpgradeBlocked(reason), {
+      stderr: "PRIVATE_VALUE_SENTINEL", cause: new Error("PRIVATE_VALUE_SENTINEL"),
+    });
+    vi.mocked(prepareCoreHelmSchemas).mockRejectedValueOnce(failure);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(process, "exit").mockImplementation(() => { throw new Error("exit boundary"); });
+    await expect(sreCommand().parseAsync(["node", "sre", operation, ...(operation === "install" ? ["--no-wait"] : [])]))
+      .rejects.toThrow("exit boundary");
+    expect(errors.mock.calls.flat().join("\n")).toContain(failure.message);
+    expect(errors.mock.calls.flat().join("\n")).not.toContain("PRIVATE_VALUE_SENTINEL");
+    expect(execute.mock.calls.some(([file, args]) => file === "helm" && args[0] === "upgrade")).toBe(false);
+    expect(process.exit).toHaveBeenCalledWith(1);
+  });
+
+  it.each([
+    {}, { model: "reviewed-model" }, { provider: "reviewed-provider" },
+    { provider: "reviewed-provider", model: "reviewed-model" },
+  ])("stages existing release policy before enrollment (inference override %j)", async selection => {
+    const values = { sre: {
+      enabled: false, dailyTokens: 50000, tokenBudget: 12000,
+      provider: "configured-provider", model: "configured-model", requirePromptShields: true,
+    } };
+    execute.mockImplementation(async (file, args, options) => {
+      if (file === "helm" && args[0] === "list") return { stdout: releases };
+      if (file === "kubectl" && args.includes("karssandboxes")) return { stdout: '{"items":[]}' };
+      if (!args.includes("crd") && args.includes("karssreregistrations.kars.azure.com")) return { stdout: "" };
+      if (file === "helm" && args[0] === "get") return { stdout: JSON.stringify(values) };
+      if (file === "helm" && args[0] === "template") {
+        expect(args).toEqual(expect.arrayContaining(["--values", "-", "sre.enabled=true"]));
+        expect(options).toEqual({ stdio: "pipe", input: JSON.stringify(values) });
+        expect(args.filter(arg => arg.startsWith("sre.model=") || arg.startsWith("sre.provider=")))
+          .toEqual(sreInferenceFlags(selection).filter(arg => arg !== "--set-json"));
+        throw new Error("Checked render boundary before source creation");
+      }
+      return authority(args);
+    });
+    await expect(sreCommand().parseAsync(["node", "sre", "install", "--no-wait",
+      ...(selection.model ? ["--model", selection.model] : []),
+      ...(selection.provider ? ["--provider", selection.provider] : [])])).rejects.toThrow("Checked render boundary");
+    expect(execute.mock.calls.some(([file, args]) => file === "kubectl" && args.includes("create"))).toBe(false);
+  });
+
+  it.each(["upgrade", "template"])("carries the provider/model pair into the final %s without funding flags", async mode => {
+    execute.mockImplementation(async (file, args) => {
+      if (file === "helm" && args[0] === "list") return { stdout: mode === "upgrade" ? releases : "[]" };
+      if (file === "kubectl" && args.includes("karssandboxes")) return { stdout: '{"items":[]}' };
+      return authority(args);
+    });
+    await sreCommand().parseAsync(["node", "sre", "install", "--no-wait",
+      "--provider", "copilot", "--model", "gpt-4.1"]);
+    const publication = execute.mock.calls.find(([file, args]) => file === "helm" && args[0] === mode);
+    expect(publication?.[1]).toEqual(expect.arrayContaining([
+      "--set-json", 'sre.provider="copilot"', "--set-json", 'sre.model="gpt-4.1"',
+    ]));
+    expect(publication?.[1].some(arg => /inferenceBudget|dailyTokens|tokenBudget|requirePromptShields/.test(arg))).toBe(false);
+  });
+
+  it("retains the existing Helm model baseline for an adopted first-install source", async () => {
+    execute.mockImplementation(async (file, args) => {
+      if (file === "helm" && args[0] === "list") return { stdout: releases };
+      if (file === "helm" && args[0] === "get" && args[1] === "values") {
+        return { stdout: JSON.stringify({ sre: { provider: "azure-openai", model: "original" } }) };
+      }
+      if (file === "kubectl" && args.includes("karssandboxes")) return { stdout: '{"items":[]}' };
+      const result = authority(args);
+      if (file === "kubectl" && !args.includes("crd") && args.includes("karssreregistrations.kars.azure.com")) {
+        const registration = JSON.parse(result.stdout);
+        registration.spec.firstInstallFunding = { intent: { uid: "original-intent" } };
+        return { stdout: JSON.stringify(registration) };
+      }
+      return result;
+    });
+    await sreCommand().parseAsync(["node", "sre", "install", "--no-wait",
+      "--provider", "github-copilot", "--model", "claude-opus-5.5"]);
+    const publication = execute.mock.calls.find(([file, args]) => file === "helm" && args[0] === "upgrade");
+    expect(publication?.[1]).toEqual(expect.arrayContaining([
+      '--set-json', 'sre.modelRouteBaseline={"provider":"azure-openai","model":"original"}',
+      'sre.provider="github-copilot"', 'sre.model="claude-opus-5.5"',
+    ]));
+  });
+
+  it("passes the same selection through explicit authority source staging", async () => {
+    execute.mockImplementation(async (file, args) => {
+      if (file === "helm" && args[0] === "template") {
+        expect(args).toEqual(expect.arrayContaining([
+          "--set-json", 'sre.provider="local"', "--set-json", 'sre.model="org/model:small"',
+        ]));
+        throw new Error("Checked authority render boundary");
+      }
+      return authority(args);
+    });
+    await expect(sreCommand().parseAsync(["node", "sre", "authority", "stage-source",
+      "--provider", "local", "--model", "org/model:small"]))
+      .rejects.toThrow("Checked authority render boundary");
+    expect(execute.mock.calls.some(([file, args]) => file === "kubectl" && args.includes("create"))).toBe(false);
+  });
+
+  it.each([
+    ["install", "--provider", ""], ["install", "--provider", "bad,tag"],
+    ["install", "--model", " "], ["authority", "stage-source", "--model", " padded "],
+  ])("rejects invalid selection before discovery or mutation: %j", async (...args) => {
+    await expect(sreCommand().parseAsync(["node", "sre", ...args])).rejects.toThrow(/SRE --/);
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it.each(["[]", '"invalid"'])("rejects malformed stored values before staging: %s", async values => {
+    execute.mockImplementation(async (file, args) => {
+      if (file === "helm" && args[0] === "list") return { stdout: releases };
+      if (file === "kubectl" && args.includes("karssandboxes")) return { stdout: '{"items":[]}' };
+      if (!args.includes("crd") && args.includes("karssreregistrations.kars.azure.com")) return { stdout: "" };
+      if (file === "helm" && args[0] === "get") return { stdout: values };
+      return authority(args);
+    });
+    await expect(sreCommand().parseAsync(["node", "sre", "install", "--no-wait"]))
+      .rejects.toThrow("invalid stored values");
+    expect(execute.mock.calls.some(([file, args]) => file === "helm" && args[0] === "template")).toBe(false);
+  });
+
   it("retains the existing release when Helm 4 removes the all-status flag", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
     execute.mockImplementation(async (file, args) => {

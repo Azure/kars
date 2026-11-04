@@ -184,6 +184,27 @@ class HermesImageDependenciesTests(unittest.TestCase):
         self.assertIn("COPY sandbox-images/hermes/entrypoint.sh", runtime)
         self.assertEqual(runtime.strip().splitlines()[-1], "USER 1000")
 
+    def test_foundry_profile_replacement_is_bound_and_applied_to_runtime_refreshes(self):
+        runtime = DOCKERFILE.split("FROM ${HERMES_RUNTIME_BASE} AS runtime")[1]
+        self.assertIn("COPY sandbox-images/hermes/azure-foundry-provider.py", runtime)
+        run = next(run for run in RUNS if "7463d513a89aebcaaead8888038493e5dbbe4e630b49d5b8970b4eef4fddbdb9" in run)
+        self.assertNotIn("cmp -s", run)
+        self.assertIn("python3 -c", run)
+        self.assertIn(".read_bytes() != Path(", run)
+        self.assertIn("sha256sum --check -", run)
+        self.assertLess(run.index("sha256sum"), run.index("install -m 0644"))
+        self.assertIn("&& rm /tmp/kars-azure-foundry-provider.py", run)
+        self.assertIn("/opt/hermes/plugins/model-providers/azure-foundry/__init__.py", run)
+
+    def test_foundry_auxiliary_bounds_patch_rejects_source_drift(self):
+        runtime = DOCKERFILE.split("FROM ${HERMES_RUNTIME_BASE} AS runtime")[1]
+        self.assertIn("COPY sandbox-images/hermes/hermes-foundry-bounds.patch", runtime)
+        run = next(run for run in RUNS if "e83807074f3577ac3980f43bfd578ffcc95efb591e38a9427d0e7d33ec7d8e4a" in run)
+        self.assertIn("e4971c76a209d5dfb70a5dcf9bcbf4f9038c7ebe1f5d21e00984a419e5b2a36a", run)
+        self.assertLess(run.index("sha256sum --check -"), run.index("apply --check"))
+        self.assertIn("&& git -C /opt/hermes apply /tmp/hermes-foundry-bounds.patch", run)
+        self.assertIn("&& rm /tmp/hermes-foundry-bounds.patch", run)
+
     def test_slack_installs_and_checks_the_async_adapter_dependencies(self):
         run = next(run for run in RUNS if '"python-telegram-bot' in run)
         install, smoke = run.replace("\\\n", " ").split("&&")

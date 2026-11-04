@@ -484,6 +484,9 @@ tools/e2e-harness/out/
 
 # Local delivery qualification, browser captures and Node diagnostic reports
 /.artifacts/
+/.qualification/
+/.profile-composer-*/
+/.python-execution-test-work/
 /.azure/deployment-plan.md
 /board-r*-dom.json
 /deliverables-rsc-*.txt

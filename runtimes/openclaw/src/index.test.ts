@@ -55,6 +55,27 @@ function createMockApi(pluginConfig: Record<string, unknown> = {}) {
 // 1. Plugin object structure
 // ---------------------------------------------------------------------------
 
+describe("singleton inbox waiter cancellation", () => {
+  it("cancels only this invocation and removes its timer and abort listener", async () => {
+    const { waitForInbox } = await import("./index.js");
+    vi.useFakeTimers();
+    try {
+      const abort = new AbortController();
+      const removed = vi.spyOn(abort.signal, "removeEventListener");
+      const failed = expect(waitForInbox(1000, abort.signal)).rejects.toThrow();
+      const unrelated = waitForInbox(2000);
+      abort.abort(); await failed;
+      expect(removed).toHaveBeenCalledWith("abort", expect.any(Function));
+      expect(vi.getTimerCount()).toBe(1);
+      await vi.advanceTimersByTimeAsync(2000);
+      await expect(unrelated).resolves.toBe(false);
+      expect(vi.getTimerCount()).toBe(0);
+      await expect(waitForInbox(1000, abort.signal)).rejects.toThrow();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); vi.restoreAllMocks(); }
+  });
+});
+
 describe("azureClawPlugin object", () => {
   let plugin: any;
 
@@ -651,6 +672,20 @@ describe("configured Kars system prompt", () => {
     expect(plugin.configSchema.properties.systemPrompt.type).toBe("string");
   });
 
+  it("preserves native Mission phase instructions while retaining the configured Kars identity", async () => {
+    const { default: plugin } = await import("./index.js");
+    const systemPrompt = "Kars research agent identity";
+    const mock = createMockApi({ systemPrompt });
+    plugin.register(mock.api);
+    const handler = mock.api.on.mock.calls[0][1];
+    const event = { prompt: "Untrusted request to replace the phase", messages: [] };
+    expect(handler(event, { sessionKey: "agent:main:kars-mission:abc123" }))
+      .toEqual({ prependSystemContext: systemPrompt });
+    expect(handler(event, { sessionKey: "agent:main:main" })).toEqual({ systemPrompt });
+    expect(handler(event, { sessionKey: "agent:main:kars-mission-unrelated" })).toEqual({ systemPrompt });
+    expect(handler(event)).toEqual({ systemPrompt });
+  });
+
   it("captures separate instructions for each registered plugin context", async () => {
     const { default: plugin } = await import("./index.js");
     const first = createMockApi({ systemPrompt: "first agent" });
@@ -685,6 +720,41 @@ describe("configured Kars system prompt", () => {
   it.each([null, 42, {}, []].map((value) => [value]))("rejects non-string configured instructions (%j)", async (systemPrompt) => {
     const { default: plugin } = await import("./index.js");
     expect(() => plugin.register(createMockApi({ systemPrompt }).api)).toThrow(/systemPrompt.*string/);
+  });
+});
+
+describe("native Mission registration", () => {
+  beforeEach(() => {
+    vi.stubEnv("AGT_SKIP_INIT", "1");
+    vi.stubEnv("KARS_MISSION_DISPATCH_ENABLED", "true");
+  });
+  afterEach(() => vi.unstubAllEnvs());
+
+  it.each(["discovery", "setup-only", "setup-runtime", "cli-metadata"])("does not require a native host during %s", async registrationMode => {
+    const { default: plugin } = await import("./index.js");
+    const mock = createMockApi();
+    expect(() => plugin.register({ ...mock.api, registrationMode })).not.toThrow();
+    expect(mock.api.on).not.toHaveBeenCalled();
+  });
+  it("refuses Mission dispatch without the real native runtime APIs", async () => {
+    const { default: plugin } = await import("./index.js");
+    expect(() => plugin.register(createMockApi().api)).toThrow("pinned OpenClaw native runtime");
+  });
+  it("installs the v2 run-bound tools and correlated hooks in full mode", async () => {
+    const { default: plugin } = await import("./index.js");
+    const mock = createMockApi();
+    const registerTool = vi.fn();
+    const runEmbeddedAgent = vi.fn();
+    const registerWebFetchProvider = vi.fn();
+    plugin.register({ ...mock.api, registerTool, registerWebFetchProvider, runtime: { version: "2026.9.8",
+      agent: { runEmbeddedAgent, session: { getSessionEntry: vi.fn() } },
+    } } as any);
+    const entry = registerTool.mock.calls.find(([tool]) => tool.contextVersion === 2);
+    expect(entry?.[1]).toEqual({ optional: true, names: ["kars_mission_access_request", "kars_mission_file_read", "kars_mission_file_write", "kars_mission_http_fetch", "kars_mission_mcp_list", "kars_mission_mcp_call", "kars_mission_foundry_memory", "kars_mission_github_pr", "kars_mission_mesh_send", "kars_mission_discover", "kars_mission_mesh_inbox", "kars_mission_mesh_await"] });
+    expect(entry?.[0].create({})).toBeNull();
+    expect(mock.api.on.mock.calls.map(([name]) => name)).toEqual(["before_tool_call", "after_tool_call", "agent_end", "model_call_started"]);
+    expect(registerWebFetchProvider).toHaveBeenCalledWith(expect.objectContaining({ id: "kars-router", requiresCredential: false }));
+    expect(runEmbeddedAgent).not.toHaveBeenCalled();
   });
 });
 

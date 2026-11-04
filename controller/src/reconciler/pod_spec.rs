@@ -10,6 +10,15 @@ use serde_json::json;
 
 use crate::crd::SandboxConfig;
 
+pub(super) fn singleton_rollout_strategy() -> serde_json::Value {
+    // A policy change can make the old router unready. Do not require spare
+    // node capacity for a second agent before releasing the singleton's slot.
+    json!({
+        "type": "RollingUpdate",
+        "rollingUpdate": {"maxSurge": 0, "maxUnavailable": 1}
+    })
+}
+
 pub(crate) fn build_pod_labels(name: &str) -> std::collections::BTreeMap<String, String> {
     std::collections::BTreeMap::from([
         ("kars.azure.com/sandbox".into(), name.into()),
@@ -81,6 +90,22 @@ pub(crate) fn cluster_default_model() -> Option<String> {
     .find(|value| !value.is_empty())
 }
 
+pub(crate) fn memory_model_env(
+    chat_model: Option<String>,
+    embedding_model: Option<String>,
+) -> Vec<serde_json::Value> {
+    [
+        ("FOUNDRY_MEMORY_CHAT_MODEL", chat_model),
+        ("FOUNDRY_MEMORY_EMBEDDING_MODEL", embedding_model),
+    ]
+    .into_iter()
+    .filter_map(|(name, value)| {
+        let value = value?.trim().to_owned();
+        (!value.is_empty()).then(|| json!({ "name": name, "value": value }))
+    })
+    .collect()
+}
+
 pub(crate) fn sandbox_node_selector_from(
     raw: &str,
     default_pool: &str,
@@ -140,6 +165,34 @@ pub(crate) fn build_egress_guard_command(_is_sre_sandbox: bool) -> String {
 #[allow(clippy::module_inception)]
 mod egress_guard_tests {
     use super::build_egress_guard_command;
+
+    #[test]
+    fn singleton_rollout_releases_capacity_before_starting_a_replacement() {
+        use k8s_openapi::api::apps::v1::DeploymentStrategy;
+        use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
+
+        let strategy: DeploymentStrategy =
+            serde_json::from_value(super::singleton_rollout_strategy()).unwrap();
+        assert_eq!(strategy.type_.as_deref(), Some("RollingUpdate"));
+        let rolling = strategy.rolling_update.unwrap();
+        assert_eq!(rolling.max_surge, Some(IntOrString::Int(0)));
+        assert_eq!(rolling.max_unavailable, Some(IntOrString::Int(1)));
+    }
+
+    #[test]
+    fn memory_model_env_keeps_independent_deployments_and_omits_empty_values() {
+        assert_eq!(
+            super::memory_model_env(
+                Some(" memory-chat ".into()),
+                Some("memory-embedding".into())
+            ),
+            vec![
+                serde_json::json!({"name": "FOUNDRY_MEMORY_CHAT_MODEL", "value": "memory-chat"}),
+                serde_json::json!({"name": "FOUNDRY_MEMORY_EMBEDDING_MODEL", "value": "memory-embedding"}),
+            ]
+        );
+        assert!(super::memory_model_env(None, Some("  ".into())).is_empty());
+    }
 
     #[test]
     fn standard_sandbox_has_no_apiserver_bypass() {

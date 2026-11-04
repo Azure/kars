@@ -22,6 +22,32 @@ def digest(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def repair_kubemanager_lifecycle(source):
+    path = source / "pkg/operators/kubemanager/kubemanager.go"
+    original = "3d4dcc027d971753d2056cc276606f680594999c9ac5f5e3d01bac3178a221d2"
+    repaired = "a4a1730a5f2da87071b365c3e0748db1005984d24198ca70e769c4f8142af01d"
+    if digest(path) != original:
+        raise SystemExit("unexpected KubeManager source before lifecycle repair")
+    before = '''func (m *KubeManagerInstance) Close(gadgetCtx operators.GadgetContext) error {
+\tm.manager.tracerCollection.RemoveTracer(m.id)
+
+\tif m.containersPublisher != nil {
+\t\tm.containersPublisher.Unsubscribe()
+\t}
+
+\treturn nil
+}'''
+    text = path.read_text()
+    if text.count(before) != 1:
+        raise SystemExit("KubeManager lifecycle repair does not match pinned source")
+    after = text.replace(before, before.replace("return nil", "return m.PostGadgetRun()"))
+    if hashlib.sha256(after.encode()).hexdigest() != repaired:
+        raise SystemExit("unexpected KubeManager source after lifecycle repair")
+    path.write_text(after)
+    return {"file": str(path.relative_to(source)), "original_sha256": original,
+            "repaired_sha256": repaired, "repair": "close-container-subscriptions"}
+
+
 def configuration():
     arch = os.environ["TARGETARCH"]
     revision = os.environ["SOURCE_REVISION"]
@@ -49,12 +75,16 @@ def package(directory):
     files = {
         "kubectl-gadget": "usr/local/bin/kubectl-gadget",
         "gadgettracermanager": "usr/bin/gadgettracermanager",
+        "kars-witness-health": "usr/bin/kars-witness-health",
         "build.json": "opt/witness/build.json",
         "witness.py": "opt/witness/witness.py",
         "kubectl-gadget.buildinfo": "opt/witness/provenance/kubectl-gadget.buildinfo",
         "gadgettracermanager.buildinfo": "opt/witness/provenance/gadgettracermanager.buildinfo",
+        "kars-witness-health.buildinfo": "opt/witness/provenance/kars-witness-health.buildinfo",
         "client.go.mod": "opt/witness/provenance/client.go.mod",
         "client.go.sum": "opt/witness/provenance/client.go.sum",
+        "build-runtime.py": "opt/witness/provenance/build-runtime.py",
+        "lifecycle/kubemanager_test.go": "opt/witness/provenance/kubemanager_test.go",
         "LICENSE": "usr/share/licenses/inspektor-gadget/LICENSE",
         "THIRD_PARTY_NOTICES.md": "usr/share/licenses/inspektor-gadget/NOTICE",
     }
@@ -62,7 +92,7 @@ def package(directory):
         target = root / destination
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(directory / name, target)
-        target.chmod(0o555 if name in ("kubectl-gadget", "gadgettracermanager") else 0o444)
+        target.chmod(0o555 if name in ("kubectl-gadget", "gadgettracermanager", "kars-witness-health") else 0o444)
     for path in [root, *root.rglob("*")]:
         if path.is_dir():
             path.chmod(0o755)
@@ -90,6 +120,9 @@ def build(directory):
         raise SystemExit("unexpected upstream source module")
     for name in ("go.mod", "go.sum"):
         shutil.copyfile(directory / f"client.{name}", source / name)
+    shutil.copytree(directory / "health", source / "kars-health")
+    shutil.copytree(directory / "lifecycle", source / "kars-lifecycle")
+    runtime_patches = [repair_kubemanager_lifecycle(source)]
 
     def go(*args):
         subprocess.run(["go", *args], cwd=source, env=env, check=True)
@@ -98,6 +131,7 @@ def build(directory):
        "./cmd/kubectl-gadget", "./pkg/oci")
     go("test", "-mod=readonly", "-p=2", "-trimpath", "-count=1",
        "./gadget-container/gadgettracermanager", "./pkg/gadget-service/api-helpers")
+    go("test", "-mod=readonly", "-p=2", "-trimpath", "-count=1", "./kars-health", "./kars-lifecycle")
     go("mod", "verify")
     binary = directory / "kubectl-gadget"
     go("build", "-mod=readonly", "-p=2", "-tags=withoutebpf", "-trimpath", "-buildvcs=false",
@@ -113,6 +147,11 @@ def build(directory):
     (directory / "gadgettracermanager.buildinfo").write_bytes(
         subprocess.check_output(["go", "version", "-m", str(daemon)], env=env))
     subprocess.run([str(daemon), "-h"], env=env, check=True)
+    health = directory / "kars-witness-health"
+    go("build", "-mod=readonly", "-p=2", "-trimpath", "-buildvcs=false", "-ldflags=-s -w",
+       "-o", str(health), "./kars-health")
+    (directory / "kars-witness-health.buildinfo").write_bytes(
+        subprocess.check_output(["go", "version", "-m", str(health)], env=env))
     go("mod", "verify")
     for name in ("go.mod", "go.sum"):
         if digest(directory / f"client.{name}") != digest(source / name):
@@ -120,12 +159,19 @@ def build(directory):
     shutil.copyfile(source / "LICENSE", directory / "LICENSE")
     binary.chmod(0o555)
     daemon.chmod(0o555)
+    health.chmod(0o555)
     metadata.update(
         ig_version="v0.53.2", client_version=VERSION, daemon_version=VERSION, client_source_revision=COMMIT,
         client_source_archive_sha256=SOURCE_SHA256, go_version=toolchain[0],
+        health_sources={name: digest(directory / "health" / name)
+                        for name in ("main.go", "main_test.go")},
+        runtime_patches=runtime_patches,
+        lifecycle_sources={"kubemanager_test.go": digest(directory / "lifecycle/kubemanager_test.go")},
+        build_recipe_sha256=digest(directory / "build-runtime.py"),
         artifacts={name: digest(directory / name) for name in (
             "kubectl-gadget", "kubectl-gadget.buildinfo", "gadgettracermanager",
-            "gadgettracermanager.buildinfo", "client.go.mod", "client.go.sum", "LICENSE")},
+            "gadgettracermanager.buildinfo", "kars-witness-health", "kars-witness-health.buildinfo",
+            "client.go.mod", "client.go.sum", "LICENSE")},
     )
     (directory / "build.json").write_text(json.dumps(metadata, indent=2) + "\n")
     package(directory)

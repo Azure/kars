@@ -263,7 +263,7 @@ pub struct OrchestratorDto {
     pub sandbox_waiting_reason: Option<String>,
     pub sandbox_node: Option<String>,
     pub sandbox_uptime_seconds: Option<i64>,
-    /// How many Running sandbox routers the composer can fall back through.
+    /// How many ready routers belong to the standing composer.
     pub router_candidates: usize,
     /// True when the operator should configure the direct endpoint (sandbox path
     /// is the only option and it's unhealthy or capacity is thin).

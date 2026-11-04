@@ -3,6 +3,9 @@
 
 "use client";
 
+import { compositionSpending } from "@/lib/budget-review";
+import { checkPackage } from "@/lib/preflight-client";
+
 // kars Bridge Workspace — mission intake → editable launch package → launch.
 //
 // The design note's §20 flow in plain language: describe what you want, review
@@ -17,13 +20,13 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useActionState } from "react";
+import { CompositionNote } from "@/components/validation-checks";
 import { OrchestrationCube } from "@/components/orchestration-cube";
 import { Icon } from "@/components/icon";
 import { JourneyRail } from "@/components/journey-rail";
 import { LoopDesigner } from "@/components/loop-designer";
 import {
   createMissionAction,
-  validateMissionAction,
   composeMissionAction,
   proposeLoopAction,
   type IntakeState,
@@ -38,8 +41,9 @@ import type {
 } from "@/lib/types";
 
 import { modelKey } from "./intake-flow/helpers";
-import { recommendedStats as selectRecommendedStats } from "@/lib/efficiency";
+import { recommendedStats as selectRecommendedStats, resolveRecommendedModel } from "@/lib/efficiency";
 import { renderReview } from "./intake-flow/review";
+import { QualificationChoice } from "./intake-flow/qualification-choice";
 
 const EXAMPLES = [
   "Audit our README for outdated install steps and propose fixes.",
@@ -47,7 +51,7 @@ const EXAMPLES = [
   "Summarize this contract's risk and obligations.",
 ];
 
-export function IntakeFlow({ options, efficiency, initialObjective }: { options: Options; efficiency?: Efficiency | null; initialObjective?: string }) {
+export function IntakeFlow({ options, efficiency, initialObjective, canQualify = false }: { options: Options; efficiency?: Efficiency | null; initialObjective?: string; canQualify?: boolean }) {
   const [state, formAction] = useActionState<IntakeState, FormData>(
     createMissionAction,
     { error: null },
@@ -63,10 +67,8 @@ export function IntakeFlow({ options, efficiency, initialObjective }: { options:
   // The learned efficiency frontier drives the recommendation. The recommended
   // route (e.g. `azure-openai/openai/gpt-4o`) carries the deployment; match it
   // back to a real model option and surface its stats at the point of choice.
-  const recommendedRouteRaw = efficiency?.recommended ?? null;
-  const recommendedModel = recommendedRouteRaw
-    ? options.models.find((m) => recommendedRouteRaw === m.deployment) ?? null
-    : null;
+  const recommendation = resolveRecommendedModel(options.models, efficiency);
+  const recommendedModel = recommendation.model;
   const recommendedStats = selectRecommendedStats(efficiency);
   const actionableRecommendedModel =
     efficiency?.recommended_low_confidence ? null : recommendedModel;
@@ -87,16 +89,11 @@ export function IntakeFlow({ options, efficiency, initialObjective }: { options:
   // It is carried into the blueprint's instructions, so it reaches the harness
   // and sub-agents, but it NEVER becomes the objective, display name, or slug.
   const [loopDirective, setLoopDirective] = useState("");
+  const [loopContext, setLoopContext] = useState("");
   const [toolPolicy, setToolPolicy] = useState<string>("");
   const [mcp, setMcp] = useState<string[]>([]);
   const [skills, setSkills] = useState<string[]>([]);
   const [egress, setEgress] = useState<BlueprintEgress[]>([]);
-  // Egress enforcement mode (§ learning|strict). "strict" enforces the proposed
-  // allowlist from the first run; "learning" starts in Learn mode (observe the
-  // hosts the agent actually reaches, enforce nothing), so you can enforce the
-  // learned set after review. Maps to the controller's Strict-vs-Learn network
-  // policy: a strict launch carries the allowlist, a learning launch carries none.
-  const [egressMode, setEgressMode] = useState<"strict" | "learning">("strict");
   const [isolation, setIsolation] = useState<string>(
     options.isolation[0]?.value ?? "standard",
   );
@@ -116,6 +113,9 @@ export function IntakeFlow({ options, efficiency, initialObjective }: { options:
   const [tier, setTier] = useState(3);
   const [budgetTokens, setBudgetTokens] = useState<string>("");
   const [launch, setLaunch] = useState(false);
+  const [selectedRepos, setSelectedRepos] = useState<string[]>([]);
+  const [qualificationRun, setQualificationRun] = useState(false);
+  const validationEpoch = useRef(0);
 
   function changeRuntime(nextRuntime: string) {
     setRuntime(nextRuntime);
@@ -127,16 +127,6 @@ export function IntakeFlow({ options, efficiency, initialObjective }: { options:
     if (nextRuntime === "OpenClaw") return;
     setSkills([]);
     if (toolPolicy === "kars-team-member") setToolPolicy("kars-default");
-    const repositorySecurity =
-      nextRuntime === "Hermes" &&
-      mcp.some((server) => server.toLowerCase() === "github") &&
-      egress.some((endpoint) => endpoint.host.toLowerCase() === "api.osv.dev");
-    if (
-      repositorySecurity &&
-      (budgetTokens.trim() === "" || Number(budgetTokens) < 600_000)
-    ) {
-      setBudgetTokens("600000");
-    }
   }
 
   // ── Orchestrator (intent → composed package) ────────────────────────────
@@ -171,14 +161,26 @@ export function IntakeFlow({ options, efficiency, initialObjective }: { options:
     setBudgetTokens(p.budget_tokens != null ? String(p.budget_tokens) : "");
   }
 
-  async function composeAndReview(objectiveOverride?: string) {
-    const obj = objectiveOverride ?? objective;
+  async function composeAndReview(objectiveOverride?: string, reviewedLoop = loopDirective) {
+    const obj = [objectiveOverride ?? objective, reviewedLoop].map((part) => part.trim())
+      .filter(Boolean).join("\n\n");
+    const requested = compositionSpending(budgetTokens, executionPlanDraft);
+    if (requested.error !== null) {
+      setComposeNote(requested.error);
+      setProposed(true);
+      return;
+    }
+    setLaunch(false);
+    validationEpoch.current += 1;
+    setValidating(false);
+    setValidation(null);
+    setValidatedSig(null);
     setComposing(true);
     setComposeNote(null);
     setRationale(null);
     setComposeSource(null);
     try {
-      const res = await composeMissionAction(obj);
+      const res = await composeMissionAction(obj, canQualify ? qualificationRun : undefined, requested.spending);
       if (res.available && res.proposal) {
         applyProposal(res.proposal);
         setRationale(res.rationale);
@@ -188,15 +190,16 @@ export function IntakeFlow({ options, efficiency, initialObjective }: { options:
       } else {
         setComposeNote(
           res.reason ??
-            "The AI orchestrator isn't available. Retry composition before reviewing or validating a package.",
+            "The AI orchestrator isn't available. Retry composition or review a manual package.",
         );
       }
     } catch {
       setComposeNote(
-        "Couldn't reach the orchestrator. Retry composition before reviewing or validating a package.",
+        "Couldn't reach the orchestrator. Retry composition or review a manual package.",
       );
     } finally {
       setComposing(false);
+      if (executionPlanDraft.trim()) setProposed(true);
     }
   }
 
@@ -223,10 +226,11 @@ export function IntakeFlow({ options, efficiency, initialObjective }: { options:
   // loop-review step (via Back / Adjust loop) shows exactly what they applied.
   function applyLoopAndCompose(
     text: string,
-    parts?: { goal: string; patternId: string; criteria: string },
+    parts?: { goal: string; patternId: string; criteria: string; context: string },
   ) {
     const humanIntent = (initialObjective ?? objective).trim();
     setLoopDirective(text);
+    setLoopContext(parts?.context ?? "");
     if (parts) {
       setLoopProposal((prev) => ({
         pattern: parts.patternId,
@@ -238,12 +242,13 @@ export function IntakeFlow({ options, efficiency, initialObjective }: { options:
     }
     setObjective(humanIntent);
     setLoopReviewed(true);
-    void composeAndReview(humanIntent);
+    void composeAndReview(humanIntent, text);
   }
   function skipLoop() {
+    setLoopDirective("");
     setLoopReviewed(true);
     if (initialObjective && initialObjective.trim().length > 0) {
-      void composeAndReview(initialObjective.trim());
+      void composeAndReview(initialObjective.trim(), "");
     }
   }
 
@@ -266,6 +271,28 @@ export function IntakeFlow({ options, efficiency, initialObjective }: { options:
   const [validatedSig, setValidatedSig] = useState<string | null>(null);
   const [validating, setValidating] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
+
+  function changeSelectedRepos(repos: string[]) {
+    setSelectedRepos(repos);
+    validationEpoch.current += 1;
+    setValidating(false);
+    setValidation(null);
+    setValidatedSig(null);
+    setValidationError(null);
+    setLaunch(false);
+  }
+
+  function changeQualification(checked: boolean) {
+    if (!canQualify) return;
+    setQualificationRun(checked);
+    validationEpoch.current += 1;
+    setValidating(false);
+    setValidation(null);
+    setValidatedSig(null);
+    setValidationError(null);
+    setLaunch(false);
+  }
+  const qualificationChoice = <QualificationChoice canQualify={canQualify} checked={qualificationRun} onChange={changeQualification} />;
 
   const ceiling = Math.max(1, tier - 1);
   const recommendedRoute = actionableRecommendedModel?.deployment ?? null;
@@ -292,46 +319,49 @@ export function IntakeFlow({ options, efficiency, initialObjective }: { options:
     if (toolPolicy) bp.tool_policy = toolPolicy;
     if (mcp.length) bp.mcp_servers = mcp;
     if (skills.length) bp.skills = skills;
-    // Strict enforces the proposed allowlist; learning launches in Learn mode
-    // (no allowlist → the controller observes egress instead of blocking it).
-    if (egressMode === "strict" && egress.length) bp.egress = egress;
-    bp.egress_mode = egressMode;
+    if (egress.length) bp.egress = egress;
+    bp.egress_mode = "strict";
     if (memory) bp.memory = memory;
     if (executionPlan) bp.execution_plan = executionPlan;
     return bp;
-  }, [model, modelFallbacks, runtime, instructions, loopDirective, toolPolicy, mcp, skills, egress, egressMode, isolation, memory, executionPlan]);
+  }, [model, modelFallbacks, runtime, instructions, loopDirective, toolPolicy, mcp, skills, egress, isolation, memory, executionPlan]);
 
   // A validation is only "fresh" for the exact package it was run against — any
   // edit (composition, tier, or budget) makes the prior result stale, so you
   // must re-validate exactly what you'll launch.
   const packageSig = useMemo(
-    () => JSON.stringify({ blueprint, tier, budgetTokens, executionPlanDraft }),
-    [blueprint, tier, budgetTokens, executionPlanDraft],
+    () => JSON.stringify({ blueprint, tier, budgetTokens, executionPlanDraft, qualificationRun, selectedRepos }),
+    [blueprint, tier, budgetTokens, executionPlanDraft, qualificationRun, selectedRepos],
   );
   const validationFresh = validation != null && validatedSig === packageSig;
 
   async function runValidation() {
+    const epoch = ++validationEpoch.current;
     setValidating(true);
     setValidationError(null);
     try {
-      const res = await validateMissionAction(blueprint, {
+      const res = await checkPackage(blueprint, {
+        git_write_repos: selectedRepos,
         tier,
         budget_tokens: budgetTokens.trim() === "" ? null : Number(budgetTokens),
-        budget_scope: budgetTokens.trim() === "" ? undefined : "GovernedInference",
+        budget_scope: "GovernedInference",
+        qualification_run: canQualify ? qualificationRun : undefined,
       });
+      if (validationEpoch.current !== epoch) return;
       if (!res || !Array.isArray(res.checks)) {
         throw new Error("The pre-flight service returned an unexpected response (no checks).");
       }
       setValidation(res);
       setValidatedSig(packageSig);
     } catch (e) {
+      if (validationEpoch.current !== epoch) return;
       // Fail loud: never leave the user staring at a button with no feedback.
       setValidation(null);
       setValidationError(
         e instanceof Error ? e.message : "Pre-flight validation failed — the cluster could not be reached.",
       );
     } finally {
-      setValidating(false);
+      if (validationEpoch.current === epoch) setValidating(false);
     }
   }
 
@@ -342,6 +372,7 @@ export function IntakeFlow({ options, efficiency, initialObjective }: { options:
     return (
       <div className="space-y-5">
         <JourneyRail current="describe" />
+        {qualificationChoice}
         <div className="kb-card kb-canvas p-6">
           <h2 className="text-sm font-semibold">Review the loop</h2>
           <p className="mt-1 text-xs text-foreground-muted">
@@ -361,6 +392,7 @@ export function IntakeFlow({ options, efficiency, initialObjective }: { options:
                 initialGoal={loopProposal?.goal ?? initialObjective}
                 initialPatternId={loopProposal?.pattern}
                 initialCriteria={loopProposal?.criteria ?? ""}
+                initialContext={loopContext}
                 rationale={loopProposal?.rationale}
                 proposalSource={loopProposal?.source}
                 applyLabel="Continue with this loop →"
@@ -400,7 +432,15 @@ export function IntakeFlow({ options, efficiency, initialObjective }: { options:
                 ? efficiency?.recommended_low_confidence
                   ? `limited evidence for ${recommendedModel.deployment}; preserving the cluster default`
                   : `learned recommendation: ${recommendedModel.deployment}`
-                : "no completed runs yet — composing from safe defaults",
+                : recommendation.reason === "ambiguous"
+                    ? "completed-run history is ambiguous across providers — preserving the cluster default"
+                    : recommendation.reason === "unavailable"
+                      ? "efficiency history is unavailable — composing from safe defaults"
+                      : recommendation.reason === "missing"
+                        ? "historical recommendation is not in the current catalogue — preserving the cluster default"
+                        : recommendation.reason === "unqualified"
+                          ? "completed runs have no qualified recommendation — preserving the cluster default"
+                          : "no completed runs yet — composing from safe defaults",
             },
             { icon: "layers", label: "Assembling the governed package", detail: `${options.mcp_servers.length} connected service${options.mcp_servers.length === 1 ? "" : "s"} · egress · autonomy tier · budget` },
             { icon: "note", label: loopDirective.trim() ? "Folding in your reviewed loop" : "Preparing the proposal for review", detail: (initialObjective ?? objective).trim().slice(0, 72) || "your objective" },
@@ -417,9 +457,15 @@ export function IntakeFlow({ options, efficiency, initialObjective }: { options:
         <JourneyRail current="describe" />
         {composeNote && (
           <div className="rounded-xl border border-danger/30 bg-danger/5 p-4 text-sm text-danger">
-            {composeNote}
+            <CompositionNote detail={composeNote} />
+            <button type="button" onClick={() => setProposed(true)}
+              disabled={objective.trim().length === 0}
+              className="mt-3 text-sm font-medium underline disabled:opacity-50">
+              Review a manual package instead
+            </button>
           </div>
         )}
+        {qualificationChoice}
         <div className="grid gap-5 lg:grid-cols-[1.15fr_0.85fr]">
         <div className="kb-card kb-canvas p-6">
           <label htmlFor="objective" className="text-sm font-semibold">
@@ -464,6 +510,7 @@ export function IntakeFlow({ options, efficiency, initialObjective }: { options:
             <LoopDesigner
               surface="mission"
               initialGoal={objective}
+              initialContext={loopContext}
               onApply={(text, parts) => {
                 // The loop scaffold is the agent's OPERATING CONTRACT — it folds
                 // into the blueprint instructions (via mergedInstructions), and
@@ -472,6 +519,7 @@ export function IntakeFlow({ options, efficiency, initialObjective }: { options:
                 // it's still empty, so Compose enables without the scaffold ever
                 // becoming the mission identity.
                 setLoopDirective(text);
+                setLoopContext(parts?.context ?? "");
                 setLoopReviewed(true);
                 if (parts) {
                   setLoopProposal((prev) => ({
@@ -540,13 +588,19 @@ export function IntakeFlow({ options, efficiency, initialObjective }: { options:
 
   // Step 2 — the editable package + hard launch gate.
   return renderReview({
+    canQualify,
+    qualificationRun,
+    changeQualification,
     formAction,
     objective,
     tier,
     budgetTokens,
     launch,
     blueprint,
+    selectedRepos,
+    changeSelectedRepos,
     delegation,
+    setDelegation,
     rationale,
     proposed,
     composeSource,
@@ -581,8 +635,6 @@ export function IntakeFlow({ options, efficiency, initialObjective }: { options:
     mcpNeedsPolicy,
     skills,
     setSkills,
-    setEgressMode,
-    egressMode,
     egress,
     setEgress,
     isolation,

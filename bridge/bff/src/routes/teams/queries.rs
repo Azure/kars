@@ -45,6 +45,68 @@ pub struct TeamOutcomeSummaryDto {
     pub failed: i64,
 }
 
+pub(super) fn team_git_write_repos(blueprint: Option<&crate::kars::task::TaskBlueprint>) -> Vec<String> {
+    let Some(blueprint) = blueprint else {
+        return Vec::new();
+    };
+    if let Some(binding) = &blueprint.github_binding {
+        return binding.repositories.clone();
+    }
+    blueprint
+        .git_write
+        .as_ref()
+        .map(|config| config.repos.clone())
+        .unwrap_or_default()
+}
+
+fn team_token_usage(
+    team: &KarsTeam,
+    now: chrono::DateTime<chrono::Utc>,
+) -> (Option<i64>, &'static str) {
+    const LIFETIME: &str = "GovernedInferenceLifetime";
+    const SYNTHESIS: &str = "RetainedRootSynthesis";
+    let status = team.status.as_ref();
+    let governed = team.spec.envelope.budget.as_ref().is_some_and(|budget| {
+        matches!(
+            budget.scope,
+            Some(crate::kars::task::BudgetScope::GovernedInference)
+        )
+    }) || status.is_some_and(|status| {
+        status.inference_budget_account.is_some()
+            || status.tokens_spent_scope.as_deref() == Some(LIFETIME)
+    });
+    if !governed {
+        return (
+            Some(
+                status
+                    .and_then(|status| status.tokens_spent_total)
+                    .unwrap_or(0)
+                    .max(0),
+            ),
+            SYNTHESIS,
+        );
+    }
+    let observed = status.filter(|status| {
+        status.tokens_spent_scope.as_deref() == Some(LIFETIME)
+            && team.metadata.generation.is_some()
+            && status.observed_generation == team.metadata.generation
+            && status
+                .tokens_observed_at
+                .as_deref()
+                .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+                .is_some_and(|at| {
+                    let age = now.signed_duration_since(at);
+                    (chrono::Duration::zero()..=chrono::Duration::seconds(300)).contains(&age)
+                })
+    });
+    (
+        observed
+            .and_then(|status| status.tokens_spent_total)
+            .filter(|tokens| *tokens >= 0),
+        LIFETIME,
+    )
+}
+
 fn run_started_at(run: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     let epoch = run.rsplit("-run-").next()?.get(..10)?.parse::<i64>().ok()?;
     chrono::DateTime::from_timestamp(epoch, 0)
@@ -196,6 +258,7 @@ fn to_summary(team: &KarsTeam) -> TeamSummaryDto {
     .flatten()
     .max();
     TeamSummaryDto {
+        qualification: super::qualification::status(team),
         name: team.name_any(),
         display_name: team.spec.display_name.clone(),
         charter: team.spec.charter.clone(),
@@ -407,6 +470,10 @@ pub async fn get_team(
                 tier: role.envelope.as_ref().map(|e| e.tier),
                 member_task: materialized.then_some(member_task),
                 skills: role.skills.clone(),
+                resources: role
+                    .blueprint
+                    .as_ref()
+                    .map(super::RoleResources::from_blueprint),
                 runtime: role.blueprint.as_ref().and_then(|b| b.runtime.clone()),
                 model: role
                     .blueprint
@@ -485,8 +552,13 @@ pub async fn get_team(
     }
 
     let (work_items, work_reviews) = read_work_for_detail(cluster, &team).await?;
+    let (tokens_spent_total, tokens_spent_scope) = team_token_usage(&team, chrono::Utc::now());
+    let budget_status = super::budget_status::read(&team, chrono::Utc::now());
     Ok(Json(TeamDetailDto {
+        budget_status,
+        qualification: super::qualification::status(&team),
         name: team.name_any(),
+        uid: team.uid().unwrap_or_default(),
         display_name: team.spec.display_name.clone(),
         charter: team.spec.charter.clone(),
         phase: phase_of(&team),
@@ -523,7 +595,8 @@ pub async fn get_team(
         detail: st.and_then(|s| s.detail.clone()),
         health: st.and_then(|s| s.health.clone()),
         runs_succeeded: st.and_then(|s| s.runs_succeeded).unwrap_or(0),
-        tokens_spent_total: st.and_then(|s| s.tokens_spent_total).unwrap_or(0),
+        tokens_spent_total,
+        tokens_spent_scope: tokens_spent_scope.into(),
         commons_entry_count: st.and_then(|s| s.commons_entry_count).unwrap_or(0),
         last_success_at: st.and_then(|s| s.last_success_at.clone()),
         created_at: team
@@ -549,12 +622,9 @@ pub async fn get_team(
         tool_policy,
         tool_policy_default,
         mcp_servers: bp.map(|b| b.mcp_servers.clone()).unwrap_or_default(),
-        git_write_repos: bp
-            .and_then(|b| b.git_write.as_ref())
-            .map(|git_write| git_write.repos.clone())
-            .unwrap_or_default(),
+        git_write_repos: team_git_write_repos(bp),
         egress,
-        egress_mode: bp.and_then(|b| b.egress_mode.clone()),
+        egress_mode: Some("Strict".into()),
         learned_egress,
         network_posture: "Default-deny egress (kernel-level). Only the inference router and AGT mesh relay are reachable; novel domains need an approved egress request.".to_string(),
         model,
@@ -584,6 +654,106 @@ pub async fn get_team(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn team_github_binding_preserves_edit_selection_without_amplifying_legacy_access() {
+        let mut raw = serde_json::json!({
+            "githubBinding": {
+                "grant": {"name": "workspace", "uid": "grant-uid"},
+                "connection": {"name": "connection", "uid": "connection-uid"},
+                "repositories": ["owner/demo"], "write": true
+            }
+        });
+        let project = |value| {
+            let blueprint = serde_json::from_value(value).unwrap();
+            team_git_write_repos(Some(&blueprint))
+        };
+        assert_eq!(project(raw.clone()), vec!["owner/demo"]);
+        raw["gitWrite"] = serde_json::json!({
+            "connectionConfigMapRef": {"name": "legacy"}, "repos": ["owner/other"]
+        });
+        assert_eq!(project(raw.clone()), vec!["owner/demo"]);
+        raw["githubBinding"]["write"] = serde_json::json!(false);
+        assert_eq!(project(raw.clone()), vec!["owner/demo"]);
+        raw["githubBinding"]["write"] = serde_json::json!(true);
+        raw["githubBinding"]["repositories"] = serde_json::json!([]);
+        assert!(project(raw.clone()).is_empty());
+        raw.as_object_mut().unwrap().remove("githubBinding");
+        assert_eq!(project(raw), vec!["owner/other"]);
+        assert!(project(serde_json::json!({})).is_empty());
+        assert!(team_git_write_repos(None).is_empty());
+    }
+
+    #[test]
+    fn team_token_usage_requires_fresh_governed_observation_without_synthesis_fallback() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-15T02:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let mut value = serde_json::json!({
+            "apiVersion":"kars.azure.com/v1alpha1", "kind":"KarsTeam",
+            "metadata":{"name":"team", "namespace":"workspace", "uid":"team-uid", "generation":1},
+            "spec":{"charter":"Review", "envelope":{"tier":1,"authorityCeiling":1,
+                "budget":{"scope":"GovernedInference", "tokens":86793}}},
+            "status":{"observedGeneration":1,"tokensSpentTotal":86793,
+                "tokensSpentScope":"GovernedInferenceLifetime","tokensObservedAt":"2026-10-15T02:00:00Z"}
+        });
+        let project = |value: serde_json::Value| {
+            team_token_usage(&serde_json::from_value(value).unwrap(), now)
+        };
+        assert_eq!(
+            project(value.clone()),
+            (Some(86793), "GovernedInferenceLifetime")
+        );
+        for (key, replacement) in [
+            ("tokensSpentScope", serde_json::Value::Null),
+            (
+                "tokensSpentScope",
+                serde_json::json!("RetainedRootSynthesis"),
+            ),
+            ("tokensSpentTotal", serde_json::Value::Null),
+            ("tokensSpentTotal", serde_json::json!(-1)),
+            ("tokensObservedAt", serde_json::Value::Null),
+            ("tokensObservedAt", serde_json::json!("invalid")),
+            (
+                "tokensObservedAt",
+                serde_json::json!("2026-10-15T01:54:59Z"),
+            ),
+            (
+                "tokensObservedAt",
+                serde_json::json!("2026-10-15T02:00:01Z"),
+            ),
+            (
+                "tokensObservedAt",
+                serde_json::json!("2026-10-15T02:00:00.001Z"),
+            ),
+            (
+                "tokensObservedAt",
+                serde_json::json!("2026-10-15T01:54:59.999Z"),
+            ),
+            ("observedGeneration", serde_json::json!(0)),
+        ] {
+            let mut stale = value.clone();
+            stale["status"][key] = replacement;
+            assert_eq!(project(stale), (None, "GovernedInferenceLifetime"), "{key}");
+        }
+        value["status"]["tokensSpentTotal"] = serde_json::json!(0);
+        assert_eq!(
+            project(value.clone()),
+            (Some(0), "GovernedInferenceLifetime")
+        );
+        value["status"] = serde_json::json!({"tokensSpentTotal":37488});
+        assert_eq!(project(value.clone()), (None, "GovernedInferenceLifetime"));
+        value["spec"]["envelope"]["budget"] = serde_json::Value::Null;
+        assert_eq!(
+            project(value.clone()),
+            (Some(37488), "RetainedRootSynthesis")
+        );
+        value["status"]["inferenceBudgetAccount"] =
+            serde_json::json!({"namespace":"kars-system", "name":"account", "uid":"account-uid"});
+        assert_eq!(project(value.clone()), (None, "GovernedInferenceLifetime"));
+        value["status"] = serde_json::Value::Null;
+        assert_eq!(project(value), (Some(0), "RetainedRootSynthesis"));
+    }
 
     #[test]
     fn team_outcomes_distinguish_change_no_action_and_failure() {

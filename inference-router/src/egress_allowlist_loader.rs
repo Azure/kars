@@ -47,6 +47,10 @@
 //! (non-pretty, no trailing newline). The cross-binary equality is
 //! pinned by `digest_is_byte_identical_to_controller_layout` below.
 
+#[cfg(test)]
+#[path = "egress_allowlist_scoped_tests.rs"]
+mod scoped_tests;
+
 use crate::blocklist::Blocklist;
 use crate::policy_status::{PolicyKind, PolicyStatusRegistry};
 use std::path::Path;
@@ -259,9 +263,10 @@ pub fn load_egress_allowlist_from_dir(
 ///
 /// `approval_dir`, when `Some`, is scanned for per-approval files
 /// (`approval-*.json`) produced by the `EgressApproval` reconciler
-/// (Slice 5e). Every active approval's hosts are unioned with the
-/// baseline before installing the result on the `Blocklist`, and the
-/// merged-allowlist digest is echoed under
+/// (Slice 5e). Manual v1 grants extend the baseline host set. Scoped v2
+/// grants stay separate and require the current queue decision and exact
+/// endpoint on each mediated fetch. Only applicable grants enter the
+/// merged-allowlist digest echoed under
 /// [`PolicyKind::EgressApproval`]. Passing `None` (or pointing at a
 /// missing directory) preserves Slice 5c.1 behaviour exactly:
 /// baseline-only, no `EgressApproval` echo.
@@ -303,11 +308,9 @@ pub async fn load_and_install_with_approvals(
             // are tolerated — each failure is recorded under
             // `PolicyKind::EgressApproval` so the reconciler can
             // surface the operator-visible drift via its status).
-            let approval_endpoints = if let Some(adir) = approval_dir {
-                load_approvals_from_dir(adir)
-            } else {
-                Vec::new()
-            };
+            let (approval_endpoints, scoped_grants) = approval_dir
+                .map(load_approvals_from_dir)
+                .unwrap_or_default();
 
             // Atomic replace with the union. Sort + dedup happens
             // here too so the on-the-wire host set the Blocklist
@@ -320,7 +323,10 @@ pub async fn load_and_install_with_approvals(
             union.dedup();
 
             let merged_hosts: Vec<String> = union.iter().map(|(h, _)| h.clone()).collect();
-            blocklist.replace_allowlist(merged_hosts).await;
+            union.extend(blocklist.applicable_grant_endpoints(&scoped_grants));
+            blocklist
+                .replace_allowlist_with_scoped_grants(merged_hosts, scoped_grants)
+                .await;
             *handle.write().await = Some(bundle.clone());
 
             // Echo the merged digest under PolicyKind::EgressApproval
@@ -369,10 +375,12 @@ pub async fn load_and_install_with_approvals(
 /// reconciler observes the missing host union via its own
 /// merged-digest mismatch — the operator can resolve via
 /// `kubectl describe`.
-fn load_approvals_from_dir(dir: &str) -> Vec<(String, u16)> {
+fn load_approvals_from_dir(
+    dir: &str,
+) -> (Vec<(String, u16)>, Vec<crate::blocklist::ScopedEgressGrant>) {
     let path = Path::new(dir);
     if !path.is_dir() {
-        return Vec::new();
+        return Default::default();
     }
     let mut entries: Vec<std::path::PathBuf> = match std::fs::read_dir(path) {
         Ok(it) => it
@@ -387,12 +395,13 @@ fn load_approvals_from_dir(dir: &str) -> Vec<(String, u16)> {
             .collect(),
         Err(e) => {
             tracing::warn!(dir, error = %e, "EgressApproval read_dir failed");
-            return Vec::new();
+            return Default::default();
         }
     };
     entries.sort();
 
     let mut endpoints: Vec<(String, u16)> = Vec::new();
+    let mut scoped_grants = Vec::new();
     for file in entries {
         let body = match std::fs::read(&file) {
             Ok(b) => b,
@@ -408,6 +417,24 @@ fn load_approvals_from_dir(dir: &str) -> Vec<(String, u16)> {
                 continue;
             }
         };
+        if parsed.get("schemaVersion").and_then(|v| v.as_u64()) == Some(2) {
+            if let Some(grant) = crate::blocklist::ScopedEgressGrant::from_document(&parsed) {
+                scoped_grants.push(grant);
+            } else {
+                tracing::warn!(file = %file.display(), "Invalid scoped EgressApproval skipped");
+            }
+            continue;
+        }
+        if parsed.get("requestScope").is_some()
+            || parsed.get("requestId").is_some()
+            || parsed.get("scopedHosts").is_some()
+            || parsed
+                .get("schemaVersion")
+                .is_some_and(|version| version.as_u64() != Some(1))
+        {
+            tracing::warn!(file = %file.display(), "Unsupported EgressApproval binding skipped");
+            continue;
+        }
         let hosts = parsed.get("hosts").and_then(|v| v.as_array());
         if let Some(arr) = hosts {
             for entry in arr {
@@ -429,7 +456,7 @@ fn load_approvals_from_dir(dir: &str) -> Vec<(String, u16)> {
             }
         }
     }
-    endpoints
+    (endpoints, scoped_grants)
 }
 
 /// Re-encode a sorted-deduped endpoint set into the canonical JSON
@@ -505,12 +532,16 @@ pub fn spawn_egress_allowlist_watcher_with_approvals(
             ticker.tick().await;
             let current_baseline = dir_max_mtime(&dir);
             let current_approvals = approval_dir.as_deref().and_then(dir_max_mtime);
-            if current_baseline != last_baseline || current_approvals != last_approvals {
-                tracing::info!(
+            // Queue decisions, scope reset and grant expiry do not change mount mtimes.
+            if approval_dir.is_some()
+                || current_baseline != last_baseline
+                || current_approvals != last_approvals
+            {
+                tracing::debug!(
                     target: "egress_allowlist_watcher",
                     dir = %dir,
                     approval_dir = ?approval_dir,
-                    "EgressAllowlist or EgressApproval directory changed, reloading"
+                    "Refreshing mounted egress policy and current scoped decisions"
                 );
                 let _ = load_and_install_with_approvals(
                     &dir,

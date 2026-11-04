@@ -11,6 +11,10 @@ export type MissionStatus =
   | "drafting"
   | "deploying"
   | "running"
+  | "waiting"
+  | "unavailable"
+  | "stopping"
+  | "stopped"
   | "needs_you"
   | "done"
   | "failed"
@@ -31,9 +35,9 @@ export function missionBlockReason(task: {
   return null;
 }
 
-/** Map a governance phase (+ optional execution phase) to user language.
- *  ONE projection, used by every surface (page badge, execution panel, fleet
- *  card) so the mission never shows two different states at once.
+/** Base controller/result projection. Mission detail and summaries use the
+ *  shared mission-presentation projection for revision-bound execution without
+ *  treating a principal's provisioning phase as the whole Mission lifecycle.
  *  `delivered` is the authoritative "work is done" signal (a REAL ok result);
  *  `failed` is a captured error result (run completed but did not succeed);
  *  `needsYou` surfaces a pending human decision; `launched` distinguishes a
@@ -70,6 +74,10 @@ const META: Record<MissionStatus, { label: string; cls: string }> = {
   drafting: { label: "Draft", cls: "border-border bg-surface-muted text-foreground-muted" },
   deploying: { label: "Deploying", cls: "border-signal/40 bg-signal/10 text-signal" },
   running: { label: "Running", cls: "border-signal/40 bg-signal/10 text-signal" },
+  waiting: { label: "Awaiting next phase", cls: "border-signal/40 bg-signal/10 text-signal" },
+  unavailable: { label: "Execution evidence unavailable", cls: "border-warning/40 bg-warning/10 text-warning" },
+  stopping: { label: "Stopping", cls: "border-warning/40 bg-warning/10 text-warning" },
+  stopped: { label: "Stopped", cls: "border-border bg-surface-muted text-foreground-muted" },
   needs_you: { label: "Needs you", cls: "border-warning/40 bg-warning/10 text-warning" },
   done: { label: "Delivered", cls: "border-ok/40 bg-ok/10 text-ok" },
   failed: { label: "Run failed", cls: "border-danger/40 bg-danger/10 text-danger" },

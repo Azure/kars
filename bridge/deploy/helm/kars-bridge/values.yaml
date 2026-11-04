@@ -52,6 +52,9 @@ auth:
 
 # ── BFF (Rust API) ───────────────────────────────────────────────────────────
 bff:
+  # Per-operation {uid, resourceVersion, replicas} from completed migration review.
+  # Empty refuses protected upgrades; see README's protected no-op procedure.
+  privateContinuity: {}
   image:
     # Override per environment: AKS -> <acr>.azurecr.io, EKS -> <account>.dkr.ecr.<region>.amazonaws.com,
     # GKE -> <region>-docker.pkg.dev/<project>/<repo>, kind -> a locally loaded image.
@@ -76,6 +79,12 @@ bff:
 
 # ── Web (Next.js UI) ─────────────────────────────────────────────────────────
 web:
+  oidc:
+    # Optional existing ConfigMap in the Bridge namespace, key ca.crt (public PEM only).
+    # External HTTPS OIDC only (idp.enabled=false). Adds Node process-wide CA trust;
+    # does not disable TLS verification or change the issuer/backchannel.
+    # Provision before Bridge; restart Web after rotating the CA (Node loads at startup).
+    caConfigMap: ""
   image:
     repository: ghcr.io/pallakatos/kars-bridge-web
     tag: "latest"
@@ -95,6 +104,12 @@ web:
   #              --set web.extraEnv[0].value=http://localhost:3903
   #     Left unset, the card shows an honest "not linked" state instead of a
   #     broken link.
+  #
+  #   BRIDGE_HEADLAMP_SSO_ENABLED - set to "true" with packaged Headlamp OIDC
+  #     navigation and shared IdP browser sessions. Opens Headlamp's own login
+  #     flow without an extra Headlamp Sign In click; never forwards Bridge tokens.
+  #     Leave unset for token-only or unpatched external dashboards. Kind beta
+  #     accepts only literal "true"/"false", retaining all genuine OIDC checks.
   #
   #   BRIDGE_OIDC_ISSUER / BRIDGE_OIDC_CLIENT_ID / BRIDGE_OIDC_CLIENT_SECRET /
   #     BRIDGE_SESSION_SECRET - connect a real OIDC identity provider (Entra
@@ -138,6 +153,15 @@ ingress:
 rbac:
   create: true
   serviceAccountName: kars-bridge
+  # Optional exact-account GET only, independently of the base RBAC above.
+  # Requires existing enrolled funding and cluster-connected Helm UID checks.
+  # Does not enroll, replenish, renew or mutate any inference allowance.
+  fundedOrchestratorAccount:
+    enabled: false
+    # Empty selects core.namespace. The actor name is always bridge-orchestrator.
+    sandboxNamespace: ""
+    sandboxUid: ""
+    accountUid: ""
 
 # NetworkPolicies so the Bridge works under a namespace default-deny (kars ships
 # a kars-system-default-deny that drops pod-to-pod on the Bridge ports). These are
@@ -212,6 +236,14 @@ idp:
     tls:
       enabled: false
       secretName: ""
+    # SQLite retains signing keys and refresh sessions across Dex Pod replacement.
+    # Keep memory as the compatibility default; Kind beta opts into persistence.
+    persistence:
+      enabled: false
+      existingClaim: ""
+      size: 1Gi
+      # null selects the cluster default; "" requires a pre-provisioned volume.
+      storageClass: null
     enablePasswordDB: true
     # Private-alpha seed users (bcrypt hash below = "password"). Replace with
     # real per-colleague accounts, or drop these and wire `connectors` to a real
@@ -245,7 +277,14 @@ podSecurityContext:
 
 nodeSelector: {}
 tolerations: []
-affinity: {}
+affinity:
+  nodeAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        preference:
+          matchExpressions:
+            - {key: node-role.kubernetes.io/control-plane, operator: DoesNotExist}
+            - {key: node-role.kubernetes.io/master, operator: DoesNotExist}
 
 # ── Teams Gateway (optional Microsoft Teams HITL integration) ─────────────────
 # The gateway resources are installed at zero replicas by default so an admin can
@@ -261,6 +300,8 @@ affinity: {}
 # credentials and conversation ConfigMap stay in namespace. The release owns
 # a namespaced core-read Role/Binding, not any core workspace resources.
 teamsGateway:
+  # Same reviewed no-op fence as bff; never infer replicas from Qualified state.
+  privateContinuity: {}
   enabled: false
   image:
     repository: ghcr.io/pallakatos/kars-bridge-freeze-teams-gateway

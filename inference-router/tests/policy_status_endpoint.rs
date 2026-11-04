@@ -95,6 +95,7 @@ fn test_state() -> (AppState, Arc<PolicyStatusRegistry>) {
         policy_status: policy_status.clone(),
         inference_policy: kars_inference_router::inference_policy_loader::empty_handle(),
         memory_binding: kars_inference_router::memory_binding_loader::empty_handle(),
+        memory_updates: Default::default(),
         egress_allowlist: kars_inference_router::egress_allowlist_loader::empty_handle(),
         deployment_health: std::sync::Arc::new(
             kars_inference_router::deployment_health::DeploymentHealthRegistry::new(),

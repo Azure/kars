@@ -13,8 +13,9 @@ scripts, or grant additional shell, network, filesystem, or delegation authority
 2. Bridge stores the files in a same-namespace ConfigMap owned by the Skill UID.
    The controller validates the manifest, exact bytes, frontmatter, and bounding
    policy before publishing a content version.
-3. A different operator opens **Review package** in Agent capabilities and
-   inspects the recipe and every file.
+3. An operator opens **Review package** in Agent capabilities and inspects the
+   recipe and every file. Administrators may review their own submissions;
+   other operators must use a different reviewer.
 4. Approval binds the displayed UID, generation, and content version. Concurrent
    changes reject the review instead of silently approving a newer package.
 5. A mission or team selects the approved skill.
@@ -62,11 +63,18 @@ skill does not enable their execution. Never embed secrets.
 
 ## Separation of duties
 
-Self-approval is always rejected. Submitter and reviewer subjects come from
-authenticated sessions, not request payloads. User package replacement requires
-the original submitter; operator raw-spec edits establish new authorship and
-reset the review. Approval is manual content review, not malware scanning,
-signature verification, or cryptographic attestation.
+Administrators may approve their own submissions after inspecting the package.
+Other operators cannot self-approve. Submitter and reviewer subjects and the
+reviewer's role come from authenticated sessions, not request payloads or display
+names. Bridge records the reviewer subject, role, timestamp and exact content
+binding; shared admission checks require the recorded `admin` role for self-review.
+Missing submitter identity still blocks approval. These annotations are trusted
+control-plane records, not cryptographic attestations; direct Kubernetes write
+access to Skills must remain restricted to trusted administrators and services.
+User package replacement requires the original submitter; operator raw-spec edits
+establish new authorship and reset the review. Replacement and revocation clear
+all approval bindings, including the recorded role. Approval is manual content
+review, not malware scanning, signature verification, or cryptographic attestation.
 
 ## Mission use
 
@@ -81,7 +89,7 @@ The default `BRIDGE_ROUTE_QUALIFICATION_MODE=required` additionally requires
 retained execution evidence for the selected route and exact Skill version.
 An operator may explicitly configure `validation` on a test installation to
 collect that first evidence. This mode permits unqualified runs of currently
-bound MCP servers, memory stores, and independently approved Skills; it does
+bound MCP servers, memory stores, and content-bound approved Skills; it does
 not mark them qualified or create evidence records. Missing current digests,
 malformed evidence configuration, failed source approval, authorization,
 budgets, tool policies, and runtime admission still block execution. External
@@ -107,7 +115,7 @@ Selected running sandboxes are rechecked on the controller's reconciliation
 cycle (normally 30 seconds); revocation is not instantaneous. A failed check
 pauses only the owned workload. A changed catalog or removed selection requires
 runtime recreation rather than replacing files under a running agent. Identical
-content may resume after current independent approval is restored.
+content may resume after current content-bound approval is restored.
 
 The shared Rust contract, typed CRDs, Helm schemas, BFF review endpoints, and
 both runtime packages must ship together. Source tests or Ready pods do not

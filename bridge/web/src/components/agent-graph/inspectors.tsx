@@ -4,7 +4,8 @@
 import type * as React from "react";
 import { Icon } from "@/components/icon";
 import type { AgentIdentity, Receipt } from "@/lib/types";
-import { actionRound, formatLastActivity, phaseKind, phaseTone } from "./activity";
+import { actionRound, exactActionQuery, formatLastActivity, phaseKind, phaseTone } from "./activity";
+import { buildExecutionOverview } from "./execution";
 import type { AgentExecution, GraphSelection } from "./types";
 
 export function SelectionInspector({ selection }: { selection: GraphSelection }) {
@@ -43,7 +44,7 @@ export function SelectionInspector({ selection }: { selection: GraphSelection })
         <FoldedList
           items={selection.agents.map((agent) => ({
             title: `${agent.displayName} · ${agent.role}`,
-            detail: `${agent.technicalName} · ${agent.model ?? "model not reported"} · ${agent.phase}`,
+            detail: `${agent.technicalName} · ${agent.runtime ?? "runtime not reported"} · ${agent.model ?? "model not reported"} · ${agent.phase}`,
             failed: phaseKind(agent.phase) === "failed",
           }))}
         />
@@ -62,6 +63,7 @@ export function SelectionInspector({ selection }: { selection: GraphSelection })
             action.ok === false ? "border-danger/30 text-danger" : action.ok === true ? "border-signal/30 text-signal" : "border-border"
           }`}>
             {action.source === "model-proposed" ? "Proposal only" : action.source === "router-upstream" ? "Router response"
+              : action.source === "router-policy" ? "Router policy observation" : action.source === "router" ? "Router fetch observation"
               : action.source === "legacy" ? action.ok === false ? "Failed" : action.ok === true ? "Succeeded" : "Model round"
                 : action.ok === false ? "Failure reported" : action.ok === true ? "Success reported" : "Outcome unavailable"}
           </span>
@@ -81,7 +83,7 @@ export function SelectionInspector({ selection }: { selection: GraphSelection })
     return (
       <InspectorShell eyebrow="Folded action cluster" title={`${selection.actions.length} earlier actions`}>
         <FoldedList
-          items={selection.actions.map((action) => ({
+          items={[...selection.actions].reverse().map((action) => ({
             title: action.human,
             detail: `${action.raw} · round ${actionRound(action)} · ${action.ms === null ? "duration unavailable" : `${action.ms} ms`} · ${action.ts ? formatLastActivity(action.ts) : "timestamp unavailable"}`,
             failed: action.ok === false,
@@ -106,6 +108,46 @@ export function SelectionInspector({ selection }: { selection: GraphSelection })
   );
 }
 
+export function ExecutionOverview({ agents, onInspect }: { agents: AgentExecution[]; onInspect?: (query: string) => void }) {
+  const overview = buildExecutionOverview(agents);
+  return (
+    <InspectorShell eyebrow="All producers · retained and live records" title="Execution overview">
+      <p className="text-xs text-foreground-muted">
+        Records from {overview.recorded.length} of {agents.length} agents or phases. Worker activity is not attributed to the principal.
+        {" "}These are recorded counts, not complete execution or usage totals.
+      </p>
+      {overview.unavailable > 0 && <p className="mt-1 text-xs text-foreground-muted">
+        Detailed trace unavailable for {overview.unavailable} agent{overview.unavailable === 1 ? "" : "s"} or phases; missing records do not mean zero execution.
+      </p>}
+      <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+        <Metric label="Retained rounds" value={overview.rounds ?? "Not recorded"} />
+        <Metric label="Reported tool results" value={overview.toolCalls ?? "Not recorded"} />
+        <Metric label="Reported failures" value={overview.failures ?? "Not recorded"} danger={(overview.failures ?? 0) > 0} />
+        <Metric label="Latest timestamped activity" value={overview.latest ? formatLastActivity(overview.latest.action.ts) : overview.recorded.length ? "Timestamp unavailable" : "No recorded activity"} small />
+      </div>
+      <div className="mt-2 rounded-lg border border-border bg-surface px-3 py-2">
+        <p className="text-[9px] font-medium uppercase tracking-wide text-foreground-muted">Latest timestamped action</p>
+        {overview.latest ? <button type="button" className="mt-0.5 text-left text-xs font-medium text-signal hover:underline"
+          onClick={() => onInspect?.(exactActionQuery(overview.latest!.agent, overview.latest!.action))}>
+          {overview.latest.agent.displayName}: {overview.latest.action.human} · Inspect record
+        </button> : <p className="mt-0.5 text-xs">{overview.recorded.length ? "Timestamp unavailable; inspect each producer below" : "Detailed trace unavailable"}</p>}
+        {overview.untimestamped && <p className="mt-1 text-xs text-foreground-muted">Some records have no timestamp; no newest action across producers can be established for those records.</p>}
+      </div>
+      <ul className="mt-3 space-y-2">
+        {overview.recorded.map(agent => {
+          const latest = agent.actions.at(-1)!;
+          return <li key={agent.id} className="rounded-lg border border-border bg-surface px-3 py-2">
+            <button type="button" className="text-left text-xs font-medium text-signal hover:underline" onClick={() => onInspect?.(agent.traceQuery)}>
+              {agent.displayName} · {agent.actions.length} records · Inspect producer
+            </button>
+            <p className="mt-1 text-[10px] text-foreground-muted">Latest producer record: {latest.human} · {latest.ts ? formatLastActivity(latest.ts) : "Timestamp unavailable"}</p>
+          </li>;
+        })}
+      </ul>
+    </InspectorShell>
+  );
+}
+
 function AgentInspector({ agent }: { agent: AgentExecution }) {
   const latest = agent.actions.at(-1);
   return (
@@ -123,14 +165,17 @@ function AgentInspector({ agent }: { agent: AgentExecution }) {
         <Metric label="Exact agent name" value={agent.technicalName} small />
       </dl>
       <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-        <Metric label="Retained rounds" value={agent.rounds} />
-        <Metric label={agent.traceQuery.startsWith("observations:") ? "Reported results" : "Tool calls"} value={agent.toolCalls} />
-        <Metric label="Failures" value={agent.failures} danger={agent.failures > 0} />
+        <Metric label="Retained rounds" value={agent.actions.length ? agent.rounds : "Not recorded"} />
+        <Metric label={agent.traceQuery.startsWith("observations:") ? "Reported results" : "Tool calls"} value={agent.actions.length ? agent.toolCalls : "Not recorded"} />
+        <Metric label="Failures" value={agent.actions.length ? agent.failures : "Not recorded"} danger={agent.failures > 0} />
         <Metric label="Latest activity" value={latest && !agent.lastActivity ? "Timestamp unavailable" : formatLastActivity(agent.lastActivity)} small />
       </div>
       <div className="mt-2 rounded-lg border border-border bg-surface px-3 py-2">
         <p className="text-[9px] font-medium uppercase tracking-wide text-foreground-muted">Latest action</p>
-        <p className="mt-0.5 text-xs font-medium">{latest?.human ?? "No retained action yet"}</p>
+        <p className="mt-0.5 text-xs font-medium">{latest?.human ?? "Detailed trace unavailable"}</p>
+        {!latest && <p className="mt-1 text-xs text-foreground-muted">
+          Missing action records do not mean zero execution. Any recorded run totals are separate from this detailed trace.
+        </p>}
       </div>
     </InspectorShell>
   );
@@ -204,15 +249,15 @@ function Metric({
   );
 }
 
-export function ProofPoints({
+export function EvidenceReferences({
   envelopeDigest,
   identity,
-  subCount,
+  nonPrincipalCount,
   receipt,
 }: {
   envelopeDigest: string | null;
   identity: AgentIdentity | null;
-  subCount: number;
+  nonPrincipalCount: number;
   receipt: Receipt | null;
 }) {
   const short = (value: string, head = 10, tail = 6) =>
@@ -221,56 +266,56 @@ export function ProofPoints({
       : value;
   const points = [
     {
-      when: "At admission",
-      title: "Trust envelope signed",
+      when: "Run record",
+      title: "Trust envelope digest",
       detail: envelopeDigest
-        ? `Digest ${short(envelopeDigest.replace(/^sha256:/, ""))} - tier, budget, tools, and reach were sealed before launch.`
-        : "Tier, budget, tools, and reach are sealed into a signed envelope before launch.",
-      proven: Boolean(envelopeDigest),
+        ? `Recorded digest ${short(envelopeDigest.replace(/^sha256:/, ""))}. A digest alone does not verify a signature or the checks performed before launch.`
+        : "No trust envelope digest is available for this run.",
+      available: Boolean(envelopeDigest),
     },
     {
-      when: "At registration",
+      when: "Identity record",
       title: "Agent mesh identity (DID)",
       detail: identity?.did
-        ? `${short(identity.did, 16, 8)} - signed mesh participant${identity.reputation_score != null ? `, reputation ${identity.reputation_score}` : ""}.`
-        : "No per-run DID registration proof is attached to this retained view.",
-      proven: Boolean(identity?.did),
+        ? `Reported identity ${short(identity.did, 16, 8)}${identity.reputation_score != null ? `, reputation ${identity.reputation_score}` : ""}. This reference is not a verified registration proof.`
+        : "No mesh identity reference is available in this view.",
+      available: Boolean(identity?.did),
     },
     {
-      when: "At spawn",
-      title: "Sub-agent attenuation enforced",
+      when: "Execution graph",
+      title: "Specialist and producer references",
       detail:
-        subCount > 0
-          ? `${subCount} specialist${subCount === 1 ? "" : "s"} spawned after the controller verified each envelope was a strict subset of the principal's authority.`
-          : "If the principal delegates, the controller rejects any sub-agent envelope that is not a strict authority subset.",
-      proven: subCount > 0,
+        nonPrincipalCount > 0
+          ? `${nonPrincipalCount} non-principal graph ${nonPrincipalCount === 1 ? "entry" : "entries"}. These can include planned phases and observed producers; the count does not establish sandbox creation or authority checks.`
+          : "No non-principal graph entries are available. This does not establish whether delegation occurred.",
+      available: nonPrincipalCount > 0,
     },
     {
       when: "At delivery",
-      title: "Governance receipt (DSSE)",
+      title: "Governance receipt reference",
       detail: receipt
-        ? `${receipt.scheme || "DSSE"} - key ${short(receipt.key_id || "-", 8, 6)}${receipt.inclusion_seq != null ? ` - inclusion log #${receipt.inclusion_seq}` : ""}.`
-        : "No per-run DSSE receipt object is attached to this retained view.",
-      proven: Boolean(receipt),
+        ? `${receipt.scheme || "DSSE"} - key ${short(receipt.key_id || "-", 8, 6)}${receipt.inclusion_seq != null ? ` - inclusion log #${receipt.inclusion_seq}` : ""}. Receipt presence is not signature verification.`
+        : "No governance receipt is available in this view. Delivery may still be in progress, or the receipt may not have been retained.",
+      available: Boolean(receipt),
     },
   ];
-  const verified = points.filter((point) => point.proven).length;
-  const notRetained = points.length - verified;
+  const available = points.filter((point) => point.available).length;
+  const unavailable = points.length - available;
 
   return (
     <details className="mt-4 rounded-xl border border-border bg-surface-muted/20">
       <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-xs font-medium text-foreground-muted">
         <Icon name="seal" size={13} />
-        Cryptographic proofs and attestations
+        Run evidence references
         <span className="ml-auto text-[10px]">
-          {verified} verified · {notRetained} not retained
+          {available} available · {unavailable} unavailable
         </span>
       </summary>
       <ol className="space-y-2 border-t border-border p-3">
         {points.map((point) => (
           <li key={point.title} className="flex gap-2.5">
-            <span className={`mt-0.5 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[9px] ${point.proven ? "bg-signal/15 text-signal" : "border border-dashed border-border text-foreground-muted"}`}>
-              {point.proven ? "ok" : "n/a"}
+            <span className="mt-0.5 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-border text-[9px] text-foreground-muted">
+              {point.available ? "i" : "—"}
             </span>
             <div className="min-w-0">
               <p className="text-[11px] font-medium">
@@ -285,9 +330,9 @@ export function ProofPoints({
         ))}
       </ol>
       <p className="border-t border-border px-3 py-2 text-[10px] leading-relaxed text-foreground-muted">
-        “Verified” means the exact per-run proof object is attached here. “Not retained” means this
-        archived run predates that retained evidence surface; it is not counted as cryptographic proof,
-        even when the platform control was enforced.
+        Available means a reference is present in this view, not that its signature or the associated
+        control has been verified. Unavailable means evidence is missing here; it does not establish
+        success, failure, or the age of this run. Use the Auditor receipt-verification tools for cryptographic checks.
       </p>
     </details>
   );

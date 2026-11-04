@@ -175,6 +175,20 @@ pub(super) async fn reconcile(
                 )
             );
             revisions.push(revision.clone());
+            let workspace = Api::<Namespace>::all(client.clone())
+                .get(&namespace)
+                .await
+                .map_err(|error| api_error("Recheck controller settings workspace", error))?;
+            if identity(&workspace.metadata)?.0 != grant.spec.workspace_uid {
+                return Err("Controller settings workspace was replaced".into());
+            }
+            let private =
+                crate::private_activation::required_in_namespace(client, &workspace).await?;
+            if private {
+                crate::private_activation::namespace_epoch(client, &workspace)
+                    .await?
+                    .ok_or("Controller settings require a qualified private workspace")?;
+            }
             if current
                 .spec
                 .as_ref()
@@ -184,6 +198,9 @@ pub(super) async fn reconcile(
                 == Some(&revision)
             {
                 continue;
+            }
+            if private {
+                return Err("Controller settings would change a sealed private template; existing execution was preserved. Configure controller defaults before private activation. Per-agent model selection does not require changing the controller defaults.".into());
             }
             Api::<Deployment>::namespaced(client.clone(),&namespace).patch(&reference.name,&PatchParams::default(),
                 &Patch::Strategic(json!({"metadata":{"uid":reference.uid,"resourceVersion":current.metadata.resource_version},

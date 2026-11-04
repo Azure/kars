@@ -134,6 +134,8 @@ def test_foundry_memory_surfaces_tool_is_error_text() -> None:
     with mock.patch.object(foundry.router_client, "call", side_effect=fake_call):
         result = foundry._foundry_memory({"operation": "search", "query": "x"})
     assert "HTTP 403" in result
+    assert json.loads(result)["isError"] is True
+    assert json.loads(result)["content"] == [{"type": "text", "text": hint}]
 
 
 def test_foundry_memory_surfaces_http_error() -> None:
@@ -145,6 +147,18 @@ def test_foundry_memory_surfaces_http_error() -> None:
         result = foundry._foundry_memory({"operation": "search", "query": "x"})
     parsed = json.loads(result)
     assert "500" in parsed["error"]
+
+
+def test_fetch_dispatch_uses_only_explicit_admitted_telemetry():
+    captured, request = _capture_platform_call(_mock_response(200, {"status": 403}))
+    args = {"url": "https://source.example/path?private=value",
+            "telemetry": {"scope_id": "forged", "call_id": "wrong"}}
+    http_fetch.fetch_response(args, request)
+    assert "telemetry" not in captured["body"]
+    identity = {"scope_id": "issued-scope", "call_id": "actual-call"}
+    http_fetch.fetch_response(args, request, telemetry=identity)
+    assert captured["path"] == "/egress/fetch"
+    assert captured["body"]["telemetry"] == identity
 
 
 # ── foundry_memory — registration gating ───────────────────────────
@@ -166,12 +180,22 @@ def test_foundry_memory_skipped_in_github_models_mode(monkeypatch: pytest.Monkey
     assert "foundry_memory" not in ctx.tools
 
 
-def test_foundry_memory_skipped_without_foundry_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_foundry_memory_without_endpoint_preserves_router_authority(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("KARS_PROVIDER", raising=False)
     monkeypatch.delenv("FOUNDRY_PROJECT_ENDPOINT", raising=False)
     ctx = _FakeCtx()
     foundry.register(ctx)
-    assert "foundry_memory" not in ctx.tools
+    captured, fake_call = _capture_platform_call(
+        _mock_response(200, _rpc_ok("private memory binding unavailable", is_error=True))
+    )
+    with mock.patch.object(foundry.router_client, "call", side_effect=fake_call) as call:
+        result = ctx.tools["foundry_memory"]["handler"]({"operation": "search", "query": "cluster health"})
+    call.assert_called_once()
+    assert captured["path"] == "/platform/mcp"
+    assert captured["body"]["params"] == {
+        "name": "foundry.memory", "arguments": {"operation": "search", "query": "cluster health"},
+    }
+    assert json.loads(result)["isError"] is True
 
 
 def test_foundry_memory_registered_when_foundry_bound(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -183,6 +207,19 @@ def test_foundry_memory_registered_when_foundry_bound(monkeypatch: pytest.Monkey
 
 
 # ── http_fetch ─────────────────────────────────────────────────────
+
+
+def test_http_fetch_reuses_payload_contract_with_reviewed_transport() -> None:
+    seen = []
+    response = _mock_response(200, {"status": 200, "headers": {}, "body": "complete", "truncated": False})
+
+    def request(method, path, **kwargs):
+        seen.append((method, path, kwargs))
+        return response
+
+    assert http_fetch.fetch_response({"url": "https://www.example.com/pricing", "method": "GET"}, request) is response
+    assert seen == [("POST", "/egress/fetch", {"json": {
+        "url": "https://www.example.com/pricing", "method": "GET", "headers": {}, "body": ""}})]
 
 
 def test_http_fetch_requires_url() -> None:

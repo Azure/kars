@@ -42,6 +42,62 @@ a rebuild; an incomplete build is never marked as a valid cache.
 
 ---
 
+## Governed private memory is absent from the SRE tool catalog
+
+`foundry_memory` is the existing router-backed memory tool, including for
+built-in private memory without a Foundry project. Non-GitHub-provider Hermes
+sandboxes register it independently of `FOUNDRY_PROJECT_ENDPOINT`; the other
+Foundry tools still require that endpoint. The router retains backend selection,
+authorization and private-store isolation. Do not add a fake Foundry endpoint or
+expose the router's private-memory credentials to the agent.
+
+For a read-only check, ask for `foundry_memory` with `operation: search`, omitting
+`scope` to use the bound scope. An unavailable binding or denied request must
+remain visible. Native `session_search` only searches local conversation history
+and is not evidence that governed private memory works.
+
+## MCP discovery succeeds but a call immediately fails
+
+Both runtime adapters treat an omitted or empty `server` as no additional server
+filter, for discovery and invocation alike. Pass the exact qualified tool name
+returned by `kars_mcp_list`; a nonempty `server` narrows the router's permitted
+catalogue. Whitespace and malformed scopes are rejected, not normalized. Router
+authorization and tool governance still apply, and failed calls are never
+replayed automatically.
+
+Older adapters rejected `server: ""` on invocation even though discovery accepted
+it. Omit that field when using an older installed image. This explains an immediate
+local validation failure, not a later upstream timeout or tool-reported error.
+
+### A streamed MCP question fails after discovery or document reads succeed
+
+Some upstreams, including DeepWiki, send `notifications/message` progress events
+before the final JSON-RPC answer. The router must skip those events and accept
+only a response matching the outgoing request ID and JSON-RPC version, with a
+result or error envelope. This applies to initialization, discovery and invocation
+for both runtimes. Older routers could mistake the first progress event for the
+answer and report `tools/call missing result` despite an upstream answer arriving.
+Update the router rather than extending timeouts or automatically replaying calls;
+response byte limits, tool authorization and genuine upstream errors still apply.
+
+## Channel-free Mission has no registered prekeys
+
+The persistent Hermes mesh initializer waits up to 60 seconds for the loopback
+router's `/healthz` before initializing its identity or connecting. Router startup
+can take longer when it discovers connected MCP tools. This wait grants no mesh
+or tool authority; normal registry authentication and prekey custody checks still
+apply, and authentication failures are not retried by this startup wait.
+
+Read `[kars-mesh-keepalive]` messages in the agent container logs. A `FATAL`
+message reports the exception class without credential-bearing exception text.
+The initializer no longer hides its output in `/tmp/hermes-mesh-keepalive.log`.
+A healthy gateway alone does not prove mesh registration or Mission execution.
+Compare the reviewed binding's DID with actual registry/prekey observations;
+a historical registry identity with the same display name is insufficient.
+Do not reset identities or start a second MeshClient to investigate. Where
+private-budget admission prohibits pod exec, use container logs and supported
+authenticated diagnostics instead.
+
 ## `MeshClient` doesn't reach the "MeshClient connected" log line
 
 **Symptom:** After `[kars-hermes] Mesh token acquired ...` the next mesh-related log line is `Relay WS dropped` or `Connect frame rejected`, with no `MeshClient connected: name=<sandbox>` line.

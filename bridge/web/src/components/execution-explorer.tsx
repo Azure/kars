@@ -5,12 +5,14 @@
 
 import { useState } from "react";
 import { ActivityStream } from "@/components/activity-stream";
+import { DeployTimeline } from "@/app/workspace/missions/[name]/deploy-timeline";
 import { AgentGraph } from "@/components/agent-graph";
 import { ExecutionLifetime } from "@/components/execution-lifetime";
 import { useLiveTrace } from "@/components/use-live-trace";
 import { RouterActivityPanel } from "@/components/router-activity-panel";
-import { matchesRouterFocus, routerProducerKey, type BoundRouterActivity } from "@/lib/router-activity";
-import { reviewedPhaseRouterActivity } from "@/lib/team-run-evidence";
+import { matchesRouterFocus, reviewedPhaseKey, routerProducerKey, stoppedRouterActivity, type BoundRouterActivity, type LiveRouterActivity } from "@/lib/router-activity";
+import { displayedPhaseRouterActivity, type TeamRunEvidence } from "@/lib/team-run-evidence";
+import { TeamRunFlow } from "@/components/team-run-flow";
 import type { ReviewedExecution } from "@/lib/types/missions";
 import type {
   ActivityEvent,
@@ -19,6 +21,7 @@ import type {
   Receipt,
   SubAgent,
   TaskAssignmentEvent,
+  TaskDetail,
 } from "@/lib/types";
 
 function focusLabel(query: string): string {
@@ -42,6 +45,7 @@ function focusLabel(query: string): string {
 
 export function ExecutionExplorer({
   running,
+  observing = running,
   activity,
   telemetry,
   assignmentEvents,
@@ -58,9 +62,13 @@ export function ExecutionExplorer({
   envelopeDigest = null,
   receipt = null,
   routerActivity: recordedRouterActivity = null,
-  phases = [],
+  stoppedActivity = null,
+  phases: retainedPhases = [],
+  startupTask = null,
+  teamFlow = null,
 }: {
   running: boolean;
+  observing?: boolean;
   activity: ActivityEvent[];
   telemetry: MissionTelemetry | null;
   assignmentEvents: TaskAssignmentEvent[];
@@ -77,17 +85,22 @@ export function ExecutionExplorer({
   envelopeDigest?: string | null;
   receipt?: Receipt | null;
   routerActivity?: BoundRouterActivity | null;
+  stoppedActivity?: LiveRouterActivity | null;
   phases?: ReviewedExecution["phases"];
+  startupTask?: TaskDetail | null;
+  teamFlow?: { task: TaskDetail; evidence: TeamRunEvidence } | null;
 }) {
-  const { events, routerActivity: live } = useLiveTrace(ns, name, running, activity, runNonce);
+  const { events, routerActivity: live, phaseActivity = {} } = useLiveTrace(ns, name, observing, activity, runNonce);
+  const phases = retainedPhases.map(phase => ({ ...phase, live_router_activity: phaseActivity[reviewedPhaseKey(phase)] ?? null }));
   const recorded = runNonce && recordedRouterActivity?.producer.run_nonce === runNonce
     ? recordedRouterActivity : null;
-  const routerActivity = recorded ?? (live
+  const stopped = !running && !observing ? stoppedRouterActivity(stoppedActivity, runNonce) : null;
+  const routerActivity = recorded ?? stopped ?? (observing && live
     ? { producer: live, observations: live.observations, provisional: true } : null);
   const producers = [
     ...(routerActivity ? [{ name, label: agentLabel, binding: routerActivity }] : []),
     ...phases.flatMap(phase => {
-      const binding = reviewedPhaseRouterActivity(phase);
+      const binding = displayedPhaseRouterActivity(phase);
       return binding && phase.task_name
         ? [{ name: phase.task_name, label: `${phase.role} / ${phase.phase}`, binding }] : [];
     }),
@@ -106,6 +119,9 @@ export function ExecutionExplorer({
 
   return (
     <div className="space-y-4">
+      {startupTask && startupTask.current_run_nonce === runNonce && (
+        <DeployTimeline task={{ ...startupTask, activity: events }} liveActivity={live} phaseActivity={phaseActivity} />
+      )}
       <AgentGraph
         key={runNonce ?? "unbound"}
         running={running}
@@ -185,7 +201,7 @@ export function ExecutionExplorer({
               ))}
               {!producers.some(producer => matchesRouterFocus(producer.binding, focus)) && (
                 <p className="p-4 text-sm text-foreground-muted">
-                  No retained router observations match this selection. Phase completion and file evidence remain available in Execution flow.
+                  No router observations match this selection. Phase completion and file evidence remain available in Execution flow.
                 </p>
               )}
             </div>
@@ -207,6 +223,14 @@ export function ExecutionExplorer({
           )}
         </div>
       </section>
+      {teamFlow && teamFlow.task.current_run_nonce === runNonce && (
+        <TeamRunFlow
+          task={{ ...teamFlow.task, activity: events }}
+          evidence={teamFlow.evidence}
+          routerActivity={routerActivity}
+          phases={phases}
+        />
+      )}
     </div>
   );
 }

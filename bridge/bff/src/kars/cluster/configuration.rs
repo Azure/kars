@@ -307,15 +307,14 @@ impl Cluster {
     /// Read the hierarchical inference-budget config (`kars-inference-budgets`
     /// ConfigMap, key `budgets.json`). Returns the raw JSON string, or `"{}"`
     /// when unset — the budgets route parses it into the typed hierarchy.
-    pub async fn read_inference_budgets(&self) -> String {
+    pub async fn read_inference_budgets(&self) -> anyhow::Result<String> {
         let cms: Api<ConfigMap> = Api::namespaced(self.client.clone(), "kars-system");
-        cms.get_opt("kars-inference-budgets")
-            .await
-            .ok()
-            .flatten()
-            .and_then(|cm| cm.data)
-            .and_then(|d| d.get("budgets.json").cloned())
-            .unwrap_or_else(|| "{}".to_string())
+        let Some(cm) = cms.get_opt("kars-inference-budgets").await? else {
+            return Ok("{}".to_string());
+        };
+        cm.data
+            .and_then(|data| data.get("budgets.json").cloned())
+            .ok_or_else(|| anyhow::anyhow!("Spending policy is missing budgets.json"))
     }
 
     /// Persist the hierarchical inference-budget config (server-side apply).

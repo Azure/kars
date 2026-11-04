@@ -4,7 +4,7 @@
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { assertSchemaCompatibility, CRD_RETENTION } from "./schema-compatibility.js";
+import { assertRollbackCompatibility, assertSchemaCompatibility, CRD_RETENTION } from "./schema-compatibility.js";
 import { stageCoreSchemaDocuments } from "./schema-stage.js";
 import { prepareCoreHelmSchemas, prepareCoreRollbackSchemas } from "./core-helm-schemas.js";
 import { schemaDocuments, type ObjectMap, type SchemaExecute } from "./schema-documents.js";
@@ -39,6 +39,172 @@ describe("one compatibility policy for schema writes and rollback", () => {
       expect(f.writes).toEqual([]);
       expect(f.objects.get(live.metadata.name)).toEqual(retained);
     });
+
+  it("stages a reduced role minimum but refuses restoring the old minimum", async () => {
+    const live = crd();
+    schema(live).properties.spec.properties.roles = {
+      type: "array", minItems: 1, maxItems: 8, items: { type: "string" },
+    };
+    const wanted = structuredClone(live);
+    schema(wanted).properties.spec.properties.roles.minItems = 0;
+    expect(() => assertSchemaCompatibility(live, wanted)).not.toThrow();
+    expect(() => assertSchemaCompatibility(wanted, live)).toThrow("migration");
+    expect(() => assertRollbackCompatibility([wanted], [live])).toThrow("migration");
+    const f = schemaFixture([wanted, admission()]);
+    f.install(live);
+    await expect(stageCoreSchemaDocuments(f.execute, [wanted, admission()], { ...f.owner, ...f.wait }))
+      .resolves.toMatchObject({ published: true });
+    expect(f.writes).toHaveLength(1);
+    expect(schema(f.writes[0]).properties.spec.properties.roles).toEqual(schema(wanted).properties.spec.properties.roles);
+  });
+
+  it.each(["negative", "fractional", "string", "maxItems", "default", "items", "type"])(
+    "does not hide a %s change when reducing an array minimum", change => {
+      const live = crd();
+      schema(live).properties.spec.properties.roles = {
+        type: "array", minItems: 1, maxItems: 8, items: { type: "string" },
+      };
+      const wanted = structuredClone(live);
+      const roles = schema(wanted).properties.spec.properties.roles;
+      roles.minItems = 0;
+      if (change === "negative") roles.minItems = -1;
+      if (change === "fractional") roles.minItems = 0.5;
+      if (change === "string") roles.minItems = "0";
+      if (change === "maxItems") roles.maxItems = 7;
+      if (change === "default") roles.default = [];
+      if (change === "items") roles.items.type = "integer";
+      if (change === "type") roles.type = "string";
+      expect(() => assertSchemaCompatibility(live, wanted)).toThrow("migration");
+    });
+
+  it("stages capability enum and array widening without allowing narrowing rollback", async () => {
+    const live = crd();
+    schema(live).properties.spec.properties.capabilities = {
+      type: "array", default: [], maxItems: 7,
+      items: { type: "string", enum: ["filesystem-read", "filesystem-write", "shell", "network", "web-search", "mcp", "memory"] },
+    };
+    const wanted = structuredClone(live);
+    const capabilities = schema(wanted).properties.spec.properties.capabilities;
+    capabilities.maxItems = 8;
+    capabilities.items.enum.push("github-pr");
+    expect(() => assertSchemaCompatibility(live, wanted)).not.toThrow();
+    expect(() => assertRollbackCompatibility([wanted], [live])).toThrow("migration");
+    const f = schemaFixture([wanted, admission()]);
+    f.install(live);
+    await expect(stageCoreSchemaDocuments(f.execute, [wanted, admission()], { ...f.owner, ...f.wait }))
+      .resolves.toMatchObject({ published: true });
+    expect(f.writes).toHaveLength(1);
+    expect(schema(f.writes[0]).properties.spec.properties.capabilities).toEqual(capabilities);
+  });
+
+  it.each([0, 7])("allows array maximum %s to widen independently of its item schema", maximum => {
+    const live = crd();
+    schema(live).properties.spec.properties.entries = { type: "array", maxItems: maximum, items: { type: "string" } };
+    const wanted = structuredClone(live);
+    schema(wanted).properties.spec.properties.entries.maxItems = 8;
+    expect(() => assertSchemaCompatibility(live, wanted)).not.toThrow();
+    expect(() => assertRollbackCompatibility([wanted], [live])).toThrow("migration");
+  });
+
+  it.each(["integer", "number"])("does not generalize enum widening to %s schemas", type => {
+    const live = crd();
+    schema(live).properties.spec.properties.value = { type, enum: [1] };
+    const wanted = structuredClone(live);
+    schema(wanted).properties.spec.properties.value.enum.push(2);
+    expect(() => assertSchemaCompatibility(live, wanted)).toThrow("migration");
+  });
+
+  it.each([6, -1, 7.5, "8", undefined, Infinity, NaN, Number.MAX_SAFE_INTEGER + 1])(
+    "rejects narrowing, removed or invalid array maximum %s", maximum => {
+      const live = crd();
+      schema(live).properties.spec.properties.capabilities = { type: "array", maxItems: 7, items: { type: "string" } };
+      const wanted = structuredClone(live);
+      const capabilities = schema(wanted).properties.spec.properties.capabilities;
+      if (maximum === undefined) delete capabilities.maxItems;
+      else capabilities.maxItems = maximum;
+      expect(() => assertSchemaCompatibility(live, wanted)).toThrow("migration");
+    });
+
+  it.each([undefined, [], ["memory"], ["memory", "github-pr"], ["memory", "mcp", 1], ["memory", "mcp", "mcp"]].map(values => ({ values })))(
+    "rejects removed, narrowed or malformed string enum $values", ({ values }) => {
+      const live = crd();
+      schema(live).properties.spec.properties.capability = { type: "string", enum: ["memory", "mcp"] };
+      const wanted = structuredClone(live);
+      const capability = schema(wanted).properties.spec.properties.capability;
+      if (values === undefined) delete capability.enum;
+      else capability.enum = values;
+      expect(() => assertSchemaCompatibility(live, wanted)).toThrow("migration");
+    });
+
+  it.each(["default", "minItems", "type", "validation", "pattern", "list-type"])(
+    "does not hide %s changes behind capability widening", change => {
+      const live = crd();
+      schema(live).properties.spec.properties.capabilities = {
+        type: "array", default: [], minItems: 0, maxItems: 1, items: { type: "string", enum: ["memory"] },
+      };
+      const wanted = structuredClone(live);
+      const capabilities = schema(wanted).properties.spec.properties.capabilities;
+      capabilities.maxItems = 2;
+      capabilities.items.enum.push("github-pr");
+      if (change === "default") capabilities.default = ["github-pr"];
+      if (change === "minItems") capabilities.minItems = 1;
+      if (change === "type") capabilities.items.type = "integer";
+      if (change === "validation") capabilities["x-kubernetes-validations"] = [{ rule: "size(self) > 0" }];
+      if (change === "pattern") capabilities.items.pattern = "^memory$";
+      if (change === "list-type") capabilities["x-kubernetes-list-type"] = "set";
+      expect(() => assertSchemaCompatibility(live, wanted)).toThrow("migration");
+    });
+
+  it.each([128, 2_147_483_647])("stages an integer maximum of %s but refuses narrowing rollback", async maximum => {
+    const live = crd();
+    schema(live).properties.spec.properties.maxToolCalls = { type: "integer", minimum: 1, maximum: 32 };
+    const wanted = structuredClone(live);
+    schema(wanted).properties.spec.properties.maxToolCalls.maximum = maximum;
+    expect(() => assertSchemaCompatibility(live, wanted)).not.toThrow();
+    expect(() => assertSchemaCompatibility(wanted, live)).toThrow("migration");
+    expect(() => assertRollbackCompatibility([wanted], [live])).toThrow("migration");
+    const f = schemaFixture([wanted, admission()]);
+    f.install(live);
+    await expect(stageCoreSchemaDocuments(f.execute, [wanted, admission()], { ...f.owner, ...f.wait }))
+      .resolves.toMatchObject({ published: true });
+    expect(f.writes).toHaveLength(1);
+    expect(schema(f.writes[0]).properties.spec.properties.maxToolCalls.maximum).toBe(maximum);
+  });
+
+  it.each([31, 32.5, "128", undefined, Infinity, NaN, Number.MAX_SAFE_INTEGER + 1])(
+    "rejects narrowing, removed or non-safe-integer maximum %s", maximum => {
+      const live = crd();
+      schema(live).properties.spec.properties.maxToolCalls = { type: "integer", maximum: 32 };
+      const wanted = structuredClone(live);
+      const limit = schema(wanted).properties.spec.properties.maxToolCalls;
+      if (maximum === undefined) delete limit.maximum;
+      else limit.maximum = maximum;
+      expect(() => assertSchemaCompatibility(live, wanted)).toThrow("migration");
+    });
+
+  it.each(["type", "minimum", "format", "default", "validation", "exclusiveMaximum"])(
+    "does not hide a %s change when increasing an integer maximum", change => {
+      const live = crd();
+      schema(live).properties.spec.properties.maxToolCalls = { type: "integer", minimum: 1, maximum: 32 };
+      const wanted = structuredClone(live);
+      const limit = schema(wanted).properties.spec.properties.maxToolCalls;
+      limit.maximum = 128;
+      if (change === "type") limit.type = "number";
+      if (change === "minimum") limit.minimum = 2;
+      if (change === "format") limit.format = "int32";
+      if (change === "default") limit.default = 128;
+      if (change === "validation") limit["x-kubernetes-validations"] = [{ rule: "self < 100" }];
+      if (change === "exclusiveMaximum") limit.exclusiveMaximum = true;
+      expect(() => assertSchemaCompatibility(live, wanted)).toThrow("migration");
+    });
+
+  it("does not generalize integer widening to floating-point schemas", () => {
+    const live = crd();
+    schema(live).properties.spec.properties.limit = { type: "number", maximum: 32 };
+    const wanted = structuredClone(live);
+    schema(wanted).properties.spec.properties.limit.maximum = 128;
+    expect(() => assertSchemaCompatibility(live, wanted)).toThrow("migration");
+  });
 
   it("checks each retained version, not only the current storage version", () => {
     const live = crd();
@@ -85,6 +251,20 @@ describe("automatic Helm failure safety", () => {
     const crds = objects.filter(object => object.kind === "CustomResourceDefinition");
     expect(crds).toHaveLength(21);
     expect(crds.every(object => object.metadata.annotations?.[CRD_RETENTION] === "keep")).toBe(true);
+  });
+
+  it("keeps receipt storage compatible with the preserved ledger and only adds an optional ceiling observation", () => {
+    const chart = fileURLToPath(new URL("../../../deploy/helm/kars", import.meta.url));
+    const objects = schemaDocuments(execFileSync("helm", ["template", "kars", chart, "-n", "kars-system", "--dry-run=client"], { encoding: "utf8" }));
+    const account = objects.find(object => object.metadata.name === "karsbudgetaccounts.kars.azure.com")!;
+    const status = schema(account).properties.status;
+    expect(status.properties.ledger["x-kubernetes-preserve-unknown-fields"]).toBe(true);
+    expect(status.properties.ledger.properties).not.toHaveProperty("tokenTopUps");
+    expect(status.properties.effectiveLimits).toMatchObject({ type: "object", nullable: true });
+    expect(status.required ?? []).not.toContain("effectiveLimits");
+    const previous = structuredClone(account);
+    delete schema(previous).properties.status.properties.effectiveLimits;
+    expect(() => assertSchemaCompatibility(previous, account)).not.toThrow();
   });
 
   it.each(["--atomic", "--rollback-on-failure"])("refuses schema-changing %s before any schema write", async flag => {

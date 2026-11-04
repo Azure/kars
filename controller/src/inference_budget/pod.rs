@@ -74,20 +74,27 @@ pub async fn prepare(
     sandbox: &KarsSandbox,
     namespace: &Namespace,
 ) -> Result<Option<Plan>, StoreError> {
+    let builtin = super::builtin::selected(client, sandbox).await?;
     let owners = sandbox
         .metadata
         .owner_references
         .as_deref()
         .unwrap_or_default();
     let Some(owner) = owners.iter().find(|owner| {
-        owner.controller == Some(true)
+        !builtin
+            && owner.controller == Some(true)
             && owner.kind == "KarsTask"
             && owner.api_version == "kars.azure.com/v1alpha1"
     }) else {
-        if sandbox.spec.inference_budget_ref.is_some() {
-            return Err(BudgetError::Authorization.into());
-        }
-        return Ok(None);
+        return match super::builtin::prepare(client, sandbox, namespace).await? {
+            Some(bound) => {
+                let settings = Settings::from_env()?.ok_or(BudgetError::Contract)?;
+                finish(client, sandbox, namespace, settings, bound)
+                    .await
+                    .map(Some)
+            }
+            None => Ok(None),
+        };
     };
     let workspace = sandbox.namespace().ok_or(BudgetError::Identity)?;
     let tasks: Api<KarsTask> = Api::namespaced(client.clone(), &workspace);
@@ -118,7 +125,7 @@ pub async fn prepare(
         return Err(BudgetError::Authorization.into());
     }
     let store = Store::new(client.clone(), &settings.accounting_namespace);
-    let account = store.read(&bound.root, &bound.account.uid).await?;
+    let account = store.for_task(&bound.task_uid).read(&bound.root, &bound.account.uid).await?;
     let ledger = account
         .status
         .as_ref()
@@ -141,6 +148,18 @@ pub async fn prepare(
     {
         return Err(BudgetError::Authorization.into());
     }
+    finish(client, sandbox, namespace, settings, bound)
+        .await
+        .map(Some)
+}
+
+async fn finish(
+    client: &Client,
+    sandbox: &KarsSandbox,
+    namespace: &Namespace,
+    settings: Settings,
+    bound: crate::inference_budget_contract::TaskBudgetBinding,
+) -> Result<Plan, StoreError> {
     crate::reconciler::namespace_ownership::recheck(client, sandbox, namespace)
         .await
         .map_err(|_| BudgetError::Identity)?;
@@ -150,11 +169,11 @@ pub async fn prepare(
         .map_err(|_| BudgetError::Authorization)?;
     let (ca, ca_version) = settings.public_ca(client).await?;
     mirror_public_ca(client, sandbox, namespace, ca).await?;
-    Ok(Some(Plan {
+    Ok(Plan {
         binding: RouterBinding {
             task: bound,
             sandbox: ResourceIdentity {
-                namespace: workspace,
+                namespace: sandbox.namespace().ok_or(BudgetError::Identity)?,
                 name: sandbox.name_any(),
                 uid: sandbox.uid().ok_or(BudgetError::Identity)?,
             },
@@ -168,10 +187,10 @@ pub async fn prepare(
             settings.accounting_namespace
         ),
         router_image_digest: settings.router_image_digest,
-    }))
+    })
 }
 
-async fn fence_namespace(
+pub(super) async fn fence_namespace(
     client: &Client,
     sandbox: &KarsSandbox,
     namespace: &Namespace,

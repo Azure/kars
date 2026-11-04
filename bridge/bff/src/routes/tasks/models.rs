@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use super::{PullRequestRef, SubAgentDto};
 
-/// Browser-facing budget shape.
+/// Browser-facing budget shape. Unknown limits must not become scope-only funding.
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BudgetDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<crate::kars::task::BudgetScope>,
@@ -30,7 +31,7 @@ pub struct EnvelopeDto {
 /// `TaskBlueprint` on write. Keeping the wire contract consistent here is what
 /// prevents silent field-drop on multi-word fields (`tool_policy`,
 /// `mcp_servers`).
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct BlueprintDto {
     #[serde(default)]
     pub runtime: Option<String>,
@@ -46,7 +47,7 @@ pub struct BlueprintDto {
     pub mcp_servers: Vec<String>,
     #[serde(default)]
     pub egress: Vec<EgressDto>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_mission_egress_mode")]
     pub egress_mode: Option<String>,
     #[serde(default)]
     pub isolation: Option<String>,
@@ -58,7 +59,21 @@ pub struct BlueprintDto {
     pub execution_plan: Option<ExecutionPlanDto>,
 }
 
+fn deserialize_mission_egress_mode<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    let mode = <Option<String> as serde::Deserialize>::deserialize(deserializer)?;
+    match mode {
+        None => Ok(None),
+        Some(mode) if mode.trim().eq_ignore_ascii_case("strict") => Ok(Some("strict".into())),
+        Some(_) => Err(serde::de::Error::custom(
+            "Missions use Strict egress; review external hosts or request approved access during a run",
+        )),
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutionPlanDto {
     pub schema: String,
     pub roles: Vec<ExecutionRoleDto>,
@@ -69,6 +84,7 @@ pub struct ExecutionPlanDto {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutionRoleDto {
     pub name: String,
     pub objective: String,
@@ -80,6 +96,7 @@ pub struct ExecutionRoleDto {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutionPhaseDto {
     pub name: String,
     pub objective: String,
@@ -92,9 +109,16 @@ pub struct ExecutionPhaseDto {
     pub max_tool_calls: i32,
     #[serde(default)]
     pub fresh_context: bool,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::kars::task::execution_plan::deserialize_execution_mode"
+    )]
+    pub execution_mode: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutionRequiredToolCallDto {
     pub name: String,
     #[serde(default)]
@@ -102,14 +126,22 @@ pub struct ExecutionRequiredToolCallDto {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutionSynthesisDto {
     pub objective: String,
     #[serde(default)]
     pub capabilities: Vec<String>,
     pub max_tool_calls: i32,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::kars::task::execution_plan::deserialize_execution_mode"
+    )]
+    pub execution_mode: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutionDeliverableDto {
     pub name: String,
     #[serde(default)]
@@ -122,7 +154,7 @@ pub struct ModelDto {
     pub deployment: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct EgressDto {
     pub host: String,
     #[serde(default)]
@@ -130,7 +162,7 @@ pub struct EgressDto {
 }
 
 impl BlueprintDto {
-    pub(super) fn into_crd(self) -> crate::kars::task::TaskBlueprint {
+    pub(crate) fn into_crd(self) -> crate::kars::task::TaskBlueprint {
         use crate::kars::task::{TaskBlueprint, TaskEgress, TaskModel};
         TaskBlueprint {
             runtime: self.runtime,
@@ -170,6 +202,13 @@ impl BlueprintDto {
 }
 
 impl ExecutionPlanDto {
+    pub(crate) fn github_write_enabled(&self) -> bool {
+        self.synthesis.capabilities.iter().any(|capability| capability == "github-pr")
+            || self.roles.iter().flat_map(|role| &role.phases).any(|phase| {
+                phase.capabilities.iter().any(|capability| capability == "github-pr")
+            })
+    }
+
     pub(crate) fn role_qualification_budget(
         &self,
         role_name: &str,
@@ -214,6 +253,7 @@ impl ExecutionPlanDto {
                             min_tool_calls: phase.min_tool_calls,
                             max_tool_calls: phase.max_tool_calls,
                             fresh_context: phase.fresh_context,
+                            execution_mode: phase.execution_mode.clone(),
                         })
                         .collect(),
                     budget_tokens: role.budget_tokens,
@@ -224,6 +264,7 @@ impl ExecutionPlanDto {
                 objective: plan.synthesis.objective.clone(),
                 capabilities: plan.synthesis.capabilities.clone(),
                 max_tool_calls: plan.synthesis.max_tool_calls,
+                execution_mode: plan.synthesis.execution_mode.clone(),
             },
             deliverables: plan
                 .deliverables
@@ -268,6 +309,7 @@ impl ExecutionPlanDto {
                             min_tool_calls: phase.min_tool_calls,
                             max_tool_calls: phase.max_tool_calls,
                             fresh_context: phase.fresh_context,
+                            execution_mode: phase.execution_mode,
                         })
                         .collect(),
                     budget_tokens: role.budget_tokens,
@@ -278,6 +320,7 @@ impl ExecutionPlanDto {
                 objective: self.synthesis.objective,
                 capabilities: self.synthesis.capabilities,
                 max_tool_calls: self.synthesis.max_tool_calls,
+                execution_mode: self.synthesis.execution_mode,
             },
             deliverables: self
                 .deliverables
@@ -323,11 +366,16 @@ pub struct TaskSummaryDto {
     /// badge agrees with the detail page — "Running" while the agent works, not
     /// a stale "Ready to launch".
     pub execution_phase: Option<String>,
+    pub current_run_nonce: Option<String>,
+    pub blocked: bool,
+    /// Compact, custody-validated states; never includes results, artifacts or traces.
+    pub reviewed_progress: Option<super::reviewed_summary::ReviewedProgressDto>,
 }
 
 /// Browser-facing task detail (single view).
 #[derive(Debug, Serialize)]
 pub struct TaskDetailDto {
+    pub qualification_run: Option<crate::routes::qualification_runs::QualificationRun>,
     pub reviewed_execution: Option<super::reviewed_execution::ReviewedExecutionDto>,
     pub name: String,
     pub namespace: String,
@@ -349,18 +397,17 @@ pub struct TaskDetailDto {
     pub status_message: Option<String>,
     /// Names of tasks that delegate from this one (its direct children).
     pub children: Vec<TaskSummaryDto>,
+    /// Saved keyless draft setup may be completed by Launch, subject to source and intent checks.
+    pub credential_setup_pending: bool,
     /// Whether the task is launched (execution gate).
     pub launched: bool,
     /// Execution phase: `Idle` | `Launching` | `Running` | `Degraded`.
     pub execution_phase: Option<String>,
     /// Name of the materialized sandbox, when launched.
     pub sandbox: Option<String>,
-    /// The live egress enforcement mode the sandbox is running under, read from
-    /// the materialized `KarsSandbox`: `"Learn"` (observe + record every domain
-    /// the agent reaches, the default) or `"Strict"` (deny anything outside the
-    /// allowlist). `None` until a sandbox exists. This is the monitoring→enforced
-    /// surface: a customer watches in Learn, then promotes to Strict when
-    /// confident the agent's reach is what it should be.
+    /// Mode reported by the materialized `KarsSandbox`, not proof of router
+    /// installation. Governed Missions expect `"Strict"`; preserve unexpected
+    /// modes for diagnosis. `None` means the mode is unavailable.
     pub egress_mode: Option<String>,
     /// Human-readable execution detail (e.g. the kind/Foundry caveat).
     pub execution_detail: Option<String>,
@@ -406,6 +453,8 @@ pub struct TaskDetailDto {
     pub activity: Vec<serde_json::Value>,
     /// Exact-run, runtime-forwarded observations; not independent execution proof.
     pub router_activity: Option<super::router_activity::RouterActivity>,
+    /// Custody-checked partial observations from a stopped, unfinished attempt.
+    pub(crate) stopped_activity: Option<super::run_evidence::live::LiveActivity>,
     /// Run telemetry rollup (rounds, tool calls) parsed from the mission output.
     /// Token totals live on `result`; this carries the loop-shape counts.
     pub telemetry: Option<MissionTelemetryDto>,
@@ -622,6 +671,8 @@ pub struct CompositionDto {
 /// Create-task request body from the UI.
 #[derive(Debug, Deserialize)]
 pub struct CreateTaskRequest {
+    #[serde(default)]
+    pub qualification_run: bool,
     pub name: String,
     pub objective: String,
     pub display_name: Option<String>,
@@ -642,6 +693,7 @@ pub struct CreateTaskRequest {
     pub launch: bool,
     /// Repos selected from the authenticated principal's GitHub connection. The
     /// server validates the full set and derives the typed connection reference.
+    /// Typed plans without github-pr receive read-only access despite this legacy field name.
     #[serde(default)]
     pub git_write_repos: Option<Vec<String>>,
     /// The identity creating this mission (the Bridge principal), stamped as

@@ -1,15 +1,18 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Narrow router service identity/credential projection; no approvals or grants.
+//! Router service identity, private control transport and task-bound human requests.
 
 use crate::{crd::KarsSandbox, kars_task::KarsTask};
 use k8s_openapi::api::{apps::v1::Deployment, core::v1::Namespace};
 use kube::{Api, Client, ResourceExt};
 use serde_json::{Value, json};
 
+pub(crate) mod access_requests;
 #[cfg(test)]
 mod continuity_tests;
+mod control_client;
+pub(super) mod control_transport;
 #[cfg(test)]
 mod credential_tests;
 pub(crate) mod credentials;
@@ -26,6 +29,17 @@ pub struct Projection {
 }
 
 impl Projection {
+    pub(super) async fn ensure_builtin_memory(
+        &mut self,
+        client: &Client,
+        sandbox: &KarsSandbox,
+        namespace: &Namespace,
+    ) -> anyhow::Result<()> {
+        self.credential.version =
+            super::builtin_memory::ensure(client, sandbox, namespace, &self.identity).await?;
+        Ok(())
+    }
+
     pub fn decorate(&self, deployment: &mut Deployment) {
         self.credential.decorate(deployment);
         self.github.decorate(deployment);
@@ -33,6 +47,9 @@ impl Projection {
 
     pub fn mount(&self, pod: &mut Value) {
         mount(pod);
+        if self.identity["task"].is_object() {
+            control_transport::mount(pod);
+        }
         if let Some(required) = self.github.required_mount() {
             super::github_services::mount(pod, required);
         }
@@ -193,9 +210,9 @@ pub async fn ensure(
     client: &Client,
     sandbox: &KarsSandbox,
     namespace: &Namespace,
-) -> Result<Projection, String> {
+) -> Result<Projection, credentials::IssuanceError> {
     let identity = identity(client, sandbox, namespace).await?;
-    let credential = credentials::ensure(client, sandbox, namespace).await?;
+    let credential = control_transport::ensure(client, sandbox, namespace, &identity).await?;
     let github =
         crate::credential_grants::github::ensure(client, sandbox, namespace, &identity).await?;
     Ok(Projection {
@@ -218,7 +235,7 @@ pub fn mount(pod: &mut Value) {
     {
         if container["name"] == "inference-router" {
             container["volumeMounts"].as_array_mut().expect("router mounts array").push(json!({
-                "name":"governed-services-control","mountPath":"/etc/kars/services","readOnly":true}));
+                "name":"governed-services-control","mountPath":crate::service_control::DIRECTORY,"readOnly":true}));
         }
     }
 }

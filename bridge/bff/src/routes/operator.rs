@@ -13,6 +13,7 @@
 mod additional_providers;
 mod audit;
 mod copilot_login;
+mod component_models;
 mod copilot_transport;
 mod diagnostics;
 mod evals;
@@ -25,6 +26,7 @@ mod skills_profiles;
 pub use additional_providers::*;
 pub use audit::*;
 pub use copilot_login::*;
+pub use component_models::*;
 pub use diagnostics::*;
 pub use evals::*;
 pub use local_inference::*;
@@ -68,17 +70,6 @@ fn created_of(o: &DynamicObject) -> Option<String> {
         .creation_timestamp
         .as_ref()
         .map(|t| t.0.to_rfc3339())
-}
-/// Whether this sandbox is owned by a KarsTask — true for every mission/team-
-/// run sandbox, false for a standing sandbox with no task behind it (e.g. the
-/// Bridge's own orchestrator sandbox). Such a sandbox never gets a
-/// mission-output ConfigMap, so it must be excluded from the "executing" test
-/// below (it would otherwise look permanently "not yet delivered").
-fn has_task_owner(o: &DynamicObject) -> bool {
-    o.metadata
-        .owner_references
-        .as_ref()
-        .is_some_and(|refs| refs.iter().any(|r| r.kind == "KarsTask"))
 }
 fn spec(o: &DynamicObject) -> &Value {
     o.data.get("spec").unwrap_or(&Value::Null)

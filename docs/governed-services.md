@@ -42,20 +42,47 @@ Operator endpoints require a separate bearer credential. The controller creates
 `/etc/kars/services/control-token`. The legacy `router-admin-token` is also
 available to some agent plugins and is deliberately not accepted here.
 
+Task-owned sandboxes also receive an identity-bound TLS configuration in that
+same private Secret, mounted only in the router. The controller imports pending
+requests into the owner Inbox and returns decisions over the dedicated HTTPS
+control listener on port 9449. It pins the exact router Pod, Sandbox/Task identity,
+credential version and issuing CA; redirects and ambient trust roots are disabled.
+NetworkPolicy permits this port only from controller Pods in the operator namespace.
+This path does not require enabling optional service observation or giving its
+recipients additional access. The observation listener remains read-only;
+assignment resets remain on the existing local service-control surface. Missing
+or invalid TLS material prevents a task router from starting rather than silently
+running without its approval channel. Certificates are reused while current and
+renewed before expiry through the existing credential rollout safeguards.
+
 Issuance and reuse require the shared live Secret GET/LIST/WATCH denial checks
 for the legacy SRE principal. If an SRE registration exists, it must carry current
 verified v2 authority: either Ready with its exact source/controller/namespace
 identities, enforcing admission and no unsafe token aliases, or fully Retired
 with current denial evidence. A Ready registration's privacy epoch is recorded
-on newly issued control credentials. No registration is needed for ordinary
-standalone installations where the legacy principal is actually denied.
+on newly issued control credentials and the initial consumer Pod template. This
+avoids a second privacy-stamping rollout interrupting newly dispatched work.
+No registration is needed for ordinary standalone installations where the legacy
+principal is actually denied.
 
 Existing unqualified **controller-owned** credentials rotate with Secret UID/RV
 preconditions; matching names or partial ownership labels never authorize
 adoption. The Deployment's credential-version annotation restarts cached-token
 consumers without changing their image pins, selectors or unrelated annotations.
+For admin Secrets that also hold `builtin-memory.json`, this version binds the
+Secret UID and a deterministic hash of every other data key. Renewing only the
+memory TokenRequest therefore does not restart healthy consumers; changes to
+control tokens, TLS configuration or other control material still do. Secret
+UID/resourceVersion compare-and-swap and privacy-epoch checks remain mandatory.
+Initial memory enrollment returns the post-write control version to the shared
+runtime projection before the Deployment is created. New Hermes and OpenClaw
+Pods therefore start with that version instead of triggering a false stale-cache
+drain when memory configuration is first added.
+Admin Secrets without memory configuration retain UID/resourceVersion versions,
+including the token-only late-enrollment receipt protocol. Other credential
+purposes retain their existing version semantics.
 The controller does not report its credential transition complete while old
-version Pods remain, including terminating Pods. Loss of the checked privacy
+version or mismatched verified-epoch Pods remain, including terminating Pods. Loss of the checked privacy
 proof quarantines the owned credential and scales only a proven owned consumer
 to zero. Restoring authority requires a new token, not reuse of the potentially
 exposed cache. Foreign consumers remain untouched and block automatic recovery.
@@ -86,7 +113,7 @@ authenticated allowed operator. They never accept a caller-selected Sandbox.
 | `POST /v1/access-requests/{id}/cancel` | Agent | Cancel its pending/approved wait |
 | `GET /v1/access-requests/{id}/wait?scope_id=…&timeout_ms=…` | Agent | Wait for a decision or lifecycle transition |
 | `GET /internal/access-requests` | Operator | Inspect scope and the `entries` queue |
-| `POST /internal/access-requests/decision` | Operator | Record one immutable approval/denial |
+| `POST /internal/access-requests/decision` | Operator | Record one immutable approval/denial or close a reviewed tier request without a grant |
 | `POST /internal/access-requests/reset` | Operator | Start a fresh scope and cancel old waits |
 
 A request body contains `scope_id`, `kind`, `target`, and an optional `reason`.
@@ -101,6 +128,20 @@ The service generates `request_id`. Decisions require that exact ID and its
 `scope_id`, with `verdict: approved|denied`. There is no decision-by-host
 fallback. Deduplication includes port and tier, preserves the original payload
 and expiry, and never inherits a decision for a different capability.
+
+For a human-approved tier request whose Task is controller-owned or whose
+execution is already launched/consumed, the controller first persists the
+`requires-fresh-run` authority outcome on the same UID/digest-bound
+`KarsApproval`. It then closes the exact pending queue entry with
+`verdict: cancelled` and a nonblank `explanation` of at most 8192 UTF-8 bytes.
+This control-only outcome accepts tier requests only, forbids `answer`, wakes
+native waiters, and is retained on duplicate requests. It leaves the human
+approval Approved, the queue's authority decision unset, and current authority
+unchanged; it is not a human denial or permission to replay a consumed run.
+The explanation identifies the required fresh authorized run (and source
+Team/package promotion for controller-owned Tasks). OpenClaw and Hermes return
+this outcome unchanged; policy gates still apply. Invalid/stale approval
+bindings cannot produce this outcome. No second approval ticket is opened.
 
 Requests live for 15 minutes. The default queue is 64 entries and creation is
 limited to 32 attempts/minute, including duplicates. Requests cannot evict
@@ -165,17 +206,36 @@ HTTP acceptance is distinct from semantic completion: buffered Responses with
 not become completed generations. Their accepted status, original response
 bytes and available usage remain intact, without retaining provider error text.
 
-Only model identifiers, tool names/IDs, status, timing, and reported usage are
-retained. Prompts, assistant text, URLs, headers, arguments, and result bodies
-are not retained in telemetry. A model-proposed tool has no successful outcome
+Model identifiers, tool names/IDs, status, timing, and reported usage are
+retained. New model proposals also carry bounded, credential-redacted argument
+previews, including ordinary file/message bodies. Both Team and Mission Activity
+use these same previews for OpenClaw and Hermes; historical arguments that were
+not captured remain unavailable. Prompts, assistant prose outside tool arguments,
+and raw result bodies are not retained.
+
+Argument capture accepts at most 64 KiB of complete JSON per call; malformed,
+incomplete or oversized capture produces an explicit unavailable marker. Each
+preview is at most 2,048 UTF-8 bytes, with bounded depth, fields and strings.
+A recorder scope retains at most 64 KiB of encoded preview content, followed by
+explicit omission markers; this limits telemetry retention, not execution or
+tokens. Sensitive keys, recognized credential text, known sensitive environment
+values and secret-file bodies are redacted. URL credentials, queries and fragments
+are omitted. Redaction and truncation are labelled. Pattern-based redaction cannot
+identify every arbitrary unlabelled secret: never intentionally place credentials
+in tool arguments. Previews are untrusted diagnostic text, not proof of the exact
+arguments executed; consumers render them as text and preserve call/round/producer
+binding. A model-proposed tool has no successful outcome
 until an outcome is observed. Harness reports are explicitly labelled
 `harness-reported`, not authoritative router execution. A native completion
 requires a unique `tool_call_id` registered by an allowed `/agt/evaluate`
 request whose context contains the current `scope_id`.
 
 MCP `isError`, JSON-RPC failures, and missing results are distinguished from
-HTTP transport success. Telemetry makes no receipt-completeness, durable
-budget, shared broker, or billing claim.
+HTTP transport success. Response outcome parsing skips tool content and error
+payloads, so large valid results do not create observation gaps merely because
+they exceed the request-metadata size limit. Malformed response metadata and
+oversized response batches still produce explicit gaps. Telemetry makes no
+receipt-completeness, durable budget, shared broker, or billing claim.
 
 ## Integration contract for later task delivery
 

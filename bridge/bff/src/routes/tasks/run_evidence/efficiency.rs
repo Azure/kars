@@ -58,7 +58,7 @@ pub(crate) fn from_attempt(
         .as_ref()?
         .get("attempt.json")
         .filter(|s| s.len() <= 900 * 1024)?;
-    let attempt: Value = serde_json::from_str(raw).ok()?;
+    let attempt = crate::mission_record::decode(raw).ok()?;
     let candidate = attempt.get("candidate")?;
     let assignment = attempt.get("assignment")?;
     let reply = attempt.get("reply")?;
@@ -92,6 +92,7 @@ pub(crate) fn from_attempt(
         || candidate.get("reviewedPhase") != assignment.get("reviewedPhase")
         || candidate.get("inputArtifacts") != assignment.get("inputArtifacts")
         || candidate.get("requiredOutputs") != assignment.get("requiredOutputs")
+        || candidate.get("peerContext") != assignment.get("peerContext")
     {
         return None;
     }
@@ -117,6 +118,7 @@ pub(crate) fn from_attempt(
         "phaseDigest",
         "inputDigest",
         "requiredOutputs",
+        "peerContext",
     ] {
         if assignment.get(key) != reply.get(key) {
             return None;

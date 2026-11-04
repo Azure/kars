@@ -4,7 +4,7 @@
 // kars Bridge Workspace — Missions list. Plain-language projection of the task
 // fleet, filterable by what the user cares about (running / ready / blocked).
 
-import Link from "next/link";
+import Link from "@/components/navigation-link";
 import { HonestState } from "@/components/honest-state";
 import { listTasks } from "@/lib/bff";
 import { defaultNamespace } from "@/lib/config";

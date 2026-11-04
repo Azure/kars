@@ -126,6 +126,7 @@ mod tests {
                 blueprint: None,
                 display_name: None,
                 retention_ttl_seconds: None,
+                requested_tier: None,
             },
         )
     }

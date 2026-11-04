@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-{{ include "kars-bridge.privateConsumerGuard" (dict "root" . "name" "kars-bridge-bff") }}
+{{- define "kars-bridge.bffDeployment" -}}
 {{ $qualification := .Values.bff.routeQualification | default dict -}}
 {{- $headlamp := .Values.headlamp | default dict -}}
 {{- if $headlamp.url -}}
@@ -148,6 +148,8 @@ spec:
       {{- with .Values.affinity }}
       affinity: {{- toYaml . | nindent 8 }}
       {{- end }}
+{{- end }}
+{{ include "kars-bridge.privateConsumerGuard" (dict "root" . "desired" (include "kars-bridge.bffDeployment" . | fromYaml) "fence" (.Values.bff.privateContinuity | default dict)) }}
 ---
 apiVersion: v1
 kind: Service

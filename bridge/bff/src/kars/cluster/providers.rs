@@ -106,13 +106,17 @@ pub(super) fn parse_model_catalog(value: &str) -> Vec<String> {
 
 fn configured_models(envs: &[EnvVar]) -> (Option<String>, Vec<String>) {
     let mut default = None;
+    let mut legacy_default = None;
     let mut catalog = Vec::new();
     let mut legacy_catalog = Vec::new();
     for e in envs {
         let Some(val) = &e.value else { continue };
         match e.name.as_str() {
-            "KARS_TASK_DEFAULT_MODEL" | "AZURE_OPENAI_DEPLOYMENT" if default.is_none() => {
+            "KARS_TASK_DEFAULT_MODEL" if !val.trim().is_empty() => {
                 default = Some(val.clone());
+            }
+            "AZURE_OPENAI_DEPLOYMENT" if !val.trim().is_empty() => {
+                legacy_default = Some(val.clone());
             }
             "KARS_MODEL_CATALOG" => {
                 catalog.extend(parse_model_catalog(val));
@@ -127,7 +131,51 @@ fn configured_models(envs: &[EnvVar]) -> (Option<String>, Vec<String>) {
     {
         catalog = legacy_catalog;
     }
-    (default, catalog)
+    (default.or(legacy_default), catalog)
+}
+
+fn incomplete_bootstrap_model() -> kube::Error {
+    kube::Error::Api(kube::core::ErrorResponse {
+        status: "Failure".into(),
+        reason: "InferenceDefaultsUnavailable".into(),
+        code: 503,
+        message: "Core inference defaults are incomplete or indirect; configure the provider and default model before initializing the Bridge orchestrator".into(),
+    })
+}
+
+pub(super) fn configured_bootstrap_model(
+    envs: &[EnvVar],
+) -> Result<Option<crate::kars::task::TaskModel>, kube::Error> {
+    let (default, catalog) = configured_models(envs);
+    if let Some(provider) = envs
+        .iter()
+        .find(|env| env.name == "KARS_TASK_DEFAULT_PROVIDER")
+    {
+        let provider = provider
+            .value
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(incomplete_bootstrap_model)?;
+        let deployment = envs
+            .iter()
+            .find(|env| env.name == "KARS_TASK_DEFAULT_MODEL")
+            .filter(|env| env.value_from.is_none())
+            .and_then(|env| env.value.as_deref())
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(incomplete_bootstrap_model)?;
+        return Ok(Some(crate::kars::task::TaskModel {
+            provider: provider.into(),
+            deployment: deployment.into(),
+        }));
+    }
+    Ok(configured_provider(envs).and_then(|(provider, _, _)| {
+        default
+            .or_else(|| catalog.into_iter().next())
+            .map(|deployment| crate::kars::task::TaskModel {
+                provider,
+                deployment,
+            })
+    }))
 }
 
 pub(super) fn inherited_provider_registered(
@@ -205,26 +253,42 @@ fn configured_provider(envs: &[EnvVar]) -> Option<(String, String, String)> {
     )
 }
 
-pub(super) fn inherited_model_settings(
-    envs: &[EnvVar],
-    provider: &str,
-    deployment: &str,
-) -> Option<Vec<serde_json::Value>> {
-    let (configured, _, _) = configured_provider(envs)?;
-    let (default, catalog) = configured_models(envs);
-    if configured != provider
-        || deployment.is_empty()
-        || !catalog
+fn parse_foundry_connection(
+    controller: k8s_openapi::api::core::v1::Container,
+) -> Result<(Option<String>, Option<String>, Option<String>, bool), String> {
+    let envs = controller.env.unwrap_or_default();
+    if controller
+        .env_from
+        .as_ref()
+        .is_some_and(|sources| !sources.is_empty())
+        && !envs
             .iter()
-            .chain(default.iter())
-            .any(|model| model == deployment)
+            .any(|env| env.name == "FOUNDRY_PROJECT_ENDPOINT")
     {
-        return None;
+        return Err("Foundry discovery cannot resolve imported project configuration; not selecting built-in memory".into());
     }
-    Some(vec![
-        serde_json::json!({"name":"KARS_TASK_DEFAULT_MODEL","value":deployment}),
-        serde_json::json!({"name":"AZURE_OPENAI_DEPLOYMENT","value":deployment}),
-    ])
+    let mut project = None;
+    let mut inference = None;
+    let mut store = None;
+    let mut has_key = false;
+    for env in envs {
+        match env.name.as_str() {
+            "FOUNDRY_PROJECT_ENDPOINT" => {
+                if env.value_from.is_some() {
+                    return Err("Foundry discovery cannot resolve an indirect project endpoint; not selecting built-in memory".into());
+                }
+                project = env.value.filter(|v| !v.trim().is_empty());
+            }
+            "FOUNDRY_ENDPOINT" => inference = env.value.filter(|v| !v.trim().is_empty()),
+            "FOUNDRY_MEMORY_STORE_ID" => store = env.value.filter(|v| !v.trim().is_empty()),
+            "FOUNDRY_API_KEY" => {
+                has_key =
+                    env.value_from.is_some() || env.value.as_ref().is_some_and(|v| !v.is_empty());
+            }
+            _ => {}
+        }
+    }
+    Ok((project, inference, store, has_key))
 }
 
 impl Cluster {
@@ -259,6 +323,26 @@ impl Cluster {
             }));
         }
         Ok(())
+    }
+
+    /// Read the provider/model pair from one Core revision. An explicitly selected
+    /// provider can differ from the bootstrap endpoint (an additional provider).
+    pub async fn controller_bootstrap_model(
+        &self,
+    ) -> Result<Option<crate::kars::task::TaskModel>, kube::Error> {
+        use k8s_openapi::api::apps::v1::Deployment;
+        let deploys: Api<Deployment> = Api::namespaced(self.client.clone(), &self.core_namespace());
+        let deployment = deploys.get("kars-controller").await?;
+        let controller = deployment
+            .spec
+            .and_then(|spec| spec.template.spec)
+            .and_then(|spec| {
+                spec.containers
+                    .into_iter()
+                    .find(|container| container.name == "controller")
+            })
+            .ok_or_else(incomplete_bootstrap_model)?;
+        configured_bootstrap_model(controller.env.as_deref().unwrap_or_default())
     }
 
     /// The model deployments this cluster is configured to serve, read from the
@@ -334,30 +418,6 @@ impl Cluster {
             .flat_map(|c| c.env.unwrap_or_default())
             .collect();
         configured_provider(&envs)
-    }
-
-    /// Select an already configured model without promoting a provider or
-    /// replacing its Helm/Workload Identity/Secret-backed authentication.
-    pub async fn try_set_inherited_model(
-        &self,
-        provider: &str,
-        deployment: &str,
-    ) -> Result<bool, kube::Error> {
-        use k8s_openapi::api::apps::v1::Deployment;
-        let api: Api<Deployment> = Api::namespaced(self.client.clone(), &self.core_namespace());
-        let current = api.get("kars-controller").await?;
-        let envs: Vec<_> = current
-            .spec
-            .and_then(|spec| spec.template.spec)
-            .into_iter()
-            .flat_map(|spec| spec.containers)
-            .flat_map(|container| container.env.unwrap_or_default())
-            .collect();
-        let Some(settings) = inherited_model_settings(&envs, provider, deployment) else {
-            return Ok(false);
-        };
-        self.write_controller_environment(settings).await?;
-        Ok(true)
     }
 
     /// The orchestrator inference config this cluster already provides — read
@@ -541,131 +601,28 @@ impl Cluster {
         self.write_controller_environment(env).await
     }
 
-    /// Make GitHub Copilot the cluster's DEFAULT provider. Copilot doesn't use
-    /// the endpoint+key shape `set_controller_catalog` wires — it authenticates
-    /// via a GitHub token exchanged for a short-lived Copilot JWT by the router
-    /// (`copilot_auth`). This wires exactly what Copilot-as-default needs on the
-    /// controller (which propagates it to every sandbox): `KARS_PROVIDER=
-    /// github-copilot`, `COPILOT_GITHUB_TOKEN` (the token signed in via the
-    /// wizard, read from the shared providers secret), the Copilot API host as
-    /// the `AZURE_OPENAI_ENDPOINT` sentinel (the controller refuses to
-    /// provision a sandbox without SOME inference endpoint), the model catalog,
-    /// and the default model — clearing any stale Azure/Foundry endpoint+key
-    /// from a prior default. Returns an error if no Copilot token is stored yet
-    /// (the operator must sign in first).
-    pub async fn set_copilot_as_default(&self, models: &str) -> Result<(), kube::Error> {
-        self.require_registered_default_before_switch(None).await?;
-        let token = self
-            .read_secret_all("kars-system", "kars-inference-providers")
-            .await?
-            .get("COPILOT_GITHUB_TOKEN")
-            .filter(|v| !v.trim().is_empty())
-            .cloned();
-        let Some(_token) = token else {
-            return Err(kube::Error::Api(kube::error::ErrorResponse {
-                status: "Failure".into(),
-                message: "no Copilot token is stored — sign in to GitHub Copilot first".into(),
-                reason: "BadRequest".into(),
-                code: 400,
-            }));
-        };
-        let default_model = models
-            .split(',')
-            .next()
-            .map(str::trim)
-            .unwrap_or("")
-            .to_string();
-        let mut env = vec![
-            serde_json::json!({"name": "KARS_PROVIDER", "value": "github-copilot"}),
-            serde_json::json!({"name": "COPILOT_GITHUB_TOKEN", "valueFrom":{"secretKeyRef":{
-                "name":"kars-inference-providers","key":"COPILOT_GITHUB_TOKEN"}}}),
-            serde_json::json!({"name": "AZURE_OPENAI_ENDPOINT", "value": "https://api.githubcopilot.com"}),
-            serde_json::json!({"name": "KARS_MODEL_CATALOG", "value": models}),
-        ];
-        if !default_model.is_empty() {
-            env.push(serde_json::json!({"name": "KARS_TASK_DEFAULT_MODEL", "value": default_model.clone()}));
-            env.push(
-                serde_json::json!({"name": "AZURE_OPENAI_DEPLOYMENT", "value": default_model}),
-            );
-        }
-        // The previous inference route is retained in the provider registry.
-        // Clear only its default-route aliases, not the independent Foundry
-        // project connection used for memory, evaluation and other services.
-        for stale in [
-            "FOUNDRY_ENDPOINT",
-            "AZURE_OPENAI_API_KEY",
-            "KARS_INFERENCE_PROVIDER",
-        ] {
-            env.push(serde_json::json!({"name": stale, "$patch": "delete"}));
-        }
-        self.write_controller_environment(env).await
-    }
-
     /// The current Foundry connection, read live from the `kars-controller`
     /// Deployment env: `(project_endpoint, inference_endpoint, memory_store_id,
     /// has_api_key)`. All `None`/false when Foundry has not been onboarded. The
     /// API key is NEVER returned — only whether one is wired.
     pub async fn get_foundry_connection(
         &self,
-    ) -> (Option<String>, Option<String>, Option<String>, bool) {
+    ) -> Result<(Option<String>, Option<String>, Option<String>, bool), String> {
         use k8s_openapi::api::apps::v1::Deployment;
         let api: Api<Deployment> = Api::namespaced(self.client.clone(), &self.core_namespace());
-        let Some(dep) = api.get_opt("kars-controller").await.ok().flatten() else {
-            return (None, None, None, false);
-        };
-        let mut project = None;
-        let mut inference = None;
-        let mut store = None;
-        let mut has_key = false;
-        if let Some(spec) = dep.spec.and_then(|s| s.template.spec) {
-            for c in spec.containers {
-                for env in c.env.unwrap_or_default() {
-                    match env.name.as_str() {
-                        "FOUNDRY_PROJECT_ENDPOINT" => project = env.value.filter(|v| !v.is_empty()),
-                        "FOUNDRY_ENDPOINT" => inference = env.value.filter(|v| !v.is_empty()),
-                        "FOUNDRY_MEMORY_STORE_ID" => store = env.value.filter(|v| !v.is_empty()),
-                        "FOUNDRY_API_KEY" => {
-                            has_key = env.value_from.is_some()
-                                || env.value.as_ref().is_some_and(|v| !v.is_empty());
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-        (project, inference, store, has_key)
-    }
-
-    /// Onboard a Foundry connection by patching the `kars-controller` Deployment
-    /// env (strategic merge on `env` by name, preserving all other vars). Sets
-    /// `FOUNDRY_PROJECT_ENDPOINT` (+ optional inference endpoint / memory store),
-    /// and for API-key auth wires `FOUNDRY_API_KEY` from a Secret via
-    /// `secretKeyRef`. The controller then propagates these to sandbox routers.
-    /// Managed-identity auth stores no key — the router uses the cluster's
-    /// workload identity (audience `https://ai.azure.com`).
-    pub async fn set_foundry_connection(
-        &self,
-        project_endpoint: &str,
-        inference_endpoint: Option<&str>,
-        memory_store_id: Option<&str>,
-        key_secret: Option<(&str, &str)>,
-    ) -> Result<(), kube::Error> {
-        let mut env = vec![
-            serde_json::json!({"name": "FOUNDRY_PROJECT_ENDPOINT", "value": project_endpoint}),
-        ];
-        if let Some(e) = inference_endpoint.filter(|e| !e.is_empty()) {
-            env.push(serde_json::json!({"name": "FOUNDRY_ENDPOINT", "value": e}));
-        }
-        if let Some(s) = memory_store_id.filter(|s| !s.is_empty()) {
-            env.push(serde_json::json!({"name": "FOUNDRY_MEMORY_STORE_ID", "value": s}));
-        }
-        if let Some((secret, key)) = key_secret {
-            env.push(serde_json::json!({
-                "name": "FOUNDRY_API_KEY",
-                "valueFrom": { "secretKeyRef": { "name": secret, "key": key } },
-            }));
-        }
-        self.write_controller_environment(env).await
+        let dep = api.get("kars-controller").await.map_err(|_| {
+            "Foundry discovery is unavailable; memory backend cannot be inferred".to_string()
+        })?;
+        let spec = dep
+            .spec
+            .and_then(|s| s.template.spec)
+            .ok_or("Foundry discovery controller template is unavailable")?;
+        let controller = spec
+            .containers
+            .into_iter()
+            .find(|c| c.name == "controller")
+            .ok_or("Foundry discovery controller container is unavailable")?;
+        parse_foundry_connection(controller)
     }
 
     /// The workload-identity client-id wired onto the sandbox/controller service
@@ -710,5 +667,39 @@ impl Cluster {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod memory_discovery_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn memory_discovery_does_not_infer_foundry_from_azure_inference() {
+        let container = serde_json::from_value(json!({"name":"controller","env":[
+            {"name":"KARS_PROVIDER","value":"azure-openai"},
+            {"name":"FOUNDRY_ENDPOINT","value":"https://inference.openai.azure.com"}]}))
+        .unwrap();
+        assert!(parse_foundry_connection(container).unwrap().0.is_none());
+        let container = serde_json::from_value(json!({"name":"controller","env":[
+            {"name":"KARS_PROVIDER","value":"github-copilot"},
+            {"name":"FOUNDRY_PROJECT_ENDPOINT","value":"https://account.services.ai.azure.com/api/projects/project"}]})).unwrap();
+        assert!(parse_foundry_connection(container).unwrap().0.is_some());
+    }
+
+    #[test]
+    fn unresolved_project_configuration_is_not_absence() {
+        for container in [
+            json!({"name":"controller","envFrom":[{"configMapRef":{"name":"settings"}}]}),
+            json!({"name":"controller","env":[{"name":"FOUNDRY_PROJECT_ENDPOINT","valueFrom":{"configMapKeyRef":{"name":"settings","key":"project"}}}]}),
+        ] {
+            assert!(parse_foundry_connection(serde_json::from_value(container).unwrap()).is_err());
+        }
+        let container = serde_json::from_value(
+            json!({"name":"controller","env":[{"name":"FOUNDRY_PROJECT_ENDPOINT","value":" "}]}),
+        )
+        .unwrap();
+        assert!(parse_foundry_connection(container).unwrap().0.is_none());
     }
 }

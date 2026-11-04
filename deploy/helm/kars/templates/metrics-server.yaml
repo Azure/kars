@@ -246,7 +246,7 @@ spec:
         - name: serving-certificate
           secret:
             secretName: kars-metrics-server-tls
-            defaultMode: 0444
+            defaultMode: 292
         {{- if $kubelet.caBundle }}
         - name: kubelet-ca
           configMap:

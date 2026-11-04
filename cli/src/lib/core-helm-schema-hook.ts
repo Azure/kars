@@ -147,7 +147,7 @@ export async function preparePendingCoreHelmSchemas(
       await recheck();
       return { stdout: prior.text };
     }
-    if (file !== "kubectl" || !["get", "create", "apply"].includes(args[0])) {
+    if (file !== "kubectl" || !["get", "create", "apply", "replace"].includes(args[0])) {
       throw new Error("Only bounded schema reads and original CRD writes are permitted");
     }
     if (args[0] !== "get") {
@@ -155,7 +155,9 @@ export async function preparePendingCoreHelmSchemas(
       if (object?.kind !== "CustomResourceDefinition" || !documents.some(desired =>
         desired.kind === object.kind && desired.metadata.name === object.metadata?.name
         && canonicalSchema(desired.spec) === canonicalSchema(object.spec))
-        || args.some(arg => arg.startsWith("--force"))) {
+        || args.some(arg => arg.startsWith("--force"))
+        || (args[0] === "replace" && (!object.metadata?.uid || !object.metadata?.resourceVersion
+          || !args.includes("--field-manager=helm")))) {
         throw new Error("Schema hook refused a write outside its pinned CRD inventory");
       }
       await recheck();

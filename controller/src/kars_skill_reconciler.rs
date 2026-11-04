@@ -82,7 +82,7 @@ async fn reconcile(skill: Arc<KarsSkill>, ctx: Arc<Ctx>) -> Result<Action, Recon
             version_digest: Some(skill.version_digest()),
             attestation_ref: skill.spec.attestation_ref.clone(),
             detail: Some(format!(
-                "Skill v{} content validated; independent operator approval is required before use. Attestation references are unverified provenance claims.",
+                "Skill v{} content validated; operator approval is required before use (administrators may self-approve). Attestation references are unverified provenance claims.",
                 skill.spec.version
             )),
             conditions: None,

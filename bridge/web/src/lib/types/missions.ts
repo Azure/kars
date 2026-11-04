@@ -37,9 +37,31 @@ export interface TaskSummary {
   failed: boolean;
   launched: boolean;
   execution_phase: string | null;
+  current_run_nonce: string | null;
+  blocked: boolean;
+  reviewed_progress: ReviewedProgress | null;
+}
+
+/** BFF-validated phase states only; no per-row artifacts, results or tool traces. */
+export interface ReviewedProgress {
+  run_nonce: string;
+  states: Array<"pending" | "active" | "completed" | "failed" | "held" | "uncertain" | "unavailable" | "stopped">;
+  issue: string | null;
+}
+
+export interface MissionQualification {
+  approved_by: string;
+  approved_by_sub: string;
+  approved_at: string;
+  /** Admission deadline, not a runtime cancellation deadline. */
+  expires_at: string;
+  package_sha256: string;
+  resource_bindings?: Record<string, string>;
 }
 
 export interface TaskDetail {
+  credential_setup_pending?: boolean;
+  qualification_run: MissionQualification | null;
   reviewed_execution?: ReviewedExecution | null;
   name: string;
   namespace: string;
@@ -75,6 +97,7 @@ export interface TaskDetail {
   pull_requests?: PullRequestRef[];
   activity: ActivityEvent[];
   router_activity?: import("../router-activity").RouterActivity | null;
+  stopped_activity?: import("../router-activity").LiveRouterActivity | null;
   telemetry: MissionTelemetry | null;
   checkpoint: TaskCheckpoint | null;
   agent_identity: AgentIdentity | null;
@@ -101,9 +124,15 @@ export interface ReviewedExecution {
     task_name: string | null;
     task_uid: string | null;
     run_nonce: string | null;
-    state: "pending" | "active" | "completed" | "failed" | "unavailable";
+    state: "pending" | "active" | "completed" | "failed" | "unavailable" | "uncertain" | "held" | "stopped";
     result: MissionResult | null;
+    /** Safe custody-checked attempt diagnostic; not a result, artifact, or usage total. */
+    failure_diagnostic?: string | null;
     router_activity?: import("../router-activity").RouterActivity | null;
+    /** Custody-checked partial progress; never a terminal result or accounting total. */
+    stopped_activity?: import("../router-activity").LiveRouterActivity | null;
+    /** Client-only stream snapshot; never a retained result or review authority. */
+    live_router_activity?: import("../router-activity").LiveRouterActivity | null;
   }>;
 }
 
@@ -243,6 +272,8 @@ export interface MissionRunEvidence {
   sandbox_uid: string;
   pod_uid: string;
   runtime_boot_id: string;
+  /** Runtime from the bound retained attempt, absent for older records. */
+  runtime?: "OpenClaw" | "Hermes" | null;
   status: string;
   started_at: string;
   finished_at: string;
@@ -308,6 +339,7 @@ export interface Composition {
 }
 
 export interface CreateTaskRequest {
+  qualification_run?: boolean;
   name: string;
   objective: string;
   display_name: string | null;
@@ -317,7 +349,8 @@ export interface CreateTaskRequest {
   delegation?: MissionDelegation | null;
   launch?: boolean;
   /** Repos (owner/name) from this principal's GitHub connection. The BFF
-   *  validates the complete set and derives the connection reference. */
+   *  validates the set and derives the binding; typed plans without github-pr
+   *  receive read-only access despite this legacy field name. */
   git_write_repos?: string[] | null;
   /** The creating principal, for per-user budget attribution. */
   created_by?: string | null;
@@ -379,6 +412,7 @@ export interface ExecutionPhase {
   min_tool_calls?: number;
   max_tool_calls: number;
   fresh_context: boolean;
+  execution_mode?: "native";
 }
 
 export interface ExecutionRequiredToolCall {
@@ -389,15 +423,18 @@ export interface ExecutionRequiredToolCall {
 export type ExecutionCapability =
   | "filesystem-read"
   | "filesystem-write"
+  | "python-execute"
   | "shell"
   | "network"
   | "mcp"
-  | "memory";
+  | "memory"
+  | "github-pr";
 
 export interface ExecutionSynthesis {
   objective: string;
   capabilities: ExecutionCapability[];
   max_tool_calls: number;
+  execution_mode?: "native";
 }
 
 export interface ExecutionDeliverable {

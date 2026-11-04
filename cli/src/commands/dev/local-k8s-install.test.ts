@@ -7,16 +7,83 @@ import { buildLocalConformanceRunnerImage, ensureCluster, installLocalCoreChart,
 import { schemaFixture } from "../../lib/schema-stage.test-support.js";
 import type { SchemaExecute } from "../../lib/schema-documents.js";
 
-const { execute, stageRust } = vi.hoisted(() => ({ execute: vi.fn<SchemaExecute>(), stageRust: vi.fn() }));
+const { execute, stageRust, publishCore } = vi.hoisted(() => ({ execute: vi.fn<SchemaExecute>(), stageRust: vi.fn(), publishCore: vi.fn() }));
+vi.mock("../../lib/private-core-publication.js", () => ({ publishPrivateCore: publishCore }));
 vi.mock("execa", () => ({ execa: execute }));
 vi.mock("../../lib/stage-rust-bin.js", () => ({ stageRustBinaries: stageRust }));
 afterEach(() => {
   vi.restoreAllMocks();
   execute.mockReset();
   stageRust.mockReset();
+  publishCore.mockReset();
 });
 
 describe("existing kind core installation target", () => {
+  it("runs original cold beta hooks directly with dedicated kubeconfig, never compatibility staging", async () => {
+    execute.mockResolvedValue({ stdout: "" });
+    await installLocalCoreChart("/tools/helm", "/tools/kubectl", "chosen", "kars", "/bundled/core", ["/reviewed/core.yaml"], [], undefined, { kubeconfig: "/dedicated/config" });
+    expect(execute).toHaveBeenCalledExactlyOnceWith("/tools/helm", ["--kubeconfig", "/dedicated/config", "--kube-context", "kind-chosen", "install", "kars", "/bundled/core", "--namespace", "kars-system", "--timeout", "20m", "-f", "/reviewed/core.yaml", "--wait", "--wait-for-jobs"], { stdio: "inherit" });
+    expect(publishCore).not.toHaveBeenCalled();
+  });
+
+  it("pins every existing-cluster operation and preserves the explicit fenced SSA upgrade", async () => {
+    const f = schemaFixture(); f.options.releaseExists = true;
+    execute.mockImplementation(async (file, args, options) => {
+      expect(args.slice(0, 4)).toEqual(["--kubeconfig", "/dedicated/config", file === "/tools/helm" ? "--kube-context" : "--context", "kind-chosen"]);
+      return f.execute(file === "/tools/helm" ? "helm" : "kubectl", args.slice(4), options);
+    });
+    await installLocalCoreChart("/tools/helm", "/tools/kubectl", "chosen", "kars", "/exact/chart", [], [], undefined, undefined,
+      { kubeconfig: "/dedicated/config", fencedControllerNoop: true });
+    const upgrade = execute.mock.calls.find(([, args]) => args[4] === "upgrade");
+    expect(upgrade?.[1]).toContain("--server-side=true");
+    expect(publishCore).not.toHaveBeenCalled();
+  });
+
+  it("rejects contradictory cold and existing-cluster modes before any operation", async () => {
+    await expect(installLocalCoreChart("helm", "kubectl", "chosen", "kars", "/chart", [], [], undefined,
+      { kubeconfig: "/cold" }, { kubeconfig: "/existing" })).rejects.toThrow("not both");
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("refuses cold beta against an existing cluster before any mutation", async () => {
+    execute.mockResolvedValue({ stdout: "chosen\n" });
+    await expect(ensureCluster("kind", "chosen", {}, "docker", { config: "kind.yaml", kubeconfig: "dedicated", image: "reviewed" })).rejects.toThrow(/fresh cluster/);
+    expect(execute).toHaveBeenCalledExactlyOnceWith("kind", ["get", "clusters"], { env: {} });
+  });
+
+  it("does not treat failed cluster inventory as permission to create", async () => {
+    execute.mockRejectedValue(new Error("runtime inventory unavailable"));
+    await expect(ensureCluster("kind", "chosen", {}, "docker", { config: "kind.yaml", kubeconfig: "dedicated", image: "reviewed" })).rejects.toThrow(/inventory unavailable/);
+    expect(execute).toHaveBeenCalledExactlyOnceWith("kind", ["get", "clusters"], { env: {} });
+  });
+
+  it("gives the migration journal sole ownership of protected publication", async () => {
+    publishCore.mockResolvedValue(undefined);
+    await installLocalCoreChart("/tools/helm", "/tools/kubectl", "chosen", "kars", "/exact/chart",
+      ["/exact/values.yaml"], [], { receipt: ".migration.jsonl" });
+    expect(execute).not.toHaveBeenCalled();
+    expect(publishCore).toHaveBeenCalledWith(expect.any(Function), expect.objectContaining({
+      context: "kind-chosen", receipt: ".migration.jsonl", release: "kars", namespace: "kars-system",
+      chart: "/exact/chart", values: ["/exact/values.yaml"], set: [],
+    }));
+  });
+
+  it("forwards explicit failed-publication recovery only to the protected journal owner", async () => {
+    publishCore.mockResolvedValue(undefined);
+    await installLocalCoreChart("/tools/helm", "/tools/kubectl", "chosen", "kars", "/exact/chart",
+      ["/exact/values.yaml"], [], { receipt: ".migration.jsonl", recoverFailedPublication: true });
+    expect(execute).not.toHaveBeenCalled();
+    expect(publishCore).toHaveBeenCalledWith(expect.any(Function), expect.objectContaining({
+      context: "kind-chosen", receipt: ".migration.jsonl", recoverFailedPublication: true,
+    }));
+  });
+
+  it("never falls back to an unjournaled install when publication is ambiguous", async () => {
+    publishCore.mockRejectedValue(new Error("Publication outcome is unknown"));
+    await expect(installLocalCoreChart("/tools/helm", "/tools/kubectl", "chosen", "kars", "/exact/chart",
+      [], [], { receipt: ".migration.jsonl" })).rejects.toThrow("Publication outcome is unknown");
+    expect(execute).not.toHaveBeenCalled();
+  });
   it.each([false, true])("pins rendering, schema preparation and final Helm install (existing Core=%s)", async existing => {
     const f = schemaFixture();
     f.options.releaseExists = existing;
@@ -51,6 +118,41 @@ describe("existing kind core installation target", () => {
       request.args.includes("--dry-run=server"))).toEqual(existing ? [false, true, true] : [false, true]);
     expect(f.requests.filter(request => request.args[0] === "template").map(request =>
       request.args.includes("--is-upgrade"))).toEqual(existing ? [true, true, true] : [false, false]);
+  });
+
+  it("passes the same captured original witness baseline to preflight and the final scoped upgrade", async () => {
+    const f = schemaFixture();
+    const witness = { managed: true, enabled: true, sandboxes: ["sre"], nodes: ["approved-node"],
+      aggregator: { image: `registry.example/witness:latest@sha256:${"a".repeat(64)}` },
+      gadget: { image: `registry.example/witness:latest@sha256:${"a".repeat(64)}`, hookMode: "podinformer" } };
+    const baselineFlag = `sre.datapathWitnessBaseline=${JSON.stringify(witness)}`;
+    const rendered: string[][] = [];
+    const final: string[][] = [];
+    execute.mockImplementation(async (file, args, options) => {
+      expect(args.slice(0, 2)).toEqual([file === "/tools/helm" ? "--kube-context" : "--context", "kind-chosen"]);
+      const command = args.slice(2);
+      if (file === "/tools/kubectl" && command[2] === "kars-sre-helm-adoption") return { stdout: JSON.stringify({
+        immutable: true, metadata: { name: "kars-sre-helm-adoption", namespace: "kars-system", uid: "adoption-uid", resourceVersion: "1",
+          annotations: { "meta.helm.sh/release-name": "kars", "meta.helm.sh/release-namespace": "kars-system" } },
+        data: { intentUID: "intent-uid", valuesDigest: "a".repeat(64) },
+      }) };
+      if (file === "/tools/helm" && command[0] === "get" && command[1] === "values") {
+        expect(command).toContain("--all");
+        return { stdout: JSON.stringify({ datapathWitness: witness }) };
+      }
+      if (command[0] === "template") rendered.push([...command]);
+      if (command[0] === "upgrade") final.push([...command]);
+      return f.execute(file === "/tools/helm" ? "helm" : "kubectl", command, options);
+    });
+    await installLocalCoreChart("/tools/helm", "/tools/kubectl", "chosen", "kars", "/exact/chart", [],
+      ["datapathWitness.scope=all", "datapathWitness.sandboxes={}"]);
+    expect(final).toHaveLength(1);
+    expect(rendered.length).toBeGreaterThan(0);
+    for (const args of [...rendered, ...final]) {
+      expect(args).toContain(baselineFlag);
+      expect(args).toContain("datapathWitness.scope=all");
+      expect(args).not.toContain('datapathWitness.scope="selected"');
+    }
   });
 
   it("refuses legacy template-owned schemas without adoption or a Helm installation", async () => {
@@ -90,6 +192,25 @@ describe("new Kind node journal retention", () => {
       return { stdout: echo };
     });
   }
+
+  it("adds cold Kind config/image/kubeconfig/retain arguments while preserving verified journal setup", async () => {
+    fixture({ inventory: "chosen-control-plane" });
+    await ensureCluster("kind", "chosen", {}, "docker", { config: "/reviewed/kind.yaml", kubeconfig: "/dedicated/config", image: "qualified-node" });
+    expect(execute.mock.calls[1][1]).toEqual(["create", "cluster", "--name", "chosen", "--config", "/reviewed/kind.yaml", "--kubeconfig", "/dedicated/config", "--image", "qualified-node", "--retain"]);
+    expect(execute.mock.calls.filter(([file, args]) => file === "docker" && args[0] === "exec")).toHaveLength(1);
+  });
+
+  it("verifies journal bytes without subprocess newline stripping", async () => {
+    fixture({ inventory: "chosen-control-plane" });
+    const simulated = execute.getMockImplementation()!;
+    const { execa } = await vi.importActual<typeof import("execa")>("execa");
+    execute.mockImplementation((file, args, options) => args[0] === "exec"
+      ? execa(process.execPath, ["-e", "process.stdin.pipe(process.stdout)"], options)
+      : simulated(file, args, options));
+    await ensureCluster("kind", "chosen", {}, "docker");
+    expect(execute.mock.calls.find(([, args]) => args[0] === "exec")?.[2])
+      .toMatchObject({ input: journal, stripFinalNewline: false });
+  });
 
   it.each(["docker", "podman", "nerdctl"])("bounds every fresh node through %s without changing runtime limits", async runtime => {
     fixture();

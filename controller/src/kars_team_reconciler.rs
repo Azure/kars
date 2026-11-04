@@ -11,6 +11,7 @@ pub(crate) mod credential_bindings;
 mod persistence_tests;
 mod promotion;
 pub(crate) mod requests;
+mod qualification;
 mod runs;
 pub(crate) mod specs;
 #[cfg(test)]
@@ -21,6 +22,7 @@ mod tests;
 mod work;
 
 pub(crate) use tasks::owner_ref as team_owner_ref;
+pub(crate) use work::contract::Binding as TeamWorkBinding;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -90,6 +92,11 @@ fn resource_version(team: &KarsTeam) -> Result<&str, ReconcileError> {
 }
 
 async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, ReconcileError> {
+    // Do not inline the full reconciliation state into every caller's future.
+    Box::pin(reconcile_inner(team, ctx)).await
+}
+
+async fn reconcile_inner(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, ReconcileError> {
     let ns = namespace(&team)?;
     let teams = Api::<KarsTeam>::namespaced(ctx.client.clone(), ns);
     let tasks_api = Api::<KarsTask>::namespaced(ctx.client.clone(), ns);
@@ -122,6 +129,10 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         return Ok(Action::requeue(Duration::from_secs(1)));
     }
 
+    if qualification::recover_consumption(&ctx.client, &teams, &tasks_api, &team).await?
+        || qualification::pause_finished(&teams, &tasks_api, &team).await? {
+        return Ok(Action::requeue(Duration::from_secs(1)));
+    }
     let effective = match capabilities::effective_team(&ctx.client, &team).await {
         Ok(effective) => effective,
         Err(error) => return fail_closed(&teams, &tasks_api, &team, error).await,
@@ -189,6 +200,12 @@ async fn write_degraded(
     status.observed_generation = team.metadata.generation;
     status.envelope_digest = None;
     status.detail = Some(detail.into());
+    if crate::inference_budget::team::governed(team) {
+        status.tokens_spent_total = None;
+        status.tokens_spent_scope = Some(crate::inference_budget::team::LIFETIME_SCOPE.into());
+        status.tokens_observed_at = None;
+        status.inference_budget_observation = None;
+    }
     write_status(teams, team, status).await.map(|_| ())
 }
 
@@ -204,6 +221,9 @@ async fn reconcile_valid(
     // Revoke old task-force authority and removed seats before creating anything.
     tasks::reconcile_revocations(tasks_api, team).await?;
     crate::team_commons::ensure_commons(client, team).await?;
+    if qualification::pause_finished(teams, tasks_api, team).await? {
+        return Ok(Action::requeue(Duration::from_secs(1)));
+    }
     let stats = runs::harvest_and_retire_runs(client, tasks_api, team).await?;
     let principal_name = specs::principal_name(team);
     tasks::apply_task(
@@ -241,12 +261,23 @@ async fn reconcile_valid(
         .and_then(|cadence| cadence.every_minutes);
     let finite = specs::has_positive_budget(&team.spec.envelope);
     let unsupported = specs::unsupported_budget(&team.spec.envelope);
-    let budget_error = if finite && !unsupported {
-        crate::inference_budget::team::ready(client, team, &principal_name)
-            .await
-            .err()
+    let governed = crate::inference_budget::team::governed(team);
+    let (tokens_spent_total, inference_budget_observation, budget_error) = if governed {
+        match crate::inference_budget::team::observe(client, team, &principal_name).await {
+            Ok(observation) => (
+                Some(observation.settled_tokens),
+                Some(observation.budget),
+                observation.admission.err(),
+            ),
+            Err(error) => (None, None, Some(error)),
+        }
     } else {
-        None
+        (Some(stats.tokens_total), None, None)
+    };
+    let tokens_spent_scope = if governed {
+        crate::inference_budget::team::LIFETIME_SCOPE
+    } else {
+        crate::inference_budget::team::SYNTHESIS_SCOPE
     };
     let bounded_plan = unsupported || budget_error.is_some();
     let manual_pending = requests::pending(team)?.is_some();
@@ -276,6 +307,7 @@ async fn reconcile_valid(
         let previous = parse_optional_time(prior.last_run_at.as_deref(), "lastRunAt")?;
         let due = previous.is_none_or(|previous| now >= previous + interval);
         if !team.spec.paused
+            && !qualification::marked(team)
             && !bounded_plan
             && !manual_pending
             && due
@@ -329,8 +361,10 @@ async fn reconcile_valid(
         });
         if !team.spec.paused && due {
             let summary = format!(
-                "{health}: {generated} run(s) generated, {} delivered, {} tokens spent, {entries} knowledge entries.",
-                stats.succeeded, stats.tokens_total,
+                "{health}: {generated} run(s) generated, {} delivered, {} tokens ({tokens_spent_scope}; monetary cost not measured), {entries} knowledge entries.",
+                stats.succeeded,
+                tokens_spent_total
+                    .map_or_else(|| "unavailable".into(), |tokens| tokens.to_string()),
             );
             crate::team_digest::publish(
                 client,
@@ -340,7 +374,8 @@ async fn reconcile_valid(
                 &summary,
                 generated,
                 stats.succeeded,
-                stats.tokens_total,
+                tokens_spent_total,
+                tokens_spent_scope,
                 entries,
             )
             .await?;
@@ -348,7 +383,7 @@ async fn reconcile_valid(
         }
     }
     let detail = if team.spec.paused {
-        "Team hibernating — members and runs governed-but-idle; charter loop paused.".into()
+        format!("Scheduling paused — no new runs will start. {} current run(s) may finish with normal usage accounting; Resume enables future scheduling, not replay.", stats.active)
     } else if let Some(error) = &budget_error {
         format!(
             "Governed inference admissions paused: {error}. No new cadence or launch is admitted; existing Task UIDs and funded work are retained."
@@ -393,7 +428,10 @@ async fn reconcile_valid(
             detail: Some(detail),
             health: Some(health.into()),
             runs_succeeded: Some(stats.succeeded),
-            tokens_spent_total: Some(stats.tokens_total),
+            tokens_spent_total,
+            tokens_spent_scope: Some(tokens_spent_scope.into()),
+            tokens_observed_at: tokens_spent_total.map(|_| now.to_rfc3339()),
+            inference_budget_observation,
             commons_entry_count: Some(entries),
             last_success_at,
             last_digest_at,
@@ -420,24 +458,67 @@ async fn reconcile_valid(
     }))
 }
 
+fn status_needs_update(
+    previous: &serde_json::Value,
+    desired: &serde_json::Value,
+    now: DateTime<Utc>,
+) -> bool {
+    if previous == desired {
+        return false;
+    }
+    let Some(observed) = previous["tokensObservedAt"]
+        .as_str()
+        .and_then(parse_rfc3339)
+    else {
+        return true;
+    };
+    if !desired["tokensObservedAt"].is_string()
+        || now < observed
+        || (now - observed).num_seconds() >= REQUEUE_OK.as_secs() as i64
+    {
+        return true;
+    }
+    // Status events must not turn an unchanged observation into a hot write loop.
+    // Retain its real timestamp until the normal freshness interval elapses.
+    let mut comparable = desired.clone();
+    comparable["tokensObservedAt"] = previous["tokensObservedAt"].clone();
+    previous != &comparable
+}
+
 async fn write_status(
     teams: &Api<KarsTeam>,
     team: &KarsTeam,
     status: KarsTeamStatus,
 ) -> Result<KarsTeam, ReconcileError> {
+    let uid = tasks::owner_ref(team)?.uid;
+    let version = resource_version(team)?;
     let mut value = serde_json::to_value(status)?;
     // Merge-patch must clear removed optional authority facts, not retain a stale digest.
     if let Some(previous) = &team.status {
-        for (key, _) in serde_json::to_value(previous)?
-            .as_object()
-            .into_iter()
-            .flatten()
-        {
+        let previous = serde_json::to_value(previous)?;
+        if !status_needs_update(&previous, &value, Utc::now()) {
+            return Ok(team.clone());
+        }
+        for (key, _) in previous.as_object().into_iter().flatten() {
             value
                 .as_object_mut()
                 .expect("status is an object")
                 .entry(key.clone())
                 .or_insert(serde_json::Value::Null);
+        }
+    }
+    // Merge-patch must remove a prior finite ceiling when the verified account
+    // becomes unbounded; omitting a nested limit would preserve the old value.
+    if let Some(observation) = value.get_mut("inferenceBudgetObservation") {
+        for field in ["originalLimits", "effectiveLimits"] {
+            if let Some(limits) = observation
+                .get_mut(field)
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                for dimension in ["tokens", "usdMicros"] {
+                    limits.entry(dimension).or_insert(serde_json::Value::Null);
+                }
+            }
         }
     }
     Ok(teams
@@ -446,8 +527,8 @@ async fn write_status(
             &PatchParams::default(),
             &Patch::Merge(json!({
                 "metadata": {
-                    "uid": tasks::owner_ref(team)?.uid,
-                    "resourceVersion": resource_version(team)?,
+                    "uid": uid,
+                    "resourceVersion": version,
                 },
                 "status": value,
             })),

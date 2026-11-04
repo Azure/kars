@@ -98,8 +98,9 @@ pub struct KarsTeamSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub knowledge_commons: Option<String>,
 
-    /// When `true` the team **hibernates**: members stay governed-but-idle and
-    /// the charter loop does not tick (idle-scaled, budget-preserving, §11).
+    /// When `true`, no new runs are scheduled. Already-authorized work may
+    /// finish with normal usage accounting. Resume enables future scheduling;
+    /// it does not replay stopped runs or restore process checkpoints.
     #[serde(default)]
     pub paused: bool,
 
@@ -202,6 +203,9 @@ pub struct KarsTeamStatus {
     /// Lifetime Team-UID inference account; cadence runs never reset its balance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inference_budget_account: Option<crate::inference_budget_contract::AccountReference>,
+    /// Verified lifetime limits and meters, refreshed with tokensObservedAt; absent on read failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference_budget_observation: Option<crate::inference_budget_contract::TeamBudgetObservation>,
     /// Lifecycle phase: `Forming` (validating + materializing), `Active`
     /// (running, cadence ticking), `Hibernating` (paused/idle), `Degraded`
     /// (envelope invalid — no authority to operate), `Retired`.
@@ -262,9 +266,18 @@ pub struct KarsTeamStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runs_succeeded: Option<i64>,
 
-    /// Total tokens spent across all of the team's standing-operation runs.
+    /// Settled lifetime governed inference, or retained root synthesis for legacy Teams.
+    /// Unavailable accounting is absent, never zero or a synthesis fallback.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokens_spent_total: Option<i64>,
+
+    /// `GovernedInferenceLifetime` or `RetainedRootSynthesis`; not monetary cost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_spent_scope: Option<String>,
+
+    /// RFC3339 time of the authenticated accounting observation (absent on failure).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_observed_at: Option<String>,
 
     /// Number of entries in the team's knowledge commons (shared memory size).
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -98,6 +98,9 @@ func configure(issuer, dir, storage string) error {
 		"web":      map[string]any{"http": "0.0.0.0:5556"},
 		"frontend": map[string]any{"dir": "/srv/dex/web"},
 		"oauth2":   map[string]any{"skipApprovalScreen": true},
+		"expiry": map[string]any{
+			"refreshTokens": map[string]any{"reuseInterval": "0s"},
+		},
 		"staticClients": []any{map[string]any{
 			"id": clientID, "name": "Ephemeral packaging test",
 			"secretEnv": "DEX_TEST_CLIENT_SECRET", "redirectURIs": []string{callback},
@@ -158,7 +161,7 @@ func login(issuer, password, verifier, nonce string, shouldSucceed bool) (string
 	query := url.Values{
 		"client_id": {clientID}, "redirect_uri": {callback}, "response_type": {"code"},
 		"scope": {"openid profile email offline_access"}, "state": {state}, "nonce": {nonce},
-		"code_challenge": {base64.RawURLEncoding.EncodeToString(challenge[:])},
+		"code_challenge":        {base64.RawURLEncoding.EncodeToString(challenge[:])},
 		"code_challenge_method": {"S256"}, "connector_id": {"local"},
 	}
 	resp, err := c.Get(issuer + "/auth?" + query.Encode())
@@ -298,7 +301,9 @@ func verifyIDToken(c *http.Client, issuer, nonce, idToken string) (verifiedIDTok
 	if header.Alg != "RS256" || header.Kid == "" {
 		return verifiedIDToken{}, fmt.Errorf("unexpected JWT algorithm or missing kid")
 	}
-	var jwks struct{ Keys []struct{ Kty, Kid, N, E string } }
+	var jwks struct {
+		Keys []struct{ Kty, Kid, N, E string }
+	}
 	if err := getJSON(c, issuer+"/keys", &jwks); err != nil {
 		return verifiedIDToken{}, err
 	}
@@ -338,9 +343,9 @@ func verifyIDToken(c *http.Client, issuer, nonce, idToken string) (verifiedIDTok
 	}
 	var claims struct {
 		Iss, Sub, Nonce, Email string
-		Aud                   json.RawMessage
-		Exp                   int64
-		EmailVerified         bool `json:"email_verified"`
+		Aud                    json.RawMessage
+		Exp                    int64
+		EmailVerified          bool `json:"email_verified"`
 	}
 	if err := json.Unmarshal(payload, &claims); err != nil {
 		return verifiedIDToken{}, err
@@ -399,6 +404,26 @@ func verify(issuer, nonce string, tokens tokenSet) (signingKeyIdentity, error) {
 	return verified.SigningKey, nil
 }
 
+func refresh(issuer, secret string, creds *credentials) error {
+	tokens, err := exchange(issuer, secret, url.Values{
+		"grant_type": {"refresh_token"}, "refresh_token": {creds.Refresh},
+	}, true)
+	if err != nil {
+		return err
+	}
+	if tokens.Refresh == creds.Refresh {
+		return fmt.Errorf("refresh reused the token instead of exercising fresh rotation")
+	}
+	signingKey, err := verify(issuer, creds.Nonce, tokens)
+	if err != nil {
+		return err
+	}
+	creds.Refresh = tokens.Refresh
+	creds.IDToken = tokens.ID
+	creds.SigningKey = signingKey
+	return nil
+}
+
 func check(issuer, dir, mode string) error {
 	c, err := client()
 	if err != nil {
@@ -450,14 +475,7 @@ func check(issuer, dir, mode string) error {
 		if previous.SigningKey != creds.SigningKey {
 			return fmt.Errorf("pre-restart signing-key identity changed")
 		}
-		tokens, err := exchange(issuer, secret, url.Values{
-			"grant_type": {"refresh_token"}, "refresh_token": {creds.Refresh},
-		}, true)
-		if err != nil {
-			return err
-		}
-		_, err = verify(issuer, creds.Nonce, tokens)
-		return err
+		return refresh(issuer, secret, &creds)
 	}
 	verifier, err := randomToken()
 	if err != nil {
@@ -502,6 +520,9 @@ func check(issuer, dir, mode string) error {
 			creds.IDToken = tokens.ID
 			creds.SigningKey = signingKey
 		}
+	}
+	if err := refresh(issuer, secret, &creds); err != nil {
+		return fmt.Errorf("fresh refresh rotation: %w", err)
 	}
 	return writeJSON(filepath.Join(dir, "credentials.json"), creds, 0600)
 }

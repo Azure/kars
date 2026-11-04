@@ -154,6 +154,23 @@ impl WorkloadIdentityAuth {
         }
     }
 
+    /// Pair Azure credentials with their wire header, including Foundry project APIs.
+    pub async fn get_auth_header(
+        &self,
+        resource: &str,
+    ) -> Result<(reqwest::header::HeaderName, reqwest::header::HeaderValue)> {
+        let token = self.get_token(resource).await?;
+        let (name, value) = if self.is_api_key_mode() {
+            (reqwest::header::HeaderName::from_static("api-key"), token)
+        } else {
+            (reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
+        };
+        let mut value = reqwest::header::HeaderValue::from_str(&value)
+            .context("Azure credential is not a valid HTTP header value")?;
+        value.set_sensitive(true);
+        Ok((name, value))
+    }
+
     /// Returns true if using API key auth (dev mode), false if Workload Identity.
     pub fn is_api_key_mode(&self) -> bool {
         // Sidecar mode is neither api-key nor pure WI; report as
@@ -348,6 +365,71 @@ mod tests {
     fn test_is_api_key_mode_without_key() {
         let auth = make_auth(None);
         assert!(!auth.is_api_key_mode());
+    }
+
+    #[tokio::test]
+    async fn azure_auth_header_uses_api_key_for_project_and_inference_audiences() {
+        let auth = make_auth(Some("test-resource-key"));
+        for audience in [
+            "https://ai.azure.com",
+            "https://cognitiveservices.azure.com",
+        ] {
+            let (name, value) = auth.get_auth_header(audience).await.unwrap();
+            assert_eq!(name, "api-key");
+            assert_eq!(value, "test-resource-key");
+            assert!(value.is_sensitive());
+        }
+    }
+
+    #[tokio::test]
+    async fn azure_auth_header_preserves_identity_tokens_and_audiences() {
+        let auth = make_auth(None);
+        for (audience, token) in [
+            ("https://ai.azure.com", "project-token"),
+            ("https://cognitiveservices.azure.com", "inference-token"),
+        ] {
+            insert_cached_token(
+                &mut *auth.token_cache.write().await,
+                audience,
+                token,
+                std::time::Duration::from_secs(3600),
+            );
+            let (name, value) = auth.get_auth_header(audience).await.unwrap();
+            assert_eq!(name, reqwest::header::AUTHORIZATION);
+            assert_eq!(value.to_str().unwrap(), format!("Bearer {token}"));
+            assert!(value.is_sensitive());
+        }
+    }
+
+    #[tokio::test]
+    async fn azure_auth_header_rejects_invalid_key_without_panicking() {
+        let auth = make_auth(Some("invalid\r\nkey"));
+        let error = auth
+            .get_auth_header("https://ai.azure.com")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("not a valid HTTP header"));
+        assert!(!format!("{error:#}").contains("invalid\r\nkey"));
+    }
+
+    #[tokio::test]
+    async fn azure_auth_header_never_falls_back_from_entra_to_api_key() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::any())
+            .respond_with(wiremock::ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let auth = WorkloadIdentityAuth::for_test(
+            Some("must-not-be-used"),
+            Some(crate::sidecar_client::SidecarClient::for_test(server.uri())),
+        );
+        assert!(!auth.is_api_key_mode());
+        let error = auth
+            .get_auth_header("https://ai.azure.com")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("refusing to fall back"));
     }
 
     #[tokio::test]

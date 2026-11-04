@@ -38,6 +38,12 @@ the page a new shift opens to triage cluster health. It bundles:
 Live-updates via Headlamp's `useList()` (watch + long-poll) so the
 Proposed → Approved → Applied → Recovered walk is visible without F5.
 
+SRE views use the signed-in user's Kubernetes permissions. Failed sandbox,
+action, or workload reads appear as **SRE state unavailable**, not an absent
+installation, empty approval queue, or healthy cluster. The install prompt
+requires a successful sandbox inventory read. Signing in through OIDC does not
+grant additional Kubernetes access.
+
 The sibling **`/kars/sre/chat`** page embeds the Hermes WebUI in
 an iframe (local port-forward by default, apiserver service-proxy
 fallback). Run `kars connect sre --web --port 18789` in another
@@ -46,6 +52,11 @@ terminal to populate the iframe.
 Detail panes show `.spec`, `.status`, and a typed Conditions table with
 status colouring (Ready / Provisioned → green, Degraded / Failed → red,
 everything else → amber).
+
+Policy metrics are fleet-wide aggregates, not per-policy attribution.
+ToolPolicy enforcement shows the controller's confirmation and report because
+its status does not expose a separate loaded digest. InferencePolicy and
+KarsMemory retain their compiled-versus-loaded digest comparisons.
 
 > **Status chip semantics.** Chips are **reason-aware**: when the
 > `Ready` condition carries a hard-failure reason
@@ -185,10 +196,17 @@ pulse colours per relay-edge:
 Controller → sub-agent edges are dashed (logical hierarchy; the
 actual frames still flow via the relay).
 
-### Token Budget panels
+### Channel discovery
+
+Credential discovery uses the logged-in operator's existing Kubernetes permissions.
+Denied or failed Secret reads are shown as unavailable, never as “No channels
+configured.” Loading is explicit; any known inline channels remain visible with
+an incomplete-discovery notice. The plugin does not grant additional Secret access.
+
+### Token Usage panels
 
 The Overview page and each KarsSandbox detail page also render a
-**💰 Token Budget (24 h)** card that joins:
+**💰 Token Usage (24 h)** card that joins:
 
 - `InferencePolicy.spec.tokenBudget.{dailyTokens,perRequestTokens}`
   (read via Headlamp's Kubernetes client)
@@ -196,11 +214,35 @@ The Overview page and each KarsSandbox detail page also render a
   Prometheus
 
 The sandbox → policy link uses
-`KarsSandbox.spec.inferenceRef.name`.
-The rolling 24-hour Prometheus estimate is not the router's calendar ledger or
-proof of policy enforcement. Loading, failed, malformed and non-finite telemetry
-is displayed as unavailable, not zero consumption. An empty token-query result
-is displayed as missing samples rather than a zero-used budget.
+`KarsSandbox.spec.inferenceRef.name` in the sandbox CR's namespace.
+Declared daily/per-request settings are shown separately from observed usage;
+they do not establish effective account limits. Record-only beta accounting has
+no spending ceiling, and these metrics cannot determine remaining budget or expiry.
+The panels therefore do not compute remaining tokens, utilization or over-budget
+warnings from a rolling window. Production enforcement remains unchanged.
+Loading, failed, malformed and non-finite telemetry is displayed as unavailable,
+not zero consumption. Missing sandbox/direction samples stay unknown; the fleet
+total includes only observed sandboxes and reports its sample coverage.
+
+### Grafana connection
+
+Grafana is optional (`monitoring.grafana.enabled`, disabled by default). Without
+an explicit endpoint, both dashboard entry points check the selected cluster's
+`monitoring/kps-grafana` Service using the operator's existing permissions. Missing,
+loading and forbidden discovery are distinguished; an absent installation does
+not render a broken iframe.
+
+For local Headlamp, the documented `kars headlamp` command starts the Grafana
+forward on port 3000 when that Service exists. For remote or separately managed
+Grafana, set the existing `window.KARS_GRAFANA_URL` override to its browser-reachable
+HTTP(S) base URL (including any subpath). Remote Headlamp never assumes a localhost
+Grafana. URL credentials, query strings, fragments and non-HTTP(S) schemes are
+rejected. Both entry points open Grafana in a separate tab, preserving the selected
+sandbox filter and Grafana's authenticated session. Headlamp does not embed Grafana:
+its default anti-framing policy and browser cookie protections remain unchanged.
+The inference-policy link remains available while telemetry is loading or failing.
+Idle inference and policy-evaluation histograms show **No observations**, not zero
+latency; absent evaluation counters show **No samples**, not a fabricated count.
 
 ### Prometheus connection
 
@@ -216,7 +258,7 @@ For a separately managed endpoint, explicitly set
 intentional local forward). External requests do not receive Kubernetes
 credentials and require the endpoint's normal browser/CORS access.
 
-Core-managed Headlamp does not currently install Prometheus; the separate
-standalone observability installer supplies it. Missing Services, denied proxy
-access and unavailable endpoints remain explicit telemetry failures. There is no
-automatic fallback to a local forward or a different cluster.
+The Core chart's monitoring dependency or the separate standalone observability
+installer supplies Prometheus. Missing Services, denied proxy access and unavailable
+endpoints remain explicit telemetry failures. There is no automatic fallback to a
+local forward or a different cluster.

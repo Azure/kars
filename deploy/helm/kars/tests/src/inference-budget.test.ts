@@ -18,7 +18,11 @@ function render(inferenceBudget?: unknown, existingSecret?: unknown, routerTag?:
   try {
     cpSync(join(chart, "templates"), join(fixture, "templates"), { recursive: true });
     cpSync(join(chart, "files"), join(fixture, "files"), { recursive: true });
-    cpSync(join(chart, "Chart.yaml"), join(fixture, "Chart.yaml"));
+    // This suite qualifies Core's budget templates, not dependency workloads
+    // whose separate preflights require a production installation namespace.
+    const chartMetadata = parse(readFileSync(join(chart, "Chart.yaml"), "utf8"));
+    delete chartMetadata.dependencies;
+    writeFileSync(join(fixture, "Chart.yaml"), JSON.stringify(chartMetadata));
     const values = parse(readFileSync(join(chart, "values.yaml"), "utf8"));
     delete values.inferenceBudget;
     if (inferenceBudget !== undefined) values.inferenceBudget = inferenceBudget;
@@ -64,6 +68,72 @@ const configured = {
 };
 
 describe("governed inference budget Helm contract", () => {
+  it("defaults to enforcement and explicitly selects protected record-only accounting for Kind beta", () => {
+    const catalog = (documents: any[]) => documents.find((doc: any) =>
+      doc.kind === "ConfigMap" && doc.metadata.name === "kars-inference-budget-contracts");
+    expect(catalog(render(configured)).data["calendar-policy"]).toBe("enforce");
+    const beta = parse(readFileSync(join(chart, "values-kind-beta.yaml"), "utf8"));
+    expect(beta.inferenceBudget.calendarPolicy).toBe("record-only");
+    expect(catalog(render({ ...configured, ...beta.inferenceBudget })).data["calendar-policy"]).toBe("record-only");
+    for (const calendarPolicy of ["", "invalid", false, null, 1]) {
+      expect(() => render({ ...configured, calendarPolicy })).toThrow(/calendarPolicy must be enforce or record-only/);
+    }
+    expect(() => render({ enabled: false, calendarPolicy: "record-only" })).toThrow(/requires inferenceBudget.enabled/);
+    const admission = render(configured).find((doc: any) =>
+      doc.kind === "ValidatingAdmissionPolicy" && doc.metadata.name === "kars-inference-budget-token-top-ups");
+    expect(admission.spec.validations[0].expression).toContain("variables.oldCalendarPolicy == variables.newCalendarPolicy");
+    expect(admission.spec.validations[0].expression).toContain("check('fund').allowed()");
+  });
+  it("persists unbounded token consent behind native fund permission without changing original grants", () => {
+    const unboundedTokenAllowances = [{
+      id: "beta-unbounded", configUid: "catalog-uid", accountUid: "account-uid",
+      root: { kind: "KarsTeam", resource: { namespace: "workspace", name: "team", uid: "team-uid" },
+        workspaceUid: "workspace-uid", clusterUid: "cluster-uid" },
+      originalLimits: { tokens: 100 }, ledgerDigest: `sha256:${"a".repeat(64)}`,
+      previousTokenTopUpIds: [],
+    }];
+    const documents = render({ ...configured, unboundedTokenAllowances });
+    const catalog = documents.find((doc: { kind: string; metadata: { name: string } }) =>
+      doc.kind === "ConfigMap" && doc.metadata.name === "kars-inference-budget-contracts");
+    expect(JSON.parse(catalog.data["unbounded-token-allowances.json"])).toEqual(unboundedTokenAllowances);
+    expect(JSON.parse(catalog.data["token-top-ups.json"])).toEqual([]);
+    const admission = documents.find((doc: { kind: string; metadata: { name: string } }) =>
+      doc.kind === "ValidatingAdmissionPolicy" && doc.metadata.name === "kars-inference-budget-token-top-ups");
+    expect(admission.spec.variables.filter((v: { name: string }) => v.name.endsWith("Unbounded")))
+      .toHaveLength(2);
+    expect(admission.spec.validations[0].expression).toContain("variables.oldUnbounded == variables.newUnbounded");
+    expect(admission.spec.validations[0].expression).toContain("check('fund').allowed()");
+    expect(() => render({ enabled: false, unboundedTokenAllowances }))
+      .toThrow(/unboundedTokenAllowances requires inferenceBudget.enabled/);
+  });
+  it("stores UID-bound funding without changing the qualified controller template", () => {
+    const builtInFunding = [{
+      root: {
+        kind: "KarsSandbox",
+        resource: { namespace: "customer-system", name: "sre", uid: "sandbox-uid" },
+        workspaceUid: "workspace-uid", clusterUid: "cluster-uid",
+      },
+      limits: { tokens: 1234 }, expiresAt: "2030-01-01T00:00:00Z",
+    }];
+    const documents = render({ ...configured, builtInFunding });
+    const controller = documents.find((doc: { kind: string; metadata: { name: string } }) =>
+      doc.kind === "Deployment" && doc.metadata.name === "kars-controller");
+    const env = controller.spec.template.spec.containers[0].env;
+    expect(env.some((entry: { name: string }) => entry.name === "KARS_BUILTIN_INFERENCE_FUNDING")).toBe(false);
+    const config = documents.find((doc: { kind: string; metadata: { name: string } }) =>
+      doc.kind === "ConfigMap" && doc.metadata.name === "kars-inference-budget-contracts");
+    expect(JSON.parse(config.data["built-in-funding.json"])).toEqual(builtInFunding);
+    const unfunded = render(configured).find((doc: { kind: string; metadata: { name: string } }) =>
+      doc.kind === "Deployment" && doc.metadata.name === "kars-controller");
+    expect(controller).toEqual(unfunded);
+    const definition = documents.find((doc: { kind: string; spec?: { names?: { kind?: string } } }) =>
+      doc.kind === "CustomResourceDefinition" && doc.spec?.names?.kind === "KarsBudgetAccount");
+    expect(definition.spec.versions[0].schema.openAPIV3Schema.properties.spec.properties.root.properties.kind.enum)
+      .toEqual(["KarsTask", "KarsTeam", "KarsSandbox"]);
+    expect(() => render({ enabled: false, builtInFunding }))
+      .toThrow(/builtInFunding requires inferenceBudget.enabled/);
+  });
+
   it("allows calendar sandboxes only through the authenticated accounting transport", () => {
     const documents = render(configured);
     const network = documents.find((doc: { kind: string; metadata: { name: string } }) =>
@@ -169,6 +239,21 @@ describe("governed inference budget Helm contract", () => {
     },
   );
 
+  it("freezes every maintained Sandbox spec field except suspension in the built-in lifecycle projection", () => {
+    const documents = render(configured);
+    const sandbox = documents.find((doc: { kind: string; spec?: { names?: { kind?: string } } }) =>
+      doc.kind === "CustomResourceDefinition" && doc.spec?.names?.kind === "KarsSandbox");
+    const policy = documents.find((doc: { kind: string; metadata: { name: string } }) =>
+      doc.kind === "ValidatingAdmissionPolicy" && doc.metadata.name === "kars-inference-budget-runtime-binding");
+    const projection = policy.spec.variables.find((variable: { name: string }) => variable.name === "suspensionOnly").expression;
+    for (const field of Object.keys(sandbox.spec.versions[0].schema.openAPIV3Schema.properties.spec.properties)) {
+      if (field !== "suspended") {
+        expect(projection.split(" && ")).toContain(`dyn(object.spec).?${field} == dyn(oldObject.spec).?${field}`);
+      }
+    }
+    expect(projection).not.toContain(".?suspended");
+  });
+
   it("uses the exact runtime-verified admission bundle and custom controller namespace", () => {
     const documents = render(configured);
     const bundle = JSON.parse(readFileSync(join(chart, "files/inference-budget-admission.json"), "utf8")
@@ -187,7 +272,8 @@ describe("governed inference budget Helm contract", () => {
       version: configured.catalogVersion, contracts: configured.contracts,
       nonInferenceEgressHosts: configured.nonInferenceEgressHosts,
     });
-    expect(documents.some((doc: { kind: string }) => doc.kind === "Secret")).toBe(false);
+    expect(documents.some((doc: { kind: string; metadata: { name: string } }) =>
+      doc.kind === "Secret" && doc.metadata.name === configured.tlsSecretName)).toBe(false);
   });
 
   it.each(["catalogVersion", "contracts", "caBundle", "tlsSecretName", "routerImageDigest"])(
@@ -205,7 +291,8 @@ describe("governed inference budget Helm contract", () => {
 
   it("installs supplied TLS only as a release-managed private Secret", () => {
     const documents = render({ ...configured, tls: suppliedTls });
-    const secrets = documents.filter((doc: { kind: string }) => doc.kind === "Secret");
+    const secrets = documents.filter((doc: { kind: string; metadata: { name: string } }) =>
+      doc.kind === "Secret" && doc.metadata.name === configured.tlsSecretName);
     expect(secrets).toHaveLength(1);
     const secret = secrets[0];
     expect(secret.metadata.name).toBe(configured.tlsSecretName);
@@ -279,7 +366,8 @@ describe("governed inference budget Helm contract", () => {
     expect(() => render({ ...configured, enabled: false, tls: suppliedTls }))
       .toThrow(/inferenceBudget.tls requires inferenceBudget.enabled/);
     const documents = render({ ...configured, enabled: false, tls: {} });
-    expect(documents.some((doc: { kind: string }) => doc.kind === "Secret")).toBe(false);
+    expect(documents.some((doc: { kind: string; metadata: { name: string } }) =>
+      doc.kind === "Secret" && doc.metadata.name === configured.tlsSecretName)).toBe(false);
   });
 
   it("rejects an invalid managed Secret name", () => {

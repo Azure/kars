@@ -14,6 +14,7 @@ import { useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { classifyIntent, type IntentKind } from "@/lib/classify-intent";
 import { Icon } from "@/components/icon";
+import { usePendingNavigation } from "@/components/navigation-link";
 
 const EXAMPLES: { label: string; text: string; kind: IntentKind }[] = [
   {
@@ -38,6 +39,7 @@ export function IntentEntry() {
   const [intent, setIntent] = useState("");
   const [override, setOverride] = useState<IntentKind | null>(null);
   const [pending, startTransition] = useTransition();
+  usePendingNavigation(pending);
 
   const auto = useMemo(() => classifyIntent(intent), [intent]);
   const kind: IntentKind = override ?? auto.kind;

@@ -127,7 +127,25 @@ ambiguous connection loss; those body/transport failures are never replayed.
 Both buffered and streaming failover end when successful response headers are
 accepted. A later body failure is never replayed onto another provider,
 including the chat-to-Responses recovery path. Responses-only model recovery
-retains the selected provider and effective deployment.
+retains the selected provider and effective deployment. This includes Foundry's
+explicit instruction to use `/v1/responses` when function tools combined with
+reasoning are unsupported on `/v1/chat/completions`: it is a request/API
+incompatibility, not evidence that the selected model is unavailable. The existing
+translation preserves reasoning effort, tool choice, and output limits; it does
+not select the workspace default model or disable reasoning. Declared Content
+Safety floors continue to block translation when their checks cannot be enforced.
+
+A complete HTTP 400 parameter rejection that explicitly instructs the caller to
+use `max_completion_tokens` instead of `max_tokens` gets one corrected Chat
+attempt on the same provider/model. The router renames only a positive integer
+legacy limit, preserving its value and all other controls; it does not retry
+missing, invalid, or conflicting limits. The retry uses normal proxy admission
+and settlement, retaining the first attempt and any unknown usage. Another
+rejection or transport failure is returned without another parameter correction.
+Parameter errors do not mark a model unavailable or switch it to the default
+model. Explicit Chat-to-Responses guidance is still honored when the error names
+a parameter such as `reasoning_effort`; other parameter errors do not trigger an
+API switch. This behavior is shared by buffered and streaming Chat requests.
 
 Provider families must support the request API. The public typed Anthropic
 provider continues to use `/anthropic/v1/messages`; Kars does not silently

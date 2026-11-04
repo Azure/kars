@@ -4,12 +4,14 @@
 // kars Bridge Workspace — Inbox. The fleet-wide decision queue. Every card
 // answers what/by-which-role/why/impact before the buttons (no rubber-stamping).
 
-import Link from "next/link";
+import Link from "@/components/navigation-link";
 import { ApprovalDecision } from "@/components/approval-decision";
+import { ApprovalDetail } from "@/components/approval-detail";
 import { ClarificationAnswer } from "@/components/clarification-answer";
-import { actionLabel } from "@/components/approval-phase-badge";
+import { actionLabel, approvalPhaseLabel } from "@/components/approval-phase-badge";
 import { HonestState } from "@/components/honest-state";
 import { Icon } from "@/components/icon";
+import { LiveRefresh } from "@/components/live-refresh";
 import { BffError, getDigests, listApprovals, listTeams } from "@/lib/bff";
 import { authWired, defaultNamespace, operatorIdentity } from "@/lib/config";
 import { currentPrincipal } from "@/lib/session";
@@ -31,6 +33,11 @@ function digestTone(health: string): string {
 }
 
 function DigestCard({ d, priorCount = 0 }: { d: Digest; priorCount?: number }) {
+  const scope = d.tokens_spent_scope === "GovernedInferenceLifetime"
+    ? "lifetime settled governed-inference tokens"
+    : d.tokens_spent_scope === "RetainedRootSynthesis" ? "retained root synthesis tokens" : null;
+  const tokens = scope && d.tokens_spent != null && Number.isSafeInteger(d.tokens_spent) && d.tokens_spent >= 0
+    ? d.tokens_spent.toLocaleString() : "Unavailable";
   return (
     <li className={`rounded-xl border ${digestTone(d.health)} bg-surface p-5`}>
       <div className="flex items-start justify-between gap-4">
@@ -50,7 +57,8 @@ function DigestCard({ d, priorCount = 0 }: { d: Digest; priorCount?: number }) {
       <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-xs text-foreground-muted">
         <span>{d.runs_generated} runs</span>
         <span>{d.runs_delivered} delivered</span>
-        <span>{d.tokens_spent.toLocaleString()} tokens</span>
+        <span>{tokens} {scope ?? "tokens"} (at report time)</span>
+        <span>Monetary cost not measured</span>
         <span>{d.knowledge_entries} knowledge entries</span>
         <span>{new Date(d.at).toLocaleString()}</span>
         {priorCount > 0 && (
@@ -78,8 +86,8 @@ function impactLine(a: Approval): string {
       return "Reaches an external system · review the destination";
     case "tierRaise":
       return a.requested_tier != null
-        ? `Raises this role's authority to Tier ${a.requested_tier} · grants more independence`
-        : "Raises this role's authority";
+        ? `Requests Tier ${a.requested_tier} · approval does not widen an already launched run`
+        : "Requests more autonomy · approval does not widen an already launched run";
     case "budgetRaise":
       return "Raises the governed token ceiling · tools and authority stay unchanged";
     case "clarification":
@@ -130,7 +138,7 @@ function DecisionCard({
             </Link>
           </div>
           <p className="mt-2 text-sm font-medium">{a.summary}</p>
-          {a.detail && <p className="mt-0.5 text-xs text-foreground-muted">{a.detail}</p>}
+          <ApprovalDetail actionKind={a.action_kind} detail={a.detail} />
           <p className="mt-2 inline-flex items-center gap-1.5 text-xs text-foreground-muted">
             <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 text-warning" fill="currentColor" aria-hidden>
               <path d="M8 1.5 1 14h14L8 1.5Zm0 5a.75.75 0 0 1 .75.75v3a.75.75 0 0 1-1.5 0v-3A.75.75 0 0 1 8 6.5ZM8 11.5a.9.9 0 1 0 0 1.8.9.9 0 0 0 0-1.8Z" />
@@ -140,7 +148,7 @@ function DecisionCard({
         </div>
         {decided && (
           <span className="shrink-0 text-right text-xs text-foreground-muted">
-            <span className="block">{a.phase}{a.decider ? ` by ${a.decider}` : ""}</span>
+            <span className="block">{approvalPhaseLabel(a.phase)}{a.decider ? ` by ${a.decider}` : ""}</span>
             {a.decided_at && <span className="block">{new Date(a.decided_at).toLocaleString()}</span>}
           </span>
         )}
@@ -206,7 +214,8 @@ export default async function WorkspaceInbox({
   }
 
   const pending = approvals.filter((a) => a.actionable);
-  const decided = approvals.filter((a) => !a.actionable);
+  const reconciling = approvals.filter((a) => a.phase === "DecisionRecorded");
+  const decided = approvals.filter((a) => !a.actionable && a.phase !== "DecisionRecorded");
   const visibleDecided = history === "all" ? decided : decided.slice(0, 10);
   const teamFor = (approval: Approval) =>
     teams.find(
@@ -233,6 +242,7 @@ export default async function WorkspaceInbox({
 
   return (
     <div className="space-y-6">
+      <LiveRefresh active intervalMs={8000} />
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Inbox</h1>
         <p className="mt-1 text-sm text-foreground-muted">
@@ -273,6 +283,20 @@ export default async function WorkspaceInbox({
               </ul>
             )}
           </section>
+
+          {reconciling.length > 0 && (
+            <section aria-label="Recorded decisions awaiting reconciliation">
+              <h2 className="mb-3 text-sm font-semibold">Decision recorded · reconciling</h2>
+              <p className="mb-3 text-xs text-foreground-muted">
+                Your decision is saved. The controller has not confirmed the outcome yet.
+              </p>
+              <ul className="space-y-3">
+                {reconciling.map((a) => (
+                  <DecisionCard key={a.name} a={a} decider={decider} auth={auth} team={teamFor(a)} />
+                ))}
+              </ul>
+            </section>
+          )}
 
           {decided.length > 0 && (
             <details className="rounded-xl border border-border bg-surface p-5">

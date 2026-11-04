@@ -45,6 +45,31 @@ fn denied() -> StoreError {
     BudgetError::Authorization.into()
 }
 
+fn rejection(stage: &'static str, error: StoreError) -> StoreError {
+    tracing::warn!(
+        authority_stage = stage,
+        "Governed inference authority rejected"
+    );
+    error
+}
+
+fn denied_at(stage: &'static str) -> StoreError {
+    rejection(stage, denied())
+}
+
+fn lineage_rejection(error: crate::task_identity::Error) -> StoreError {
+    use crate::task_identity::Error;
+    let stage = match &error {
+        Error::Identity => "task_lineage_identity",
+        Error::Changed => "task_lineage_changed",
+        Error::NotReady => "task_lineage_not_ready",
+        Error::Attenuation => "task_lineage_attenuation",
+        Error::Depth => "task_lineage_depth",
+        Error::Api { .. } => "task_lineage_api",
+    };
+    rejection(stage, error.into())
+}
+
 fn bearer(headers: &HeaderMap) -> Result<&str, StoreError> {
     headers
         .get("authorization")
@@ -167,14 +192,28 @@ pub async fn authenticate(
     identity: &ExecutionIdentity,
     dispatch: bool,
 ) -> Result<(), StoreError> {
-    identity.validate()?;
+    let (sandbox, binding) = authenticate_runtime(client, headers, account, identity, dispatch).await?;
+    authenticate_ledger(client, account, identity, &sandbox, &binding, dispatch).await
+}
+
+/// Verify the live router and its account binding before restoring any history.
+pub(super) async fn authenticate_runtime(
+    client: &Client,
+    headers: &HeaderMap,
+    account: &KarsBudgetAccount,
+    identity: &ExecutionIdentity,
+    dispatch: bool,
+) -> Result<(KarsSandbox, RouterBinding), StoreError> {
+    identity
+        .validate()
+        .map_err(|error| rejection("execution_identity", error.into()))?;
     let ledger = account
         .status
         .as_ref()
         .and_then(|status| status.ledger.as_ref())
-        .ok_or_else(denied)?;
+        .ok_or_else(|| denied_at("account_ledger"))?;
     if dispatch && ledger.phase != crate::inference_budget_contract::AccountPhase::Active {
-        return Err(denied());
+        return Err(denied_at("account_phase"));
     }
     let runtime_namespace = format!("kars-{}", identity.sandbox.name);
     let user = review_router_token(
@@ -184,7 +223,8 @@ pub async fn authenticate(
         &identity.pod_name,
         &identity.pod_uid,
     )
-    .await?;
+    .await
+    .map_err(|error| rejection("router_token", error))?;
 
     let namespaces: Api<Namespace> = Api::all(client.clone());
     let workspace = namespaces
@@ -199,7 +239,7 @@ pub async fn authenticate(
         || workspace.metadata.deletion_timestamp.is_some()
         || cluster.metadata.uid.as_deref() != Some(ledger.root.cluster_uid.as_str())
     {
-        return Err(denied());
+        return Err(denied_at("workspace_incarnation"));
     }
     let namespace = namespaces
         .get(&runtime_namespace)
@@ -212,7 +252,7 @@ pub async fn authenticate(
             .map(String::as_str)
             != Some("v1")
     {
-        return Err(denied());
+        return Err(denied_at("runtime_namespace"));
     }
     let sandboxes: Api<KarsSandbox> = Api::namespaced(client.clone(), &identity.sandbox.namespace);
     let sandbox = sandboxes
@@ -221,10 +261,10 @@ pub async fn authenticate(
         .map_err(|e| api_error("verify budget Sandbox", e))?;
     if sandbox.metadata.uid.as_deref() != Some(identity.sandbox.uid.as_str())
         || !crate::reconciler::namespace_ownership::claimed(&namespace, &sandbox)
-            .map_err(|_| denied())?
+            .map_err(|_| denied_at("sandbox_namespace_claim"))?
         || (dispatch && sandbox.metadata.deletion_timestamp.is_some())
     {
-        return Err(denied());
+        return Err(denied_at("sandbox_ownership"));
     }
     let pods: Api<Pod> = Api::namespaced(client.clone(), &runtime_namespace);
     let pod = pods
@@ -240,17 +280,15 @@ pub async fn authenticate(
         || (dispatch && pod.metadata.deletion_timestamp.is_some())
         || !has_router_only_projection(&pod)
     {
-        return Err(denied());
+        return Err(denied_at("pod_identity_or_projection"));
     }
-    verify_workload_owner(client, &pod, &sandbox, &runtime_namespace, dispatch).await?;
-    verify_agent_privileges(client, &user, &runtime_namespace, &identity.pod_name).await?;
-
-    // This is the combined-privacy prerequisite, not an agent-admin-token
-    // fallback. It performs real shared Secret GET/LIST/WATCH denial checks and
-    // validates the current v2 registration when present.
-    let epoch = crate::sre_authority::privacy_epoch(client, &runtime_namespace)
+    verify_workload_owner(client, &pod, &sandbox, &runtime_namespace, dispatch)
         .await
-        .map_err(|_| denied())?;
+        .map_err(|error| rejection("workload_owner", error))?;
+    verify_agent_privileges(client, &user, &runtime_namespace, &identity.pod_name)
+        .await
+        .map_err(|error| rejection("agent_privileges", error))?;
+
     let encoded = pod
         .spec
         .as_ref()
@@ -266,19 +304,88 @@ pub async fn authenticate(
         })
         .and_then(|value| value.value.as_deref())
         .ok_or_else(denied)?;
-    let binding: RouterBinding = serde_json::from_str(encoded).map_err(|_| denied())?;
-    if binding.privacy_epoch != epoch
-        || binding.sandbox != identity.sandbox
+    let binding: RouterBinding =
+        serde_json::from_str(encoded).map_err(|_| denied_at("router_binding_encoding"))?;
+    verify_privacy_epoch(client, &runtime_namespace, &binding.privacy_epoch, dispatch).await?;
+    if binding.sandbox != identity.sandbox
         || binding.runtime_namespace != runtime_namespace
         || binding.runtime_namespace_uid != identity.runtime_namespace_uid
         || binding.task.task_uid != identity.task_uid
         || binding.task.authorization_digest != identity.authorization_digest
         || binding.task.account.uid != ledger.account_uid
+        || binding.task.account.name != account.name_any()
+        || Some(binding.task.account.namespace.as_str()) != account.metadata.namespace.as_deref()
         || binding.task.root != ledger.root
+    {
+        return Err(denied_at("router_binding_identity"));
+    }
+    if ledger.root.kind == RootKind::KarsSandbox
+        && sandbox.spec.inference_budget_ref.as_ref() != Some(&binding.task)
     {
         return Err(denied());
     }
-    verify_task_binding(client, account, ledger, identity, &sandbox, dispatch).await
+    Ok((sandbox, binding))
+}
+
+pub(super) async fn authenticate_ledger(
+    client: &Client,
+    account: &KarsBudgetAccount,
+    identity: &ExecutionIdentity,
+    sandbox: &KarsSandbox,
+    binding: &RouterBinding,
+    dispatch: bool,
+) -> Result<(), StoreError> {
+    let ledger = account.status.as_ref().and_then(|status| status.ledger.as_ref())
+        .ok_or_else(|| denied_at("account_ledger"))?;
+    if dispatch && ledger.phase != crate::inference_budget_contract::AccountPhase::Active {
+        return Err(denied_at("account_phase"));
+    }
+    if ledger.root.kind == RootKind::KarsSandbox {
+        if dispatch {
+            super::builtin::verify_registration(
+                client,
+                sandbox,
+                &identity.runtime_namespace_uid,
+                &binding.privacy_epoch,
+            )
+            .await?;
+            super::builtin::verify_dispatch_grant(client, ledger, sandbox).await?;
+        }
+        super::builtin::verify_binding(ledger, sandbox, identity, dispatch)
+    } else {
+        verify_task_binding(client, account, ledger, identity, sandbox, dispatch).await
+    }
+}
+
+pub(super) async fn verify_privacy_epoch(
+    client: &Client,
+    namespace: &str,
+    projected_epoch: &Option<String>,
+    dispatch: bool,
+) -> Result<(), StoreError> {
+    check_privacy_readiness(
+        crate::sre_authority::privacy_readiness(client, namespace).await,
+        projected_epoch,
+        dispatch,
+    )
+}
+
+fn check_privacy_readiness(
+    readiness: Result<crate::sre_authority::PrivacyReadiness, String>,
+    projected_epoch: &Option<String>,
+    dispatch: bool,
+) -> Result<(), StoreError> {
+    use crate::sre_authority::PrivacyReadiness;
+
+    // Live Secret denial, registration identity, admission and credential-guard
+    // checks still apply. Rotation fences new dispatch, not the original
+    // authenticated router's settlement of an already accepted liability.
+    match readiness.map_err(|_| denied_at("privacy_epoch"))? {
+        PrivacyReadiness::Qualified(epoch) if !dispatch || epoch == *projected_epoch => Ok(()),
+        PrivacyReadiness::Pending if !dispatch => Ok(()),
+        PrivacyReadiness::Pending => Err(StoreError::PrivacyPending),
+        _ => Err(denied_at("privacy_epoch")),
+    }
 }
 
 pub(super) async fn review_router_token(
@@ -520,7 +627,10 @@ async fn verify_task_binding(
     sandbox: &KarsSandbox,
     dispatch: bool,
 ) -> Result<(), StoreError> {
-    let node = ledger.nodes.get(&identity.task_uid).ok_or_else(denied)?;
+    let node = ledger
+        .nodes
+        .get(&identity.task_uid)
+        .ok_or_else(|| denied_at("task_ledger_node"))?;
     let refs = sandbox
         .metadata
         .owner_references
@@ -533,7 +643,7 @@ async fn verify_task_binding(
             && owner.uid == identity.task_uid
             && owner.name == node.authority.task.name
     }) {
-        return Err(denied());
+        return Err(denied_at("task_sandbox_owner"));
     }
     if !dispatch {
         let session = ledger.sessions.get(&identity.pod_uid).ok_or_else(denied)?;
@@ -553,18 +663,25 @@ async fn verify_task_binding(
         &leaf,
         crate::task_identity::LeafReadiness::RequireReady,
     )
-    .await?;
+    .await
+    .map_err(lineage_rejection)?;
     if lineage.workspace_uid != ledger.root.workspace_uid
         || lineage.nodes.len() != ledger.ancestors(&identity.task_uid)?.len()
     {
-        return Err(denied());
+        return Err(denied_at("task_lineage_scope"));
     }
     let mut pins = Vec::new();
     for current in &lineage.nodes {
         let uid = &current.pin.task.uid;
-        let node = ledger.nodes.get(uid).ok_or_else(denied)?;
+        let node = ledger
+            .nodes
+            .get(uid)
+            .ok_or_else(|| denied_at("ancestor_ledger_node"))?;
         let task = &current.task;
-        let status = task.status.as_ref().ok_or_else(denied)?;
+        let status = task
+            .status
+            .as_ref()
+            .ok_or_else(|| denied_at("ancestor_status"))?;
         if task.metadata.uid.as_deref() != Some(uid.as_str())
             || current.authorization_digest != node.authority.authorization_digest
             || (uid == &identity.task_uid
@@ -574,9 +691,12 @@ async fn verify_task_binding(
                     .as_ref()
                     .is_some_and(|execution| execution.launch))
         {
-            return Err(denied());
+            return Err(denied_at("task_authorization_or_launch"));
         }
-        let binding = status.inference_budget.as_ref().ok_or_else(denied)?;
+        let binding = status
+            .inference_budget
+            .as_ref()
+            .ok_or_else(|| denied_at("task_budget_binding_missing"))?;
         if binding.account.uid != ledger.account_uid
             || binding.account.name != account.name_any()
             || Some(binding.account.namespace.as_str()) != account.metadata.namespace.as_deref()
@@ -586,7 +706,7 @@ async fn verify_task_binding(
             || binding.root_task_uid != node.authority.root_task_uid
             || binding.authorization_digest != node.authority.authorization_digest
         {
-            return Err(denied());
+            return Err(denied_at("task_budget_binding_identity"));
         }
         pins.push(crate::task_identity::TaskLineagePin {
             task: crate::task_identity::ObjectUidRef {
@@ -598,13 +718,15 @@ async fn verify_task_binding(
             root_task_uid: node.authority.root_task_uid.clone(),
         });
     }
-    lineage.verify_pins(&pins)?;
+    lineage.verify_pins(&pins).map_err(lineage_rejection)?;
     if ledger.root.kind == RootKind::KarsTeam {
-        let team = lineage.team.as_ref().ok_or_else(denied)?;
+        let team = lineage
+            .team
+            .as_ref()
+            .ok_or_else(|| denied_at("team_lineage_missing"))?;
         if team.metadata.uid.as_deref() != Some(ledger.root.resource.uid.as_str())
             || team.name_any() != ledger.root.resource.name
             || team.metadata.deletion_timestamp.is_some()
-            || team.spec.paused
             || super::binding::limits(&team.spec.envelope)? != ledger.limits
             || team
                 .status
@@ -617,7 +739,7 @@ async fn verify_task_binding(
                             != account.metadata.namespace.as_deref()
                 })
         {
-            return Err(denied());
+            return Err(denied_at("team_authority"));
         }
     } else if lineage.team.is_some()
         || lineage.nodes.first().is_none_or(|node| {
@@ -625,7 +747,7 @@ async fn verify_task_binding(
                 || node.pin.task.name != ledger.root.resource.name
         })
     {
-        return Err(denied());
+        return Err(denied_at("task_root_identity"));
     }
     Ok(())
 }

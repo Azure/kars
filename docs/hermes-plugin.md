@@ -25,8 +25,11 @@ For the conceptual split between plugin-owned mesh and router-owned governance/a
 Reviewed missions must read all immutable peer handoffs and retained Team
 documents before exporting findings. `kars_mission_read` at path `inputs` returns
 their complete JSON bundle, including every content, source and SHA256, in one
-authorized tool call. The existing 16-record/65536-byte input bound still
-applies. Every materialized file must match the sealed manifest before any input
+authorized tool call. Inputs contain at most 16 records, with each file at most
+64 KiB. Aggregate inputs share the existing 192 KiB Mission base envelope
+capacity; the full assignment including metadata must also fit. Retained inputs
+are distinct from live AgentMesh file transfers and remain usable after the
+producer stops. Every materialized file must match the sealed manifest before any input
 is marked consumed; missing, modified or unsafe files fail the whole read.
 Individual `inputs/<name>` reads remain supported. Neither tool-call nor
 inference-call limits are increased.
@@ -77,7 +80,7 @@ Implemented in `runtimes/hermes/src/kars_runtime_hermes/plugin/handoff.py`. `kar
 
 | Tool | Surface |
 |---|---|
-| `foundry_memory` (native) | `ctx.register_tool` direct — agent sees it as `foundry_memory`. Per-agent long-term memory backed by Azure AI Foundry Memory Store. Scoped via `agent:${CLUSTER_NAME}/${SANDBOX_NAME}` so memory survives pod restart and is per-sandbox-isolated. |
+| `foundry_memory` (native) | `ctx.register_tool` direct — agent sees it as `foundry_memory`. Router-selected persistent memory: discovered/configured Foundry project, otherwise Bridge-owned private lexical memory. Same selection, governance and storage contract as OpenClaw; omit scope for the authorized private default. See [memory backends and lifecycle](memory.md). |
 | `foundry_web_search`, `foundry_image_gen`, `foundry_code_execute`, `foundry_file_search`, `foundry_conversations`, `foundry_evaluations`, `foundry_deployments`, `foundry_agents`, `foundry_download_file` | Wired via the platform MCP server at `http://127.0.0.1:8443/platform/mcp` — Hermes' native MCP client connects on first use. **Agent sees them as `mcp__platform__foundry_*` rather than `foundry_*`.** Tracked: `hermes-native-foundry-tools`. |
 
 ### Network (1)

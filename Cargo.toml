@@ -66,6 +66,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml = "0.9"
 
+# Text matching and terminal escape sanitization
+regex = "1.12.3"
+
 # Azure identity (via REST — no SDK dependency)
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 rsa = "0.9.10"

@@ -8,6 +8,7 @@ import { KubernetesError, type KubernetesJson } from "./kubernetes-json.js";
 import { KubernetesMissionStore, missionObjective } from "./mission-store.js";
 import { MissionDispatcher, missionAttemptName, missionContentDigest, type MissionAttempt, type MissionCandidate } from "./mission-dispatcher.js";
 import { missionContract, type MissionReply } from "./mission-protocol.js";
+import { unpackMissionAttempt } from "./mission-record.js";
 import type { IMeshTransport } from "./transport-interface.js";
 import type { MissionMetadata, MissionWorkloadResources } from "./mission-workload.js";
 
@@ -26,7 +27,8 @@ const phaseEvidence = { ...evidence, phase: { name: "write-briefing", attemptedT
 const stamp = "2026-10-02T20:00:00.000Z";
 const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
 interface Resource {
-  metadata: MissionMetadata;
+  metadata: MissionMetadata & { continue?: string };
+  items?: Resource[];
   spec?: NonNullable<MissionWorkloadResources["deployment"]["spec"]> & { objective?: string; execution?: { launch: boolean; runtime?: string }; suspended?: boolean; blueprint?: { executionPlan?: unknown; runtime?: string }; runtime?: { kind?: string } };
   status?: NonNullable<MissionWorkloadResources["deployment"]["status"]> & { executionPhase?: string; envelopeDigest?: string; sandboxRef?: { name: string }; phase?: string; conditions?: Array<{ type: string; status: string }> };
   data?: Record<string, string>; immutable?: boolean;
@@ -48,6 +50,10 @@ class Api implements KubernetesJson {
     const target = method === "POST" ? `${path}/${value!.metadata.name}` : path;
     const prior = this.resources.get(target);
     const fail = (status: number): never => { throw new KubernetesError(status, method, path); };
+    if (method === "GET" && path.endsWith("/pods?limit=100") && !prior) {
+      const prefix = `${path.split("?")[0]}/`;
+      return { metadata: {}, items: [...this.resources].filter(([key]) => key.startsWith(prefix)).map(([, pod]) => clone(pod)) } as T;
+    }
     if (method === "GET") return (prior ? clone(prior) : fail(404)) as T;
     if (method === "POST") return (prior ? fail(409) : this.put(target, value!)) as T;
     if (!prior) return fail(404);
@@ -126,6 +132,167 @@ const outputPath = `${mapsPath}/kars-mission-output-${key}`;
 const artifactPath = `${mapsPath}/kars-mission-artifacts-${key}`;
 const projectionPath = `${mapsPath}/kars-mission-output-${c.taskName}`;
 
+describe.each(["OpenClaw", "Hermes"] as const)("%s interrupted dispatcher recovery", runtime => {
+  const candidate = { ...c, runtime };
+
+  it.each(["dispatching", "accepted", "running"] as const)("retains %s work as uncertain without replay or publication", async phase => {
+    const { api, store } = fixture(candidate);
+    let stored = (await store.create(initial(candidate)))!;
+    if (phase !== "dispatching") stored = await store.replace(stored, next(stored.attempt, "accepted"));
+    if (phase === "running") stored = await store.replace(stored, next(stored.attempt, "running"));
+    const before = clone(stored.attempt);
+    api.calls.length = 0;
+
+    expect(await store.recoverInterrupted(candidate, "replacement-process")).toBe(true);
+    const recovered = (await store.get(candidate))!.attempt;
+    expect(recovered).toEqual({ ...before, phase: "uncertain", updatedAt: expect.any(String),
+      error: expect.stringContaining("restarted before its final result was saved") });
+    expect(api.calls.filter(call => call.method !== "GET")).toEqual([
+      expect.objectContaining({ method: "PUT", path: `${mapsPath}/${missionAttemptName(candidate)}` }),
+    ]);
+    expect(await store.recoverInterrupted(candidate, "another-process")).toBe(false);
+    expect((await store.get(candidate))!.attempt).toEqual(recovered);
+  });
+
+  it("recovers a replaced worker using the original consumed claim", async () => {
+    const { api, store, podPath, bindingPath } = fixture(candidate);
+    const created = (await store.create(initial(candidate)))!;
+    const running = await store.replace(created, next(created.attempt, "running"));
+    api.resources.delete(podPath);
+    const cm = api.resources.get(bindingPath)!;
+    api.put(bindingPath, { ...cm, data: { "binding.json": JSON.stringify({ ...JSON.parse(cm.data!["binding.json"]),
+      podName: "briefing-replacement", podUid: "replacement-pod", agentDid: `did:mesh:${"c".repeat(32)}` }) } });
+    api.put("/api/v1/namespaces/kars-briefing/pods/briefing-replacement", {
+      metadata: { name: "briefing-replacement", namespace: "kars-briefing", uid: "replacement-pod" }, status: { phase: "Running" },
+    });
+    expect(await store.isCurrent(candidate)).toBe(false);
+    expect(await store.workloadInterrupted(candidate)).toBe(true);
+    expect(await store.recoverInterrupted(candidate, "replacement-process")).toBe(true);
+    expect((await store.get(candidate))!.attempt).toEqual({ ...running.attempt, phase: "uncertain",
+      updatedAt: expect.any(String), error: expect.stringContaining("worker handling this run was replaced or removed") });
+  });
+
+  it("does not retire work owned by the current process", async () => {
+    const { store } = fixture(candidate);
+    const stored = (await store.create(initial(candidate)))!;
+    expect(await store.recoverInterrupted(candidate, stored.attempt.ownerSession)).toBe(false);
+    expect(await store.get(candidate)).toEqual(stored);
+  });
+
+  it.each(["succeeded", "failed", "rejected"] as const)("preserves a %s handback for normal publication recovery", async phase => {
+    const { store } = fixture(candidate);
+    const created = (await store.create(initial(candidate)))!;
+    const stored = await store.replace(created, next(created.attempt, phase));
+    expect(await store.recoverInterrupted(candidate, "replacement-process")).toBe(false);
+    expect(await store.get(candidate)).toEqual(stored);
+  });
+
+  it("requires current dispatcher custody and an unchanged candidate", async () => {
+    const { api, store } = fixture(candidate);
+    const stored = (await store.create(initial(candidate)))!;
+    const denied = new KubernetesMissionStore(api, async () => false);
+    expect(await denied.recoverInterrupted(candidate, "replacement-process")).toBe(false);
+    expect(await store.recoverInterrupted({ ...candidate, podUid: "another-pod" }, "replacement-process")).toBe(false);
+    expect(await store.get(candidate)).toEqual(stored);
+    expect(api.calls.filter(call => ["PUT", "PATCH"].includes(call.method))).toHaveLength(0);
+  });
+
+  it.each([false, true])("does not overwrite a handback committed during recovery (worker removed=%s)", async removed => {
+    const { api, store, podPath } = fixture(candidate);
+    const stored = (await store.create(initial(candidate)))!;
+    if (removed) api.resources.delete(podPath);
+    const path = `${mapsPath}/${missionAttemptName(candidate)}`;
+    const completed = next(stored.attempt, "succeeded");
+    api.before = (method, target) => {
+      if (method === "PUT" && target === path) {
+        api.put(path, { ...api.resources.get(path)!, data: { "attempt.json": JSON.stringify(completed) } });
+      }
+    };
+    await expect(store.recoverInterrupted(candidate, "replacement-process")).rejects.toThrow();
+    expect((await store.get(candidate))!.attempt).toEqual(completed);
+  });
+});
+
+describe.each(["OpenClaw", "Hermes"] as const)("%s workload continuity evidence", runtime => {
+  const candidate = { ...c, runtime };
+  const listPath = "/api/v1/namespaces/kars-briefing/pods?limit=100";
+
+  it("does not treat an unready original Pod or a deployment rollout as absence", async () => {
+    const { api, store, podPath, deploymentPath } = fixture(candidate);
+    const pod = api.resources.get(podPath)!;
+    api.put(podPath, { ...pod, status: { phase: "Pending", conditions: [] } });
+    const deployment = api.resources.get(deploymentPath)!;
+    api.put(deploymentPath, { ...deployment, metadata: { ...deployment.metadata, generation: 2 } });
+    expect(await store.isCurrent(candidate)).toBe(false);
+    expect(await store.workloadInterrupted(candidate)).toBe(false);
+  });
+
+  it("requires a complete successful Pod listing", async () => {
+    const { api, store, podPath } = fixture(candidate);
+    api.resources.delete(podPath);
+    api.put(listPath, { metadata: { name: "", continue: "more-pods" }, items: [] });
+    expect(await store.workloadInterrupted(candidate)).toBe(false);
+    api.resources.delete(listPath);
+    api.before = (method, path) => { if (path === listPath) throw new KubernetesError(503, method, path); };
+    expect(await store.workloadInterrupted(candidate)).toBe(false);
+    api.before = undefined;
+    expect(await store.workloadInterrupted(candidate)).toBe(true);
+  });
+
+  it.each(["task", "binding", "sandbox", "namespace"] as const)("does not hold work when %s custody changed", async resource => {
+    const { api, store, podPath, paths } = fixture(candidate);
+    api.resources.delete(podPath);
+    const prior = api.resources.get(paths[resource])!;
+    api.put(paths[resource], { ...prior, metadata: { ...prior.metadata, uid: "replacement-resource" } });
+    // A binding's UID is not pinned in the candidate, but its Task owner still must match.
+    if (resource === "binding") api.put(paths.binding, { ...prior, metadata: { ...prior.metadata, ownerReferences: [] } });
+    expect(await store.workloadInterrupted(candidate)).toBe(false);
+    expect(api.calls.every(call => call.method === "GET")).toBe(true);
+  });
+
+  it("rejects changed run authority and unavailable dispatcher custody", async () => {
+    const { api, store, podPath, paths } = fixture(candidate);
+    api.resources.delete(podPath);
+    expect(await new KubernetesMissionStore(api, async () => false).workloadInterrupted(candidate)).toBe(false);
+    const task = api.resources.get(paths.task)!;
+    api.put(paths.task, { ...task, spec: { ...task.spec, execution: { launch: false } } });
+    expect(await store.workloadInterrupted(candidate)).toBe(false);
+  });
+
+  it("treats resource churn during observation as unknown rather than interruption", async () => {
+    const { api, store, podPath, bindingPath } = fixture(candidate);
+    api.resources.delete(podPath);
+    let reads = 0;
+    api.before = (method, path) => {
+      if (method === "GET" && path === bindingPath && ++reads === 2) api.put(bindingPath, api.resources.get(bindingPath)!);
+    };
+    expect(await store.workloadInterrupted(candidate)).toBe(false);
+    api.before = undefined;
+    expect(await store.workloadInterrupted(candidate)).toBe(true);
+  });
+});
+
+it("validates native extended journals without removing custody or storage bounds", () => {
+  const selected: MissionCandidate = { ...phasedCandidate,
+    reviewedPhase: { ...phasedCandidate.reviewedPhase!, executionMode: "native", maxToolCalls: 128 } };
+  let attempt = next(initial(selected), "accepted");
+  for (let index = 0; index < 260; index++) {
+    const current = next(attempt, "running");
+    const measured = { ...phaseEvidence, phase: { ...phaseEvidence.phase, maxToolCalls: 128 } };
+    current.reply!.evidence = measured;
+    current.events.at(-1)!.evidence = measured;
+    attempt = current;
+  }
+  const cm = { apiVersion: "v1" as const, kind: "ConfigMap" as const,
+    metadata: { name: missionAttemptName(selected), namespace: selected.namespace,
+      resourceVersion: "42", ownerReferences: [owner] }, data: { "attempt.json": JSON.stringify(attempt) } };
+  expect(unpackMissionAttempt(cm, selected).attempt.events).toHaveLength(261);
+  const changed = clone(attempt);
+  changed.events[200].evidence!.phase!.successfulToolCalls = 129;
+  expect(() => unpackMissionAttempt({ ...cm, data: { "attempt.json": JSON.stringify(changed) } }, selected)).toThrow();
+  expect(() => unpackMissionAttempt({ ...cm, data: { "attempt.json": " ".repeat(900 * 1024 + 1) } }, selected)).toThrow("storage bounds");
+});
+
 describe.each([
   ["OpenClaw", "protocol-fixture.json"],
   ["Hermes", "protocol-hermes-fixture.json"],
@@ -157,6 +324,35 @@ describe.each([
     }
     return { ...h, reference: candidate, grant };
   }
+  it("admits bounded installed v5 context without widening admission or legacy configuration", async () => {
+    const h = installed(false);
+    const stateName = h.grant.authority.stateName;
+    const map = h.api.resources.get(`/api/v1/namespaces/default/configmaps/${stateName}`)!;
+    const state = JSON.parse(map.data!["state.json"]);
+    state.schema = "kars.reviewed-run/v2";
+    map.data!["state.json"] = JSON.stringify(state);
+    const peers = { rootUid: state.rootUid, stateName, slot: h.grant.authority.slot,
+      peers: state.plan.roles.flatMap((role: { name: string; phases: Array<{ name: string }> }, r: number) => role.phases.map((phase, p) => ({
+        role: role.name, phase: phase.name, slot: `r${r}-p${p}`, agentName: `rp-${stateName.slice(14, 34)}-r${r}-p${p}`,
+      }))) };
+    h.grant.contract = missionContract(h.grant.contract.reviewedPhase, undefined, h.grant.contract.requiredOutputs, peers);
+    const binding = h.api.resources.get(h.bindingPath)!;
+    binding.data!["binding.json"] = JSON.stringify({ ...JSON.parse(binding.data!["binding.json"]), reviewed: h.grant });
+    const setEnv = (name: string, value: string) => {
+      for (const workload of [h.deploymentPath, h.replicaSetPath]) {
+        const env = h.api.resources.get(workload)!.spec!.template!.spec!.containers![0].env as Array<{ name: string; value: string }>;
+        env.find(e => e.name === name)!.value = value;
+      }
+    };
+    setEnv("KARS_MISSION_CONTRACT", JSON.stringify(h.grant.contract).padEnd(32768, " "));
+    expect((await h.store.candidate(h.reference, c.dispatcherDid))?.peerContext).toEqual(peers);
+    setEnv("KARS_MISSION_CONTRACT", JSON.stringify(h.grant.contract).padEnd(32769, " "));
+    expect(await h.store.candidate(h.reference, c.dispatcherDid)).toBeNull();
+    setEnv("KARS_MISSION_CONTRACT", JSON.stringify(h.grant.contract));
+    const admission = JSON.parse(binding.data!["binding.json"]).admission;
+    setEnv("KARS_MISSION_ADMISSION", JSON.stringify(admission).padEnd(8193, " "));
+    expect(await h.store.candidate(h.reference, c.dispatcherDid)).toBeNull();
+  });
   it.each([false, true])("discovers installed synthesis=%s with exact phase, named evidence and custody", async synthesis => {
     const h = installed(synthesis);
     const candidate = await h.store.candidate(h.reference, c.dispatcherDid);
@@ -165,7 +361,15 @@ describe.each([
     expect(candidate!.agentName).toBe(synthesis ? "briefing" : "writer / draft");
     expect(candidate!.requiredOutputs).toEqual(synthesis ? ["report.md"] : ["handoff.md"]);
     expect(candidate!.reviewedPhase).toEqual(h.grant.contract.reviewedPhase);
-    expect(candidate!.inputArtifacts?.[0].content).toBe(synthesis ? "Reviewed handoff — 日本語" : undefined);
+    if (synthesis) {
+      expect(candidate!.inputArtifacts).toHaveLength(4);
+      expect(candidate!.inputArtifacts?.find(input => input.source.artifactName === "handoff.md")?.content)
+        .toBe("Reviewed handoff — 日本語");
+      expect(candidate!.inputArtifacts?.find(input => input.source.artifactName === "station-plan.csv")?.content)
+        .toBe('station,jobs,notes\n1,14,"quoted, note"\n');
+    } else {
+      expect(candidate!.inputArtifacts).toBeUndefined();
+    }
     expect(await h.store.isCurrent(candidate!)).toBe(true);
     if (!synthesis) {
       const attempt = initial(candidate!);
@@ -896,6 +1100,31 @@ describe("Kubernetes mission attempt store", () => {
     expect(h.api.resources.get(outputPath)!.data).toMatchObject({ status: "failed", output: "", artifactCount: "0", usageKnown: "false" });
     expect(h.api.resources.get(outputPath)!.data).not.toHaveProperty("totalTokens");
     expect(h.api.resources.get(artifactPath)!.data).toEqual({});
+  });
+  it("recovers failed publication when Kubernetes omits the empty artifact data map", async () => {
+    const h = fixture(); const done = await terminal(h.store, "failed");
+    h.api.before = (method, _path, body) => {
+      if (method === "POST" && body?.metadata.name === `kars-mission-artifacts-${c.taskName}`) {
+        throw new Error("Interrupted before current projection");
+      }
+    };
+    await expect(h.store.publish(done)).rejects.toThrow("Interrupted");
+    expect(h.api.resources.get(artifactPath)!.data).toEqual({});
+    delete h.api.resources.get(artifactPath)!.data;
+    h.api.before = undefined;
+    const recovered = new KubernetesMissionStore(h.api);
+    expect(await recovered.publish((await recovered.get(c))!.attempt)).toBe(true);
+    expect(h.api.resources.get(projectionPath)!.data).toMatchObject({ status: "failed", artifactCount: "0", usageKnown: "false" });
+    expect(h.api.resources.get(taskPath)!.metadata.annotations![`${p}run-completed`]).toBe(c.runNonce);
+    expect(h.api.calls.filter(call => call.method === "POST" && call.body?.metadata.name === missionAttemptName(c))).toHaveLength(1);
+  });
+  it("does not equate missing nonempty artifacts or unexpected artifacts with empty data", async () => {
+    const success = fixture(); const done = await terminal(success.store); await success.store.publish(done);
+    delete success.api.resources.get(artifactPath)!.data;
+    await expect(success.store.publish(done)).rejects.toThrow("collision");
+    const failed = fixture(); const failure = await terminal(failed.store, "failed"); await failed.store.publish(failure);
+    failed.api.resources.get(artifactPath)!.data = { "unexpected.md": "not in the retained reply" };
+    await expect(failed.store.publish(failure)).rejects.toThrow("collision");
   });
   it("archives an old run but never completes a newer requested run", async () => {
     const h = fixture(); const done = await terminal(h.store);

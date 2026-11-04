@@ -1,0 +1,37 @@
+# Copyright (c) Microsoft Corporation. Licensed under the MIT License.
+# Pass BEFORE reviewed private operator values to the ordinary Core helm install.
+# Deliberately incomplete: templates reject missing identity, funding, CNI and images.
+global:
+  installationProfile: kind-beta
+kindBeta:
+  cni: ""
+schemaHook:
+  enabled: true
+agentMesh:
+  enabled: true
+datapathWitness:
+  managed: true
+  enabled: true
+  scope: all
+  sandboxes: []
+  nodes: []
+  gadget:
+    hookMode: ""
+sre:
+  enabled: true
+  firstInstallFunding:
+    unboundedTokens: true
+  provider: ""
+  model: ""
+inferenceBudget:
+  enabled: true
+  calendarPolicy: record-only
+headlamp:
+  enabled: true
+  oidc:
+    enabled: true
+monitoring:
+  kube-state-metrics:
+    resources:
+      requests: {cpu: 25m, memory: 64Mi}
+      limits: {cpu: 500m, memory: 256Mi}

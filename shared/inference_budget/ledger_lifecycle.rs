@@ -55,7 +55,7 @@ impl Ledger {
             .attempts
             .values()
             .filter(|attempt| attempt.key.pod_uid == pod_uid && !attempt.phase.terminal())
-            .map(|attempt| (attempt.key.clone(), attempt.phase, attempt.quote.maximum))
+            .map(|attempt| (attempt.key.clone(), attempt.phase, attempt.quote.maximum()))
             .collect();
         for (key, phase, maximum) in attempts {
             if phase == AttemptPhase::Reserved {
@@ -68,9 +68,9 @@ impl Ledger {
         self.mutation(next, ())
     }
 
-    /// A stalled accepted attempt is permanently charged at its full maximum.
-    /// Its contract remains as a bounded tombstone so late over-bound evidence
-    /// can still freeze the account; capacity pressure never erases uncertainty.
+    /// Stalled bounded attempts retain their full maximum charge; record-only
+    /// attempts retain explicit unknown usage. Late evidence can still resolve
+    /// record-only usage or freeze a breach; capacity never erases uncertainty.
     pub fn commit_uncertain_before(&self, cutoff: i64) -> Result<Mutation<usize>, BudgetError> {
         self.validate()?;
         let attempts: Vec<_> = self
@@ -79,7 +79,7 @@ impl Ledger {
             .filter(|attempt| {
                 attempt.phase == AttemptPhase::InFlight && attempt.expires_at <= cutoff
             })
-            .map(|attempt| (attempt.key.clone(), attempt.quote.maximum))
+            .map(|attempt| (attempt.key.clone(), attempt.quote.maximum()))
             .collect();
         let mut next = self.clone();
         for (key, maximum) in &attempts {
@@ -97,12 +97,21 @@ impl Ledger {
         if !limits.attenuates(self.limits) || !limits.allows(self.meters.total()?) {
             return Err(BudgetError::Authorization);
         }
+        if self.token_allowance_limits(limits).finite()
+            && (self.meters.unknown_usage_attempts > 0
+                || self
+                    .attempts
+                    .values()
+                    .any(|attempt| !attempt.phase.terminal() && attempt.quote.is_record_only()))
+        {
+            return Err(BudgetError::Contract);
+        }
         if limits.normalized().usd_micros.is_some()
             && (self.meters.unpriced_attempts > 0
                 || self
                     .attempts
                     .values()
-                    .any(|attempt| !attempt.phase.terminal() && !attempt.quote.price_covered))
+                    .any(|attempt| !attempt.phase.terminal() && !attempt.quote.price_covered()))
         {
             return Err(BudgetError::Contract);
         }

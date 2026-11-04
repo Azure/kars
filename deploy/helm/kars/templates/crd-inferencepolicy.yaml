@@ -405,7 +405,9 @@ spec:
                 nullable: true
                 type: array
               lastCompiledAt:
-                description: Last time the policy was compiled and pushed.
+                description: |-
+                  Last time a changed compilation result was published to status.
+                  Unchanged periodic verification preserves this timestamp.
                 nullable: true
                 type: string
               loadedDigest:

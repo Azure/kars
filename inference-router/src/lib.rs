@@ -23,6 +23,10 @@ pub mod auth;
 pub mod behavior_monitor;
 pub mod blocklist;
 pub mod budget;
+#[path = "../../shared/builtin_memory.rs"]
+#[allow(dead_code)]
+mod builtin_memory;
+mod builtin_memory_client;
 pub mod config;
 pub mod config_mount;
 #[path = "../../shared/constant_time.rs"]
@@ -47,6 +51,8 @@ pub mod inference_budget_contract;
 mod inference_budget_dispatch;
 pub mod inference_policy_loader;
 pub mod mcp;
+#[path = "../../shared/memory_access.rs"]
+pub mod memory_access;
 pub mod memory_binding_loader;
 pub mod mesh;
 pub mod metrics;
@@ -63,6 +69,9 @@ pub mod proxy;
 pub mod rate_limiter;
 pub mod routes;
 pub mod safety;
+#[path = "../../shared/service_control.rs"]
+pub mod service_control;
+pub mod service_control_tls;
 pub mod service_observation;
 pub mod service_observation_tls;
 #[path = "../../shared/service_observer.rs"]
@@ -71,6 +80,9 @@ pub mod sidecar_client;
 pub mod spawn;
 #[path = "../../shared/sre_privacy.rs"]
 mod sre_privacy;
+#[path = "../../shared/sre_report.rs"]
+#[allow(dead_code)]
+mod sre_report;
 pub mod sre_proxy;
 pub mod task_telemetry;
 pub mod telemetry;

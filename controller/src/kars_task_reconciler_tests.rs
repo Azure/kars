@@ -19,6 +19,7 @@ fn task_with(tier: i32, authority_ceiling: i32, delegation_depth: i32) -> KarsTa
             execution: None,
             blueprint: None,
             display_name: None,
+            requested_tier: None,
         },
     );
     task.metadata.namespace = Some("default".into());
@@ -122,7 +123,7 @@ fn retired_funded_phases_use_idle_polling_without_changing_live_admission() {
     status.execution_phase = Some("Idle".into());
     assert_eq!(requeue_delay(&task, &status), REQUEUE_IDLE);
     task.spec.execution.as_mut().unwrap().launch = false;
-    assert_eq!(requeue_delay(&task, &status), REQUEUE_IDLE);
+    assert_eq!(requeue_delay(&task, &status), REQUEUE_OK);
 
     task.spec.execution.as_mut().unwrap().launch = true;
     for phase in ["Running", "Launching", "Stopping", PHASE_DEGRADED] {
@@ -139,6 +140,242 @@ fn retired_funded_phases_use_idle_polling_without_changing_live_admission() {
         status.phase = Some(phase.into());
         assert_eq!(requeue_delay(&task, &status), REQUEUE_PENDING, "{phase}");
     }
+}
+
+#[test]
+fn stopped_tasks_poll_quietly_only_after_verified_cleanup() {
+    let mut task = task_with(3, 3, 2);
+    task.spec.envelope.budget = Some(
+        serde_json::from_value(json!({"tokens": 150000, "scope": "GovernedInference"})).unwrap(),
+    );
+    for execution in [
+        None,
+        Some(crate::kars_task::TaskExecution {
+            launch: false,
+            runtime: None,
+        }),
+    ] {
+        task.spec.execution = execution;
+        for phase in [PHASE_READY, PHASE_PENDING, PHASE_DEGRADED] {
+            let mut status = ready_status(None, Some(1), task.envelope_digest(), vec![]);
+            status.phase = Some(phase.into());
+            status.execution_phase = Some("Idle".into());
+            assert_eq!(requeue_delay(&task, &status), REQUEUE_OK, "{phase}");
+            status.sandbox_ref = Some(crate::mcp_server::LocalObjectRef {
+                name: "owned".into(),
+            });
+            assert_eq!(requeue_delay(&task, &status), REQUEUE_PENDING);
+            status.sandbox_ref = None;
+            for execution_phase in [
+                None,
+                Some("Running"),
+                Some("Launching"),
+                Some("Stopping"),
+                Some(PHASE_DEGRADED),
+            ] {
+                status.execution_phase = execution_phase.map(str::to_owned);
+                assert_eq!(requeue_delay(&task, &status), REQUEUE_PENDING);
+            }
+        }
+    }
+}
+
+#[test]
+fn completed_phase_quiet_retry_requires_current_completion_and_verified_idle_state() {
+    let mut task = task_with(3, 3, 2);
+    task.spec.execution = Some(crate::kars_task::TaskExecution {
+        launch: true,
+        runtime: None,
+    });
+    task.spec.envelope.budget = Some(
+        serde_json::from_value(json!({"tokens": 150000, "scope": "GovernedInference"})).unwrap(),
+    );
+    let ready = ready_status(None, Some(1), task.envelope_digest(), vec![]);
+    let mut idle = ready.clone();
+    idle.execution_phase = Some("Idle".into());
+    for (root, run, complete, expected) in [
+        (None, Some("run"), Some("run"), REQUEUE_IDLE),
+        (Some(""), Some("run"), Some("run"), REQUEUE_IDLE),
+        (Some("root"), None, Some("run"), REQUEUE_IDLE),
+        (Some("root"), Some(""), Some(""), REQUEUE_IDLE),
+        (Some("root"), Some("run"), None, REQUEUE_IDLE),
+        (Some("root"), Some("new-run"), Some("old-run"), REQUEUE_IDLE),
+        (Some("root"), Some("run"), Some("run"), REQUEUE_OK),
+    ] {
+        task.metadata.annotations = Some(
+            [
+                ("kars.azure.com/reviewed-root", root),
+                ("kars.azure.com/run-requested", run),
+                ("kars.azure.com/run-completed", complete),
+            ]
+            .into_iter()
+            .filter_map(|(key, value)| value.map(|value| (key.into(), value.into())))
+            .collect(),
+        );
+        assert_eq!(
+            requeue_delay(&task, &idle),
+            expected,
+            "{root:?}/{run:?}/{complete:?}"
+        );
+        for phase in ["Running", "Launching", "Stopping", PHASE_DEGRADED] {
+            let mut active = ready.clone();
+            active.execution_phase = Some(phase.into());
+            assert_eq!(requeue_delay(&task, &active), REQUEUE_PENDING);
+        }
+        let mut stopping = idle.clone();
+        stopping.sandbox_ref = Some(crate::mcp_server::LocalObjectRef {
+            name: "owned".into(),
+        });
+        assert_eq!(requeue_delay(&task, &stopping), REQUEUE_PENDING);
+        let mut pending = idle.clone();
+        pending.phase = Some(PHASE_PENDING.into());
+        assert_eq!(requeue_delay(&task, &pending), REQUEUE_PENDING);
+    }
+}
+
+#[tokio::test]
+async fn receipt_echo_is_idempotent_without_skipping_signing_log_checks_or_error_retries() {
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
+    let receipt_path = "/apis/kars.azure.com/v1alpha1/namespaces/default/karsreceipts/t";
+    let stored = Arc::new(Mutex::new(json!({})));
+    let fail_echo = Arc::new(AtomicBool::new(false));
+    Mock::given(method("GET"))
+        .and(path(
+            "/apis/kars.azure.com/v1alpha1/namespaces/default/karsapprovals",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "apiVersion": "kars.azure.com/v1alpha1", "kind": "KarsApprovalList",
+            "metadata": {"resourceVersion": "1"}, "items": [],
+        })))
+        .expect(7)
+        .mount(&server)
+        .await;
+    let receipt_store = stored.clone();
+    Mock::given(method("PATCH"))
+        .and(path(receipt_path))
+        .respond_with(move |request: &wiremock::Request| {
+            let mut current = receipt_store.lock().unwrap();
+            let status = current["status"].clone();
+            *current = request.body_json::<serde_json::Value>().unwrap();
+            if !status.is_null() {
+                current["status"] = status;
+            }
+            ResponseTemplate::new(200).set_body_json(current.clone())
+        })
+        .expect(7)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/api/v1/namespaces/{}/configmaps",
+            crate::providers::signing::receipt_namespace()
+        )))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+            "status": "Failure", "code": 403, "reason": "Forbidden", "message": "log unavailable",
+        })))
+        .expect(7)
+        .mount(&server)
+        .await;
+    let echo_store = stored.clone();
+    let echo_failure = fail_echo.clone();
+    Mock::given(method("PATCH")).and(path(format!("{receipt_path}/status")))
+        .respond_with(move |request: &wiremock::Request| {
+            if echo_failure.load(Ordering::SeqCst) {
+                return ResponseTemplate::new(503).set_body_json(json!({
+                    "status": "Failure", "code": 503, "reason": "ServiceUnavailable", "message": "retry",
+                }));
+            }
+            let patch = request.body_json::<serde_json::Value>().unwrap();
+            assert!(patch["status"].get("conditions").is_none());
+            let mut current = echo_store.lock().unwrap();
+            let conditions = current["status"]["conditions"].clone();
+            current["status"] = patch["status"].clone();
+            if !conditions.is_null() {
+                current["status"]["conditions"] = conditions;
+            }
+            ResponseTemplate::new(200).set_body_json(current.clone())
+        }).expect(6).mount(&server).await;
+    let signer = crate::providers::signing::ReceiptSigner::from_bytes(&[7; 32]);
+    let mut task = task_with(1, 1, 0);
+    task.metadata.uid = Some("task-uid".into());
+    task.metadata.generation = Some(1);
+    let status = ready_status(None, Some(1), task.envelope_digest(), vec![]);
+    let old_time = "2020-01-01T00:00:00Z";
+    for (step, writes) in [1, 1, 2, 3, 4, 5, 6].into_iter().enumerate() {
+        {
+            let mut current = stored.lock().unwrap();
+            match step {
+                1 => {
+                    current["status"]["issuedAt"] = json!(old_time);
+                    current["status"]["conditions"] = json!([{
+                        "type": "Ready", "status": "True", "reason": "Verified",
+                        "message": "external observer", "lastTransitionTime": old_time,
+                    }]);
+                }
+                2 => task.metadata.generation = Some(2),
+                3 => {
+                    current["status"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("issuedAt");
+                }
+                4 => {
+                    current["status"]["inclusionSeq"] = json!(99);
+                    current["status"]["inclusionEntryHash"] = json!("stale");
+                }
+                5 => {
+                    current["status"]["observedTaskGeneration"] = json!(0);
+                    fail_echo.store(true, Ordering::SeqCst);
+                }
+                6 => fail_echo.store(false, Ordering::SeqCst),
+                _ => {}
+            }
+        }
+        reconcile_receipt(&client, "default", &task, &status, &signer).await;
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.url.path() == format!("{receipt_path}/status"))
+                .count(),
+            writes
+        );
+        let current = stored.lock().unwrap();
+        if matches!(step, 1 | 2) {
+            assert_eq!(current["status"]["issuedAt"], old_time);
+        }
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(current["status"]["issuedAt"].as_str().unwrap())
+                .is_ok()
+        );
+        if step > 0 {
+            assert_eq!(current["status"]["conditions"][0]["reason"], "Verified");
+        }
+        if step != 5 {
+            assert_eq!(
+                current["status"]["observedTaskGeneration"],
+                task.metadata.generation.unwrap()
+            );
+            assert!(current["status"].get("inclusionSeq").is_none());
+            assert!(current["status"].get("inclusionEntryHash").is_none());
+        }
+    }
+    let requests = server.received_requests().await.unwrap();
+    let emissions = requests
+        .iter()
+        .filter(|r| r.url.path() == receipt_path)
+        .map(|r| r.body_json::<serde_json::Value>().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(emissions[0]["spec"]["dsse"], emissions[1]["spec"]["dsse"]);
+    server.verify().await;
 }
 
 #[test]
@@ -273,7 +510,7 @@ async fn reviewed_wait_and_outage_preserve_accepted_sandbox_without_materializat
             kube::Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
         let mut status = task.status.clone().unwrap();
         status.sandbox_ref = None;
-        reconcile_execution(&client, "default", &task, &mut status).await;
+        reconcile_execution(&client, "default", &task, &mut status, false).await;
         assert_eq!(
             status.execution_phase.as_deref(),
             Some(if unavailable { "Degraded" } else { "Launching" })
@@ -387,7 +624,7 @@ async fn stopped_reviewed_root_retires_only_owned_phase_compute_and_retries_clea
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
         let mut status = task.status.clone().unwrap();
-        reconcile_execution(&client, "default", &task, &mut status).await;
+        reconcile_execution(&client, "default", &task, &mut status, false).await;
         assert_eq!(
             status.execution_phase.as_deref(),
             Some(match mode {
@@ -421,7 +658,7 @@ async fn stopped_reviewed_root_retires_only_owned_phase_compute_and_retries_clea
         }
         if mode == "stopped" {
             assert!(status.sandbox_ref.is_none());
-            reconcile_execution(&client, "default", &task, &mut status).await;
+            reconcile_execution(&client, "default", &task, &mut status, false).await;
             assert_eq!(status.execution_phase.as_deref(), Some("Idle"));
         }
     }
@@ -464,7 +701,7 @@ async fn cleanup_errors_preserve_stopping_reference_until_a_successful_retry() {
         .mount(&server)
         .await;
     let mut status = KarsTaskStatus::default();
-    reconcile_execution(&client, "default", &task, &mut status).await;
+    reconcile_execution(&client, "default", &task, &mut status, false).await;
     assert_eq!(status.execution_phase.as_deref(), Some("Stopping"));
     assert_eq!(status.sandbox_ref.as_ref().unwrap().name, "t");
     assert!(
@@ -481,7 +718,7 @@ async fn cleanup_errors_preserve_stopping_reference_until_a_successful_retry() {
         })))
         .mount(&server)
         .await;
-    reconcile_execution(&client, "default", &task, &mut status).await;
+    reconcile_execution(&client, "default", &task, &mut status, false).await;
     assert_eq!(status.execution_phase.as_deref(), Some("Idle"));
     assert!(status.sandbox_ref.is_none());
 }

@@ -295,7 +295,12 @@ async fn responses(
     // `TOKEN_BUDGET_DAILY` default when no policy is loaded.
     if let Err(msg) = state
         .budget
-        .check_budget(sandbox_name, policy.daily_tokens, policy.monthly_tokens)
+        .check_governed_budget(
+            sandbox_name,
+            policy.daily_tokens,
+            policy.monthly_tokens,
+            state.inference_budget.as_deref(),
+        )
         .await
     {
         tracing::warn!(
@@ -555,6 +560,54 @@ async fn images_generations_v1(
 }
 /// GET /v1/models — list available models from the OpenAI endpoint.
 async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
+    if let Some(client) = state.inference_budget.as_ref() {
+        let policy =
+            crate::inference_policy_loader::current_snapshot(&state.inference_policy).await;
+        let selected = super::resolve_primary_upstream(
+            &state,
+            &policy,
+            state.upstream_config(&state.sandbox_name),
+        );
+        let upstream = match selected {
+            Ok(upstream) => upstream,
+            Err(_) => {
+                return errors::openai(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Selected model route is unavailable",
+                    errors::PROXY_ERROR,
+                )
+                .into_response();
+            }
+        };
+        let limits = match client.model_limits(&upstream).await {
+            Ok(Some(limits)) => Ok(limits),
+            Ok(None) => crate::proxy::model_capacity(
+                &state.auth,
+                Some(&state.copilot),
+                &state.client,
+                &upstream,
+            )
+            .await
+            .map_err(|_| {
+                "Selected model capacity metadata is unavailable from its provider".to_owned()
+            }),
+            Err(error) => Err(error.to_string()),
+        };
+        return match limits {
+            Ok((context_window, max_output_tokens)) => Json(serde_json::json!({
+                "object": "list",
+                "data": [{ "id": upstream.deployment, "object": "model", "owned_by": "kars",
+                    "context_window": context_window, "max_output_tokens": max_output_tokens }],
+            }))
+            .into_response(),
+            Err(error) => errors::openai(
+                StatusCode::SERVICE_UNAVAILABLE,
+                error.to_string(),
+                errors::PROXY_ERROR,
+            )
+            .into_response(),
+        };
+    }
     let endpoint = state
         .config
         .azure_openai_endpoint
@@ -775,14 +828,6 @@ async fn foundry_proxy(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    if state.inference_budget.is_some() {
-        return errors::openai_coded(
-            StatusCode::FORBIDDEN,
-            "This Foundry operation is outside the closed governed-inference contract; use a supported inference route",
-            "unsupported_budget_operation",
-            "unsupported_budget_operation",
-        ).into_response();
-    }
     let sandbox_name = state.sandbox_name.as_str();
 
     // The raw path is concatenated into the upstream URL below, and
@@ -809,6 +854,16 @@ async fn foundry_proxy(
         .into_response();
     };
 
+    let memory_request = match super::memory_access::guard(&state, &method, &segments, &body).await
+    {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
+
+    if let Err(response) = super::memory_budget::authorize(&state, memory_request.as_ref()).await {
+        return response;
+    }
+
     // Default-deny fail-closed guard: every Foundry proxy route is
     // guarded unless it is on the canonical management/storage exempt
     // list (see `guarded_foundry_route` / `guard_unenforced_route`).
@@ -819,10 +874,20 @@ async fn foundry_proxy(
         return resp;
     }
 
-    // Use project endpoint for agent/standalone APIs, fall back to foundry/openai endpoint
-    let endpoint = state
+    let project = state
         .config
         .foundry_project_endpoint
+        .clone()
+        .filter(|value| !value.trim().is_empty());
+    if memory_request.is_some() && project.is_none() {
+        return errors::openai_coded(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Foundry memory requires a configured project. Unbound memory uses the governed platform memory tool's built-in backend; an explicit binding never falls back.",
+            "memory_backend_unavailable", "memory_backend_unavailable",
+        ).into_response();
+    }
+    // A Foundry project is independent of the selected inference provider.
+    let endpoint = project
         .clone()
         .or_else(|| state.config.foundry_endpoint.clone())
         .or_else(|| state.config.azure_openai_endpoint.clone())
@@ -832,7 +897,7 @@ async fn foundry_proxy(
     // agents, evaluations, indexes, knowledge bases, datasets, deployments,
     // connections, etc.). Return a clear 501 instead of letting the call
     // hit GitHub Models with a path it doesn't understand.
-    if state.config.is_github_models() {
+    if state.config.is_github_models() && project.is_none() {
         tracing::info!(
             sandbox = %sandbox_name,
             path = %uri.path(),
@@ -976,8 +1041,8 @@ async fn foundry_proxy(
     } else {
         "https://cognitiveservices.azure.com"
     };
-    let token = match state.auth.get_token(audience).await {
-        Ok(t) => t,
+    let (auth_header, auth_value) = match state.auth.get_auth_header(audience).await {
+        Ok(header) => header,
         Err(e) => {
             tracing::error!("Foundry proxy auth failed: {e}");
             return errors::openai(
@@ -988,9 +1053,6 @@ async fn foundry_proxy(
             .into_response();
         }
     };
-
-    // For Azure OpenAI endpoints with API key auth (dev mode), use api-key header
-    let use_api_key_header = is_azure_openai && state.auth.is_api_key_mode();
 
     // Build upstream request — strip sandbox headers, inject auth
     let mut upstream_headers = HeaderMap::new();
@@ -1003,21 +1065,29 @@ async fn foundry_proxy(
             }
         }
     }
-    if use_api_key_header {
-        upstream_headers.insert(
-            "api-key",
-            axum::http::HeaderValue::from_str(&token).unwrap(),
-        );
-    } else {
-        upstream_headers.insert(
-            "authorization",
-            axum::http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
-        );
-    }
+    upstream_headers.insert(auth_header, auth_value);
     upstream_headers
         .entry("content-type")
         .or_insert(axum::http::HeaderValue::from_static("application/json"));
 
+    // Authentication may have waited for token exchange; recheck funding and
+    // the binding at final dispatch rather than retaining stale authority.
+    let memory_authority =
+        match super::memory_budget::authorize(&state, memory_request.as_ref()).await {
+            Ok(authority) => authority,
+            Err(response) => return response,
+        };
+    let memory_observation = match super::memory_budget::Observation::begin(
+        &state,
+        memory_authority,
+        &foundry_action,
+        &body,
+    )
+    .await
+    {
+        Ok(observation) => observation,
+        Err(response) => return response,
+    };
     let resp = state
         .client
         .request(method, &upstream_url)
@@ -1031,8 +1101,26 @@ async fn foundry_proxy(
             let status =
                 StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
             let resp_headers = r.headers().clone();
-            let body = r.bytes().await.unwrap_or_default();
+            let body = match r.bytes().await {
+                Ok(body) => body,
+                Err(_) => {
+                    if let Some(observation) = &memory_observation {
+                        observation.finish(&state, None, &[]).await;
+                    }
+                    return errors::openai(
+                        StatusCode::BAD_GATEWAY,
+                        "Foundry response body was lost; operation outcome is unknown, do not resubmit an update",
+                        errors::PROXY_ERROR,
+                    ).into_response();
+                }
+            };
+            if let Some(observation) = &memory_observation {
+                observation.finish(&state, Some(status), &body).await;
+            }
 
+            if let Some(request) = &memory_request {
+                super::memory_access::observe(request, &state.memory_updates, status, &body);
+            }
             tracing::info!(sandbox = %sandbox_name, status = %status.as_u16(), path = %path, "Foundry Agent API complete");
 
             let mut response = (status, Body::from(body)).into_response();
@@ -1042,6 +1130,9 @@ async fn foundry_proxy(
             response
         }
         Err(e) => {
+            if let Some(observation) = &memory_observation {
+                observation.finish(&state, None, &[]).await;
+            }
             tracing::error!(sandbox = %sandbox_name, "Foundry proxy error: {e}");
             errors::openai(
                 StatusCode::BAD_GATEWAY,

@@ -3,6 +3,12 @@
 !sandbox-images/headlamp/Dockerfile
 !sandbox-images/headlamp/Dockerfile.dockerignore
 !sandbox-images/headlamp/build-backend.sh
+!sandbox-images/headlamp/patch-backend.go
+!sandbox-images/headlamp/patch-backend_test.go
+!sandbox-images/headlamp/static-cache.go
+!sandbox-images/headlamp/static-cache_test.go
+!sandbox-images/headlamp/oidc-navigation.go
+!sandbox-images/headlamp/oidc-navigation_test.go
 !sandbox-images/headlamp/build-frontend.mjs
 !tools/headlamp-plugin/package.json
 !tools/headlamp-plugin/package-lock.json

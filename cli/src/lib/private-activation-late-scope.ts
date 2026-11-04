@@ -318,9 +318,10 @@ function supportedTemplate(deployment: unknown, scope: NamespaceReview, activati
 }
 
 async function current(
-  execute: Execute, activation: PrivateActivation, scope: NamespaceReview, root: string, state?: Receipt,
+  execute: Execute, activation: PrivateActivation, scope: NamespaceReview, root: string, state?: Receipt, retired = false, pendingRetirement = false,
 ): Promise<{ runtime: Runtime; snapshot: RuntimeSnapshot; deployment: ReturnType<typeof record>; pods: Json[]; namespace: ReturnType<typeof record> }> {
-  if (scope.consumers.length !== 1 || scope.consumers[0]?.kind !== "Deployment") throw new Error(failure);
+  if (scope.consumers.length !== 1 || scope.consumers[0]?.kind !== "Deployment"
+    || (retired && state?.phase !== "Qualified")) throw new Error(failure);
   const consumer = scope.consumers[0];
   const namespace = await namespaceFor(execute, scope);
   const deployment = await read(execute, "deployments.apps", consumer.object.name, scope.namespace.name);
@@ -335,11 +336,12 @@ async function current(
     if (["Pausing", "Retired"].includes(state.phase) && binding(scope) !== state.binding) throw new Error(failure);
     const replicas = replicaIntent(deployment);
     if (!(["Pausing", "Restoring", "Qualified"].includes(state.phase) ? [0, state.replicas] : [0]).includes(replicas)) throw new Error(failure);
-    if (state.phase === "Qualified" && (replicas !== state.replicas
+    if (state.phase === "Qualified" && (replicas !== (retired ? 0 : state.replicas)
       || binding(scope) !== state.qualified?.binding || templateDigest(deployment) !== state.qualified.template)) throw new Error(failure);
     if (state.epoch) {
+      const qualification = retired && pendingRetirement && at(namespace, "metadata", "annotations", `${P}state`) === "Pending" ? "Pending" : "Qualified";
       if (at(namespace, "metadata", "annotations", `${P}epoch`) !== state.epoch
-        || Object.entries(annotations(activation, scope, "Qualified")).some(([k, v]) => at(namespace, "metadata", "annotations", k) !== v)) throw new Error(failure);
+        || Object.entries(annotations(activation, scope, qualification)).some(([k, v]) => at(namespace, "metadata", "annotations", k) !== v)) throw new Error(failure);
     } else if (Object.entries(annotations(activation, scope, "Pending")).some(([k, v]) => at(namespace, "metadata", "annotations", k) !== v)
       || at(namespace, "metadata", "annotations", `${P}epoch`) !== undefined) throw new Error(failure);
   } else {
@@ -381,6 +383,7 @@ async function current(
   // private epoch may change, never the reviewed executable Pod specification.
   const liveScope = { ...scope, consumers: [{ ...consumer, templateDigest: templateDigest(deployment) }] };
   const pods = await inventory(execute, liveScope);
+  if (retired && pods.length) throw new Error(failure);
   if (state && state.phase !== "Pausing" && state.phase !== "Qualified" && state.phase !== "Restoring" && pods.length) throw new Error(failure);
   if (state && ["Qualified", "Restoring"].includes(state.phase) && pods.some(pod =>
     state.captured.includes(reviewed(pod, true).uid) || at(pod, "metadata", "annotations", `${P}epoch`) !== state.epoch
@@ -407,6 +410,14 @@ export async function reviewLateScope(
     return "Qualified";
   }
   return "Late";
+}
+
+/** Verify the unchanged qualification proof after migration has paused all consumers. */
+export async function verifyRetiredLateScope(
+  execute: Execute, activation: PrivateActivation, scope: NamespaceReview, root: string, pendingRetirement = false,
+): Promise<void> {
+  const namespace = await namespaceFor(execute, scope);
+  await current(execute, activation, scope, root, receipt(namespace), true, pendingRetirement);
 }
 
 /** Apply-only witness, captured while the original Task authority is current. */

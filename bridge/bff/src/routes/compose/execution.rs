@@ -33,6 +33,9 @@ pub(super) fn single_agent_delegation() -> ComposeDelegation {
 pub(super) fn delegation_from_execution_plan(
     plan: &crate::routes::tasks::ExecutionPlanDto,
 ) -> ComposeDelegation {
+    if plan.roles.is_empty() {
+        return single_agent_delegation();
+    }
     ComposeDelegation {
         mode: "principal-specialists".into(),
         roles: plan
@@ -45,82 +48,6 @@ pub(super) fn delegation_from_execution_plan(
             .collect(),
         max_parallel: plan.max_parallel,
     }
-}
-
-const EXECUTION_ROLE_PHASE_BASE_WEIGHT: i64 = 4;
-
-fn role_budget_weight(role: &crate::routes::tasks::ExecutionRoleDto) -> i64 {
-    role.phases
-        .iter()
-        .map(|phase| EXECUTION_ROLE_PHASE_BASE_WEIGHT + i64::from(phase.max_tool_calls))
-        .sum::<i64>()
-        .max(1)
-}
-
-pub(super) fn weighted_role_budget_floors(
-    total_tokens: i64,
-    plan: &crate::routes::tasks::ExecutionPlanDto,
-) -> Vec<i64> {
-    let weights = plan
-        .roles
-        .iter()
-        .map(role_budget_weight)
-        .collect::<Vec<_>>();
-    let total_weight = weights
-        .iter()
-        .map(|weight| i128::from(*weight))
-        .sum::<i128>();
-    let total_tokens_i128 = i128::from(total_tokens);
-    let mut floors = weights
-        .iter()
-        .map(|weight| ((total_tokens_i128 * i128::from(*weight)) / total_weight) as i64)
-        .collect::<Vec<_>>();
-    let assigned = floors.iter().sum::<i64>();
-    let mut remainders = weights
-        .iter()
-        .enumerate()
-        .map(|(index, weight)| {
-            (
-                (total_tokens_i128 * i128::from(*weight)) % total_weight,
-                index,
-            )
-        })
-        .collect::<Vec<_>>();
-    remainders.sort_by(
-        |(left_remainder, left_index), (right_remainder, right_index)| {
-            right_remainder
-                .cmp(left_remainder)
-                .then(left_index.cmp(right_index))
-        },
-    );
-    for (_, index) in remainders
-        .into_iter()
-        .take((total_tokens - assigned) as usize)
-    {
-        floors[index] += 1;
-    }
-    floors
-}
-
-pub(super) fn apply_weighted_role_budget_floors(
-    plan: &mut crate::routes::tasks::ExecutionPlanDto,
-    total_tokens: i64,
-) -> (bool, i64) {
-    let mut changed = false;
-    let floors = weighted_role_budget_floors(total_tokens, plan);
-    for (role, floor) in plan.roles.iter_mut().zip(floors) {
-        let floor = floor.max(1);
-        if role.budget_tokens.is_none_or(|current| current < floor) {
-            role.budget_tokens = Some(floor);
-            changed = true;
-        }
-    }
-    let total = plan
-        .roles
-        .iter()
-        .filter_map(|role| role.budget_tokens)
-        .sum();
-    (changed, total)
 }
 
 pub(crate) fn validate_execution_plan(
@@ -139,9 +66,22 @@ pub(crate) fn validate_execution_plan_for_launch(
     )
 }
 
+pub(super) fn repair_feedback(
+    review_error: Option<String>,
+    plan: Option<&crate::routes::tasks::ExecutionPlanDto>,
+) -> Option<String> {
+    let activation_error = plan.and_then(|plan| validate_execution_plan_for_launch(plan).err());
+    let errors = review_error
+        .into_iter()
+        .chain(activation_error)
+        .collect::<Vec<_>>();
+    (!errors.is_empty()).then(|| errors.join("\n"))
+}
+
 fn parse_execution_plan_result(
     json: &serde_json::Value,
 ) -> Result<crate::routes::tasks::ExecutionPlanDto, String> {
+    super::budgets::validate_proposed_caps(json)?;
     let value = json
         .get("execution_plan")
         .ok_or_else(|| "execution_plan is missing".to_string())?;
@@ -205,10 +145,17 @@ pub(crate) fn delegation_budget_allocation(
     total_tokens: i64,
     role_count: usize,
 ) -> Result<(i64, i64), String> {
-    if role_count == 0 || total_tokens < role_count as i64 {
+    if total_tokens <= 0 || total_tokens < role_count as i64 {
         return Err(
             "execution plans require a positive total budget with capacity for every role".into(),
         );
     }
-    Ok((total_tokens, total_tokens / role_count as i64))
+    Ok((
+        total_tokens,
+        if role_count == 0 {
+            0
+        } else {
+            total_tokens / role_count as i64
+        },
+    ))
 }

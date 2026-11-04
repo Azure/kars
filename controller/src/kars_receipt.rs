@@ -129,14 +129,14 @@ impl Claim {
 
 /// `KarsReceipt.status` — informational echo. The receipt's authority comes
 /// from its signature, not from this block.
-#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct KarsReceiptStatus {
     /// Standard Kubernetes conditions describing the advisory receipt lifecycle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conditions: Option<Vec<Condition>>,
 
-    /// RFC3339 issuance time (unsigned — not part of the attested payload).
+    /// First RFC3339 issuance time for this receipt object (unsigned, not a heartbeat).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issued_at: Option<String>,
 
@@ -673,6 +673,7 @@ mod tests {
                         summary: "ok?".to_string(),
                         ..Default::default()
                     },
+                    requested_by: None,
                     ttl: None,
                     decision: decider.map(|decider| ApprovalDecision {
                         verdict: if phase == Some("Approved") {
@@ -682,6 +683,8 @@ mod tests {
                         }
                         .into(),
                         decider: decider.into(),
+                        decider_subject: None,
+                        decider_roles: vec![],
                         reason: None,
                     }),
                 },

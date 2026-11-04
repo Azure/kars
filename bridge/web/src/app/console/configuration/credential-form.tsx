@@ -25,7 +25,14 @@ export function CredentialForm() {
     ...(targetUid.trim() ? { targetUid: targetUid.trim() } : {}),
   }) ? state.review : null;
   return (
-    <form action={action} className="space-y-3">
+    <form action={action} className="space-y-3" onReset={(event) => {
+      // Action resets must not desynchronize the selected target from its review.
+      event.preventDefault();
+      const value = event.currentTarget.elements.namedItem("value");
+      const confirmed = event.currentTarget.elements.namedItem("confirmed");
+      if (value instanceof HTMLInputElement) value.value = "";
+      if (confirmed instanceof HTMLInputElement) confirmed.checked = false;
+    }}>
       <div className="grid gap-2 sm:grid-cols-3">
         <select name="kind" value={kind} onChange={(e) => setKind(e.target.value)} required
           aria-label="Credential target kind"

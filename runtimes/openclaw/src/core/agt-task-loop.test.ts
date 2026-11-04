@@ -6,7 +6,8 @@ import { createHash } from "node:crypto";
 import { createServer, type Server, type ServerResponse } from "node:http";
 import { join } from "node:path";
 import { mkdtemp, readFile, rm, access, writeFile, symlink } from "node:fs/promises";
-import { executeTaskWithEvidence, processTaskWithTools, type TaskLoopDeps } from "./agt-task-loop.js";
+import { processTaskWithTools, type TaskLoopDeps } from "./agt-task-loop.js";
+import { executeLegacyTaskForTest as executeTaskWithEvidence } from "./agt-task-loop.test-support.js";
 import { TaskCompletionLedger, TaskExecutionError, type TaskExecutionEvidence } from "./task-completion.js";
 import { MissionReceiver, type MissionReceiverOptions } from "./mission-receiver.js";
 import { missionObjectiveDigest } from "@kars/mesh/dist/mission-admission.js";
@@ -96,6 +97,93 @@ const batch = (...responses: ReturnType<typeof tool>[]) => ({
   })) } }],
 });
 
+describe("reviewed governed public fetch execution", () => {
+  const args = { method: "GET", url: "https://www.example.com/pricing" };
+  const contract = (patch = {}) => reviewedPhase({ capabilities: ["network"], minToolCalls: 0, maxToolCalls: 2,
+    requiredToolCalls: [{ name: "http_fetch", arguments: args }], ...patch });
+  const page = { status: 200, headers: { "content-type": "text/html" }, body: "<p>Official published terms</p>", truncated: false };
+  it("executes the governed router fetch and records only verified required success", async () => {
+    await router([tool("http_fetch", args), page, final()], 200, { allowed: true });
+    const result = await executeTaskWithEvidence("Read reviewed evidence", deps, log, false, contract());
+    expect(result.phase).toMatchObject({ attemptedToolCalls: 1, successfulToolCalls: 1, completedRequiredToolCalls: 1 });
+    expect(requests[0].tools.map((t: any) => t.function.name)).toEqual(["http_fetch"]);
+    expect(requests[0].tools[0].function.parameters).toMatchObject({ additionalProperties: false,
+      properties: { method: { enum: ["GET"] }, url: { enum: [args.url] } } });
+    expect(requests[0].tool_choice.function.name).toBe("http_fetch");
+    expect(requests[1]).toEqual({ ...args, headers: {}, body: "" });
+    expect(policyRequests[0]).toMatchObject({ action: "tool:http_fetch", context: { arguments: args } });
+    expect(JSON.stringify(requests[2].messages)).toContain("Official published terms");
+    expect(requests[2].tools[0].function.parameters).toMatchObject({ additionalProperties: false,
+      properties: { method: { enum: ["GET"] }, url: { enum: [args.url] } } });
+  });
+  it.each([{ ...page, status: 302 }, { ...page, status: 403 }, { ...page, truncated: true },
+    { ...page, body: "" }, { ...page, body: "x".repeat(65537) }, { ...page, body: "bad\ufffd" },
+    { ...page, headers: [] }, { ...page, headers: { oversized: "x".repeat(512 * 1024) } },
+    { error: "denied" }, "malformed envelope"])("does not credit unsuccessful fetch envelope %#", async envelope => {
+    await router([tool("http_fetch", args), envelope, final()], 200, { allowed: true });
+    await expect(executeTaskWithEvidence("Read evidence", deps, log, false, contract())).rejects.toMatchObject({
+      phase: { attemptedToolCalls: 1, successfulToolCalls: 0, completedRequiredToolCalls: 0 } });
+  });
+  it("does not dispatch or credit a policy refusal", async () => {
+    await router([tool("http_fetch", args), final()], 200, { allowed: false });
+    await expect(executeTaskWithEvidence("Read evidence", deps, log, false, contract())).rejects.toMatchObject({
+      phase: { attemptedToolCalls: 1, successfulToolCalls: 0, completedRequiredToolCalls: 0 } });
+    expect(requests.every(r => !r.url)).toBe(true);
+  });
+  it.each([{ ...args, method: "POST" }, { ...args, headers: {} }, { ...args, url: "https://www.example.com/other" }])(
+    "rejects changed arguments before governance or network %#", async changed => {
+      await router([tool("http_fetch", changed), final()], 200, { allowed: true });
+      await expect(executeTaskWithEvidence("Read evidence", deps, log, false, contract())).rejects.toMatchObject({
+        phase: { successfulToolCalls: 0, completedRequiredToolCalls: 0 } });
+      expect(policyRequests).toHaveLength(0);
+      expect(requests.every(r => !r.url)).toBe(true);
+    });
+  it("rejects router HTTP failure even with a successful-looking envelope", async () => {
+    await router([tool("http_fetch", args), (res: ServerResponse) => { res.writeHead(403); res.end(JSON.stringify(page)); }, final()], 200, { allowed: true });
+    await expect(executeTaskWithEvidence("Read evidence", deps, log, false, contract())).rejects.toMatchObject({
+      phase: { successfulToolCalls: 0, completedRequiredToolCalls: 0 } });
+  });
+  it("reserves required fetch plus exact export before the first inference", async () => {
+    await router([final()], 200, { allowed: true });
+    await expect(executeTaskWithEvidence("Read evidence", deps, log, true,
+      contract({ capabilities: ["filesystem-write", "network"], maxToolCalls: 1 }), undefined, ["report.md"]))
+      .rejects.toMatchObject({ phase: { attemptedToolCalls: 0, completedRequiredToolCalls: 0 } });
+    expect(requests).toHaveLength(0);
+  });
+});
+
+describe("task-loop Foundry memory uses shared MCP", () => {
+  it("reports terminal provider failure without provisioning or repeating the write", async () => {
+    await router([
+      tool("foundry_memory", { operation: "update", text: "remember this" }),
+      { jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: '{"status":"failed","update_id":"u-1","error":{"code":"model_failure"}}' }], isError: true } },
+      final(),
+    ], 200, { allowed: true });
+    await executeTaskWithEvidence("remember this", deps, log, false);
+    expect(requests).toHaveLength(3);
+    const reply = requests[2].messages.find((message: { role: string }) => message.role === "tool").content;
+    expect(reply).toContain("Memory error:");
+    expect(reply).toContain("model_failure");
+    expect(reply).not.toContain("Memory update completed");
+  });
+
+  it.each(["completed", "queued", "in_progress"])("reports the router's %s status without another write", async (status) => {
+    const args = { operation: "update", text: "remember this", scope: "custom_partition" };
+    await router([
+      tool("foundry_memory", args),
+      { jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: JSON.stringify({ status, update_id: "u-1" }) }], isError: false } },
+      final(),
+    ], 200, { allowed: true });
+    await executeTaskWithEvidence("remember this", deps, log, false);
+    expect(requests).toHaveLength(3);
+    expect(requests[1].params).toEqual({ name: "foundry.memory", arguments: args });
+    const reply = requests[2].messages.find((message: { role: string }) => message.role === "tool").content;
+    expect(reply).toContain(`Memory update ${status}`);
+    expect(reply.includes("persistence not yet confirmed")).toBe(status !== "completed");
+    expect(reply).not.toContain("updated successfully");
+  });
+});
+
 describe("router observations in completed task handoffs", () => {
   const correlated = (round: number, response: unknown) => (res: ServerResponse) => {
     res.writeHead(200, { "content-type": "application/json", "x-kars-telemetry-scope": "scope-a", "x-kars-telemetry-round": String(round) });
@@ -110,6 +198,9 @@ describe("router observations in completed task handoffs", () => {
       partial_observation: false, ms: 10, tool_calls_observed: 0 })),
   };
   const filename = "kars-router-observations.json";
+  const page = <T extends { events: { seq: number }[] }>(trace: T) => ({
+    ...trace, cursor: trace.events.at(-1)?.seq ?? 0, high_water: trace.events.at(-1)?.seq ?? 0, has_more: false,
+  });
 
   it("emits a selected snapshot while the next response is still pending, without artifact negotiation", async () => {
     let finishResponse: ServerResponse | undefined;
@@ -126,7 +217,7 @@ describe("router observations in completed task handoffs", () => {
     await router([
       correlated(1, tool()),
       (res: ServerResponse) => { finishResponse = res; },
-    ], 200, { allowed: true }, (url: string) => url === "/telemetry/trace?rounds=1" ? firstSelection : cumulativeSelection);
+    ], 200, { allowed: true }, (url: string) => page(url === "/telemetry/trace?rounds=1" ? firstSelection : cumulativeSelection));
     let completed = false;
     const execution = executeTaskWithEvidence("task", { ...deps, liveActivityEnabled: true,
       onEvidence: (_evidence, snapshot) => { if (snapshot) snapshots.push(snapshot); },
@@ -157,7 +248,7 @@ describe("router observations in completed task handoffs", () => {
     await router([
       correlated(1, tool("file_write", { path, content: "Useful briefing\r\n✓", artifact_name: "briefing.md" })),
       correlated(2, final()),
-    ], 200, { allowed: true }, selection);
+    ], 200, { allowed: true }, page(selection));
     const result = await executeTaskWithEvidence("task", deps, log, true, reviewedPhase());
     expect(result.artifacts?.["briefing.md"]).toBe(await readFile(path, "utf8"));
     expect(JSON.parse(result.artifacts![filename])).toEqual({
@@ -427,7 +518,7 @@ describe("reviewed filesystem phase execution", () => {
         { type: "function", function: { name: "file_write" } }, "none",
       ]);
       expect(requests[1].tools[0].function.parameters.properties.path.enum).toEqual([`${TASK_INPUT_ROOT}/second.md`]);
-      expect(requests[0].messages.at(-1).content).toContain(`Next, call file_read with path "${TASK_INPUT_ROOT}" and max_bytes 65536`);
+      expect(requests[0].messages.at(-1).content).toContain(`Next, call file_read with path "${TASK_INPUT_ROOT}" and max_bytes 393216`);
       expect(requests[1].messages.at(-1).content).toContain(`Unread immutable inputs remaining: ["${TASK_INPUT_ROOT}/second.md"]`);
       expect(requests[1].messages.at(-1).content).not.toContain(path);
       expect(requests[1].messages.at(-1).content).toContain("One complete read and 2 required exports must fit within the 3 remaining reviewed tool calls");
@@ -828,10 +919,52 @@ describe("required reviewed exports", () => {
       reviewedPhase({ maxToolCalls: 1 }), undefined, ["handoff.md"])).rejects.toMatchObject({
       message: "Missing required named mission output: handoff.md; insufficient remaining reviewed tool calls",
       evidence: { rounds: 1, usage: { totalTokens: 11 } },
-      phase: { attemptedToolCalls: 1, successfulToolCalls: 1, maxToolCalls: 1 },
+      phase: { attemptedToolCalls: 1, successfulToolCalls: 0, maxToolCalls: 1 },
     });
     expect(requests).toHaveLength(1);
-    expect(write).toHaveBeenCalledTimes(1);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, null, "different.md"])("rejects a reserved export call with artifact_name=%s before authorization or filesystem access", async artifact_name => {
+    const write = mockWrite();
+    await router([tool("file_write", { ...args, artifact_name }), final()], 200, { allowed: true });
+    await expect(executeTaskWithEvidence("Prepare phase findings", deps, log, true,
+      reviewedPhase({ maxToolCalls: 1 }), undefined, ["handoff.md"])).rejects.toMatchObject({
+      message: expect.stringContaining("Missing required named mission output: handoff.md"),
+      phase: { attemptedToolCalls: 1, successfulToolCalls: 0, maxToolCalls: 1 },
+    });
+    expect(policyRequests).toHaveLength(0);
+    expect(write).not.toHaveBeenCalled();
+    expect(requests).toHaveLength(1);
+  });
+
+  it("rejects a different otherwise-authorized tool in the reserved export slot", async () => {
+    await router([tool("file_read", { path: args.path }), final()], 200, { allowed: true });
+    await expect(executeTaskWithEvidence("Prepare phase findings", deps, log, true,
+      reviewedPhase({ capabilities: ["filesystem-read", "filesystem-write"], maxToolCalls: 1 }), undefined, ["handoff.md"])).rejects.toMatchObject({
+      phase: { attemptedToolCalls: 1, successfulToolCalls: 0, maxToolCalls: 1 },
+    });
+    expect(policyRequests).toHaveLength(0);
+  });
+
+  it.each([
+    ["azure", "gpt-5.4-mini", true],
+    ["azure", "claude-sonnet-4-5", false],
+    ["github-models", "gpt-5.4-mini", false],
+    ["github-copilot", "gpt-5.4-mini", false],
+  ])("uses the existing strict-schema capability gate for required exports on %s/%s", async (provider, model, strict) => {
+    mockWrite();
+    await router([tool("file_write", args), final()], 200, { allowed: true });
+    vi.stubEnv("KARS_PROVIDER", String(provider));
+    vi.stubEnv("KARS_MODEL", String(model));
+    vi.stubEnv("KARS_STRICT_TOOLS", "");
+    await executeTaskWithEvidence("Prepare phase findings", deps, log, true,
+      reviewedPhase({ maxToolCalls: 1 }), undefined, ["handoff.md"]);
+    const schema = requests[0].tools[0].function;
+    expect(schema.strict).toBe(strict ? true : undefined);
+    expect(schema.parameters.additionalProperties).toBe(strict ? false : undefined);
+    expect(schema.parameters.required).toEqual(["path", "content", "artifact_name"]);
+    expect(schema.parameters.properties.artifact_name.enum).toEqual(["handoff.md"]);
   });
 
   it("reserves the last allowed call for an explicit named export without widening authority", async () => {
@@ -851,6 +984,31 @@ describe("required reviewed exports", () => {
     expect(requests[2].tool_choice).toBe("none");
     expect(result.phase).toMatchObject({ attemptedToolCalls: 2, successfulToolCalls: 2, maxToolCalls: 2 });
     expect(result.artifacts).toEqual({ "handoff.md": args.content });
+  });
+
+  it("preserves scratch writes and completes the required export within eight reviewed calls", async () => {
+    const write = mockWrite();
+    await router([
+      ...Array.from({ length: 7 }, () => tool("file_write", { ...args, artifact_name: null })),
+      tool("file_write", args), final(),
+    ], 200, { allowed: true });
+    vi.stubEnv("KARS_STRICT_TOOLS", "");
+    const result = await executeTaskWithEvidence("Prepare phase findings", deps, log, true,
+      reviewedPhase({ minToolCalls: 3, maxToolCalls: 8 }), undefined, ["handoff.md"]);
+    expect(result.phase).toMatchObject({ attemptedToolCalls: 8, successfulToolCalls: 8, maxToolCalls: 8 });
+    expect(result.artifacts).toEqual({ "handoff.md": args.content });
+    expect(write).toHaveBeenCalledTimes(8);
+    expect(requests[7].tools[0].function).toMatchObject({ strict: true,
+      parameters: { additionalProperties: false, properties: { artifact_name: { enum: ["handoff.md"] } } } });
+    expect(requests[8].tool_choice).toBe("none");
+  });
+
+  it("does not enable strict tools for missions without a required-output contract", async () => {
+    mockWrite();
+    await router([tool("file_write", args), final()], 200, { allowed: true });
+    vi.stubEnv("KARS_STRICT_TOOLS", "");
+    await executeTaskWithEvidence("Prepare phase findings", deps, log, true, reviewedPhase());
+    expect(requests[0].tools.find((entry: any) => entry.function.name === "file_write").function.strict).toBeUndefined();
   });
 
   it("narrows the required export choice after each committed output", async () => {

@@ -179,26 +179,34 @@ async fn reconcile(agent: Arc<A2AAgent>, ctx: Arc<Ctx>) -> Result<Action, Reconc
         PHASE_READY
     };
 
-    // SSA requires apiVersion + kind in the patch body — without
-    // them, the API server returns "invalid object type: /, Kind=".
-    let status_patch = json!({
-        "apiVersion": "kars.azure.com/v1alpha1",
-        "kind": "A2AAgent",
-        "status": A2AAgentStatus {
-            phase: Some(phase.into()),
-            observed_generation,
-            conditions: Some(new_conditions),
-            agent_card_config_map_ref: Some(LocalObjectRef { name: cm_name.clone() }),
-            version_hash: Some(v_hash),
-            last_compiled_at: Some(rfc3339_now()),
-        }
-    });
-    api.patch_status(
-        &name,
-        &PatchParams::apply(FIELD_MANAGER).force(),
-        &Patch::Apply(status_patch),
-    )
-    .await?;
+    let mut next_status = A2AAgentStatus {
+        phase: Some(phase.into()),
+        observed_generation,
+        conditions: Some(new_conditions),
+        agent_card_config_map_ref: Some(LocalObjectRef {
+            name: cm_name.clone(),
+        }),
+        version_hash: Some(v_hash),
+        last_compiled_at: agent
+            .status
+            .as_ref()
+            .and_then(|s| s.last_compiled_at.clone()),
+    };
+    // A timestamp-only status write triggers the same controller's watch again.
+    if next_status.last_compiled_at.is_none() || agent.status.as_ref() != Some(&next_status) {
+        next_status.last_compiled_at = Some(rfc3339_now());
+        let status_patch = json!({
+            "apiVersion": "kars.azure.com/v1alpha1",
+            "kind": "A2AAgent",
+            "status": next_status,
+        });
+        api.patch_status(
+            &name,
+            &PatchParams::apply(FIELD_MANAGER).force(),
+            &Patch::Apply(status_patch),
+        )
+        .await?;
+    }
 
     if degraded.is_some() {
         Ok(Action::requeue(REQUEUE_FAIL))
@@ -407,6 +415,74 @@ pub async fn run(client: Client) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn compilation_status_is_idempotent_without_skipping_publication_or_retries() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+
+        let server = MockServer::start().await;
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
+        let ctx = Arc::new(Ctx { client });
+        let mut agent: A2AAgent = serde_json::from_value(json!({
+            "apiVersion": "kars.azure.com/v1alpha1", "kind": "A2AAgent",
+            "metadata": {"name": "example", "namespace": "workspace", "generation": 1,
+                "uid": "agent-uid", "finalizers": [FINALIZER]},
+            "spec": {"endpointUrl": "https://agent.example", "signingKeys": []},
+        }))
+        .unwrap();
+        Mock::given(method("PATCH"))
+            .and(path(
+                "/api/v1/namespaces/workspace/configmaps/a2aagent-example-card",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "card"},
+            })))
+            .expect(5)
+            .mount(&server)
+            .await;
+        let status_path =
+            "/apis/kars.azure.com/v1alpha1/namespaces/workspace/a2aagents/example/status";
+        Mock::given(method("PATCH"))
+            .and(path(status_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&agent))
+            .expect(4)
+            .mount(&server)
+            .await;
+
+        for (step, expected_writes) in [1, 1, 2, 3, 4].into_iter().enumerate() {
+            match step {
+                2 => agent.metadata.generation = Some(2),
+                3 => agent.status.as_mut().unwrap().phase = Some(PHASE_DEGRADED.into()),
+                4 => agent.status.as_mut().unwrap().last_compiled_at = None,
+                _ => {}
+            }
+            assert_eq!(
+                reconcile(Arc::new(agent.clone()), ctx.clone())
+                    .await
+                    .unwrap(),
+                Action::requeue(REQUEUE_OK),
+            );
+            let requests = server.received_requests().await.unwrap();
+            let writes: Vec<_> = requests
+                .iter()
+                .filter(|r| r.url.path() == status_path)
+                .collect();
+            assert_eq!(writes.len(), expected_writes, "step {step}");
+            let body: serde_json::Value =
+                serde_json::from_slice(&writes.last().unwrap().body).unwrap();
+            let mut published: A2AAgentStatus =
+                serde_json::from_value(body["status"].clone()).unwrap();
+            assert_eq!(published.observed_generation, agent.metadata.generation);
+            assert_eq!(published.phase.as_deref(), Some(PHASE_READY));
+            assert!(published.last_compiled_at.is_some());
+            published.last_compiled_at = Some("2020-01-01T00:00:00Z".into());
+            agent.status = Some(published);
+        }
+    }
 
     #[test]
     fn rfc3339_now_is_utc_z_suffixed() {

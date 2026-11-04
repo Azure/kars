@@ -14,7 +14,8 @@
 //!   `chat_completions.rs`. Unavailable calendar accounting returns HTTP 503.
 //! * Managed calendars record Begin at the final provider-send boundary and
 //!   Finish from complete provider usage before returning the final result.
-//!   Interrupted work blocks replacement writers; no empty restart is admitted.
+//!   Interrupted work blocks replacement writers by default. Explicit operator
+//!   record-only policy retains that liability while admitting new work; it never resets usage.
 //!   This is completed-usage accounting, not a token-amount reservation.
 //!   `record_usage` only updates the legacy local/file backend.
 //! * `check_per_request(total)` is the existing warn-only response-side
@@ -177,6 +178,21 @@ impl TokenBudgetTracker {
     }
 
     pub async fn observed_usage(&self, sandbox: &str) -> Result<(u64, u64), CheckError> {
+        let (usage, _, _) = self.observed_accounting(sandbox).await?;
+        Ok(usage)
+    }
+
+    pub async fn observed_accounting(
+        &self,
+        sandbox: &str,
+    ) -> Result<
+        (
+            (u64, u64),
+            crate::inference_budget_contract::calendar::Policy,
+            Option<u64>,
+        ),
+        CheckError,
+    > {
         if let Some(calendar) = &self.calendar {
             if sandbox != calendar.sandbox() {
                 return Err(CheckError::unavailable(
@@ -188,14 +204,22 @@ impl TokenBudgetTracker {
                 .await
                 .map_err(|error| CheckError::unavailable(error.to_string()))?;
             let now = self.clock.now();
-            if remote.day > day_key(now) || remote.month > month_key(now) {
+            if remote.usage.day > day_key(now) || remote.usage.month > month_key(now) {
                 return Err(CheckError::unavailable(
                     "Calendar accounting clock mismatch",
                 ));
             }
-            return Ok(remote.current(day_key(now), month_key(now)));
+            return Ok((
+                remote.usage.current(day_key(now), month_key(now)),
+                remote.policy,
+                remote.pending_requests,
+            ));
         }
-        Ok(self.get_usage(sandbox).await)
+        Ok((
+            self.get_usage(sandbox).await,
+            crate::inference_budget_contract::calendar::Policy::Enforce,
+            None,
+        ))
     }
 
     /// Construct an in-memory tracker (no persistence) with the
@@ -299,7 +323,10 @@ impl TokenBudgetTracker {
         daily_limit: Option<u64>,
         monthly_limit: Option<u64>,
     ) -> Result<(), CheckError> {
-        let (daily_used, monthly_used) = self.observed_usage(sandbox).await?;
+        let ((daily_used, monthly_used), policy, _) = self.observed_accounting(sandbox).await?;
+        if policy == crate::inference_budget_contract::calendar::Policy::RecordOnly {
+            return Ok(());
+        }
         let daily_effective = daily_limit.unwrap_or(self.daily_default);
         let monthly_effective = monthly_limit.unwrap_or(0);
         if daily_effective == 0 && monthly_effective == 0 {
@@ -325,6 +352,27 @@ impl TokenBudgetTracker {
             });
         }
         Ok(())
+    }
+
+    pub async fn check_governed_budget(
+        &self,
+        sandbox: &str,
+        daily_limit: Option<u64>,
+        monthly_limit: Option<u64>,
+        authority: Option<&crate::inference_budget::Client>,
+    ) -> Result<(), CheckError> {
+        let result = self.check_budget(sandbox, daily_limit, monthly_limit).await;
+        // An allowance can override a ceiling, never missing or uncertain accounting.
+        if result.as_ref().is_err_and(|error| !error.unavailable)
+            && let Some(authority) = authority
+            && authority
+                .tokens_unbounded(sandbox)
+                .await
+                .map_err(|error| CheckError::unavailable(error.to_string()))?
+        {
+            return Ok(());
+        }
+        result
     }
 
     /// Compat shim for the legacy single-limit path. New code should

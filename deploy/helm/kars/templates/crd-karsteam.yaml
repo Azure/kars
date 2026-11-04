@@ -91,7 +91,7 @@ spec:
                     nullable: true
                     type: string
                   skills:
-                    description: Same-namespace, independently approved skills pinned at runtime creation.
+                    description: Same-namespace, content-bound approved skills pinned at runtime creation.
                     type: array
                     items:
                       type: string
@@ -198,21 +198,27 @@ spec:
                                       - web-search
                                       - mcp
                                       - memory
+                                      - github-pr
+                                      - python-execute
                                       type: string
-                                    maxItems: 7
+                                    maxItems: 8
                                     type: array
+                                  executionMode:
+                                    enum:
+                                    - native
+                                    type: string
                                   freshContext:
                                     default: false
                                     type: boolean
                                   maxToolCalls:
                                     format: int32
-                                    maximum: 32.0
+                                    maximum: 2147483647.0
                                     minimum: 0.0
                                     type: integer
                                   minToolCalls:
                                     default: 0
                                     format: int32
-                                    maximum: 32.0
+                                    maximum: 2147483647.0
                                     minimum: 0.0
                                     type: integer
                                   name:
@@ -237,6 +243,7 @@ spec:
                                         name:
                                           enum:
                                           - github_actions_job_logs
+                                          - http_fetch
                                           type: string
                                       required:
                                       - name
@@ -257,7 +264,7 @@ spec:
                           - phases
                           type: object
                         maxItems: 8
-                        minItems: 1
+                        minItems: 0
                         type: array
                       schema:
                         enum:
@@ -276,12 +283,18 @@ spec:
                               - web-search
                               - mcp
                               - memory
+                              - github-pr
+                              - python-execute
                               type: string
-                            maxItems: 7
+                            maxItems: 8
                             type: array
+                          executionMode:
+                            enum:
+                            - native
+                            type: string
                           maxToolCalls:
                             format: int32
-                            maximum: 32.0
+                            maximum: 2147483647.0
                             minimum: 0.0
                             type: integer
                           objective:
@@ -469,8 +482,9 @@ spec:
               paused:
                 default: false
                 description: |-
-                  When `true` the team **hibernates**: members stay governed-but-idle and
-                  the charter loop does not tick (idle-scaled, budget-preserving, §11).
+                  When `true`, no new runs are scheduled. Already-authorized work may
+                  finish with normal usage accounting. Resume enables future scheduling;
+                  it does not replay stopped runs or restore process checkpoints.
                 type: boolean
               profileRef:
                 description: |-
@@ -555,7 +569,7 @@ spec:
                           nullable: true
                           type: string
                         skills:
-                          description: Same-namespace, independently approved skills pinned at runtime creation.
+                          description: Same-namespace, content-bound approved skills pinned at runtime creation.
                           type: array
                           items:
                             type: string
@@ -662,21 +676,27 @@ spec:
                                             - web-search
                                             - mcp
                                             - memory
+                                            - github-pr
+                                            - python-execute
                                             type: string
-                                          maxItems: 7
+                                          maxItems: 8
                                           type: array
+                                        executionMode:
+                                          enum:
+                                          - native
+                                          type: string
                                         freshContext:
                                           default: false
                                           type: boolean
                                         maxToolCalls:
                                           format: int32
-                                          maximum: 32.0
+                                          maximum: 2147483647.0
                                           minimum: 0.0
                                           type: integer
                                         minToolCalls:
                                           default: 0
                                           format: int32
-                                          maximum: 32.0
+                                          maximum: 2147483647.0
                                           minimum: 0.0
                                           type: integer
                                         name:
@@ -701,6 +721,7 @@ spec:
                                               name:
                                                 enum:
                                                 - github_actions_job_logs
+                                                - http_fetch
                                                 type: string
                                             required:
                                             - name
@@ -721,7 +742,7 @@ spec:
                                 - phases
                                 type: object
                               maxItems: 8
-                              minItems: 1
+                              minItems: 0
                               type: array
                             schema:
                               enum:
@@ -740,12 +761,18 @@ spec:
                                     - web-search
                                     - mcp
                                     - memory
+                                    - github-pr
+                                    - python-execute
                                     type: string
-                                  maxItems: 7
+                                  maxItems: 8
                                   type: array
+                                executionMode:
+                                  enum:
+                                  - native
+                                  type: string
                                 maxToolCalls:
                                   format: int32
-                                  maximum: 32.0
+                                  maximum: 2147483647.0
                                   minimum: 0.0
                                   type: integer
                                 objective:
@@ -1098,8 +1125,116 @@ spec:
                 format: int64
                 nullable: true
                 type: integer
+              inferenceBudgetObservation:
+                description: Verified lifetime limits and meters, refreshed with tokensObservedAt; absent on read failure.
+                type: object
+                nullable: true
+                required: [account, effectiveLimits, originalLimits, phase, priceCoverageComplete, reserved, settled, team, unboundedTokens, uncertain]
+                properties:
+                  account:
+                    type: object
+                    required: [name, namespace, uid]
+                    properties:
+                      namespace:
+                        type: string
+                      name:
+                        type: string
+                      uid:
+                        type: string
+                  team:
+                    type: object
+                    required: [name, namespace, uid]
+                    properties:
+                      namespace:
+                        type: string
+                      name:
+                        type: string
+                      uid:
+                        type: string
+                  originalLimits:
+                    type: object
+                    properties:
+                      tokens:
+                        type: integer
+                        format: uint64
+                        minimum: 0.0
+                        nullable: true
+                      usdMicros:
+                        type: integer
+                        format: uint64
+                        minimum: 0.0
+                        nullable: true
+                  effectiveLimits:
+                    type: object
+                    properties:
+                      tokens:
+                        type: integer
+                        format: uint64
+                        minimum: 0.0
+                        nullable: true
+                      usdMicros:
+                        type: integer
+                        format: uint64
+                        minimum: 0.0
+                        nullable: true
+                  phase:
+                    type: string
+                    enum: [Active, Closing, Closed, Frozen]
+                  unboundedTokens:
+                    type: boolean
+                  settled:
+                    type: object
+                    required: [tokens, usdMicros]
+                    properties:
+                      tokens:
+                        type: integer
+                        format: uint64
+                        minimum: 0.0
+                      usdMicros:
+                        description: Maximum configured inference-price units, not an invoice or all-in cost.
+                        type: integer
+                        format: uint64
+                        minimum: 0.0
+                  reserved:
+                    type: object
+                    required: [tokens, usdMicros]
+                    properties:
+                      tokens:
+                        type: integer
+                        format: uint64
+                        minimum: 0.0
+                      usdMicros:
+                        description: Maximum configured inference-price units, not an invoice or all-in cost.
+                        type: integer
+                        format: uint64
+                        minimum: 0.0
+                  uncertain:
+                    type: object
+                    required: [tokens, usdMicros]
+                    properties:
+                      tokens:
+                        type: integer
+                        format: uint64
+                        minimum: 0.0
+                      usdMicros:
+                        description: Maximum configured inference-price units, not an invoice or all-in cost.
+                        type: integer
+                        format: uint64
+                        minimum: 0.0
+                  priceCoverageComplete:
+                    type: boolean
+              tokensObservedAt:
+                description: RFC3339 time of the authenticated accounting observation (absent on failure).
+                nullable: true
+                type: string
+              tokensSpentScope:
+                description: '`GovernedInferenceLifetime` or `RetainedRootSynthesis`; not monetary cost.'
+                nullable: true
+                type: string
               tokensSpentTotal:
-                description: Total tokens spent across all of the team's standing-operation runs.
+                description: |-
+                  Settled lifetime governed inference, or retained root synthesis for legacy Teams.
+                  Unavailable accounting is absent, never zero or a synthesis fallback.
                 format: int64
                 nullable: true
                 type: integer

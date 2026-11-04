@@ -39,7 +39,8 @@ function fixture(preset = "everything") {
           "kars.azure.com/mcp-namespace-claim": "v1", "kars.azure.com/mcp-controller-namespace": "kars-system",
           "kars.azure.com/mcp-controller-namespace-uid": "system" } } }) };
     if (args[0] === "get" && resources[args[1]]) return { stdout: JSON.stringify(resources[args[1]]) };
-    if (["patch", "wait"].includes(args[0])) return { stdout: "" };
+    if (args[0] === "patch" || args[0] === "annotate") throw new Error("Protected source metadata cannot be mutated");
+    if (args[0] === "wait") return { stdout: "" };
     throw new Error("Unexpected command");
   }) as unknown as Execute & ReturnType<typeof vi.fn>;
   return { execute, resources, image, inventory };
@@ -58,14 +59,21 @@ describe("managed MCP image application", () => {
     expect(await inspectManagedMcpPlans(execute, [{ name: "controller", image }])).toEqual([]);
     expect(execute).not.toHaveBeenCalled();
   });
-  it.each(["everything", "playwright"])("CAS-triggers only %s and verifies its actual artifact, selector and probed generation", async preset => {
+  it.each(["everything", "playwright"])("verifies protected %s sources without mutating their metadata or spec", async preset => {
     const { execute, image } = fixture(preset);
     const plans = await inspectManagedMcpPlans(execute, [{ name: `mcp-${preset}`, image }]);
     expect(await refreshManagedMcpImages(execute, plans, "kars-system")).toBe(1);
     const calls = execute.mock.calls.map(call => call[1] as string[]);
-    const patch = calls.find(args => args[0] === "patch")!;
-    expect(JSON.parse(patch.at(-1)!).metadata).toMatchObject({ uid: "source", resourceVersion: "1" });
-    expect(calls.some(args => args[0] === "patch" && args[1] === "deployment")).toBe(false);
+    expect(calls.some(args => ["patch", "annotate"].includes(args[0]))).toBe(false);
+    expect(calls.some(args => args[0] === "wait" && args[1] === "mcpserver/tools")).toBe(true);
+  });
+  it.each(["uid", "generation", "spec"])("rejects a concurrent source %s change without any writes", async field => {
+    const { execute, resources } = fixture();
+    const plans = await inspectManagedMcpPlans(execute, [{ name: "mcp-everything", image }]);
+    if (field === "spec") resources.mcpserver.spec.allowedTools = ["another-tool"];
+    else resources.mcpserver.metadata[field] = field === "uid" ? "replacement" : 3;
+    await expect(refreshManagedMcpImages(execute, plans, "kars-system")).rejects.toThrow("source changed");
+    expect(execute.mock.calls.every(call => call[1][0] === "get")).toBe(true);
   });
   it("selects preset-specific images without including unrelated servers", async () => {
     const { execute, inventory } = fixture();

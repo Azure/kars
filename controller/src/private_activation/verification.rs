@@ -23,7 +23,7 @@ use kube::{
 use serde_json::json;
 use std::collections::BTreeSet;
 
-fn template_digest(mut template: serde_json::Value) -> Result<String, String> {
+pub(super) fn template_digest(mut template: serde_json::Value) -> Result<String, String> {
     if !template.is_object() {
         return Err(ERROR.into());
     }
@@ -44,7 +44,7 @@ fn template_digest(mut template: serde_json::Value) -> Result<String, String> {
     Ok(hash(&template))
 }
 
-async fn reviewed_consumers(
+pub(super) async fn reviewed_consumers(
     client: &Client,
     namespace: &Namespace,
     scope: &NamespaceReview,
@@ -99,7 +99,9 @@ async fn reviewed_consumers(
                 types.kind != consumer.kind || types.api_version != resource.api_version
             })
             || live(&current.metadata)?.0 != consumer.object.uid
-            || template_digest(template.clone())? != consumer.template_digest
+            || (template_digest(template.clone())? != consumer.template_digest
+                && !super::reconciliation::matches(client, namespace, consumer, &current, epoch)
+                    .await?)
         {
             return Err(
                 "Private capability reviewed consumer identity or template differs from its qualification"

@@ -24,8 +24,32 @@ pub struct DatapathWitnessSandbox {
     pub beyond_declared: Vec<String>,
     pub unused_declared: Vec<String>,
     pub verdict: String,
-    #[serde(default)]
+    #[serde(deserialize_with = "required_nullable_string")]
     pub egress_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_uid: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "present_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub declaration_diagnostic: Option<String>,
+}
+
+fn required_nullable_string<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    Option::<String>::deserialize(deserializer)
+}
+
+fn present_string<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    String::deserialize(deserializer).map(Some)
+}
+
+fn selected_scope() -> String {
+    "selected".into()
 }
 
 #[derive(Debug, Serialize)]
@@ -39,6 +63,8 @@ pub struct DatapathWitnessDto {
     pub install_hint: String,
     pub state: &'static str,
     pub requested_enabled: Option<bool>,
+    /// Validated operator intent, not an assertion of complete fleet coverage.
+    pub scope: Option<String>,
     pub owner_release: Option<String>,
     pub settings_state: &'static str,
     /// Reading ConfigMaps cannot establish Helm/DaemonSet installation state.
@@ -58,6 +84,8 @@ struct Settings {
     enabled: bool,
     release_revision: u64,
     config_digest: String,
+    #[serde(default = "selected_scope")]
+    scope: String,
     sandboxes: Vec<String>,
 }
 
@@ -69,13 +97,50 @@ struct WitnessDoc {
     schema_version: Option<u32>,
     release_revision: Option<u64>,
     config_digest: Option<String>,
+    #[serde(default = "selected_scope")]
+    scope: String,
     publisher_uid: Option<String>,
     status: Option<String>,
+    diagnostic: Option<String>,
     coverage: Option<String>,
     started_at: Option<String>,
     nodes_targeted: Option<Vec<String>>,
     nodes_with_events: Option<Vec<String>>,
     event_count: Option<u64>,
+}
+
+fn unavailable_diagnostic(code: Option<&str>) -> &'static str {
+    match code {
+        Some("sandbox_inventory_changed_during_capture") => {
+            "Sandbox inventory changed during capture. This window was discarded to avoid assigning traffic to the wrong worker. Waiting for the next sample."
+        }
+        Some("gadget_nodes_changed_during_capture") => {
+            "Capture nodes changed during the window. This window was discarded to avoid presenting mismatched node coverage. Waiting for the next sample."
+        }
+        Some("declaration_changed_during_capture") => {
+            "Egress declarations changed during capture. This window was discarded rather than comparing traffic against a different baseline. Waiting for the next sample."
+        }
+        Some("sample_expired_before_publication") => {
+            "The capture window expired before publication. No current sample is available. Waiting for the next sample."
+        }
+        Some("gadget_not_ready" | "gadget_node_set_incomplete") => {
+            "Capture agents are not ready on every targeted node. No current sample is available; check the observer workload and node readiness."
+        }
+        Some("capture_failed" | "capture_ended_early" | "capture_interrupted") => {
+            "Capture did not complete. No current sample is available; inspect operator-controlled capture logs."
+        }
+        Some("capture_output_limit") => {
+            "Capture exceeded its output limit. The incomplete window is not presented as current evidence; inspect operator-controlled capture logs."
+        }
+        Some(
+            "capture_invalid_json" | "capture_event_schema_or_attribution" | "capture_diagnostics",
+        ) => {
+            "Capture output could not be validated. No current sample is available; inspect operator-controlled capture logs."
+        }
+        _ => {
+            "The aggregator reported capture, node readiness, or declaration failure. No current sample is available; inspect operator-controlled logs."
+        }
+    }
 }
 
 fn owner(cm: &ConfigMap) -> Option<&str> {
@@ -153,6 +218,7 @@ fn classify(
         install_hint: SETUP.into(),
         state: "missing",
         requested_enabled: None,
+        scope: None,
         owner_release: None,
         settings_state: "missing",
         installation_state: "unknown",
@@ -184,12 +250,19 @@ fn classify(
                         && value.release_revision > 0
                         && value.config_digest.len() == 64
                         && value.config_digest.bytes().all(|c| c.is_ascii_hexdigit())
-                        && value.sandboxes.len() <= 50
-                        && distinct(&value.sandboxes)
-                        && value.sandboxes.iter().all(|s| valid_sandbox(s))
-                        && (!value.enabled || !value.sandboxes.is_empty()) =>
+                        && match value.scope.as_str() {
+                            "all" => value.sandboxes.is_empty(),
+                            "selected" => {
+                                value.sandboxes.len() <= 50
+                                    && distinct(&value.sandboxes)
+                                    && value.sandboxes.iter().all(|s| valid_sandbox(s))
+                                    && (!value.enabled || !value.sandboxes.is_empty())
+                            }
+                            _ => false,
+                        } =>
                 {
                     dto.requested_enabled = Some(value.enabled);
+                    dto.scope = Some(value.scope.clone());
                     dto.owner_release = owner(&cm).map(str::to_owned);
                     dto.settings_state = "known";
                     Some(value)
@@ -282,13 +355,14 @@ fn classify(
         || doc.publisher_uid != cm.metadata.uid
         || doc.release_revision != Some(settings.release_revision)
         || doc.config_digest.as_deref() != Some(settings.config_digest.as_str())
+        || doc.scope != settings.scope
         || doc.coverage.as_deref() != Some("partial")
     {
         return dto;
     }
     if doc.status.as_deref() == Some("unavailable") {
         dto.state = "unavailable";
-        dto.diagnostic = "The aggregator reported capture, node readiness, or declaration failure. No current sample is available; inspect operator-controlled logs.";
+        dto.diagnostic = unavailable_diagnostic(doc.diagnostic.as_deref());
         return dto;
     }
     let (Some(nodes), Some(event_nodes), Some(count), Some(start)) = (
@@ -316,7 +390,7 @@ fn classify(
             (Some("empty"), 0) | (Some("observed"), 1..)
         )
         || (count == 0) != event_nodes.is_empty()
-        || doc.sandboxes.len() != settings.sandboxes.len()
+        || (settings.scope == "selected" && doc.sandboxes.len() != settings.sandboxes.len())
     {
         return dto;
     }
@@ -336,26 +410,41 @@ fn classify(
         } else {
             "NO-BEYOND-OBSERVED"
         };
-        if !settings.sandboxes.contains(&sandbox.sandbox)
+        let valid_declaration = if sandbox.verdict == "UNAVAILABLE" {
+            sandbox.egress_mode.is_none()
+                && matches!(
+                    sandbox.declaration_diagnostic.as_deref(),
+                    Some("baseline_unavailable" | "declaration_invalid")
+                )
+                && sandbox.declared_hosts.is_empty()
+                && sandbox.beyond_declared.is_empty()
+                && sandbox.unused_declared.is_empty()
+        } else {
+            sandbox.declaration_diagnostic.is_none()
+                && matches!(sandbox.egress_mode.as_deref(), Some("Learn" | "Strict"))
+                && sandbox.verdict == expected_verdict
+                && sandbox
+                    .beyond_declared
+                    .iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    == expected_beyond
+                && sandbox
+                    .unused_declared
+                    .iter()
+                    .all(|host| sandbox.declared_hosts.contains(host))
+        };
+        if !valid_sandbox(&sandbox.sandbox)
+            || (settings.scope == "selected" && !settings.sandboxes.contains(&sandbox.sandbox))
+            || (settings.scope == "all"
+                && sandbox
+                    .sandbox_uid
+                    .as_ref()
+                    .is_none_or(|uid| uid.trim().is_empty()))
             || sandbox.namespace != format!("kars-{}", sandbox.sandbox)
             || !seen.insert(&sandbox.sandbox)
-            || !matches!(sandbox.egress_mode.as_deref(), Some("Learn" | "Strict"))
-            || !matches!(
-                sandbox.verdict.as_str(),
-                "LEARN" | "NO-TRAFFIC" | "NO-BEYOND-OBSERVED" | "BEYOND-DECLARED"
-            )
-            || sandbox.verdict != expected_verdict
+            || !valid_declaration
             || sandbox.observed_connects > count
             || sandbox.observed_dns.len() as u64 > count
-            || sandbox
-                .beyond_declared
-                .iter()
-                .collect::<std::collections::BTreeSet<_>>()
-                != expected_beyond
-            || sandbox
-                .unused_declared
-                .iter()
-                .any(|host| !sandbox.declared_hosts.contains(host))
             || [
                 &sandbox.declared_hosts,
                 &sandbox.observed_dns,

@@ -36,7 +36,9 @@ export default async function SandboxesPage({
   const error = sandboxResult.status === "rejected";
 
   const running = sandboxes.filter((s) => s.phase === "Running" || s.phase === "Ready").length;
-  const executing = sandboxes.filter((s) => s.phase === "Running" && s.executing).length;
+  const live = sandboxes.filter((s) => s.phase === "Running" || s.phase === "Ready");
+  const executing = live.filter((s) => s.executing === true).length;
+  const unknownExecution = live.filter((s) => s.executing == null).length;
   const degraded = sandboxes.filter((s) => s.phase === "Degraded" || s.phase === "Failed").length;
   const suspended = sandboxes.filter((s) => s.phase === "Suspended").length;
   const subAgents = sandboxes.filter((s) => s.parent).length;
@@ -47,14 +49,14 @@ export default async function SandboxesPage({
       <PageHeader
         eyebrow="Operator Console"
         title="Sandboxes"
-        lead="Every sandbox record across all namespaces, including suspended retained evidence. Running and Executing now are the live-agent counts."
+        lead="Sandbox infrastructure across all namespaces, including suspended records. Running means the sandbox is up, not that an agent is working."
       />
 
       {!error && sandboxes.length > 0 && (
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-6">
           <Stat label="Sandboxes" value={sandboxes.length} />
           <Stat label="Running" value={running} accent={running > 0} />
-          <Stat label="Executing now" value={executing} accent={executing > 0} />
+          <Stat label="Execution confirmed" value={unknownExecution === live.length && live.length > 0 ? "Unavailable" : unknownExecution > 0 ? `${executing}+` : executing} accent={executing > 0} />
           <Stat label="Sub-agents" value={subAgents} />
           <Stat label="Suspended" value={suspended} />
           <Stat label="Degraded" value={degraded} />
@@ -65,10 +67,11 @@ export default async function SandboxesPage({
           {suspended} suspended sandbox record{suspended === 1 ? "" : "s"} retain audit and deliverable linkage but consume no agent pod capacity.
         </p>
       )}
-      {!error && sandboxes.length > 0 && running > executing && (
+      {!error && unknownExecution > 0 && (
         <p className="text-xs text-foreground-muted">
-          {`${running - executing} of ${running} running sandbox${running - executing === 1 ? "" : "es"} ${running - executing === 1 ? "is" : "are"} idle — already delivered (or a standing sandbox with no task attached), not actively executing right now. `}
-          The Workspace&rsquo;s &ldquo;Active agents&rdquo; page counts exactly this same signal.
+          Execution status is unavailable for {unknownExecution} running sandbox{unknownExecution === 1 ? "" : "es"}.
+          Missing activity does not mean idle or finished. Counts marked + cover only confirmed execution.
+          {" "}<a href="/workspace/agents" className="underline">Open Active agents</a> for assignment-verified work and live run observations.
         </p>
       )}
 

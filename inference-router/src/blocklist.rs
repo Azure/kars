@@ -40,6 +40,10 @@ const MAX_DOMAINS_PER_FEED: usize = 500_000;
 const OISD_SMALL_URL: &str = "https://small.oisd.nl/domainswild";
 const URLHAUS_URL: &str = "https://urlhaus.abuse.ch/downloads/hostfile/";
 
+#[path = "blocklist/scoped_grants.rs"]
+mod scoped_grants;
+pub(crate) use scoped_grants::ScopedEgressGrant;
+
 /// Thread-safe blocklist that can be shared across handlers and updated in background.
 #[derive(Clone)]
 pub struct Blocklist {
@@ -62,6 +66,8 @@ pub struct Blocklist {
     /// surface) was removed alongside this slice — see
     /// `docs/internal/crd-well-oiled-machine/slice-5-egress-polish-and-observability.md`.
     allowlist: Arc<RwLock<HashSet<String>>>,
+    scoped_grants: Arc<RwLock<Vec<ScopedEgressGrant>>>,
+    services: Arc<std::sync::OnceLock<Arc<crate::governed_services::GovernedServices>>>,
     inference_budget: Arc<std::sync::OnceLock<crate::inference_budget::egress::Fence>>,
 }
 
@@ -93,6 +99,8 @@ impl Blocklist {
             learn_mode: Arc::new(AtomicBool::new(false)),
             learned_domains: Arc::new(RwLock::new(HashSet::new())),
             allowlist: Arc::new(RwLock::new(HashSet::new())),
+            scoped_grants: Arc::default(),
+            services: Arc::default(),
             inference_budget: Arc::default(),
         }
     }
@@ -126,6 +134,8 @@ impl Blocklist {
             learn_mode: Arc::new(AtomicBool::new(false)),
             learned_domains: Arc::new(RwLock::new(HashSet::new())),
             allowlist: Arc::new(RwLock::new(HashSet::new())),
+            scoped_grants: Arc::default(),
+            services: Arc::default(),
             inference_budget: Arc::default(),
         }
     }
@@ -344,10 +354,54 @@ impl Blocklist {
     /// endpoint. The `sandbox` arg is preserved so callers (the
     /// `BlockedBuffer` observability surface in `forward_proxy`) can
     /// continue to attribute denials.
-    pub async fn check_egress(&self, url: &str, _sandbox: &str) -> Result<(), String> {
-        if let Some(fence) = self.inference_budget.get() {
-            fence.check(extract_domain(url)).await?;
+    pub async fn check_egress(&self, url: &str, sandbox: &str) -> Result<(), String> {
+        self.check_egress_inner(url, sandbox, None, false)
+            .await
+            .map(|_| ())
+    }
+
+    pub(crate) async fn check_egress_in_scope(
+        &self,
+        url: &str,
+        sandbox: &str,
+        scope: &str,
+    ) -> Result<Option<String>, String> {
+        self.check_egress_inner(url, sandbox, Some(scope), false)
+            .await
+    }
+
+    /// Only for the keyless service after validating its identity-bound repository
+    /// authority. This grants no opaque proxy or ordinary public-fetch access.
+    pub(crate) async fn check_github_service_egress(
+        &self,
+        url: &str,
+        sandbox: &str,
+    ) -> Result<(), String> {
+        if ![crate::github_app::API, crate::github_app::GIT]
+            .iter()
+            .any(|origin| {
+                url.strip_prefix(origin)
+                    .is_some_and(|path| path.is_empty() || path.starts_with('/'))
+            })
+        {
+            return Err("Destination is outside the keyless GitHub service".into());
         }
+        self.check_egress_inner(url, sandbox, None, true)
+            .await
+            .map(|_| ())
+    }
+
+    async fn check_egress_inner(
+        &self,
+        url: &str,
+        _sandbox: &str,
+        scope: Option<&str>,
+        repository_service: bool,
+    ) -> Result<Option<String>, String> {
+        let catalog_exclusion = match self.inference_budget.get() {
+            Some(fence) => Some(fence.check(extract_domain(url)).await?),
+            None => None,
+        };
         // 1. Blocklist: hard deny
         let block_result = self.is_blocked(url).await;
         if block_result.is_blocked() {
@@ -355,27 +409,39 @@ impl Blocklist {
         }
 
         let domain = extract_domain(url).to_lowercase();
+        let approved = {
+            let al = self.allowlist.read().await;
+            let mut parts: &str = &domain;
+            let mut matched = al.contains(parts);
+            while !matched && let Some(pos) = parts.find('.') {
+                parts = &parts[pos + 1..];
+                matched = al.contains(parts);
+            }
+            matched
+        };
 
-        // 2. Learn mode: allow + record (for discovery)
+        // Scoped grants are only consumed by mediated requests with an atomic
+        // dispatch claim, never by an opaque proxy tunnel or an unbound caller.
+        let request_id = if !approved && let Some(scope) = scope {
+            self.scoped_egress_request(url, scope).await
+        } else {
+            None
+        };
+        let approved = approved || request_id.is_some() || repository_service;
+
+        // Reviewed, controller-published egress grants ordinary non-model access.
+        // Learn mode alone must not turn an unknown host into a budget exclusion.
+        if catalog_exclusion == Some(false) && !approved {
+            return Err(
+                "Governed mediated egress requires a reviewed non-model destination".into(),
+            );
+        }
         if self.is_learn_mode() {
             self.record_learned(url).await;
-            return Ok(());
+            return Ok(request_id);
         }
-
-        // 3. Allowlist: explicitly approved domains pass through
-        {
-            let al = self.allowlist.read().await;
-            if al.contains(&domain) {
-                return Ok(());
-            }
-            // Check parent domains (e.g., allowlisting "telegram.org" covers "api.telegram.org")
-            let mut parts: &str = &domain;
-            while let Some(pos) = parts.find('.') {
-                parts = &parts[pos + 1..];
-                if al.contains(parts) {
-                    return Ok(());
-                }
-            }
+        if approved {
+            return Ok(request_id);
         }
 
         // 4. Not allowlisted → deny. Observability is recorded by the
@@ -399,6 +465,16 @@ impl Blocklist {
     /// concurrent readers never observe a partial allowlist (mid-add
     /// or mid-remove).
     pub async fn replace_allowlist(&self, domains: Vec<String>) {
+        self.replace_allowlist_with_scoped_grants(domains, Vec::new())
+            .await;
+    }
+
+    pub(crate) async fn replace_allowlist_with_scoped_grants(
+        &self,
+        domains: Vec<String>,
+        grants: Vec<ScopedEgressGrant>,
+    ) {
+        let mut scoped = self.scoped_grants.write().await;
         let normalized: HashSet<String> = domains
             .into_iter()
             .map(|d| d.trim().to_ascii_lowercase())
@@ -407,6 +483,7 @@ impl Blocklist {
         let count = normalized.len();
         let mut al = self.allowlist.write().await;
         *al = normalized;
+        *scoped = grants;
         tracing::info!(count, "Egress allowlist replaced from signed bundle");
     }
 

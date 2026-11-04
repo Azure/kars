@@ -13,6 +13,65 @@ use crate::{
 };
 use k8s_openapi::api::core::v1::{Namespace, Pod};
 use kube::{Api, Client, ResourceExt, api::ListParams};
+use std::collections::{BTreeMap, BTreeSet};
+
+pub(super) async fn task_snapshot(
+    tasks: &Api<KarsTask>,
+    names: BTreeSet<String>,
+) -> Result<BTreeMap<String, Option<KarsTask>>, StoreError> {
+    let mut result = BTreeMap::new();
+    if names.len() > 1 {
+        let mut params = ListParams::default().limit(128);
+        let mut version = None;
+        let mut tokens = BTreeSet::new();
+        // Bound unrelated namespace traffic. If the inventory is larger, fresh
+        // point reads resolve the remainder; a truncated list never means absent.
+        for _ in 0..4 {
+            let page = tasks.list(&params).await.map_err(api_error)?;
+            if page.items.len() > 128 {
+                return Err(StoreError::Contention);
+            }
+            let current = page
+                .metadata
+                .resource_version
+                .filter(|value| !value.is_empty())
+                .ok_or(StoreError::Contention)?;
+            if version
+                .as_ref()
+                .is_some_and(|previous| previous != &current)
+            {
+                return Err(StoreError::Contention);
+            }
+            version = Some(current);
+            for task in page.items {
+                let name = task.name_any();
+                if names.contains(&name) && result.insert(name, Some(task)).is_some() {
+                    return Err(StoreError::Contention);
+                }
+            }
+            let Some(token) = page.metadata.continue_.filter(|token| !token.is_empty()) else {
+                for name in names {
+                    result.entry(name).or_insert(None);
+                }
+                return Ok(result);
+            };
+            if result.len() == names.len() {
+                return Ok(result);
+            }
+            if !tokens.insert(token.clone()) {
+                return Err(StoreError::Contention);
+            }
+            params = params.continue_token(&token);
+        }
+    }
+    for name in names {
+        if !result.contains_key(&name) {
+            let task = tasks.get_opt(&name).await.map_err(api_error)?;
+            result.insert(name, task);
+        }
+    }
+    Ok(result)
+}
 
 fn api_error(error: kube::Error) -> StoreError {
     StoreError::Api {
@@ -47,9 +106,19 @@ async fn scan(client: &Client, settings: &Settings) -> Result<(), StoreError> {
     loop {
         let page = api.list(&params).await.map_err(api_error)?;
         for account in page.items {
-            if reconcile_account(client, &store, &account).await.is_err() {
+            let recovered = reconcile_account(client, &store, &account).await;
+            let result = match recovered {
+                Ok(()) if account.annotations().get(BOOTSTRAP).map(String::as_str) == Some("sealed") => {
+                    super::topups::reconcile(client, settings, &store, &account.spec.root,
+                        account.metadata.uid.as_deref().ok_or(StoreError::Missing)?).await
+                }
+                result => result,
+            };
+            if let Err(error) = result {
+                let _ = store.refresh_status(&account.spec.root,
+                    account.metadata.uid.as_deref().ok_or(StoreError::Missing)?, Some(&error)).await;
                 tracing::error!(account = %account.name_any(),
-                    "Governed inference account recovery failed closed; no balances reset");
+                    "Governed inference account recovery/funding failed closed; no balances reset");
             }
         }
         let Some(token) = page.metadata.continue_.filter(|token| !token.is_empty()) else {
@@ -111,6 +180,9 @@ async fn recover(
             .transact(root, &uid, |ledger| ledger.close_account())
             .await;
     }
+    if root.kind == RootKind::KarsSandbox {
+        return super::builtin::recover(client, store, account).await;
+    }
     let tasks: Api<KarsTask> = Api::namespaced(client.clone(), &root.resource.namespace);
     if root.kind == RootKind::KarsTeam {
         let teams: Api<KarsTeam> = Api::namespaced(client.clone(), &root.resource.namespace);
@@ -125,26 +197,6 @@ async fn recover(
             return store
                 .transact(root, &uid, |ledger| ledger.close_account())
                 .await;
-        }
-        if team.is_some_and(|team| team.spec.paused) {
-            let current = store.read(root, &uid).await?;
-            let ledger = current
-                .status
-                .as_ref()
-                .and_then(|status| status.ledger.as_ref())
-                .ok_or(StoreError::Missing)?;
-            for node in ledger
-                .nodes
-                .values()
-                .filter(|node| node.authority.parent_uid.is_none())
-            {
-                store
-                    .transact(root, &uid, |ledger| {
-                        ledger.close_subtree(&node.authority.task.uid)
-                    })
-                    .await?;
-            }
-            return Ok(());
         }
     } else {
         let task = tasks
@@ -166,11 +218,21 @@ async fn recover(
         .as_ref()
         .and_then(|status| status.ledger.as_ref())
         .ok_or(StoreError::Missing)?;
+    let snapshot = task_snapshot(
+        &tasks,
+        ledger
+            .nodes
+            .values()
+            .filter(|node| node.active)
+            .map(|node| node.authority.task.name.clone())
+            .collect(),
+    )
+    .await?;
     for node in ledger.nodes.values().filter(|node| node.active) {
-        let task = tasks
-            .get_opt(&node.authority.task.name)
-            .await
-            .map_err(api_error)?;
+        let task = snapshot
+            .get(&node.authority.task.name)
+            .ok_or(StoreError::Missing)?
+            .as_ref();
         if task.as_ref().is_none_or(|task| {
             task.metadata.uid.as_deref() != Some(node.authority.task.uid.as_str())
                 || task.metadata.deletion_timestamp.is_some()
@@ -200,6 +262,7 @@ async fn recover(
         let launched = task.is_some_and(|task| {
             task.spec
                 .execution
+                .as_ref()
                 .is_some_and(|execution| execution.launch)
         });
         for session in ledger.sessions.values().filter(|session| {

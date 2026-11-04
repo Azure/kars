@@ -10,6 +10,7 @@ use serde::Serialize;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
+use super::additional_providers::{INFERENCE_PROVIDERS_NS, INFERENCE_PROVIDERS_SECRET};
 use super::copilot_transport::{CopilotClient, CopilotEndpoint};
 use super::{require_cluster, upstream};
 
@@ -71,16 +72,35 @@ pub async fn put_provider(
             "at least one model deployment is required".into(),
         ));
     }
+    // Reject sealed/unavailable bootstrap authority before touching a reused live credential.
+    cluster
+        .require_controller_environment()
+        .await
+        .map_err(AppError::from)?;
+    cluster
+        .integration_store(
+            &cluster.core_namespace(),
+            "kars-credential-controller-settings",
+        )
+        .await
+        .map_err(AppError::from)?;
     let mut key_secret: Option<(String, String)> = None;
     if req.auth == "api" {
         if let Some(k) = req.key.as_deref().filter(|k| !k.trim().is_empty()) {
-            let secret = format!("kars-provider-{}", req.kind);
-            cluster.upsert_secret("kars-system", &secret, serde_json::json!({
-                "apiVersion": "v1", "kind": "Secret", "type": "Opaque",
-                "metadata": {"name": secret, "namespace": "kars-system", "labels": {"app.kubernetes.io/managed-by": "kars-bridge"}},
-                "stringData": {"API_KEY": k},
-            })).await.map_err(upstream)?;
-            key_secret = Some((secret, "API_KEY".to_string()));
+            if !super::is_dns1123_label(&req.kind) {
+                return Err(AppError::BadRequest("Invalid provider kind.".into()));
+            }
+            let key_name = format!(
+                "KARS_PROVIDER_{}_API_KEY",
+                req.kind.to_ascii_uppercase().replace('-', "_")
+            );
+            cluster
+                .mutate_secret_keys(INFERENCE_PROVIDERS_NS, INFERENCE_PROVIDERS_SECRET, |keys| {
+                    keys.insert(key_name.clone(), k.to_string());
+                })
+                .await
+                .map_err(AppError::from)?;
+            key_secret = Some((INFERENCE_PROVIDERS_SECRET.into(), key_name));
         } else {
             return Err(AppError::BadRequest(
                 "auth=api requires a provider API key".into(),
@@ -397,15 +417,16 @@ pub struct DiscoverModelsRequest {
 
 /// `POST /api/operator/providers/discover` — real, live model discovery so the
 /// operator never hand-types a deployment id. GitHub Models queries the public
-/// catalog (no auth). Azure OpenAI queries the data-plane `/openai/deployments`
-/// endpoint using the operator-supplied endpoint + key (a live round-trip, so a
-/// wrong key/endpoint surfaces as an immediate, actionable error). GitHub
-/// Copilot exchanges the supplied token for a Copilot JWT (verifying the seat +
+/// catalog (no auth). Azure OpenAI queries its Foundry project's deployment
+/// collection, reusing a same-resource saved credential when available.
+/// Discovery only previews results; model selection is saved separately. GitHub
+/// Copilot exchanges the supplied or enrolled token for a Copilot JWT (verifying the seat +
 /// Chat entitlement live) and then queries the seat's LIVE `/models` catalog —
 /// so the picker always reflects the models GitHub currently serves this seat
 /// (gpt-5.6, claude-opus-4.8, gemini-3.1-pro, …), never a hand-maintained list
 /// that goes stale.
 pub async fn discover_models(
+    State(state): State<AppState>,
     Json(req): Json<DiscoverModelsRequest>,
 ) -> AppResult<Json<Vec<DiscoveredModelDto>>> {
     let client = reqwest::Client::builder()
@@ -459,62 +480,22 @@ pub async fn discover_models(
                         "endpoint is required to discover Azure OpenAI deployments".into(),
                     )
                 })?;
-            let key = req
-                .key
-                .as_deref()
-                .filter(|k| !k.trim().is_empty())
-                .ok_or_else(|| AppError::BadRequest(
-                    "an API key is required to discover deployments (workload/agentid auth can't be exercised from the browser — enter deployment ids manually, or discover once with a temporary key)".into(),
-                ))?;
-            let url = format!("{endpoint}/openai/deployments?api-version=2023-05-15");
-            let resp = client
-                .get(&url)
-                .header("api-key", key)
-                .send()
-                .await
-                .map_err(|e| AppError::Upstream(format!("Azure OpenAI request failed: {e}")))?;
-            let status = resp.status();
-            let body_text = resp.text().await.unwrap_or_default();
-            if !status.is_success() {
-                return Err(AppError::Rejected(format!(
-                    "Azure OpenAI rejected the discovery request ({status}) — check the endpoint and key: {body_text}"
-                )));
-            }
-            let body: serde_json::Value = serde_json::from_str(&body_text)
-                .map_err(|e| AppError::Upstream(format!("bad deployments JSON: {e}")))?;
-            let models = body
-                .get("data")
-                .and_then(|d| d.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|d| {
-                            let id = d.get("id").and_then(|v| v.as_str())?.to_string();
-                            let base = d
-                                .get("model")
-                                .and_then(|v| v.as_str())
-                                .map(|m| format!("deployment of {m}"));
-                            Some(DiscoveredModelDto {
-                                id,
-                                label: base,
-                                recommended: false,
-                                detail: None,
-                            })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+            let models =
+                crate::routes::foundry::discover_azure_models(&state, endpoint, req.key.as_deref())
+                    .await?
+                    .into_iter()
+                    .map(|id| DiscoveredModelDto {
+                        id,
+                        label: None,
+                        recommended: false,
+                        detail: None,
+                    })
+                    .collect();
             Ok(Json(models))
         }
         "github-copilot" => {
-            let token = req
-                .key
-                .as_deref()
-                .map(str::trim)
-                .filter(|k| !k.is_empty())
-                .ok_or_else(|| AppError::BadRequest(
-                    "a GitHub token (OAuth token or PAT with Copilot access) is required to verify the seat before showing the model catalog".into(),
-                ))?;
-            let jwt = copilot_jwt(token).await?;
+            let token = copilot_discovery_token(&state, req.key.as_deref()).await?;
+            let jwt = copilot_jwt(&token).await?;
             let models = fetch_copilot_models(&jwt).await?;
             Ok(Json(models))
         }
@@ -522,6 +503,28 @@ pub async fn discover_models(
             "unknown provider kind '{other}' for discovery"
         ))),
     }
+}
+
+pub(super) async fn copilot_discovery_token(
+    state: &AppState,
+    supplied: Option<&str>,
+) -> AppResult<String> {
+    if let Some(token) = supplied.map(str::trim).filter(|token| !token.is_empty()) {
+        return Ok(token.to_string());
+    }
+    let keys = require_cluster(state)?
+        .read_secret_all(INFERENCE_PROVIDERS_NS, INFERENCE_PROVIDERS_SECRET)
+        .await
+        .map_err(AppError::from)?;
+    keys.get("KARS_PROVIDER_GITHUB_COPILOT_TOKEN")
+        .or_else(|| keys.get("COPILOT_GITHUB_TOKEN"))
+        .filter(|token| !token.trim().is_empty())
+        .cloned()
+        .ok_or_else(|| {
+            AppError::BadRequest(
+                "Sign in to GitHub Copilot before discovering the seat's model catalog.".into(),
+            )
+        })
 }
 
 #[cfg(test)]

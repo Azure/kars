@@ -56,6 +56,32 @@ function descendants(node) {
   return [node, ...descendants(node.props?.children)];
 }
 
+test("GitHub catalog explains that MCP access is separate from the App connection", () => {
+  const github = MCP_CATALOG.find(e => e.id === "github");
+  assert.ok(github);
+  assert.equal(github.bearerFromEnv, "COPILOT_GITHUB_TOKEN");
+  const f = load([true, "All", "", null, false]);
+  const html = renderToStaticMarkup(f.render("McpCatalog", { servers: [] }));
+  assert.match(html, /does not give this service access or limit which repositories it can reach/);
+  assert.match(html, /For private repository metadata, use the App connection/);
+});
+
+test("DeepWiki exposes the current question tool with an explicit matching scenario allowlist", () => {
+  const deepwiki = MCP_CATALOG.find(e => e.id === "deepwiki");
+  assert.ok(deepwiki);
+  assert.deepEqual(deepwiki.allowedTools, ["read_wiki_structure", "read_wiki_contents", "ask_wiki_question"]);
+  const f = load();
+  const html = renderToStaticMarkup(f.render("AddForm", { entry: deepwiki, onDone() {}, onBusy() {} }));
+  assert.match(html, /ask_wiki_question/);
+  assert.doesNotMatch(html, /\bask_question\b/);
+  for (const scenario of ["exec-brief", "exec-brief-hermes-single"]) {
+    const manifest = readFileSync(new URL(`../../../tools/e2e-harness/scenarios/${scenario}/manifests/04-mcpserver.yaml`, import.meta.url), "utf8");
+    const allowedTools = manifest.match(/  allowedTools:\n((?:    - [^\n]+\n)+)/)?.[1];
+    assert.ok(allowedTools);
+    assert.deepEqual(allowedTools.trim().split("\n").map(line => line.trim().slice(2)), deepwiki.allowedTools);
+  }
+});
+
 test("cancelling a catalog form does not mark anything installed or submit a request", () => {
   const states = [true, "All", "", "playwright", false];
   const f = load(states);

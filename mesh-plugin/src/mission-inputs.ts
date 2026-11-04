@@ -3,8 +3,13 @@
 
 import { createHash } from "node:crypto";
 
-export const MAX_MISSION_INPUT_BYTES = 64 * 1024;
-export const MAX_MISSION_INPUTS = 16;
+// Assembled inputs use the remaining 384 KiB of the existing 576 KiB envelope;
+// retained Kubernetes annotations keep their independent 192 KiB ceiling.
+export const MAX_MISSION_RETAINED_INPUT_BYTES = 192 * 1024;
+export const MAX_MISSION_INPUT_BYTES = 384 * 1024;
+export const MAX_MISSION_INPUT_FILE_BYTES = 64 * 1024;
+// Eight final-phase producers, eight memory files, and sixteen revision files.
+export const MAX_MISSION_INPUTS = 8 * 16 + 8 + 16;
 export interface MissionInputSource {
   namespace: string;
   taskName: string;
@@ -64,7 +69,7 @@ function canonicalInputs(value: unknown, withContent: boolean): readonly Mission
     names.add(item.name);
     if (typeof item.sha256 !== "string" || !/^sha256:[a-f0-9]{64}$/.test(item.sha256)) throw new Error("Invalid mission input digest");
     if (withContent && (typeof item.content !== "string" || !item.content.trim()
-      || Buffer.byteLength(item.content) > MAX_MISSION_INPUT_BYTES || Buffer.from(item.content).toString("utf8") !== item.content
+      || Buffer.byteLength(item.content) > MAX_MISSION_INPUT_FILE_BYTES || Buffer.from(item.content).toString("utf8") !== item.content
       || item.sha256 !== digest(item.content))) throw new Error("Mission input content must match its exact UTF8 digest");
     const source = fields(item.source, ["namespace", "taskName", "taskUid", "sandboxUid", "podUid", "runNonce", "assignmentId", "agentDid", "artifactName"]);
     if (typeof source.namespace !== "string" || !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(source.namespace)

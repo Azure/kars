@@ -141,6 +141,118 @@ async fn stage_cannot_activate_without_its_persisted_reservation() {
 }
 
 #[tokio::test]
+async fn retained_input_preflight_rejects_legacy_staging_before_recovery_or_dispatch() {
+    for runtime in ["OpenClaw", "Hermes"] {
+        let mut team = requested_team();
+        team.spec.envelope.delegation_depth = 3;
+        let mut plan = crate::task_execution_plan::test_filesystem_plan();
+        plan.roles[0].phases[0].execution_mode = Some("native".into());
+        plan.roles[0].phases[0].capabilities = vec!["filesystem-write".into()];
+        plan.synthesis.execution_mode = Some("native".into());
+        team.spec.roster = vec![crate::kars_team::TeamRole {
+            name: plan.roles[0].name.clone(), ..Default::default()
+        }];
+        team.spec.blueprint = Some(crate::kars_task::TaskBlueprint {
+            runtime: Some(runtime.into()), execution_plan: Some(plan), ..Default::default()
+        });
+        let (server, client, store) = setup(&team).await;
+        let mut prepared = stage(&client, &store).await;
+        // Model a correctly sealed staged Task persisted by an older controller.
+        let mut task: KarsTask = serde_json::from_value(store.lock().unwrap().tasks[&prepared.record.task_name].clone()).unwrap();
+        let content = "Retained source material";
+        task.annotations_mut().insert(crate::reviewed_execution::TEAM_MEMORY.into(), json!([{
+            "name":"prior.md", "content":content, "sha256":hex::encode(<sha2::Sha256 as sha2::Digest>::digest(content.as_bytes())),
+            "source":{"namespace":"tenant-a","taskName":"prior-run","taskUid":"prior-uid",
+                "sandboxUid":"sandbox-uid","podUid":"pod-uid","runNonce":"prior-nonce",
+                "assignmentId":"prior-assignment","agentDid":"did:agt:prior","artifactName":"prior.md"}
+        }]).to_string());
+        prepared.record.task_spec_digest = requests::task_digest(&task).unwrap();
+        task.annotations_mut().insert("kars.azure.com/team-request-spec".into(), prepared.record.task_spec_digest.clone());
+        store.lock().unwrap().tasks.insert(prepared.record.task_name.clone(), json!(task));
+        let persisted = reserve(&client, &store, &prepared).await;
+        let before = server.received_requests().await.unwrap().len();
+        let snapshot = store.lock().unwrap().tasks.clone();
+        let result = requests::prepare(&client, &Api::namespaced(client.clone(), "tenant-a"), &persisted, true).await;
+        assert!(result.err().unwrap().to_string().contains("ReviewedInputCapabilityRequired"));
+        assert!(finish(&client, &persisted, &prepared).await.unwrap_err().to_string().contains("ReviewedInputCapabilityRequired"));
+        assert_eq!(store.lock().unwrap().tasks, snapshot);
+        assert!(store.lock().unwrap().activation_reservations.is_empty());
+        assert!(server.received_requests().await.unwrap()[before..].iter().all(|request| request.method.as_str() == "GET"));
+    }
+}
+
+#[tokio::test]
+async fn staged_revision_formats_recover_and_activate_without_replay() {
+    for runtime in ["OpenClaw", "Hermes"] {
+        for diagnostics in [false, true] {
+            let mut team = requested_team();
+            team.spec.envelope.delegation_depth = 3;
+            let mut plan = crate::task_execution_plan::test_filesystem_plan();
+            plan.roles[0].phases[0].execution_mode = Some("native".into());
+            plan.synthesis.execution_mode = Some("native".into());
+            team.spec.roster = vec![crate::kars_team::TeamRole {
+                name: plan.roles[0].name.clone(),
+                ..Default::default()
+            }];
+            team.spec.blueprint = Some(crate::kars_task::TaskBlueprint {
+                runtime: Some(runtime.into()),
+                execution_plan: Some(plan),
+                ..Default::default()
+            });
+            let (_server, client, store) = setup(&team).await;
+            let mut prepared = stage(&client, &store).await;
+            let mut task: KarsTask = serde_json::from_value(
+                store.lock().unwrap().tasks[&prepared.record.task_name].clone(),
+            )
+            .unwrap();
+            let documents = (0..if diagnostics { 28 } else { 1 }).map(|index| {
+                let content = format!("Retained source {index}");
+                serde_json::from_value(json!({
+                    "name": if diagnostics { format!("revision-unaccepted-r0-p0--source-{index}.py") } else { "revision-0".into() },
+                    "content":content,
+                    "sha256":format!("sha256:{}", crate::providers::signing::sha256_hex(content.as_bytes())),
+                    "source":{"namespace":"tenant-a","taskName":"prior-run","taskUid":"prior-uid",
+                        "sandboxUid":"prior-sandbox","podUid":"prior-pod","runNonce":"prior-nonce",
+                        "assignmentId":"prior-assignment","agentDid":"did:agt:prior",
+                        "artifactName":format!("source-{index}.py")}
+                })).unwrap()
+            }).collect::<Vec<crate::team_memory::Document>>();
+            crate::reviewed_execution::seal_team_revision(&mut task, &documents, &[]).unwrap();
+            prepared.record.task_spec_digest = requests::task_digest(&task).unwrap();
+            task.annotations_mut().insert(
+                "kars.azure.com/team-request-spec".into(),
+                prepared.record.task_spec_digest.clone(),
+            );
+            store
+                .lock()
+                .unwrap()
+                .tasks
+                .insert(prepared.record.task_name.clone(), json!(task));
+            let persisted = reserve(&client, &store, &prepared).await;
+            let recovered = requests::prepare(
+                &client,
+                &Api::namespaced(client.clone(), "tenant-a"),
+                &persisted,
+                true,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(!recovered.newly_reserved);
+            assert_eq!(recovered.record.task_uid, prepared.record.task_uid);
+            assert!(!launched(&store, &prepared));
+            finish(&client, &persisted, &recovered).await.unwrap();
+            assert!(launched(&store, &prepared));
+            assert_eq!(store.lock().unwrap().activation_reservations.len(), 1);
+            assert_eq!(
+                store.lock().unwrap().team["status"]["generatedTaskCount"],
+                1
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn staged_reviewed_run_seals_roster_routes_in_its_reserved_digest() {
     let mut team = requested_team();
     team.spec.envelope.delegation_depth = 3;

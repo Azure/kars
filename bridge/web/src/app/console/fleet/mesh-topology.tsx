@@ -171,6 +171,7 @@ export function MeshTopology({ sandboxes }: { sandboxes: Sandbox[] }) {
 
   const byName = new Map(nodes.map((n) => [n.s.name, n]));
   const executing = nodes.filter((node) => node.s.executing === true).length;
+  const unknownExecution = nodes.filter((node) => node.s.executing == null).length;
 
   return (
     <section className="rounded-2xl border border-border bg-surface p-5">
@@ -179,18 +180,19 @@ export function MeshTopology({ sandboxes }: { sandboxes: Sandbox[] }) {
           <h2 className="text-sm font-semibold">Team delegation topology</h2>
           <p className="mt-0.5 max-w-3xl text-xs text-foreground-muted">
             Curved links show controller-recorded parent and sub-agent relationships.
-            They do not establish that those agents exchanged messages through the AgentMesh relay.
+            A root record is not necessarily a Team leader; its parent may be absent from this inventory.
+            These links do not establish that agents exchanged messages through the AgentMesh relay.
           </p>
         </div>
         <div className="flex flex-wrap gap-1.5 text-[11px]">
           <span className="rounded-full border border-border bg-surface-muted px-2.5 py-1 text-foreground-muted">
-            {roots.length} principal{roots.length === 1 ? "" : "s"}
+            {roots.length} root record{roots.length === 1 ? "" : "s"}
           </span>
           <span className="rounded-full border border-accent/25 bg-accent/10 px-2.5 py-1 text-accent">
             {edges.length} delegation relationship{edges.length === 1 ? "" : "s"}
           </span>
           <span className="rounded-full border border-ok/25 bg-ok/10 px-2.5 py-1 text-ok">
-            {executing} executing
+            {executing} execution confirmed · {unknownExecution} unavailable
           </span>
         </div>
       </div>
@@ -259,7 +261,7 @@ export function MeshTopology({ sandboxes }: { sandboxes: Sandbox[] }) {
             const statusFill =
               running && n.s.executing
                 ? "fill-ok"
-                : running
+                : running && n.s.executing === false
                   ? "fill-warning"
                   : "fill-foreground-muted";
             const principal = n.depth === 0;
@@ -269,10 +271,8 @@ export function MeshTopology({ sandboxes }: { sandboxes: Sandbox[] }) {
             const label = truncate(displayName(n.s), principal ? 29 : 22);
             const parentNode = n.s.parent ? byName.get(n.s.parent) : null;
             const relationship = principal
-              ? "team principal"
-              : n.depth === 1
-                ? "specialist"
-                : `spawned by ${parentNode ? displayName(parentNode.s) : "parent"}`;
+              ? n.s.parent ? "parent outside inventory" : "no parent recorded"
+              : `spawned by ${parentNode ? displayName(parentNode.s) : "parent"}`;
             return (
               <g
                 key={n.s.name}
@@ -351,7 +351,10 @@ export function MeshTopology({ sandboxes }: { sandboxes: Sandbox[] }) {
             <span className="h-2 w-2 rounded-full bg-ok" /> executing
           </span>
           <span className="inline-flex items-center gap-1.5">
-            <span className="h-2 w-2 rounded-full bg-warning" /> idle / retained
+            <span className="h-2 w-2 rounded-full bg-warning" /> not executing (reported)
+          </span>
+          <span className="inline-flex items-center gap-1.5">
+            <span className="h-2 w-2 rounded-full bg-foreground-muted" /> unavailable / not running
           </span>
           <span className="inline-flex items-center gap-1.5">
             <span className="font-bold text-foreground">✓</span> governed

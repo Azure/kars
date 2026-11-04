@@ -69,6 +69,29 @@ test("an explicit standing charter is not outweighed by its deliverable verbs", 
   }
 });
 
+test("explicit on-demand and unqualified Team requests retain their chosen composer", () => {
+  for (const intent of [
+    "Create an on-demand Team called Memory developer desk, initially paused with no recurrence. Research memory, investigate results, and write a developer guide. Later intake will assess continuity.",
+    "Maintain an on-demand memory review team. Investigate observations and produce reports for owner review.",
+    "Please create a Team to research memory and write a guide.",
+    "We need a team to investigate issues and generate recommendations.",
+  ]) {
+    assert.equal(classifyIntent(intent).kind, "team", intent);
+    assert.equal(classifyIntent(intent).confidence, "high", intent);
+  }
+});
+
+test("on-demand wording does not create a Team when bounded, negated, or only a subject", () => {
+  for (const intent of [
+    "Create an on-demand Team for a one-off mission to write a report.",
+    "Do not create an on-demand Team. Research and write a report.",
+    "Write a report about an on-demand memory review team.",
+    "Create a report about a team and review its mandate.",
+    "Use a team of researchers to write an on-demand report.",
+    "Team performance: research results and write a report.",
+  ]) assert.equal(classifyIntent(intent).kind, "mission", intent);
+});
+
 test("a standing team mentioned as a subject or a rejected action stays a Mission", () => {
   for (const intent of [
     "Write a report about a standing operations team.",

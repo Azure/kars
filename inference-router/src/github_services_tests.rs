@@ -29,7 +29,7 @@ fn source() -> serde_json::Value {
 async fn github_secret_removal_rotation_and_invalid_replacement_drop_cached_credentials() {
     let directory = tempfile::Builder::new()
         .prefix(".github-config-test-")
-        .tempdir_in(".")
+        .tempdir()
         .unwrap();
     let path = directory.path().join("config.json");
     let mut services = GitHubServices::new(Some(identity()), crate::github_app::client().unwrap());
@@ -59,7 +59,7 @@ async fn github_secret_removal_rotation_and_invalid_replacement_drop_cached_cred
 async fn github_secret_cannot_rebind_to_recreated_namespace_sandbox_or_changed_task() {
     let directory = tempfile::Builder::new()
         .prefix(".github-config-test-")
-        .tempdir_in(".")
+        .tempdir()
         .unwrap();
     let path = directory.path().join("config.json");
     let mut services = GitHubServices::new(Some(identity()), crate::github_app::client().unwrap());
@@ -83,7 +83,7 @@ async fn github_secret_cannot_rebind_to_recreated_namespace_sandbox_or_changed_t
 pub(crate) async fn fixture(api: &str) -> (tempfile::TempDir, Arc<GitHubServices>) {
     let directory = tempfile::Builder::new()
         .prefix(".github-http-test-")
-        .tempdir_in(".")
+        .tempdir()
         .unwrap();
     let path = directory.path().join("config.json");
     let bytes = serde_json::to_vec(&source()).unwrap();

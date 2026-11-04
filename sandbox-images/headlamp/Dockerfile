@@ -1,14 +1,14 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-ARG AZURELINUX_DISTROLESS=mcr.microsoft.com/azurelinux/distroless/base:3.0
+ARG AZURELINUX_DISTROLESS=mcr.microsoft.com/azurelinux/distroless/base:3.0@sha256:6b85a86416a29cdcfd404e9fbd9c5ef49cc0612882cecc702535dcac39c9446c
 FROM ghcr.io/headlamp-k8s/headlamp@sha256:89c6c65810bfde61796483c93c70d659104355593792bf55cab680d685da8eeb AS upstream
 
-FROM golang:1.27.2-bookworm AS backend
+FROM golang:1.27.3-bookworm@sha256:d9b6a1beb9474adc2a1ce842573639b44b2a0dd49b6669f51d3821baf9ec37c9 AS backend
 ENV CGO_ENABLED=0 GOMAXPROCS=2 GOMEMLIMIT=3GiB GOTOOLCHAIN=local
 ADD --checksum=sha256:73c885c09f4121f8497ced73b99e8bda233f354ae328c7a5211106577e4a5b5c https://codeload.github.com/kubernetes-sigs/headlamp/tar.gz/066c5be9deb14b12bcef3485b531c64a84a2a219 /download/source.tar.gz
-COPY sandbox-images/headlamp/build-backend.sh /usr/local/bin/build-headlamp-backend
-RUN sh /usr/local/bin/build-headlamp-backend /download
+COPY sandbox-images/headlamp/build-backend.sh sandbox-images/headlamp/patch-backend.go sandbox-images/headlamp/patch-backend_test.go sandbox-images/headlamp/static-cache.go sandbox-images/headlamp/static-cache_test.go sandbox-images/headlamp/oidc-navigation.go sandbox-images/headlamp/oidc-navigation_test.go /usr/local/lib/kars-headlamp/
+RUN sh /usr/local/lib/kars-headlamp/build-backend.sh /download
 
 FROM node:22-bookworm-slim AS frontend
 ARG NPM_CONFIG_REGISTRY=https://registry.npmjs.org
@@ -39,17 +39,18 @@ COPY --from=frontend /build/frontend/frontend-evidence.json /build/frontend/fron
 COPY --from=upstream /headlamp/plugins /headlamp/plugins
 COPY --from=upstream /headlamp/static-plugins /headlamp/static-plugins
 COPY --from=backend /download/headlamp-server /headlamp/headlamp-server
-COPY --from=plugin /build/dist /headlamp/plugins/kars
-COPY --from=plugin /build/package.json /headlamp/plugins/kars/package.json
+COPY --from=plugin --chmod=0555 /build/dist /headlamp/plugins/kars
+COPY --from=plugin --chmod=0444 /build/package.json /headlamp/plugins/kars/package.json
 COPY LICENSE /usr/share/licenses/kars/LICENSE
 ADD --chmod=0444 --checksum=sha256:cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30 https://raw.githubusercontent.com/kubernetes-sigs/headlamp/v0.41.0/LICENSE /usr/share/licenses/headlamp/LICENSE
 LABEL org.opencontainers.image.title="Kars Headlamp" \
       org.opencontainers.image.description="Headlamp v0.41.0 and the Kars plugin on Azure Linux 3 distroless" \
-      org.kars.headlamp.backend-patch="go1.27.2-dependencies.1" \
+      org.kars.headlamp.backend-patch="go1.27.3-dependencies.3-static-cache.1-oidc-navigation.1" \
       org.kars.headlamp.frontend-patch="npm-runtime-dependencies.1" \
       org.opencontainers.image.source="https://github.com/Azure/kars" \
       org.opencontainers.image.licenses="Apache-2.0 AND MIT"
 ENV HEADLAMP_STATIC_PLUGINS_DIR=/headlamp/static-plugins \
+    HEADLAMP_STATIC_CACHE_NAME=kars-headlamp-static \
     USER=headlamp \
     HOME=/tmp
 USER 10001:10001

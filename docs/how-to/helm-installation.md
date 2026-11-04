@@ -9,6 +9,14 @@ AgentMesh or use an existing external deployment.
 
 For the public `kars-bridge` integration branch and optional Bridge add-on, see
 the [beta Helm installation and acceptance guide](../../bridge/docs/public-beta-helm.md).
+Its [release artifacts and two Helm commands](../../bridge/docs/public-beta-helm.md#release-artifacts-and-the-two-helm-commands)
+use version-selected, digest-bound Core and Bridge chart archives with bundled
+locked dependencies. Once those artifacts are published, installation requires no
+source checkout or image build. Private operator values, genuine HTTPS OIDC,
+provider credentials and a compatible qualified cluster remain prerequisites;
+packaging alone is not publication or acceptance. Use matching generic/Kind
+profiles and apply the release image overrides last, not an unrelated stable
+`latest` release.
 
 Before upgrading an existing controller, run `kars namespace preflight` with the
 updated CLI and resolve all ownership conflicts. See
@@ -34,6 +42,16 @@ The hook is not an upgrade, rollback or existing-release migration mechanism.
 The CLI-assisted procedures below remain the compatibility path when it is
 disabled; they do not satisfy the Helm-only beta acceptance gate.
 
+The cold SRE funding contract pins the original router digest as well as the
+source, policies and funding mode. Disabling the schema hook does not authorize a
+router refresh: both the chart and controller reject changing that sealed intent.
+Use the qualified router digest in a fresh install with its own explicit funding
+intent: unbounded, non-expiring tokens and record-only accounting for Kind beta,
+or an explicitly reviewed production grant/enforcement policy. Existing installs
+require a separately reviewed identity-preserving migration.
+Never edit the immutable receipt, reset the existing ledger, or treat a failed
+upgrade as a successful rollout.
+
 ## Required schema-before-admission stage
 
 When the first-install hook is disabled, use the matching CLI/chart to stage
@@ -52,6 +70,48 @@ Repeat the same values files and `--set`/`--set-string` overrides in both comman
 For a Helm upgrade using `--reuse-values` or `--reset-then-reuse-values`, pass that
 same option to `schemas prepare`; the helper reads the appropriate release values
 without printing them. `--check` verifies existing owned schemas without writes.
+Reconcile reused values with reviewed live runtime pins, rotated budget TLS and
+the current inference catalog before an upgrade; `--reuse-values` alone can
+reintroduce old operator configuration. The chart retains an owned catalog's
+exact JSON serialization when its parsed content matches the requested values,
+so a formatting-only change does not seize an operator-managed field.
+If the requested TLS certificate/key already match the owned live Secret, the
+chart also retains the owned controller's existing TLS checksum: synchronizing
+values after an operator rotation must not restart a sealed controller. An actual
+certificate/key change still computes a new checksum and requires the normal
+controller-mutation review.
+
+For a protected controller, the explicit **non-atomic Helm 4.1.3 SSA no-op**
+path accepts `controller.upgradePrecondition.uid` and
+`controller.upgradePrecondition.resourceVersion`, both strings from a fresh
+controller read. Pass the identical values and `--server-side true` to
+`kars schemas prepare` and the following Helm operation. Preparation requires
+digest-pinned controller/init-container images, verifies a real Helm-manager
+SSA admission preview leaves the entire controller spec and meaningful metadata
+unchanged, and rereads the controller and namespace evidence before proceeding.
+The chart carries the UID/resourceVersion into the actual write, so a changed or
+replaced controller conflicts rather than receiving a stale update. Reused Helm
+values retain this fence: review and supply a fresh one on the next upgrade.
+After SRE adoption, the chart validates this exact two-field fence against the
+live controller before excluding it from the sealed configuration comparison;
+the original adoption receipt and every other setting remain protected. Fences
+are not accepted during initial SRE adoption.
+This does not authorize a restart, root change, controller removal, template
+apply, automatic rollback, or bypass of chart-hook retirement checks. An
+existing chart-managed schema hook still enforces its conservative historical
+root checks; do not disable one to obtain this path. Fresh installations need
+neither this fence nor a private-root exception.
+
+The controller no-op proof does **not** make other release resources immutable.
+In particular, Helm can change a TLS Secret's resourceVersion while retaining
+identical certificate/key bytes. A private qualification pins that exact revision.
+Preparation therefore refuses this no-op exception when the current or previous
+release includes the revision-bound budget TLS Secret, including its removal.
+Do not remove it from the chart to evade the guard. An already incurred same-key
+revision change has a separate, explicit
+[sealed qualification recovery](governed-credential-grants.md#same-key-budget-tls-revision-recovery);
+that recovery is not authorization for another Core upgrade.
+
 Pass `--atomic` (or Helm 4's `--rollback-on-failure`) to preparation whenever the
 following Helm operation uses automatic rollback. The helper does not infer an
 external caller's later flags or silently remove them.
@@ -76,8 +136,13 @@ Preparation plans all CRDs before writing, refuses foreign/unmarked ownership,
 and never adopts resources by matching a name or label alone. Existing schemas
 must match the target chart, their recorded staged schema, or the owning Helm
 release's previous manifest. Customized schemas, changed ownership, UID/RV races,
-SSA field conflicts, and storage-version/identity migrations stop explicitly.
-Updates use UID/resourceVersion-fenced server-side apply with no force conflicts.
+foreign SSA field conflicts, and storage-version/identity migrations stop explicitly.
+Updates normally use UID/resourceVersion-fenced server-side apply with no force
+conflicts. When the already-verified Helm owner has legacy `Update` ownership and
+all spec field managers are that same Helm manager at the same API version, the
+helper uses a UID/resourceVersion-fenced in-place replacement instead. It retains
+unrelated live metadata and status; it does not delete/recreate the CRD or force
+field ownership. Foreign spec managers keep the normal SSA conflict protection.
 Unrelated metadata and customer custom resources are not rewritten or deleted.
 An interrupted stage retains any already-created owned schemas for a safe retry;
 it does not roll back by deleting CRDs.
@@ -211,7 +276,11 @@ retains real capabilities and lookups. A cold cluster's initial client render is
 only a CRD bootstrap plan; after staging it must pass a full server-aware render
 and exact CRD recheck before policy/workload installation. A chart whose CRDs
 change between bootstrap and server rendering is explicitly unsupported, not
-silently reconciled to a different plan.
+silently reconciled to a different plan. For an existing release, if the initial
+client render cannot satisfy live CNI or sealed-lookup guards, preparation uses
+the authoritative server render instead. Server guard failures still stop before
+writes; fresh-install bootstrap and successful missing-dependency bootstrap plans
+retain their existing checks.
 The separate render/apply ownership mode retains its template-render semantics;
 it does not run Helm's install/adoption validation against non-Helm-owned CRDs.
 
@@ -385,7 +454,11 @@ Key Vault flags enable the corresponding advanced flows.
 `kars push --apply` updates the owning image configuration and verifies the
 pushed artifact, rather than merely restarting an old image. Explicit sandbox
 image pins are preserved. `sandbox-base` is a build dependency, not a deployable
-target; rebuild the sandbox image before applying it.
+target; rebuild the sandbox image before applying it. Ordinary Helm image updates
+first complete the chart's guarded SRE adoption with unchanged installation values
+when needed, then turn off the first-install-only schema hook and keep the controller
+digest aligned with the selected artifact. Existing SRE adoption, schema compatibility and
+private-root protections still apply; this does not authorize protected-root upgrades.
 
 Core upgrades leave external AgentMesh services untouched. Mesh image updates
 are limited to the owning Kars Helm release or the standalone Kars deployment

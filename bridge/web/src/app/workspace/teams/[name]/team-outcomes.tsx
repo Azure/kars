@@ -3,9 +3,10 @@
 
 "use client";
 
-import Link from "next/link";
+import Link from "@/components/navigation-link";
+import { toPlainPreview } from "@/components/deliverable-view";
 import { useState } from "react";
-import type { TeamOutcome, TeamOutcomeSummary } from "@/lib/types";
+import type { TeamDetail, TeamOutcome, TeamOutcomeSummary, TeamTask } from "@/lib/types";
 
 const DISPOSITION = {
   change_proposed: {
@@ -19,9 +20,9 @@ const DISPOSITION = {
     cls: "border-emerald-500/30 bg-emerald-500/10 text-emerald-600",
   },
   completed: {
-    label: "Completed",
-    glyph: "✓",
-    cls: "border-emerald-500/30 bg-emerald-500/10 text-emerald-600",
+    label: "Run finished",
+    glyph: "•",
+    cls: "border-border bg-surface-muted text-foreground-muted",
   },
   failed: {
     label: "Failed",
@@ -45,8 +46,23 @@ function duration(seconds: number | null): string | null {
   return remainder ? `${minutes}m ${remainder}s` : `${minutes}m`;
 }
 
-function OutcomeRow({ team, outcome }: { team: string; outcome: TeamOutcome }) {
+function reviewLabel(run: string, tasks: TeamTask[]): string | null {
+  const decisions = new Set<string>();
+  for (const task of tasks) {
+    if (task.run === run && task.status === "awaiting_review") decisions.add("Awaiting review");
+    for (const attempt of task.history ?? []) {
+      if (attempt.run !== run) continue;
+      if (attempt.outcome === "approved") decisions.add("Approved");
+      if (attempt.outcome === "changes_requested") decisions.add("Changes requested");
+    }
+  }
+  if (decisions.size > 1) return "Review status unavailable";
+  return decisions.values().next().value ?? null;
+}
+
+function OutcomeRow({ team, outcome, tasks }: { team: string; outcome: TeamOutcome; tasks: TeamTask[] }) {
   const meta = DISPOSITION[outcome.disposition];
+  const review = reviewLabel(outcome.run, tasks);
   const elapsed = duration(outcome.duration_seconds);
   return (
     <li>
@@ -62,10 +78,15 @@ function OutcomeRow({ team, outcome }: { team: string; outcome: TeamOutcome }) {
         </span>
         <span className="min-w-0">
           <span className="flex flex-wrap items-center gap-2">
-            <span className="text-sm font-semibold group-hover:text-signal">{outcome.headline}</span>
+            <span className="text-sm font-semibold group-hover:text-signal">{toPlainPreview(outcome.headline, outcome.detail)}</span>
             <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${meta.cls}`}>
               {meta.label}
             </span>
+            {review && (
+              <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${review === "Approved" ? "border-success/30 text-success" : "border-warning/50 text-warning"}`}>
+                {review}
+              </span>
+            )}
           </span>
           {outcome.objective && (
             <span className="mt-0.5 block line-clamp-1 text-xs text-foreground-muted">
@@ -88,7 +109,7 @@ function OutcomeRow({ team, outcome }: { team: string; outcome: TeamOutcome }) {
           </span>
         </span>
         <span className="self-center text-right text-[11px] text-foreground-muted">
-          {outcome.tokens != null ? `${compactNumber(outcome.tokens)} tokens` : "cost unavailable"}
+          {outcome.tokens != null ? `${compactNumber(outcome.tokens)} root synthesis tokens` : "root synthesis tokens unavailable"}
         </span>
       </Link>
     </li>
@@ -102,17 +123,20 @@ export function TeamValueSummary({
   queued,
   active,
   tokens,
+  tokenScope,
 }: {
   summary: TeamOutcomeSummary;
   generated: number;
   retained: number;
   queued: number;
   active: number;
-  tokens: number;
+  tokens: number | null;
+  tokenScope: TeamDetail["tokens_spent_scope"];
 }) {
-  const resolved =
-    summary.change_proposed + summary.no_action_needed + summary.completed;
-  const tokensPerResolved = resolved > 0 ? Math.round(tokens / resolved) : null;
+  const governed = tokenScope === "GovernedInferenceLifetime";
+  const knownScope = governed || tokenScope === "RetainedRootSynthesis";
+  const observedTokens = knownScope && tokens != null && Number.isSafeInteger(tokens) && tokens >= 0
+    ? tokens : null;
   return (
     <section className="rounded-2xl border border-border bg-surface p-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -120,7 +144,9 @@ export function TeamValueSummary({
           <h2 className="text-sm font-semibold">Value & operating health</h2>
           <p className="mt-0.5 max-w-2xl text-xs text-foreground-muted">
             Outcomes from retained evidence. A scheduled check that correctly finds nothing to do is
-            resolved work, not a failed delivery.
+            resolved work, not a failed delivery. Assigned work counts queue assignments, not
+            currently executing runs; an assignment can remain active while its run is held.
+            A finished run is not an accepted result. Review decisions are shown separately when retained.
           </p>
         </div>
         <span className="rounded-full border border-border bg-surface-muted px-2.5 py-1 text-xs text-foreground-muted">
@@ -131,10 +157,10 @@ export function TeamValueSummary({
         {[
           ["Changes proposed", summary.change_proposed, "text-sky-600"],
           ["No action needed", summary.no_action_needed, "text-emerald-600"],
-          ["Other completed", summary.completed, "text-emerald-600"],
+          ["Other runs finished", summary.completed, ""],
           ["Failed", summary.failed, summary.failed > 0 ? "text-rose-600" : ""],
           ["Work queued", queued, ""],
-          ["Working now", active, active > 0 ? "text-sky-600" : ""],
+          ["Assigned work", active, ""],
         ].map(([label, value, cls]) => (
           <div key={String(label)} className="rounded-xl border border-border bg-surface-muted/25 p-3">
             <dt className="text-[11px] text-foreground-muted">{label}</dt>
@@ -143,11 +169,11 @@ export function TeamValueSummary({
         ))}
       </dl>
       <p className="mt-4 text-[11px] text-foreground-muted">
-        Observed token volume: {compactNumber(tokens)}
-        {tokensPerResolved != null
-          ? ` · ${compactNumber(tokensPerResolved)} per resolved retained outcome`
-          : ""}
-        . Cost is diagnostic context, not a measure of value.
+        {governed ? "Lifetime settled governed-inference tokens" : knownScope ? "Retained root synthesis tokens" : "Token usage"}: {observedTokens == null ? "Unavailable" : compactNumber(observedTokens)}.
+        {governed
+          ? " Includes all Team roles and root inference; excludes reserved and uncertain charges. Lifetime usage is not divided by retained outcomes: their time windows differ."
+          : " Root synthesis only; excludes descendant inference and is not total Team usage."}
+        {" Monetary cost is not measured here; unpriced inference does not imply zero cost."}
       </p>
     </section>
   );
@@ -156,10 +182,12 @@ export function TeamValueSummary({
 export function RecentTeamOutcomes({
   team,
   outcomes,
+  tasks = [],
   limit = 4,
 }: {
   team: string;
   outcomes: TeamOutcome[];
+  tasks?: TeamTask[];
   limit?: number;
 }) {
   const shown = outcomes.slice(0, limit);
@@ -184,7 +212,7 @@ export function RecentTeamOutcomes({
       ) : (
         <ul className="mt-4 space-y-2">
           {shown.map((outcome) => (
-            <OutcomeRow key={outcome.run} team={team} outcome={outcome} />
+            <OutcomeRow key={outcome.run} team={team} outcome={outcome} tasks={tasks} />
           ))}
         </ul>
       )}
@@ -197,11 +225,13 @@ export function TeamRunHistory({
   runs,
   outcomes,
   generated,
+  tasks = [],
 }: {
   team: string;
   runs: string[];
   outcomes: TeamOutcome[];
   generated: number;
+  tasks?: TeamTask[];
 }) {
   const byRun = new Map(outcomes.map((outcome) => [outcome.run, outcome]));
   const [query, setQuery] = useState("");
@@ -236,7 +266,7 @@ export function TeamRunHistory({
           <h2 className="text-sm font-semibold">Outcome history</h2>
           <p className="mt-0.5 text-xs text-foreground-muted">
             Searchable outcome history is the customer record; opaque run IDs are retained only as
-            provenance.
+            provenance. A finished run is not an accepted result; retained review decisions appear alongside it.
           </p>
         </div>
         <span className="rounded-full bg-surface-muted px-2.5 py-1 text-xs text-foreground-muted">
@@ -260,7 +290,7 @@ export function TeamRunHistory({
           <option value="all">All outcomes</option>
           <option value="change_proposed">Changes proposed</option>
           <option value="no_action_needed">No action needed</option>
-          <option value="completed">Completed</option>
+          <option value="completed">Run finished</option>
           <option value="failed">Failed</option>
         </select>
         <select
@@ -276,7 +306,7 @@ export function TeamRunHistory({
       <ul className="mt-4 space-y-2">
         {visibleRuns.map((run) => {
           const outcome = byRun.get(run);
-          if (outcome) return <OutcomeRow key={run} team={team} outcome={outcome} />;
+          if (outcome) return <OutcomeRow key={run} team={team} outcome={outcome} tasks={tasks} />;
           return (
             <li key={run}>
               <Link

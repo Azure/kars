@@ -29,6 +29,85 @@ fn plan(blueprint: &Value) -> Result<Option<ExecutionPlan>, String> {
         .transpose()
 }
 
+pub(crate) fn validate_required_egress<'a>(
+    plan: &ExecutionPlan,
+    egress: impl IntoIterator<Item = (&'a str, Option<i32>)>,
+) -> Result<(), String> {
+    let egress = egress.into_iter().collect::<Vec<_>>();
+    let mut missing = std::collections::BTreeSet::new();
+    for role in &plan.roles {
+        for phase in &role.phases {
+            for call in &phase.required_tool_calls {
+                if call.name != "http_fetch" {
+                    continue;
+                }
+                let url = call
+                    .arguments
+                    .get("url")
+                    .and_then(|url| reqwest::Url::parse(url).ok())
+                    .filter(|url| url.scheme() == "https");
+                let Some(url) = url else {
+                    return Err(format!(
+                        "Invalid required HTTP fetch URL in role {} phase {}",
+                        role.name, phase.name
+                    ));
+                };
+                let host = url
+                    .host_str()
+                    .ok_or("Required HTTP fetch URL has no host")?;
+                let port = i32::from(
+                    url.port_or_known_default()
+                        .ok_or("Required HTTP fetch URL has no port")?,
+                );
+                // Match the router's signed allowlist: a domain covers itself and
+                // its subdomains, but never siblings or a textual suffix alone.
+                if !egress.iter().any(|(domain, allowed_port)| {
+                    let domain = domain.to_ascii_lowercase();
+                    !domain.is_empty()
+                        && allowed_port.unwrap_or(443) == port
+                        && (host.eq_ignore_ascii_case(&domain)
+                            || host
+                                .strip_suffix(&domain)
+                                .is_some_and(|prefix| prefix.ends_with('.')))
+                }) {
+                    missing.insert(format!(
+                        "{host}:{port} (role {}, phase {})",
+                        role.name, phase.name
+                    ));
+                }
+            }
+        }
+    }
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Required HTTP fetch destinations are outside the proposed egress: {}. Propose the necessary hosts or revise the required fetches; no permissions were added.",
+            missing.into_iter().collect::<Vec<_>>().join(", ")
+        ))
+    }
+}
+
+fn validate_blueprint_egress(
+    blueprint: &Value,
+    plan: Option<&ExecutionPlan>,
+) -> Result<(), String> {
+    if let Some(plan) = plan {
+        let egress: Vec<super::task::TaskEgress> = serde_json::from_value(
+            blueprint
+                .get("egress")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!([])),
+        )
+        .map_err(|error| format!("Invalid reviewed egress: {error}"))?;
+        validate_required_egress(
+            plan,
+            egress.iter().map(|entry| (entry.host.as_str(), entry.port)),
+        )?;
+    }
+    Ok(())
+}
+
 fn reviewed(object: &Value, active: bool) -> Result<ReviewedPlans, String> {
     let decomposition = object["metadata"]["annotations"]
         .get(MARKER)
@@ -40,7 +119,11 @@ fn reviewed(object: &Value, active: bool) -> Result<ReviewedPlans, String> {
         })
         .transpose()?;
     let root = plan(&object["spec"]["blueprint"])?;
+    validate_run_activation(object, active)?;
     validate_activation(root.as_ref(), decomposition.as_deref(), active)?;
+    if active {
+        validate_blueprint_egress(&object["spec"]["blueprint"], root.as_ref())?;
+    }
     let depth = object["spec"]["envelope"]["delegationDepth"]
         .as_i64()
         .unwrap_or(0);
@@ -49,6 +132,8 @@ fn reviewed(object: &Value, active: bool) -> Result<ReviewedPlans, String> {
             depth,
             if object["kind"] == "KarsTeam" {
                 REVIEWED_TEAM_DELEGATION_DEPTH
+            } else if root.as_ref().is_some_and(|plan| plan.roles.is_empty()) {
+                0
             } else {
                 REVIEWED_TASK_DELEGATION_DEPTH
             },
@@ -70,6 +155,9 @@ fn reviewed(object: &Value, active: bool) -> Result<ReviewedPlans, String> {
             }
             if let Some(plan) = role_plan {
                 validate_activation(Some(&plan), None, active)?;
+                if active {
+                    validate_blueprint_egress(&role["blueprint"], Some(&plan))?;
+                }
                 let name = role["name"]
                     .as_str()
                     .filter(|name| !name.is_empty())
@@ -145,8 +233,27 @@ pub fn identity_fence(
     Ok(serde_json::json!({"uid":uid,"resourceVersion":version}))
 }
 
+fn validate_run_activation(object: &Value, active: bool) -> Result<(), String> {
+    let annotations = &object["metadata"]["annotations"];
+    if active
+        && object["kind"] == "KarsTask"
+        && object["spec"]["execution"]["launch"] != true
+        && object["spec"]["blueprint"]["executionPlan"].is_object()
+        && annotations["kars.azure.com/run-requested"]
+            .as_str()
+            .filter(|nonce| !nonce.is_empty())
+            .is_some_and(|nonce| {
+                annotations["kars.azure.com/run-completed"].as_str() == Some(nonce)
+            })
+    {
+        return Err("CompletedReviewedRun: this run is complete and its runtime is stopped. Review the retained output, or request changes in Deliverable and launch the new revision from Overview. Relaunching the completed run would repeat reviewed phases.".into());
+    }
+    Ok(())
+}
+
 pub fn activation_fence<T: Serialize>(object: &T, active: bool) -> Result<Value, String> {
     let object = serde_json::to_value(object).map_err(|error| error.to_string())?;
+    validate_run_activation(&object, active)?;
     let metadata = serde_json::from_value(object["metadata"].clone())
         .map_err(|error| format!("Invalid target metadata: {error}"))?;
     let mut fence = identity_fence(&metadata)?;
@@ -172,3 +279,7 @@ pub fn activation_fence<T: Serialize>(object: &T, active: bool) -> Result<Value,
 #[cfg(test)]
 #[path = "execution_plans_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "execution_plan_egress_tests.rs"]
+mod egress_tests;

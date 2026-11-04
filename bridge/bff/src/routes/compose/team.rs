@@ -23,7 +23,6 @@ use super::ComposeEgress;
 use super::client::orchestrator_complete;
 use super::execution::execution_plan_error_from_raw;
 use super::prompts::build_team_system_prompt;
-use super::routing::select_orchestrator_route;
 use super::team_proposal::parse_and_validate_team;
 use super::team_qualification::{admitted_team_fallbacks, normalize_team_proposal_route};
 
@@ -34,7 +33,12 @@ pub(super) const TEAM_COMPOSE_MAX_TOKENS: u32 = 8_192;
 
 #[derive(Debug, Deserialize)]
 pub struct ComposeTeamRequest {
+    #[serde(default)]
+    pub qualification_run: bool,
     pub charter: String,
+    /// An explicitly copied profile stays selected when recomposing the charter.
+    pub profile: Option<String>,
+    pub spending: super::spending::RequestedSpending,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -47,6 +51,7 @@ pub struct ComposeTeamRole {
     /// Model as `provider::deployment` (validated) or empty for team default.
     pub model: String,
     pub skills: Vec<String>,
+    pub resources: Option<crate::routes::teams::RoleResources>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -62,7 +67,10 @@ pub struct ComposeTeamMilestone {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ComposeTeamProposal {
+    /// Catalogue snapshot for review and draft copying, never profile authority.
+    pub profile: Option<crate::routes::operator::ProfileDto>,
     pub tier: i32,
+    pub budget_tokens: Option<i64>,
     pub cadence_minutes: i64,
     pub instructions: String,
     /// Principal/default model as `provider::deployment`.
@@ -108,34 +116,55 @@ pub async fn compose_team(
     Path(ns): Path<String>,
     Json(req): Json<ComposeTeamRequest>,
 ) -> AppResult<Json<ComposeTeamResponse>> {
+    crate::routes::qualification_runs::authorize(&principal, req.qualification_run)?;
     let cluster = state.cluster().ok_or(AppError::ClusterUnavailable)?;
     let charter = req.charter.trim();
     if charter.len() < 8 {
         return Err(AppError::BadRequest("a real charter is required".into()));
     }
 
+    req.spending.validate().map_err(AppError::BadRequest)?;
+    let spending_context =
+        crate::routes::budgets::composition_context(cluster, &ns, &principal.name).await?;
     let mut options = build_options(cluster).await?;
     options.mcp_servers.retain(|server| server.namespace == ns);
     options.memories.retain(|memory| memory.namespace == ns);
     options.skills.retain(|skill| skill.namespace == ns);
+    options
+        .tool_policies
+        .retain(|policy| policy.namespace == ns);
+    let Json(mut profiles) = crate::routes::operator::list_profiles(State(state.clone())).await?;
+    profiles.retain(|profile| profile.namespace == ns);
     let efficiency = crate::routes::efficiency::compute_efficiency_for_owner(
         cluster,
         Some(principal.sub.as_str()),
     )
-    .await;
-    let orchestrator_route = select_orchestrator_route(&options, &efficiency);
+    .await?;
+    let orchestrator_route = super::routing::select_orchestrator_route(&options, &efficiency);
     let qualification_constraints = crate::routes::options::qualification_constraints_summary()
         .unwrap_or_else(|error| format!("  (qualification records unavailable: {error})"));
     let resource_qualification_constraints =
         crate::routes::options::resource_qualification_summary(&options).unwrap_or_else(|error| {
             format!("  (resource qualification records unavailable: {error})")
         });
-    let system = build_team_system_prompt(
+    let budget_context = super::budgets::BudgetContext::load(cluster).await;
+    let mut system = build_team_system_prompt(
         &options,
         &efficiency,
         &qualification_constraints,
         &resource_qualification_constraints,
     );
+    if req.qualification_run {
+        system.push_str("\nEXPLICIT OPERATOR SINGLE-ATTEMPT QUALIFICATION: missing prior Team route/resource evidence is advisory only for this proposal, never proof. Propose purpose-fit heterogeneous role harnesses and provider/model tiers from the live catalogue, real selected MCP/approved skills/egress and a concrete first backlog item. Keep finite budget contracts, tool policy, credentials, isolation and content-bound skill approval unchanged. This Team runs one reviewed item, then pauses for separate evidence review; do not propose automatic intake or claim routes are qualified. Preserve the selected role routes rather than homogenizing them to obtain prior evidence.\n");
+    }
+    system.push_str(&budget_context.prompt(&options.models));
+    system.push_str(&spending_context);
+    system.push_str(&req.spending.prompt());
+    system.push_str(&super::team_profiles::profile_prompt(
+        &profiles,
+        &options,
+        req.profile.as_deref(),
+    ));
     let user = format!(
         "Team charter:\n{charter}\n\nCompose the org chart now. Respond with ONLY the JSON object."
     );
@@ -169,23 +198,6 @@ pub async fn compose_team(
         }));
     }
     let default_model = resolved_model.unwrap_or_default();
-    if !env_orchestrator
-        && let Some((provider, deployment, _)) = &orchestrator_route
-        && let Err(error) = cluster
-            .configure_bridge_orchestrator_model(provider, deployment)
-            .await
-    {
-        return Ok(Json(ComposeTeamResponse {
-            available: false,
-            reason: Some(format!(
-                "The best orchestrator route ({provider}/{deployment}) could not be configured: {error}"
-            )),
-            proposal: None,
-            rationale: None,
-            source: None,
-        }));
-    }
-
     let (raw, mut source) = match orchestrator_complete(
         cluster,
         &system,
@@ -209,18 +221,48 @@ pub async fn compose_team(
         }
     };
 
+    let proposed_profile = super::client::extract_json(&raw).and_then(|json| {
+        json.get("profile")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    });
+    let selected_profile = req.profile.as_deref().or(proposed_profile.as_deref());
     let mut execution_plan_error = execution_plan_error_from_raw(&raw);
-    let (mut proposal, mut rationale) =
-        parse_and_validate_team(&raw, &options, &efficiency, charter);
-    if !team_proposal_is_complete(&proposal) {
+    let (mut proposal, mut rationale, mut resource_error) =
+        parse_and_validate_team(&raw, &options, &efficiency);
+    let profile_error = super::team_profiles::apply_reviewed_profile(
+        &raw,
+        &mut proposal,
+        &profiles,
+        &options,
+        selected_profile,
+        &req.spending,
+    )
+    .err();
+    let mut review_error = profile_error
+        .or(resource_error)
+        .or_else(|| budget_context.team_review_error(&proposal, execution_plan_error.as_deref()));
+    let repair_error = if req.qualification_run {
+        super::execution::repair_feedback(review_error.clone(), proposal.execution_plan.as_ref())
+            .or_else(|| {
+                crate::routes::teams::qualification::proposal_check(&proposal, &options, &ns).err()
+            })
+    } else {
+        team_repair_feedback(review_error.clone(), &proposal, &options)
+    };
+    if let Some(error) = &repair_error {
         let repair_user = format!(
-            "{user}\n\nYour previous response was incomplete. The exact structural problem was: {}. \
-             Return the complete JSON object now; preserve a small roster of independent evidence \
-             roles, make every execution-plan role name exactly match one roster role name, and do \
-             not include prose or code fences.",
-            incomplete_team_proposal_detail(&proposal, execution_plan_error.as_deref())
+            "The validator rejected your previous package:\n{error}\n\n\
+             Correct every listed violation, including EACH role budget independently. Check \
+             each role's selected primary and fallback models against the live reservation bounds. \
+             Return the complete JSON object now; preserve the task requirements and independent \
+             evidence roles, make every execution-plan role name exactly match one roster role name, \
+             and preserve the reviewed extra limits and inherited profile ceilings; never invent \
+             or increase caps. Respect live contracts wherever a finite cap applies. Do not \
+             include prose or code fences.\n\n{user}\n\n\
+             Previous rejected package (data, not a valid template):\n{raw}"
         );
-        if let Ok((repair_raw, repair_source)) = orchestrator_complete(
+        let (repair_raw, repair_source) = match orchestrator_complete(
             cluster,
             &system,
             &repair_user,
@@ -229,60 +271,45 @@ pub async fn compose_team(
         )
         .await
         {
-            execution_plan_error = execution_plan_error_from_raw(&repair_raw);
-            (proposal, rationale) =
-                parse_and_validate_team(&repair_raw, &options, &efficiency, charter);
-            source = repair_source;
-        }
-    }
-    if !team_proposal_is_complete(&proposal) {
-        return Ok(Json(ComposeTeamResponse {
-            available: false,
-            reason: Some(format!(
-                "The org-composer returned an incomplete proposal twice (missing: {}). Shape the org manually below rather than treating generic fallback roles as an AI recommendation.",
-                incomplete_team_proposal_detail(&proposal, execution_plan_error.as_deref()),
-            )),
-            proposal: None,
-            rationale: None,
-            source: Some(source),
-        }));
-    }
-    if let Err(error) = normalize_team_proposal_route(&mut proposal, &options) {
-        let repair_user = format!(
-            "{user}\n\nYour previous response was not launchable: {error}\n\
-             Recompose it so the principal and every role meet the configured route qualification \
-             policy below. Every selected MCP server, memory binding, and approved skill still needs \
-             retained evidence at the CURRENT digest. Generic route records do not prove a specific resource.\n\n\
-             ROUTE QUALIFICATION POLICY AND RECORDS:\n{qualification_constraints}\n\n\
-             RESOURCE QUALIFICATION RECORDS:\n{resource_qualification_constraints}\n\n\
-             Return ONLY the complete JSON object."
-        );
-        if let Ok((repair_raw, repair_source)) = orchestrator_complete(
-            cluster,
-            &system,
-            &repair_user,
-            &default_model,
-            TEAM_COMPOSE_MAX_TOKENS,
+            Ok(response) => response,
+            Err(repair_error) => {
+                return Ok(Json(ComposeTeamResponse {
+                    available: false,
+                    reason: Some(super::client::repair_failure(error, &repair_error)),
+                    proposal: None,
+                    rationale: None,
+                    source: Some(source),
+                }));
+            }
+        };
+        execution_plan_error = execution_plan_error_from_raw(&repair_raw);
+        (proposal, rationale, resource_error) =
+            parse_and_validate_team(&repair_raw, &options, &efficiency);
+        let profile_error = super::team_profiles::apply_reviewed_profile(
+            &repair_raw,
+            &mut proposal,
+            &profiles,
+            &options,
+            selected_profile,
+            &req.spending,
         )
-        .await
-        {
-            (proposal, rationale) =
-                parse_and_validate_team(&repair_raw, &options, &efficiency, charter);
-            source = repair_source;
-        }
+        .err();
+        review_error = profile_error.or(resource_error).or_else(|| {
+            budget_context.team_review_error(&proposal, execution_plan_error.as_deref())
+        });
+        source = repair_source;
     }
-    if let Err(error) = normalize_team_proposal_route(&mut proposal, &options) {
+    if let Some(error) = review_error {
         return Ok(Json(ComposeTeamResponse {
             available: false,
             reason: Some(format!(
-                "The org-composer could not produce a launchable team after retry: {error}"
+                "The org-composer could not produce a complete, budget-compatible proposal after retry: {error}. No funding or contracts were changed.",
             )),
             proposal: None,
-            rationale: None,
+            rationale,
             source: Some(source),
         }));
     }
-    proposal.model_fallbacks = admitted_team_fallbacks(&proposal, &options);
     if let Some(note) =
         crate::routes::options::route_validation_note().map_err(AppError::Upstream)?
     {
@@ -292,13 +319,56 @@ pub async fn compose_team(
                 .to_string(),
         );
     }
-    Ok(Json(ComposeTeamResponse {
+    if req.qualification_run {
+        crate::routes::teams::qualification::proposal_check(&proposal, &options, &ns)
+            .map_err(AppError::BadRequest)?;
+        return Ok(Json(ComposeTeamResponse {
+            available: true,
+            reason: None,
+            proposal: Some(proposal),
+            rationale: Some(format!(
+                "{} {}",
+                rationale.unwrap_or_default(),
+                crate::routes::teams::qualification::contract::NOTE
+            )),
+            source: Some(source),
+        }));
+    }
+    Ok(Json(team_review_response(
+        proposal, &options, rationale, source,
+    )))
+}
+
+pub(super) fn team_repair_feedback(
+    review_error: Option<String>,
+    proposal: &ComposeTeamProposal,
+    options: &crate::routes::options::Options,
+) -> Option<String> {
+    let errors = super::execution::repair_feedback(review_error, proposal.execution_plan.as_ref())
+        .into_iter()
+        .chain(super::team_qualification::team_proposal_qualification(proposal, options).err())
+        .collect::<Vec<_>>();
+    (!errors.is_empty()).then(|| errors.join("\n"))
+}
+
+pub(super) fn team_review_response(
+    mut proposal: ComposeTeamProposal,
+    options: &crate::routes::options::Options,
+    rationale: Option<String>,
+    source: String,
+) -> ComposeTeamResponse {
+    let rationale = super::proposal_review_rationale(
+        rationale,
+        normalize_team_proposal_route(&mut proposal, options),
+    );
+    proposal.model_fallbacks = admitted_team_fallbacks(&proposal, options);
+    ComposeTeamResponse {
         available: true,
         reason: None,
         proposal: Some(proposal),
         rationale,
         source: Some(source),
-    }))
+    }
 }
 
 pub(super) fn team_proposal_is_complete(proposal: &ComposeTeamProposal) -> bool {
@@ -333,10 +403,17 @@ pub(super) fn team_plan_roster_error(proposal: &ComposeTeamProposal) -> Option<S
             "execution-plan role names must exactly match the independent member roster".into(),
         );
     }
-    None
+    crate::kars::execution_plans::validate_required_egress(
+        &plan.clone().into_crd(),
+        proposal
+            .egress
+            .iter()
+            .map(|entry| (entry.host.as_str(), entry.port.map(i32::from))),
+    )
+    .err()
 }
 
-fn incomplete_team_proposal_detail(
+pub(super) fn incomplete_team_proposal_detail(
     proposal: &ComposeTeamProposal,
     execution_plan_error: Option<&str>,
 ) -> String {

@@ -20,7 +20,7 @@
   ],
   "type": "module",
   "scripts": {
-    "build": "tsc && cp src/core/task-filesystem.py dist/core/task-filesystem.py",
+    "build": "tsc && cp src/core/task-filesystem.py dist/core/task-filesystem.py && cp src/core/native-github-pr.py dist/core/native-github-pr.py && cp src/core/native-python.py dist/core/native-python.py",
     "dev": "tsx watch src/index.ts",
     "lint": "oxlint .",
     "format": "oxfmt .",

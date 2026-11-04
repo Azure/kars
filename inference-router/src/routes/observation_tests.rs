@@ -20,6 +20,9 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 #[path = "observation_privacy_tests.rs"]
 mod privacy;
 
+#[path = "observation_reviewed_tier_tests.rs"]
+mod reviewed_tier;
+
 const SANDBOX: &str = "/apis/kars.azure.com/v1alpha1/namespaces/workspace/karssandboxes/agent";
 const GRANT: &str =
     "/apis/kars.azure.com/v1alpha1/namespaces/workspace/karscredentialgrants/workspace";
@@ -264,6 +267,114 @@ async fn observation_tokens_cannot_authorize_mutations_control_or_legacy_even_on
             StatusCode::FORBIDDEN
         );
     }
+    assert!(metadata.lock().unwrap().calls.is_empty());
+}
+
+#[tokio::test]
+async fn private_control_surface_preserves_purpose_limits_and_scope_binding() {
+    let (_server, state, metadata) = fixture().await;
+    let scope = state.services.requests.scope().unwrap().id;
+    let (entry, _) = state.services.requests.record(serde_json::from_value(json!({
+        "scope_id":scope,"kind":"clarification","target":"source-choice","reason":"Which source?"
+    })).unwrap()).unwrap();
+    let app = routes(state.clone())
+        .merge(crate::routes::access_request::control_routes(state.clone()))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            purpose_boundary,
+        ))
+        .with_state(state.clone());
+    let send = |method: &str, path: &str, body: Value, token: Option<String>| {
+        let app = app.clone();
+        let mut request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("content-type", "application/json")
+            .extension(ConnectInfo(
+                "192.0.2.10:43210".parse::<SocketAddr>().unwrap(),
+            ));
+        if let Some(token) = token {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        let request = request.body(Body::from(body.to_string())).unwrap();
+        async move { app.oneshot(request).await.unwrap() }
+    };
+    for (token, expected) in [
+        (None, StatusCode::UNAUTHORIZED),
+        (Some("legacy-agent-token".into()), StatusCode::UNAUTHORIZED),
+        (Some(observer_token()), StatusCode::FORBIDDEN),
+        (Some(control_token()), StatusCode::OK),
+    ] {
+        assert_eq!(
+            send("GET", "/internal/access-requests", Value::Null, token)
+                .await
+                .status(),
+            expected
+        );
+    }
+    for path in [
+        "/internal/access-requests/reset",
+        "/v1/access-request",
+        "/egress/learn",
+    ] {
+        assert_eq!(
+            send("POST", path, json!({}), Some(control_token()))
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+    let path = "/internal/access-requests/decision";
+    let answer = "\"".repeat(8192);
+    let body = json!({"scope_id":scope,"request_id":entry.request_id,"verdict":"approved","answer":answer});
+    assert!(body.to_string().len() > 8192);
+    assert_eq!(
+        send("POST", path, body.clone(), Some(observer_token()))
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let mut oversized = body.clone();
+    oversized["answer"] = json!("x".repeat(64 * 1024));
+    assert_eq!(
+        send("POST", path, oversized, Some(control_token()))
+            .await
+            .status(),
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    let mut stale = body.clone();
+    stale["scope_id"] = json!(format!("{}:9", "b".repeat(32)));
+    assert_eq!(
+        send("POST", path, stale, Some(control_token()))
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        state
+            .services
+            .requests
+            .entry(&scope, &entry.request_id)
+            .unwrap()
+            .status,
+        crate::access_request::Status::Pending
+    );
+    assert_eq!(
+        send("POST", path, body, Some(control_token()))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        state
+            .services
+            .requests
+            .entry(&scope, &entry.request_id)
+            .unwrap()
+            .answer
+            .as_deref(),
+        Some(answer.as_str())
+    );
     assert!(metadata.lock().unwrap().calls.is_empty());
 }
 

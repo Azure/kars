@@ -14,14 +14,16 @@ pub(super) fn extract_json_object(raw: &str) -> Option<serde_json::Value> {
 
 /// Complete the orchestrator prompt, returning `(raw_model_output, source)`.
 ///
-/// Two reachable paths, in priority order:
+/// When finite funding is unconfigured, two legacy paths, in priority order:
 ///   1. **Ops override** — an explicit `BRIDGE_ORCHESTRATOR_{ENDPOINT,TOKEN,MODEL}`
 ///      triple (a dedicated composer endpoint the operator configured).
-///   2. **Native** — route through a Running sandbox's inference router via the
-///      `pods/proxy` subresource. The router injects the provider's auth +
+///   2. **Native** — route through the standing composer's inference router via
+///      the `pods/proxy` subresource. The router injects the provider's auth +
 ///      integration headers (Copilot/Foundry) and enforces governance, so this
 ///      works on workload-identity clusters with NO static token in the Bridge —
 ///      reusing exactly the secure path agents use.
+/// Finite funding selects only the verified standing actor router before these
+/// legacy paths; any refusal on that route is terminal, never a fallback signal.
 pub(super) async fn orchestrator_complete(
     cluster: &crate::kars::cluster::Cluster,
     system: &str,
@@ -29,22 +31,51 @@ pub(super) async fn orchestrator_complete(
     default_model: &str,
     max_tokens: u32,
 ) -> anyhow::Result<(String, String)> {
-    // 1. Ops override — direct endpoint/token/model.
-    if let (Ok(endpoint), Ok(token), Ok(model)) = (
-        std::env::var("BRIDGE_ORCHESTRATOR_ENDPOINT"),
-        std::env::var("BRIDGE_ORCHESTRATOR_TOKEN"),
-        std::env::var("BRIDGE_ORCHESTRATOR_MODEL"),
-    ) && !endpoint.trim().is_empty()
+    let funded_route = cluster.funded_orchestrator_route().await?;
+    // Explicit legacy endpoints are independent of the standing policy, but
+    // cannot bypass a funded actor or an unresolved account pin.
+    if funded_route.is_none()
+        && let (Ok(endpoint), Ok(token), Ok(model)) = (
+            std::env::var("BRIDGE_ORCHESTRATOR_ENDPOINT"),
+            std::env::var("BRIDGE_ORCHESTRATOR_TOKEN"),
+            std::env::var("BRIDGE_ORCHESTRATOR_MODEL"),
+        )
+        && !endpoint.trim().is_empty()
         && !token.trim().is_empty()
         && !model.trim().is_empty()
     {
         let raw = call_llm(&endpoint, &token, &model, system, user, max_tokens).await?;
         return Ok((raw, model));
     }
-
-    // 2. Native — through a running sandbox's secure inference router. Try each
-    //    stable candidate in turn so a sandbox with stale provider auth or a
-    //    warming router is skipped rather than failing the whole compose.
+    let selected = cluster.bridge_orchestrator_model_route().await?;
+    if let Some(model) = &selected {
+        cluster.wait_for_bridge_orchestrator_model(&model.provider, &model.deployment)
+            .await.map_err(anyhow::Error::msg)?;
+    }
+    let default_model = selected.as_ref().map(|model| model.deployment.as_str()).unwrap_or(default_model);
+    if let Some((namespace, pod)) = funded_route {
+        let content = orchestrator_via_router(
+            cluster,
+            &namespace,
+            &pod,
+            default_model,
+            OrchestratorPrompt { system, user },
+            default_model.to_ascii_lowercase().contains("claude"),
+            max_tokens,
+        )
+        .await?;
+        if content.trim().is_empty() {
+            anyhow::bail!(
+                "The funded orchestrator router returned no content; fallback is forbidden"
+            );
+        }
+        return Ok((
+            content,
+            format!("{default_model} (funded orchestrator router)"),
+        ));
+    }
+    // 2. Native — only through the standing composer's ready routers. Never
+    //    borrow a customer's account or governance when the actor is unavailable.
     //    Claude models use the native Anthropic `/v1/messages` path (the
     //    OpenAI-compat path returns empty content for Claude).
     let candidates = cluster.running_sandbox_candidates().await?;
@@ -54,7 +85,7 @@ pub(super) async fn orchestrator_complete(
         );
     }
     let is_claude = default_model.to_ascii_lowercase().contains("claude");
-    let mut last_err = String::from("no candidate router returned content");
+    let mut failures = Vec::new();
     for (ns, pod) in candidates.iter().take(4) {
         match orchestrator_via_router(
             cluster,
@@ -68,13 +99,13 @@ pub(super) async fn orchestrator_complete(
         .await
         {
             Ok(content) if !content.trim().is_empty() => {
-                return Ok((content, format!("{default_model} (cluster router)")));
+                return Ok((content, format!("{default_model} (bridge-orchestrator router)")));
             }
-            Ok(_) => last_err = "router returned empty content".into(),
-            Err(e) => last_err = e.to_string(),
+            Ok(_) => failures.push(format!("{ns}/{pod}: router returned empty content")),
+            Err(e) => failures.push(format!("{ns}/{pod}: {e}")),
         }
     }
-    anyhow::bail!("{last_err}")
+    anyhow::bail!("No candidate router completed the request: {}", failures.join("; "))
 }
 
 struct OrchestratorPrompt<'a> {
@@ -104,6 +135,9 @@ async fn orchestrator_via_router(
         let text = cluster.router_messages(ns, pod, &body).await?;
         let parsed: serde_json::Value = serde_json::from_str(&text)
             .map_err(|e| anyhow::anyhow!("router returned non-JSON: {e}"))?;
+        if parsed.get("stop_reason").and_then(|value| value.as_str()) == Some("max_tokens") {
+            anyhow::bail!("Orchestrator response was truncated at the requested {max_tokens}-token output limit; no complete package was received");
+        }
         let content: String = parsed
             .get("content")
             .and_then(|c| c.as_array())
@@ -123,14 +157,30 @@ async fn orchestrator_via_router(
     let text = cluster.router_chat(ns, pod, &body).await?;
     let parsed: serde_json::Value = serde_json::from_str(&text)
         .map_err(|e| anyhow::anyhow!("router returned non-JSON: {e}"))?;
-    Ok(parsed
-        .get("choices")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("message"))
-        .and_then(|m| m.get("content"))
-        .and_then(|c| c.as_str())
-        .unwrap_or_default()
-        .to_string())
+    chat_completion_content(&parsed, max_tokens)
+}
+
+pub(super) fn repair_failure(review_error: &str, error: &anyhow::Error) -> String {
+    format!(
+        "The orchestrator repair call failed ({error}); no corrected package was received. \
+         Original proposal diagnostics: {review_error}. No funding or contracts were changed."
+    )
+}
+
+fn chat_completion_content(parsed: &serde_json::Value, max_tokens: u32) -> anyhow::Result<String> {
+    let choice = &parsed["choices"][0];
+    match choice["finish_reason"].as_str() {
+        Some("length") => anyhow::bail!(
+            "Orchestrator response was truncated at the requested {max_tokens}-token output limit (including reasoning); no complete package was received"
+        ),
+        Some("content_filter") => anyhow::bail!("Orchestrator response was blocked by the provider content filter"),
+        _ => {}
+    }
+    choice["message"]["content"]
+        .as_str()
+        .filter(|content| !content.trim().is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("no completion content"))
 }
 
 fn chat_completion_body(
@@ -148,6 +198,7 @@ fn chat_completion_body(
             {"role": "user", "content": user},
         ],
         "max_completion_tokens": max_tokens,
+        "response_format": {"type": "json_object"},
     })
 }
 
@@ -185,15 +236,7 @@ async fn call_llm(
         );
     }
     let parsed: serde_json::Value = serde_json::from_str(&text)?;
-    let content = parsed
-        .get("choices")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("message"))
-        .and_then(|m| m.get("content"))
-        .and_then(|c| c.as_str())
-        .map(str::to_string)
-        .ok_or_else(|| anyhow::anyhow!("no completion content"))?;
-    Ok(content)
+    chat_completion_content(&parsed, max_tokens)
 }
 
 /// Extract the first balanced JSON object from a string, tolerating code fences

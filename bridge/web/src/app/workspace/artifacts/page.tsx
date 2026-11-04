@@ -10,7 +10,7 @@
 // place alongside its Governance Receipt. Honestly empty until a mission
 // produces a deliverable — never fabricated.
 
-import Link from "next/link";
+import Link from "@/components/navigation-link";
 import { HonestState } from "@/components/honest-state";
 import { Icon, type IconName } from "@/components/icon";
 import { BffError, getArtifacts } from "@/lib/bff";
@@ -87,7 +87,9 @@ export default async function ArtifactsPage({
   const allMissions = index?.missions ?? [];
   const query = q.trim().toLowerCase();
   const filteredMissions = allMissions.filter((mission) => {
-    if (view !== "all" && (mission.status === "error" || mission.parent)) return false;
+    // Standing runs are children of the Team principal, not internal role phases.
+    const isTeamRun = mission.team && mission.parent === `${mission.team}-principal`;
+    if (view !== "all" && (mission.status === "error" || (mission.parent && !isTeamRun))) return false;
     if (!query) return true;
     return [
       mission.task,

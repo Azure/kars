@@ -71,7 +71,7 @@ spec:
   # tells the controller to mirror the DeepWiki MCP's per-server
   # ConfigMap/Secret into the sandbox namespace and mount them into
   # the inference-router so it can dispatch `read_wiki_*` /
-  # `ask_question` calls to https://mcp.deepwiki.com/mcp.
+  # `ask_wiki_question` calls to https://mcp.deepwiki.com/mcp.
   governance:
     enabled: true
     toolPolicyRef:

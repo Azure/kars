@@ -22,6 +22,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
@@ -32,6 +33,7 @@ SA_PATH = Path("/var/run/secrets/kubernetes.io/serviceaccount")
 MAX_OUTPUT = 8 * 1024 * 1024
 MAX_DOCUMENT = 512 * 1024
 HEALTH = Path("/tmp/witness-healthy")
+PROCESS_HEALTH = Path("/tmp/witness-process-healthy")
 MAX_AGE = 180
 STOP = False
 
@@ -112,10 +114,20 @@ def check_btf(path):
         raise WitnessError("host_kernel_btf_unreadable") from error
 
 
-def capture(image, window, nodes):
+def capture(image, window, nodes, namespaces):
+    # The pinned KubeManager applies this selector to its mount-namespace map
+    # and container subscriptions before attaching/collecting, not just output.
+    for scope, maximum in ((nodes, 253), (namespaces, 63)):
+        if (not isinstance(scope, list) or not scope
+            or any(not isinstance(name, str) or len(name) > maximum
+                   or not re.fullmatch(r"[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?", name)
+                   for name in scope) or len(set(scope)) != len(scope)):
+            raise WitnessError("capture_scope_invalid")
+    if any(not re.fullmatch(r"kars-[a-z0-9](?:[-a-z0-9]*[a-z0-9])?", ns) for ns in namespaces):
+        raise WitnessError("capture_scope_invalid")
     command = [
         "kubectl-gadget", "run", image, "--gadget-namespace", NAMESPACE,
-        "--node", ",".join(nodes), "--all-namespaces", "--timeout", str(window),
+        "--node", ",".join(nodes), "--namespace", ",".join(namespaces), "--timeout", str(window),
         "--output", "json", "--request-timeout", "15s",
     ]
     with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
@@ -217,41 +229,102 @@ def ready_nodes(api, release=RELEASE):
     return result
 
 
-def declarations(api, names):
-    records = []
-    for name in names:
-        sandbox = api.request(
-            f"/apis/kars.azure.com/v1alpha1/namespaces/kars-system/karssandboxes/{name}"
-        )
-        baseline = api.request(
-            f"/api/v1/namespaces/kars-{name}/configmaps/karssandbox-{name}-egress-allowlist"
-        )
+def discovery(api):
+    """One paginated CR snapshot; never infer a fleet from a namespace prefix."""
+    path = "/apis/kars.azure.com/v1alpha1/namespaces/kars-system/karssandboxes?limit=250"
+    result, seen_tokens = {}, set()
+    version, size = None, 0
+    started = time.monotonic()
+    while True:
+        if STOP or time.monotonic() - started > MAX_AGE:
+            raise WitnessError("discovery_interrupted_or_expired")
+        page = api.request(path)
+        size += len(json.dumps(page).encode())
+        if size > MAX_OUTPUT:
+            raise WitnessError("discovery_output_limit")
         try:
-            if sandbox["metadata"]["name"] != name or sandbox["metadata"]["namespace"] != "kars-system":
-                raise ValueError("sandbox identity")
-            if baseline["metadata"]["name"] != f"karssandbox-{name}-egress-allowlist" or baseline["metadata"]["namespace"] != f"kars-{name}":
-                raise ValueError("baseline identity")
-            mode = sandbox["spec"].get("networkPolicy", {}).get("egressMode", "Learn")
-            body = json.loads(baseline["data"]["allowlist.json"])
-            if (
-                mode not in ("Learn", "Strict")
-                or type(body["schemaVersion"]) is not int or body["schemaVersion"] != 1
-                or not isinstance(body["endpoints"], list)
-            ):
-                raise ValueError("baseline schema")
-            hosts = set()
-            for endpoint in body["endpoints"]:
-                host = endpoint["host"]
-                if (
-                    not isinstance(host, str) or not host or len(host) > 253
-                    or any(c.isspace() or ord(c) < 32 for c in host)
-                ):
-                    raise ValueError("baseline host")
-                hosts.add(host.lower().rstrip("."))
-            records.append({"namespace": f"kars-{name}", "sandbox": name,
-                            "egress_mode": mode, "declared_hosts": sorted(hosts)})
+            metadata, items = page["metadata"], page["items"]
+            current_version = metadata["resourceVersion"]
+            if (not isinstance(items, list) or not isinstance(current_version, str)
+                or not current_version or (version is not None and version != current_version)):
+                raise ValueError("list snapshot")
+            version = current_version
+            for sandbox in items:
+                md = sandbox["metadata"]
+                name, uid = md["name"], md["uid"]
+                if (not isinstance(name, str) or len(name) > 58
+                    or not re.fullmatch(r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?", name)
+                    or md["namespace"] != "kars-system" or name in result
+                    or not isinstance(uid, str) or not uid or len(uid) > 253
+                    or not isinstance(sandbox["spec"], dict)):
+                    raise ValueError("sandbox identity")
+                # Status/resourceVersion churn is unrelated to capture attribution.
+                result[name] = {"metadata": {"name": name, "namespace": "kars-system", "uid": uid,
+                                            "deletionTimestamp": md.get("deletionTimestamp")},
+                                "spec": {"networkPolicy": sandbox["spec"].get("networkPolicy", {})}}
+            token = metadata.get("continue", "")
+            if not isinstance(token, str) or token in seen_tokens:
+                raise ValueError("continuation")
+            if not token:
+                return result
+            seen_tokens.add(token)
+            path = ("/apis/kars.azure.com/v1alpha1/namespaces/kars-system/karssandboxes?limit=250&continue="
+                    + urllib.parse.quote(token, safe=""))
         except (KeyError, TypeError, ValueError, AttributeError) as error:
-            raise WitnessError("declaration_invalid") from error
+            raise WitnessError("discovery_invalid") from error
+
+
+def declaration(api, name, sandbox):
+    baseline = api.request(
+        f"/api/v1/namespaces/kars-{name}/configmaps/karssandbox-{name}-egress-allowlist"
+    )
+    try:
+        if sandbox["metadata"]["name"] != name or sandbox["metadata"]["namespace"] != "kars-system":
+            raise ValueError("sandbox identity")
+        if baseline["metadata"]["name"] != f"karssandbox-{name}-egress-allowlist" or baseline["metadata"]["namespace"] != f"kars-{name}":
+            raise ValueError("baseline identity")
+        mode = sandbox["spec"].get("networkPolicy", {}).get("egressMode", "Learn")
+        body = json.loads(baseline["data"]["allowlist.json"])
+        if (
+            mode not in ("Learn", "Strict")
+            or type(body["schemaVersion"]) is not int or body["schemaVersion"] != 1
+            or not isinstance(body["endpoints"], list)
+        ):
+            raise ValueError("baseline schema")
+        hosts = set()
+        for endpoint in body["endpoints"]:
+            host = endpoint["host"]
+            if (
+                not isinstance(host, str) or not host or len(host) > 253
+                or any(c.isspace() or ord(c) < 32 for c in host)
+            ):
+                raise ValueError("baseline host")
+            hosts.add(host.lower().rstrip("."))
+        return {"namespace": f"kars-{name}", "sandbox": name,
+                "egress_mode": mode, "declared_hosts": sorted(hosts)}
+    except (KeyError, TypeError, ValueError, AttributeError) as error:
+        raise WitnessError("declaration_invalid") from error
+
+
+def declarations(api, names):
+    return [declaration(api, name, api.request(
+        f"/apis/kars.azure.com/v1alpha1/namespaces/kars-system/karssandboxes/{name}"
+    )) for name in names]
+
+
+def fleet_declarations(api, inventory):
+    records = []
+    for name, sandbox in sorted(inventory.items()):
+        try:
+            if sandbox["metadata"].get("deletionTimestamp"):
+                raise WitnessError("baseline_unavailable")
+            record = declaration(api, name, sandbox)
+        except WitnessError as error:
+            record = {"namespace": f"kars-{name}", "sandbox": name, "egress_mode": None,
+                      "declared_hosts": [], "declaration_diagnostic": (
+                          "declaration_invalid" if str(error) == "declaration_invalid" else "baseline_unavailable")}
+        record["sandbox_uid"] = sandbox["metadata"]["uid"]
+        records.append(record)
     return records
 
 
@@ -310,7 +383,10 @@ def compute(records, dns, tcp, nodes):
         ns = record["namespace"]
         observed = observed_dns[ns]
         beyond = sorted(h for h in observed if not declared_host(h, record["declared_hosts"]))
-        if record["egress_mode"] == "Learn":
+        if record.get("declaration_diagnostic"):
+            verdict = "UNAVAILABLE"
+            beyond = []
+        elif record["egress_mode"] == "Learn":
             verdict = "LEARN"
         elif beyond:
             verdict = "BEYOND-DECLARED"
@@ -358,16 +434,39 @@ class Publisher:
 def sample(api, config):
     release = config.get("release_name", RELEASE)
     before = ready_nodes(api, release)
-    declared = declarations(api, config["sandboxes"])
+    if "nodes" in config and (not config["nodes"] or sorted(before) != sorted(config["nodes"])):
+        raise WitnessError("gadget_nodes_outside_configured_scope")
+    scope = config.get("scope", "selected")
+    if scope not in ("all", "selected") or (scope == "all" and config["sandboxes"]):
+        raise WitnessError("sandbox_scope_invalid")
+    inventory = discovery(api) if scope == "all" else None
+    declared = fleet_declarations(api, inventory) if inventory is not None else declarations(api, config["sandboxes"])
+    namespaces = sorted(record["namespace"] for record in declared)
     started = time.monotonic()
     started_at = utc_now()
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-        dns = pool.submit(capture, config["dns_image"], config["window_seconds"], sorted(before))
-        tcp = pool.submit(capture, config["tcp_image"], config["window_seconds"], sorted(before))
-        dns_events, tcp_events = dns.result(), tcp.result()
+    if namespaces:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            dns = pool.submit(capture, config["dns_image"], config["window_seconds"], sorted(before), namespaces)
+            tcp = pool.submit(capture, config["tcp_image"], config["window_seconds"], sorted(before), namespaces)
+            dns_events, tcp_events = dns.result(), tcp.result()
+    elif scope == "all":
+        # An empty fleet is not permission to run an unfiltered kernel capture.
+        time.sleep(config["window_seconds"])
+        dns_events, tcp_events = [], []
+    else:
+        raise WitnessError("sandbox_scope_invalid")
+    if STOP:
+        raise WitnessError("capture_interrupted")
     if ready_nodes(api, release) != before:
         raise WitnessError("gadget_nodes_changed_during_capture")
-    if declarations(api, config["sandboxes"]) != declared:
+    if inventory is not None:
+        after = discovery(api)
+        if after != inventory:
+            raise WitnessError("sandbox_inventory_changed_during_capture")
+        unchanged = fleet_declarations(api, after) == declared
+    else:
+        unchanged = declarations(api, config["sandboxes"]) == declared
+    if not unchanged:
         raise WitnessError("declaration_changed_during_capture")
     records, count, event_nodes = compute(declared, dns_events, tcp_events, before)
     if time.monotonic() - started > MAX_AGE:
@@ -385,7 +484,7 @@ def run_cycle(api, publisher, config, revision, digest):
         "schema_version": 1, "gadget": "inspektor-gadget/v0.53.2",
         "release_revision": revision, "config_digest": digest,
         "window_seconds": config["window_seconds"],
-        "coverage": "partial", "sandboxes": [],
+        "coverage": "partial", "scope": config.get("scope", "selected"), "sandboxes": [],
     }
     try:
         document.update(sample(api, config))
@@ -398,7 +497,10 @@ def run_cycle(api, publisher, config, revision, digest):
         publisher.publish(document)
     except WitnessError:
         HEALTH.unlink(missing_ok=True)
+        PROCESS_HEALTH.unlink(missing_ok=True)
         raise
+    # A published unavailable report proves loop progress, not qualification.
+    PROCESS_HEALTH.write_text(str(time.time()))
     if document["status"] in ("observed", "empty"):
         HEALTH.write_text(str(time.time()))
     print(f"witness report published: {document['status']}", flush=True)
@@ -414,11 +516,12 @@ def main():
     if sys.argv[1:2] == ["--check-btf"]:
         check_btf(sys.argv[2])
         return
-    if sys.argv[1:] == ["--health"]:
+    if sys.argv[1:] in (["--health"], ["--process-health"]):
+        process_probe = sys.argv[1] == "--process-health"
         try:
-            age = time.time() - float(HEALTH.read_text())
+            age = time.time() - float((PROCESS_HEALTH if process_probe else HEALTH).read_text())
         except (OSError, ValueError) as error:
-            raise WitnessError("no_successful_publication") from error
+            raise WitnessError("no_process_publication" if process_probe else "no_successful_publication") from error
         if not 0 <= age <= MAX_AGE:
             raise WitnessError("publication_stale")
         return
@@ -443,6 +546,7 @@ def main():
                 break
             time.sleep(1)
     HEALTH.unlink(missing_ok=True)
+    PROCESS_HEALTH.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

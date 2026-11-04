@@ -127,6 +127,7 @@ pub(super) struct Intent {
     pub request_job: Option<String>,
     pub pod_spec: Value,
     proxy: Option<super::egress::Target>,
+    memory: Option<super::memory::Target>,
 }
 
 impl Intent {
@@ -200,7 +201,16 @@ impl Intent {
             request_job,
             pod_spec,
             proxy: None,
+            memory: None,
         })
+    }
+
+    pub fn with_memory(mut self, target: super::memory::Target) -> anyhow::Result<Self> {
+        ensure!(self.target_uid.as_ref() == Some(&target.sandbox_uid), "memory evaluation target changed");
+        target.configure(&mut self.pod_spec)?;
+        self.digest = content_digest(&serde_json::to_vec(&(&self.digest, &target, &self.pod_spec))?);
+        self.memory = Some(target);
+        Ok(self)
     }
 
     pub fn with_proxy(mut self, target: super::egress::Target) -> anyhow::Result<Self> {
@@ -252,6 +262,9 @@ impl Intent {
         identity(&current.metadata)?;
         if let Some(proxy) = &self.proxy {
             proxy.validate(client, eval).await?;
+        }
+        if let Some(memory) = &self.memory {
+            memory.validate(client, eval).await?;
         }
         Ok(current)
     }

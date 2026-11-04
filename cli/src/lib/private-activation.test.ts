@@ -4,11 +4,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { rootCertificates } from "node:tls";
 import { fixture as baseFixture, rootPod } from "./private-activation-fixtures.js";
-import { applyReviewedGrant } from "../commands/credential-grants.js";
+import { applyReviewedGrant, credentialGrantsCommand } from "../commands/credential-grants.js";
+import { applyBudgetRevisionRecovery, previewBudgetRevisionRecovery } from "./private-budget-tls-recovery.js";
 import {
   previewPrivateActivation, stagePrivateActivation, validatePrivateActivation,
   validateQualifiedActivation, privateMaterial, PRIVATE_PREFIX,
-  consumesPrivateAuthority,
+  consumesPrivateAuthority, canonical, type Execute,
 } from "./private-activation.js";
 
 function fixture() {
@@ -87,6 +88,189 @@ function budgetFixture(replicas = 2) {
   };
   return { ...f, execute, secret, controls, rotate, events, state };
 }
+
+async function revisionFixture() {
+  const f = budgetFixture();
+  const execute: Execute = async (args, input) => {
+    if (args[0] === "get" && args[1] === "namespaces") {
+      f.calls.push(args);
+      return JSON.stringify({ metadata: {}, items: [...f.objects.entries()]
+        .filter(([key]) => key.startsWith("namespace/")).map(([, value]) => value) });
+    }
+    return f.execute(args, input);
+  };
+  const document = async () => ({
+    apiVersion: "kars.azure.com/v1alpha1", kind: "KarsCredentialGrant",
+    metadata: { name: "workspace", namespace: "core" },
+    spec: { workspaceUid: "core-uid", enabled: true,
+      writers: [{ namespace: "core", name: "kars-controller", uid: "controller-sa" }],
+      privateActivation: await previewPrivateActivation(execute, "core", [{ namespace: "core" }], [],
+        "core", "kcm-certificate", []) },
+  });
+  await expect(applyReviewedGrant(execute, await document())).rejects.toThrow("operator rotation");
+  f.rotate(1);
+  await applyReviewedGrant(execute, await document());
+  const grant = f.objects.get(f.key("karscredentialgrants.kars.azure.com", "workspace", "core"));
+  const namespace = f.objects.get(f.key("namespace", "core"));
+  await validateQualifiedActivation(execute, grant.spec.privateActivation);
+  f.secret.metadata.resourceVersion = "3";
+  f.calls.length = 0;
+  return { ...f, execute, grant, namespace };
+}
+
+describe("sealed same-key budget revision recovery", () => {
+  it("publishes only the revision delta, preserves history/intent/consumers and retains strict normal validation", async () => {
+    const f = await revisionFixture();
+    const old = structuredClone(f.grant.spec.privateActivation);
+    const deployment = structuredClone(f.deployment);
+    const secret = structuredClone(f.secret);
+    const history = JSON.parse(f.namespace.metadata.annotations[`${PRIVATE_PREFIX}root-retirement`]).retirement;
+    const review = await previewBudgetRevisionRecovery(f.execute, "core");
+    expect(f.calls.every(args => ["get", "auth"].includes(args[0]!))).toBe(true);
+    await expect(validateQualifiedActivation(f.execute, old)).rejects.toThrow("Budget TLS review changed");
+    await applyBudgetRevisionRecovery(f.execute, review);
+    expect(f.deployment).toEqual(deployment);
+    expect(f.secret).toEqual(secret);
+    expect(JSON.parse(f.namespace.metadata.annotations[`${PRIVATE_PREFIX}root-retirement`]).retirement).toBe(history);
+    const expected = structuredClone(review.grant.spec);
+    const next = structuredClone(old);
+    next.root.budgetTls.secret.resourceVersion = "3";
+    expected.privateActivation = next;
+    expect(f.grant.spec).toEqual(expected);
+    expect(f.calls.filter(args => args[0] === "patch").map(args => args[1]))
+      .toEqual(["namespace", "karscredentialgrants.kars.azure.com"]);
+    await validateQualifiedActivation(f.execute, f.grant.spec.privateActivation);
+    await expect(validateQualifiedActivation(f.execute, old)).rejects.toThrow();
+    const published = canonical({ namespace: f.namespace, grant: f.grant });
+    await applyBudgetRevisionRecovery(f.execute, review);
+    expect(canonical({ namespace: f.namespace, grant: f.grant })).toBe(published);
+  });
+
+  it("resumes the exact retained review after interrupted grant publication without rewriting the namespace", async () => {
+    const f = await revisionFixture();
+    const review = await previewBudgetRevisionRecovery(f.execute, "core");
+    await expect(applyBudgetRevisionRecovery(async (args, input) => {
+      if (args[0] === "patch" && args[1] === "karscredentialgrants.kars.azure.com") throw new Error("grant conflict");
+      return f.execute(args, input);
+    }, review)).rejects.toThrow("grant conflict");
+    await expect(validateQualifiedActivation(f.execute, f.grant.spec.privateActivation)).rejects.toThrow();
+    const namespace = structuredClone(f.namespace);
+    await applyBudgetRevisionRecovery(f.execute, review);
+    expect(f.namespace).toEqual(namespace);
+    await validateQualifiedActivation(f.execute, f.grant.spec.privateActivation);
+  });
+
+  it("explicitly restores Pending quarantine only after verifying the original sealed consumers and same-key revision", async () => {
+    const f = await revisionFixture();
+    f.namespace.metadata.annotations[`${PRIVATE_PREFIX}state`] = "Pending";
+    await expect(validateQualifiedActivation(f.execute, f.grant.spec.privateActivation)).rejects.toThrow();
+    const review = await previewBudgetRevisionRecovery(f.execute, "core");
+    expect(review.qualification.state).toBe("Pending");
+    const root = structuredClone(f.deployment);
+    await applyBudgetRevisionRecovery(f.execute, review);
+    expect(f.namespace.metadata.annotations[`${PRIVATE_PREFIX}state`]).toBe("Qualified");
+    expect(f.deployment).toEqual(root);
+    await validateQualifiedActivation(f.execute, f.grant.spec.privateActivation);
+  });
+
+  it.each(["unchanged-revision", "unreviewed-pod", "template", "new-state"])(
+    "does not release Pending quarantine with %s", async fault => {
+      const f = await revisionFixture();
+      f.namespace.metadata.annotations[`${PRIVATE_PREFIX}state`] = "Pending";
+      if (fault === "unchanged-revision") f.secret.metadata.resourceVersion = "2";
+      if (fault === "unreviewed-pod") f.pods.get("core")![0].metadata.ownerReferences[0].uid = "foreign";
+      if (fault === "template") f.deployment.spec.template.spec.containers[0]!.command = ["changed"];
+      if (fault === "new-state") f.namespace.metadata.annotations[`${PRIVATE_PREFIX}state`] = "Retired";
+      await expect(previewBudgetRevisionRecovery(f.execute, "core")).rejects.toThrow();
+      expect(f.namespace.metadata.annotations[`${PRIVATE_PREFIX}state`]).not.toBe("Qualified");
+      expect(f.calls.every(args => ["get", "auth"].includes(args[0]!))).toBe(true);
+    },
+  );
+
+  it.each(["key", "secret", "root", "profile", "consumer", "bundle", "scope", "grant", "no-change"])(
+    "refuses unrelated %s changes before mutation", async fault => {
+      const f = await revisionFixture();
+      if (fault === "key") f.rotate(2);
+      if (fault === "secret") f.secret.metadata.uid = "replaced";
+      if (fault === "root") f.deployment.metadata.uid = "replaced";
+      if (fault === "profile") f.pods.set("kube-system", [{
+        metadata: { annotations: { "kubernetes.io/config.mirror": "mirror" } },
+        spec: { containers: [{ name: "kube-controller-manager", command: ["--use-service-account-credentials=true"] }] },
+      }]);
+      if (fault === "consumer") f.pods.get("core")![0].metadata.ownerReferences[0].uid = "unreviewed";
+      if (fault === "bundle") f.objects.get(f.key("validatingadmissionpolicy", "kars-private-consumption")).metadata.resourceVersion = "2";
+      if (fault === "scope") f.objects.get(f.key("namespace", "reader")).metadata.annotations[`${PRIVATE_PREFIX}root-namespace`] = "core";
+      if (fault === "grant") f.objects.set(f.key("karscredentialgrants.kars.azure.com", "extra", "core"),
+        { ...structuredClone(f.grant), metadata: { name: "extra", namespace: "core", uid: "extra", resourceVersion: "1" } });
+      if (fault === "no-change") f.secret.metadata.resourceVersion = "2";
+      await expect(previewBudgetRevisionRecovery(f.execute, "core")).rejects.toThrow();
+      expect(f.calls.every(args => ["get", "auth"].includes(args[0]!))).toBe(true);
+    },
+  );
+
+  it.each(["namespace", "karscredentialgrants.kars.azure.com"])("preserves strict %s UID/RV conflicts", async kind => {
+    const f = await revisionFixture();
+    const review = await previewBudgetRevisionRecovery(f.execute, "core");
+    await expect(applyBudgetRevisionRecovery(async (args, input) => {
+      if (args[0] === "patch" && args[1] === kind) throw new Error("UID/RV conflict");
+      return f.execute(args, input);
+    }, review)).rejects.toThrow("UID/RV conflict");
+    expect(f.grant.spec).toEqual(review.grant.spec);
+    await expect(validateQualifiedActivation(f.execute, f.grant.spec.privateActivation)).rejects.toThrow();
+  });
+
+  it("uses a fresh namespace CAS for RV-only churn, never for changed namespace content", async () => {
+    const f = await revisionFixture();
+    const review = await previewBudgetRevisionRecovery(f.execute, "core");
+    f.namespace.metadata.resourceVersion = String(Number(f.namespace.metadata.resourceVersion) + 1);
+    await applyBudgetRevisionRecovery(async (args, input) => {
+      if (args[0] === "get" && args[1] === "namespace") {
+        f.namespace.metadata.resourceVersion = String(Number(f.namespace.metadata.resourceVersion) + 1);
+      }
+      return f.execute(args, input);
+    }, review);
+    await validateQualifiedActivation(f.execute, f.grant.spec.privateActivation);
+    const changed = await revisionFixture();
+    const oldReview = await previewBudgetRevisionRecovery(changed.execute, "core");
+    changed.namespace.metadata.annotations["operator.example/hold"] = "true";
+    await expect(applyBudgetRevisionRecovery(changed.execute, oldReview)).rejects.toThrow("changed since review");
+    expect(changed.calls.every(args => ["get", "auth"].includes(args[0]!))).toBe(true);
+  });
+
+  it("rejects changed reviews, interrupted-publication tampering and missing operator authority", async () => {
+    const f = await revisionFixture();
+    await expect(previewBudgetRevisionRecovery(async (args, input) => args[0] === "auth" ? "no" : f.execute(args, input), "core"))
+      .rejects.toThrow("operator authority");
+    const review = await previewBudgetRevisionRecovery(f.execute, "core");
+    f.secret.metadata.resourceVersion = "4";
+    await expect(applyBudgetRevisionRecovery(f.execute, review)).rejects.toThrow("changed since review");
+    expect(f.calls.every(args => ["get", "auth"].includes(args[0]!))).toBe(true);
+    f.secret.metadata.resourceVersion = "3";
+    await expect(applyBudgetRevisionRecovery(async (args, input) => {
+      if (args[0] === "patch" && args[1] === "karscredentialgrants.kars.azure.com") throw new Error("interrupted");
+      return f.execute(args, input);
+    }, review)).rejects.toThrow("interrupted");
+    f.grant.spec.enabled = false;
+    await expect(applyBudgetRevisionRecovery(f.execute, review)).rejects.toThrow("grant changed");
+    expect(f.grant.spec.enabled).toBe(false);
+  });
+
+  it.each(["namespaces", "karscredentialgrants.kars.azure.com"])("rejects incomplete %s inventories", async kind => {
+    const f = await revisionFixture();
+    await expect(previewBudgetRevisionRecovery(async (args, input) => {
+      const value = await f.execute(args, input);
+      return args[0] === "get" && args[1] === kind && args.includes("--chunk-size=0")
+        ? JSON.stringify({ ...JSON.parse(value), metadata: { continue: "next" } }) : value;
+    }, "core")).rejects.toThrow("inventory");
+  });
+
+  it("exposes bounded preview/apply on the existing credential-grant CLI", () => {
+    const command = credentialGrantsCommand().commands.find(command => command.name() === "recover-budget-revision")!;
+    expect(command.commands.map(command => command.name())).toEqual(["preview", "apply"]);
+    expect(command.commands[0]!.options.some(option => option.long === "--private-root" && option.mandatory)).toBe(true);
+    expect(command.commands.every(command => command.options.some(option => option.long === "--context"))).toBe(true);
+  });
+});
 
 describe("generic private activation staging", () => {
   it.each([

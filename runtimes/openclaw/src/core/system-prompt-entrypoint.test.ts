@@ -48,6 +48,63 @@ afterEach(() => {
 });
 
 describe("entrypoint system prompt binding", () => {
+  it.each([0, 1, 2, 3])("keeps welcome template %i conditional on there being no assigned work", (index) => {
+    const templates = [...entrypoint.matchAll(/## On First Message \(Welcome\)\n([\s\S]*?)(?=\n## )/g)];
+    expect(templates).toHaveLength(4);
+    const result = spawnSync("/bin/bash", ["-e", "-u", "-o", "pipefail", "-s"], {
+      input: `cat << PROMPTEOF\n${templates[index][1]}\nPROMPTEOF\n`,
+      encoding: "utf8", timeout: 10_000,
+      env: { PATH: process.env.PATH, ENDPOINT: "https://example.invalid/", MODEL: "reviewed-model", HOSTNAME: "reviewed-sandbox" },
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain("message supplies a task, a reviewed Mission phase, or revision feedback, execute\nthat assigned work directly.");
+    expect(result.stdout).toContain('Do not substitute a welcome, capability tour, or\n"How can I help?" for the task.');
+    expect(result.stdout).toContain("The reviewed phase and its granted tools take\nprecedence");
+    expect(result.stdout).toContain("this guidance grants no capabilities.");
+    expect(result.stdout).toContain("Only when the user starts a conversation without an actionable request");
+    expect(result.stdout).toContain("verified protections and currently granted tools");
+    expect(result.stdout).toContain("🔒 kars Sandbox —");
+    if (index >= 2) expect(result.stdout).toContain("https://example.invalid/");
+    else expect(result.stdout).toContain(index === 0 ? "GitHub Copilot" : "GitHub Models");
+    expect(result.stdout).toContain("reviewed-model");
+    expect(result.stdout).not.toContain("When a user starts a new conversation, include");
+  });
+
+  it("configures native routed auth without creating a legacy credential store", () => {
+    const directory = mkdtempSync(join(tmpdir(), "kars-native-auth-test-"));
+    directories.push(directory);
+    const configPath = join(directory, "openclaw.json");
+    const start = entrypoint.indexOf('  # Write openclaw.json (');
+    const end = entrypoint.indexOf('  # Build channels config dynamically', start);
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    const result = spawnSync("/bin/bash", ["-e", "-u", "-o", "pipefail", "-s"], {
+      input: entrypoint.slice(start, end), encoding: "utf8", timeout: 10_000,
+      env: { PATH: process.env.PATH, OPENCLAW_DIR: directory, OPENCLAW_CONFIG: configPath,
+        MODELS_JSON: '[{"id":"gpt-5.4-mini"}]', _PRIMARY_MODEL_REF: "azure-openai/gpt-5.4-mini",
+        _ANTHROPIC_PROVIDER_BLOCK: "", _MCP_BLOCK: "", IS_ROOT: "false" },
+    });
+    expect(result.status, result.stderr).toBe(0);
+    const config = JSON.parse(readFileSync(configPath, "utf8")
+      .replace("PLUGINS_ALLOW_PLACEHOLDER", "").replace("PLUGINS_ENTRIES_PLACEHOLDER", "")
+      .replace("CHANNELS_PLACEHOLDER", ""));
+    expect(config.models.providers["azure-openai"]).toMatchObject({
+      apiKey: "routed-via-inference-router", baseUrl: "http://127.0.0.1:8443/v1",
+      api: "openai-completions", authHeader: false,
+    });
+    expect(readdirSync(directory)).toEqual(["openclaw.json"]);
+    expect(statSync(configPath).mode & 0o777).toBe(0o600);
+  });
+
+  it("uses direct tool schemas in the activated host configuration", () => {
+    const tools = entrypoint.match(/  "tools": (\{[\s\S]*?\n  \}),\n  "commands":/);
+    expect(tools).not.toBeNull();
+    expect(JSON.parse(tools![1])).toEqual({
+      toolSearch: false, web: { fetch: { provider: "kars-router", useTrustedEnvProxy: true } },
+      deny: ["sessions_spawn", "sessions_send"], exec: { mode: "full" },
+    });
+  });
+
   it("preserves exact instructions and existing configuration, granting hooks only to Kars", () => {
     const prompt = 'Kars 🐾\nUse "named agents" & C:\\work\\repo | artifacts.\nKeep `tools` and ${literal} unchanged.\n';
     const { result, content, configPath, directory } = runBinding(prompt);

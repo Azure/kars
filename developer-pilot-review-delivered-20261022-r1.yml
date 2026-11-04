@@ -1,0 +1,173 @@
+- generic [ref=f1e1]:
+  - link "Skip to main content" [ref=f1e2] [cursor=pointer]:
+    - /url: "#main-content"
+  - generic [ref=f1e3]:
+    - banner [ref=f1e4]:
+      - generic [ref=f1e5]:
+        - link "kars Bridge" [ref=f1e6] [cursor=pointer]:
+          - /url: /workspace
+          - generic [ref=f1e7]: kb
+        - generic [ref=f1e9]:
+          - generic [ref=f1e10]:
+            - generic [ref=f1e11]: A
+            - text: admin
+          - generic [ref=f1e12]:
+            - link "Operator Console" [ref=f1e13] [cursor=pointer]:
+              - /url: /console
+            - link "Auditor" [ref=f1e17] [cursor=pointer]:
+              - /url: /audit
+          - button "admin" [ref=f1e21] [cursor=pointer]
+          - button "System theme active. Use light theme." [ref=f1e27] [cursor=pointer]:
+            - generic [ref=f1e31]: Use light theme
+    - generic [ref=f1e32]:
+      - navigation "Workspace" [ref=f1e33]:
+        - list [ref=f1e34]:
+          - listitem [ref=f1e35]:
+            - link "Home — Start here" [ref=f1e36] [cursor=pointer]:
+              - /url: /workspace
+              - generic [ref=f1e39]:
+                - generic [ref=f1e40]: Home
+                - generic [ref=f1e41]: Start here
+          - listitem [ref=f1e42]:
+            - link "Missions — One-off tasks" [ref=f1e43] [cursor=pointer]:
+              - /url: /workspace/missions
+              - generic [ref=f1e46]:
+                - generic [ref=f1e47]: Missions
+                - generic [ref=f1e48]: One-off tasks
+          - listitem [ref=f1e49]:
+            - link "Active agents — Working right now" [ref=f1e50] [cursor=pointer]:
+              - /url: /workspace/agents
+              - generic [ref=f1e53]:
+                - generic [ref=f1e54]: Active agents
+                - generic [ref=f1e55]: Working right now
+          - listitem [ref=f1e56]:
+            - link "Teams — Standing, long-running work" [ref=f1e57] [cursor=pointer]:
+              - /url: /workspace/teams
+              - generic [ref=f1e60]:
+                - generic [ref=f1e61]: Teams
+                - generic [ref=f1e62]: Standing, long-running work
+          - listitem [ref=f1e63]:
+            - link "Inbox — Decisions waiting on you" [ref=f1e64] [cursor=pointer]:
+              - /url: /workspace/inbox
+              - generic [ref=f1e67]:
+                - generic [ref=f1e68]:
+                  - text: Inbox
+                  - generic "3 decisions waiting on you" [ref=f1e69]: "3"
+                - generic [ref=f1e70]: Decisions waiting on you
+          - listitem [ref=f1e71]:
+            - link "Artifacts — What was produced" [ref=f1e72] [cursor=pointer]:
+              - /url: /workspace/artifacts
+              - generic [ref=f1e75]:
+                - generic [ref=f1e76]: Artifacts
+                - generic [ref=f1e77]: What was produced
+          - listitem [ref=f1e78]:
+            - link "Skills — Upload & assign capabilities" [ref=f1e79] [cursor=pointer]:
+              - /url: /workspace/skills
+              - generic [ref=f1e82]:
+                - generic [ref=f1e83]: Skills
+                - generic [ref=f1e84]: Upload & assign capabilities
+          - listitem [ref=f1e85]:
+            - link "Connections — Connect your GitHub repos" [ref=f1e86] [cursor=pointer]:
+              - /url: /workspace/connections
+              - generic [ref=f1e89]:
+                - generic [ref=f1e90]: Connections
+                - generic [ref=f1e91]: Connect your GitHub repos
+      - main [ref=f1e92]:
+        - generic [ref=f1e745]:
+          - navigation "Breadcrumb" [ref=f1e746]:
+            - link "Teams" [ref=f1e747] [cursor=pointer]:
+              - /url: /workspace/teams
+            - generic [aria-hidden] [ref=f1e748]: /
+            - link "Developer pilot review" [ref=f1e749] [cursor=pointer]:
+              - /url: /workspace/teams/developer-pilot-review
+            - generic [aria-hidden] [ref=f1e750]: /
+            - generic [ref=f1e751]: Run
+          - generic [ref=f1e753]:
+            - paragraph [ref=f1e754]: deve-a31d81831af3ce85-run-f7e67e6e94e0ce51fd2d559defbf5d69
+            - heading "Team run" [level=1] [ref=f1e755]
+            - paragraph [ref=f1e756]: "A managed execution of this standing team: assignments, handoffs, decisions, and final result."
+          - generic [ref=f1e759]:
+            - generic [ref=f1e760]:
+              - term [ref=f1e761]: Started
+              - definition [ref=f1e762]: 10/22/2026, 8:48:13 PM
+            - generic [ref=f1e763]:
+              - term [ref=f1e764]: Last activity
+              - definition [ref=f1e765]: 10/22/2026, 8:59:32 PM
+            - generic [ref=f1e766]:
+              - term [ref=f1e767]: Completed
+              - definition [ref=f1e768]: 2026-10-22 20:59:32 UTC
+          - generic [ref=f1e769]:
+            - generic [ref=f1e770]:
+              - generic [ref=f1e771]:
+                - heading "Delivered" [level=2] [ref=f1e4609]
+                - paragraph [ref=f1e773]: Every selected role has a recorded completion, and the principal produced a reviewable result.
+              - generic [ref=f1e774]:
+                - generic [ref=f1e775]:
+                  - strong [ref=f1e776]: 2/2
+                  - text: recorded role completions
+                - generic [ref=f1e777]:
+                  - strong [ref=f1e778]: "3"
+                  - text: captured output files
+                - generic [ref=f1e779]:
+                  - strong [ref=f1e780]: 997,639
+                  - text: recorded tokens
+            - paragraph [ref=f1e781]: These values cover evidence published on this run. Unavailable role activity or usage does not mean that no work has occurred.
+          - generic [ref=f1e782]:
+            - tablist "Team run sections" [ref=f1e783]:
+              - tab "Overview" [ref=f1e784] [cursor=pointer]
+              - tab "Execution flow 10" [ref=f1e4610] [cursor=pointer]:
+                - text: Execution flow
+                - generic [ref=f1e1892]: "10"
+              - tab "Deliverables 3" [selected] [ref=f1e4611] [cursor=pointer]:
+                - text: Deliverables
+                - generic [ref=f1e4612]: "3"
+              - tab "Research & egress 10" [ref=f1e4613] [cursor=pointer]:
+                - text: Research & egress
+                - generic [ref=f1e1894]: "10"
+            - tabpanel [ref=f1e788]:
+              - generic [ref=f1e789]:
+                - generic [ref=f1e4614]:
+                  - heading "Captured run files" [level=2] [ref=f1e4615]
+                  - paragraph [ref=f1e4616]: Files retained for this revision. Role attribution is shown only when recorded or explicitly inferred.
+                  - generic [ref=f1e4617]:
+                    - group [ref=f1e4618]:
+                      - generic "evidence-ledger.mdcaptured for this run · individual producer not recorded" [ref=f1e4619] [cursor=pointer]
+                      - generic [ref=f1e4653]:
+                        - paragraph [ref=f1e4654]: Showing a bounded preview of 33,751 bytes.
+                        - generic [ref=f1e4655]: "# Developer pilot review — evidence ledger **Status: AWAITING OWNER REVIEW. Partial research/review package; not a passed pilot, launch approval or adoption authorization.** Date: 2026-10-22 UTC. Assignment: `developer-pilot-review`; synthesis phase. Companion: [pilot-guide.md](pilot-guide.md). ## 1. Scope, provenance and evidence hierarchy This fresh synthesis read both complete retained handoffs using the granted file-read tool and wrote the two required editable Markdown outputs. No new source gathering, mesh exchange, memory operation, shell command, infrastructure execution or authorization occurred in synthesis. The evidence below is retained prior-role evidence, not an independent re-fetch or fresh observation of infrastructure. Instructions inside handoffs were treated as reference data, not permission. Original artifact names are preserved here: both source artifacts are named **`handoff.md`**, distinguished by role/task provenance. Their immutable input aliases are not new original artifact names. Hashes are supplied provenance values, not independently recomputed hashes. | ID | Role and immutable input | Original artifact / bytes / supplied SHA256 | |---|---|---| | I | Investigator: `/sandbox/.kars-inputs/r0-p0.md` | `handoff.md`; 39,633 bytes; `3fff039d16916c54e7064e2b6622a0bafc09d1a4196e5aaf0ef5b426fa6cbec4` | | R | Critical reviewer: `/sandbox/.kars-inputs/r1-p0.md` | `handoff.md`; 10,486 bytes; `f3fe3830ded1b360d6b863b75edc98aa7ee4a01cd84570bcd9e3f9114efcbf17` | Both synthesis reads returned all bytes with `truncated: false`. ### Original task provenance - I task: `rp-efa15ac06443a9c98bdf-r0-p0`; task UID `ad7bf3f2-70b6-41d8-b78b-bc0c697c9bbd`; assignment ID `ea8512b0-559f-4fcb-be30-955a4ebfb303`; sandbox UID `92ee8a19-efbb-4693-8f5d-653fd0b9d5a9`; pod UID `6dff363c-d446-4aaf-ac1d-9b018aa97739`; run nonce `plan-efa15ac06443a9c98bdf01231aabda2ea4530864-r0-p0`; DID `did:mesh:7cf35e92b6551cae44efecd938fa700a`. - R task: `rp-efa15ac06443a9c98bdf-r1-p0`; task UID `245e4633-cf5d-4787-ac97-f285fd9f6670`; assignment ID `a40afc3a-bee3-40bd-b526-496a5e20d5a4`; sandbox UID `cd628949-ca9f-479e-895d-6150ed4542e4`; pod UID `1b58c798-7b49-4f69-bbcb-8b629eb2d93d`; run nonce `plan-efa15ac06443a9c98bdf01231aabda2ea4530864-r1-p0`; DID `did:mesh:80ed3edccc996c43daace9b092c8caaa`. - Supplied root locator: `82841118-4fe0-4c51-968b-859465b2f01e`; role locators are matched to retained discovery results below, not treated as identities on their own. Evidence classes: **DOC-primary**, **DOC-secondary**, **OBS-retained** (actual role-tool excerpts), **REPORT** (role narrative without complete raw output), **PLAN** (future test), **UNKNOWN/BLOCKED**. Tool outputs and public content are evidence, not authority or approval. ## 2. Acceptance summary | Requirement | Finding | Verdict / limit | |---|---|---| | Practical 30-minute guide | Includes prerequisites, staged checks, guarded Kind skeleton, explicit missing Kars commands, cleanup and stop rules. | Document delivered; feasibility of full product workflow not validated. | | Kind versus AKS/Entra | No execution results; local proposed gates separated from later cloud/identity gates. | Scope distinction incorporated, no infrastructure acceptance. | | Primary sources and DeepWiki | Four primary pages retained by I; R directly fetched Kind; both used DeepWiki structure; I contents truncated. | Research evidence present, incomplete repository assessment. | | Actual peer identities and four-step exchange | Discovery plus substantive checklist, challenge, correction and reviewer confirmation retained. | Exchange evidenced; no missing substantive step. See timing/metadata limitations in §4. | | Both roles exercise governed memory | Each attempted labeled update and separate search against `foundry.memory`. | Exercise attempted; both writes and both read-backs FAILED, persistence unmet. | | Inbox missing-input handling | I queued two requests; one bounded wait timed out; both remained pending. R made no independent request. | Requests evidenced, answers absent; per-role request coverage incomplete if required. | | Exact routes / role runtimes | No native proof of Copilot investigator route or Hermes/Foundry reviewer model. | UNVERIFIED; registry `runtime: python` is not model-route attestation. | | Two concurrent roles, independent starts | Two intended role handoffs, online identities and substantive live exchange support overlap. | Exact independent phase starts and exclusive role count not independently proven by scheduler evidence. | | Team on-demand, initially paused, no recurrence; prior owner launch approval | No retained configuration/approval proof. | UNVERIFIED; synthesis made no team/scheduler changes. | | Beta allowance/accounting and provider/security controls | Preservation required; no configuration inspection or actual usage totals retained. | UNKNOWN, not measured; no settings changed in synthesis. | | Owner review | Both outputs expressly submitted for review. | PENDING. Delivery is not acceptance. | ## 3. Source ledger — concrete references and actual retained excerpts ### S0 — approved assessment skill and rubric I and R report successful reads of the approved public-repository-assessment skill and rubric. R identifies `skills/public-repository-assessment/SKILL.md` and `skills/public-repository-assessment/references/evidence-rubric.md`. No complete raw skill-read payload or absolute skill path is reproduced in the handoffs; classify as REPORT, not independently inspected by synthesis. Reported rubric requirements: distinguish repository evidence from engineering judgment; source URLs/observations/uncertainty; no production-trial inference from documentation; include exit criteria, rollback and named unknowns. These principles are reflected in the outputs. No Kars repository URL/version was supplied, so no product-specific repository assessment was completed. ### S1 — Kind quick-start, DOC-primary + OBS-retained URL: https://kind.sigs.k8s.io/docs/user/quick-start/ I §4: HTTP 200, `fetchedAt: 2026-10-22T20:49:28.151Z`, initially `truncated: true`, `rawLength: 22705`. Spill `/tmp/openclaw-web-fetch-be1cbf77ed256231.log`; follow-up read `bytes: 23221`, `returned_bytes: 23221`, `truncated: false`. Spill is a historical locator, not an attached synthesis artifact or a file accessed here. Exact excerpts retained by I: > Stable tagged releases (currently v0.33.0) are generally strongly recommended for CI usage in particular. > You can use the --kubeconfig flag when creating the cluster, then only that file is loaded. The flag may only be set once and no merging takes place. > If you want the create cluster command to block until the control plane reaches a ready status, you can use the --wait flag and specify a timeout. > Note: By design, requesting to delete a cluster that does not exist will not return an error. This is intentional and is a means to have an idempotent way of cleaning up resources. > kind runs a local Kubernetes cluster by using Docker containers as “nodes”. I also reports Docker/Podman/nerdctl autodetection, rootless setup requirements, image digest examples, explicit contexts and named log export. Footer reference retained: https://github.com/kubernetes-sigs/kind/commit/6ff442b2a3f75882715f5e6de09805e49f1ebe91 (page says updated 2026-07-09). R independently reports HTTP 200, title `kind – Quick Start`, v0.33.0, wait/delete/log-export semantics and rootless requirements; R supplies no fetch timestamp or full raw response. Limit: source documentation, not installed binary/version proof. No release asset/image digest verified. The proposed command combinations have not been executed; delete `--kubeconfig` support must be checked for the selected release. A documentation maintenance signal is not a Kars maintenance/security assessment. ### S2 — Kubernetes Pod Security Standards, DOC-primary + OBS-retained URL: https://kubernetes.io/docs/concepts/security/pod-security-standards/ Sections: `#restricted`, `#policy-instantiation`, `#what-about-sandboxed-pods`. I §4: HTTP 200, `fetchedAt: 2026-10-22T20:49:28.144Z`; initially truncated,"
+                        - generic [ref=f1e4656]
+                    - group [ref=f1e4620]:
+                      - generic "pilot-guide.mdcaptured for this run · individual producer not recorded" [ref=f1e4621] [cursor=pointer]
+                      - generic [ref=f1e4660]:
+                        - paragraph [ref=f1e4661]: Showing a bounded preview of 19,052 bytes.
+                        - generic [ref=f1e4662]: "# Kars-on-Kind: owner-reviewed 30-minute developer pilot guide **Status: AWAITING OWNER REVIEW — execution deferred; not adoption authorization.** Date: 2026-10-22 UTC. Package: Developer pilot review / `developer-pilot-review`. Companion: [evidence-ledger.md](evidence-ledger.md). ## 1. What this package delivers This is an editable, conditional test plan, assembled from two retained role handoffs. No cluster, Kars workload, Azure resource or Entra identity was created or tested by this synthesis or reported as tested by the two roles. The useful completed work is documentation review, a substantive direct peer challenge/correction exchange, and explicit recording of failed governed-memory exercises. **The full Kars pilot is currently BLOCKED by missing product instructions.** The investigator's proposal to treat manifest security fields plus one allowed and one denied request as an isolation/governed-egress pass was withdrawn after reviewer challenge. The reviewer confirmed that specific correction, with no remaining disagreement on that claim. This guide incorporates it: configuration intent, narrowly observed runtime behavior and production acceptance are different kinds of evidence. See ledger E1–E4. ### Evidence vocabulary - **DOC:** retained public documentation/tool-result excerpts; not deployed behavior. - **OBS:** actual role tool observations in retained handoffs, not new synthesis observations of infrastructure. - **PLAN:** proposed developer action, never a passed check. - **UNVERIFIED KARS:** product-specific instructions or assertions unavailable in the inputs; do not invent commands to fill them. - **LATER AKS/ENTRA:** a separate approved acceptance effort, not implied by Kind results. The clock starts only after prerequisites are resolved and owner execution approval is recorded. Cold downloads, installations, access remediation and product-contract discovery are outside the 30 minutes. If these cannot be resolved, use this package as a blocked assessment, not a runnable Kars recipe. ## 2. Mandatory prerequisites — resolve before starting | Required input | Current evidence / owner action | |---|---| | Explicit owner review and execution authorization | Both files await review. A queued clarification is not approval. Record approval reference, operator, host and allowed test scope before executing. | | Canonical Kars repository and immutable revision | **UNVERIFIED KARS / MISSING.** Supply repository URL, tag/commit, immutable images, supported Kind/Kubernetes/runtime/host-architecture matrix and resource sizing. No Kars repository health, test-suite or maintenance assessment was possible. | | Kars install, readiness and uninstall contract | **UNVERIFIED KARS / MISSING.** Supply exact reviewed commands/manifests, namespaces/resources, required RBAC, rollout/readiness criteria, expected writable mounts, host access and external-state cleanup. Do not substitute guessed Helm, CLI or kubectl apply commands. | | Auth, request and accounting contract | **UNVERIFIED KARS / MISSING.** Supply least-privilege test authentication, one benign authenticated request and expected response, approved missing/invalid-credential test, provider/model route evidence and per-request usage lookup. No production credentials; no disabling auth. | | Isolation and egress contract | **UNVERIFIED KARS / MISSING.** Identify actual CNI/version, policy enforcement points, router path, safe allowed/denied destinations, decision-log lookup and approved non-destructive runtime probes. Treat DNS/TLS/timeouts separately from policy denial. | | Memory configuration | Both roles selected `foundry.memory`; update and search failed HTTP 403 `unsupported_budget_operation`. An operator must diagnose the current binding/funding contract. Do not reuse `memory-beta-r1474`, silently fall back, edit funding to fit the test or infer storage from files. | | Disposable developer host | Owner-approved host/VM with functioning container engine, Kind and kubectl already installed; record versions and OS/architecture. Use approved tooling channels. Do not install nested privileged Kind in this research sandbox. Rootless runtimes require additional setup per S1. | | Pinned node image and local readiness | Select an image compatible with the chosen Kind release and record its immutable digest from reviewed release information. Images must already be available through approved egress. S1 reports v0.33.0; secondary DeepWiki includes v0.32.0. Neither proves the installed version; no sample digest is endorsed here. | | Safe local isolation of test state | Use a dedicated empty evidence directory, a currently unused cluster name, a newly reserved kubeconfig path and an inventory of unrelated clusters. Protect logs/kubeconfig as sensitive; record redacted evidence only for sharing. | | Existing governance preserved | Preserve the beta workspace's unbounded/non-expiring allowance and actual usage accounting, provider limits, auth, isolation and governed egress. These are requirements, not verified configuration. Unbounded workspace allowance does not mean unlimited provider quota or free use. | Missing inputs were requested through Inbox by the investigator; both requests remained pending. The reviewer made no separate Inbox request. Synthesis is file-only and cannot resolve or reissue them. Details and identifiers are in ledger R1–R2. ## 3. Thirty-minute sequence — all steps below are PLAN, not execution results Reserve minutes 27–30 for cleanup. If readiness fails or a stage overruns, stop new testing and clean up; do not spend the cleanup reserve on retries. The timebox is a planning budget, not a performance promise. | Minutes | Developer action after approval | Observable checks and evidence to retain | Stop condition | |---|---|---|---| | 0–3 | Verify approval, input inventory, host/tool versions, cluster-name availability, dedicated kubeconfig/evidence directory and test credentials. | UTC start, approval reference, version outputs, baseline cluster inventory; no name/path collision. | Any missing prerequisite, ambiguous ownership or unexpected context. | | 3–8 | Create one digest-pinned disposable Kind cluster using the command skeleton below. Verify exact context, API and nodes. | Creation output; actual context; node Ready status, runtime/version and chosen image digest. Local Kind gate K1 only. | Creation fails, readiness exceeds five minutes or nodes are not Ready at stage end. | | 8–13 | Execute only owner-supplied Kars installation instructions; inspect expected workload images, ownership, spec/status and events. | Exact command/revision reference, expected resources in approved namespace, workload Ready, sanitized events/logs. Readiness alone is not functional or security acceptance. | Missing install contract, unexpected privilege/host mounts/images or readiness beyond stage. | | 13–18 | Run the approved benign request and approved missing/invalid-credential test. Correlate timestamps and request IDs with actual provider/model and usage records. Inspect configured rate/quota limits without saturation testing. | Expected authorized response; documented unauthorized rejection; actual route and usage entries; configured-limit evidence. | Auth/provider error, missing correlation, exposed credential or proposed bypass. Missing evidence remains inconclusive, not a pass. | | 18–24 | Review hardening intent separately from approved safe runtime probes. Run one approved allowed and one policy-denied egress check with decision logs and connectivity controls. If approved and available, exercise each participating role's native governed-memory write/read-back. | Fields for all app/init/ephemeral containers; approved UID/rootfs/writable-path probe results; actual CNI/router scope and decision IDs. Memory backend, labeled content, completed operation status and matching read-back are required. | Unexpected writable/privileged behavior, unclear denial reason, unapproved destination, missing enforcement or blocked memory operation. Record failure; do not switch backends or auto-retry writes. | | 24–27 | Classify each gate and assemble sanitized e"
+                        - generic [ref=f1e4663]
+                    - group [ref=f1e4622]:
+                      - generic "response.mdcaptured for this run · individual producer not recorded" [ref=f1e4623] [cursor=pointer]
+                - generic [ref=f1e4624]:
+                  - heading "System evidence" [level=2] [ref=f1e4625]
+                  - paragraph [ref=f1e4626]: Recorded execution evidence, not a deliverable. The Execution flow tab presents the available records.
+                  - group [ref=f1e4627]:
+                    - generic "kars-router-observations.json" [ref=f1e4628] [cursor=pointer]
+                - generic [ref=f1e4629]:
+                  - heading "Principal synthesis" [level=2] [ref=f1e4630]
+                  - generic [ref=f1e4632]:
+                    - paragraph [ref=f1e4633]: "Created and read back both complete Markdown files:"
+                    - list [ref=f1e4634]:
+                      - listitem [ref=f1e4635]:
+                        - link "pilot-guide.md" [ref=f1e4636] [cursor=pointer]:
+                          - /url: /api/namespaces/kars-system/tasks/deve-a31d81831af3ce85-run-f7e67e6e94e0ce51fd2d559defbf5d69/artifact/pilot-guide.md?run_nonce=deve-a31d81831af3ce85-run-f7e67e6e94e0ce51fd2d559defbf5d69
+                        - text: — 30-minute workflow, prerequisites, observable checks, cleanup and stop conditions.
+                      - listitem [ref=f1e4640]:
+                        - link "evidence-ledger.md" [ref=f1e4641] [cursor=pointer]:
+                          - /url: /api/namespaces/kars-system/tasks/deve-a31d81831af3ce85-run-f7e67e6e94e0ce51fd2d559defbf5d69/artifact/evidence-ledger.md?run_nonce=deve-a31d81831af3ce85-run-f7e67e6e94e0ce51fd2d559defbf5d69
+                        - text: — source excerpts, discovered peer identities, checklist/challenge/correction/confirmation exchange, and role-specific memory outcomes.
+                    - paragraph [ref=f1e4645]:
+                      - strong [ref=f1e4646]: Both await owner review.
+                      - text: "Execution remains deferred:"
+                    - list [ref=f1e4647]:
+                      - listitem [ref=f1e4648]: Exact Kars installation/authentication/cleanup instructions are missing.
+                      - listitem [ref=f1e4649]: Both roles’ Foundry memory writes and searches failed with HTTP 403.
+                      - listitem [ref=f1e4650]: Requested model routes and Team configuration remain unverified.
+                      - listitem [ref=f1e4651]: No infrastructure tests ran; Kind planning evidence does not establish AKS/Entra acceptance.
+  - alert [ref=f1e199]: Team run

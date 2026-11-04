@@ -48,7 +48,7 @@ fn qualify_role_resource(
     }
 }
 
-fn team_proposal_qualification(
+pub(super) fn team_proposal_qualification(
     proposal: &ComposeTeamProposal,
     options: &crate::routes::options::Options,
 ) -> Result<(), String> {
@@ -107,7 +107,7 @@ fn team_proposal_qualification(
         &principal_route.1,
         &required,
         max_parallel,
-        None,
+        proposal.budget_tokens,
     )? {
         let missing = crate::routes::options::route_qualification_gap(
             principal_runtime,
@@ -115,16 +115,24 @@ fn team_proposal_qualification(
             &principal_route.1,
             &required,
             max_parallel,
-            None,
+            proposal.budget_tokens,
+        )?;
+        let minimum = crate::routes::options::route_minimum_tokens(
+            principal_runtime,
+            &principal_route.0,
+            &principal_route.1,
+            &required,
+            max_parallel,
         )?;
         return Err(format!(
-            "{} lacks retained qualification for [{}] at max_parallel={max_parallel}",
+            "{} lacks retained qualification for [{}] at max_parallel={max_parallel}; proposed lifetime token cap={:?}, matching record minimum={minimum:?}",
             crate::routes::options::route_label(
                 principal_runtime,
                 &principal_route.0,
                 &principal_route.1
             ),
             missing.into_iter().collect::<Vec<_>>().join(", "),
+            proposal.budget_tokens,
         ));
     }
     let principal_route_label = crate::routes::options::route_label(
@@ -198,7 +206,7 @@ fn team_proposal_qualification(
             role.runtime.trim()
         };
         let role_required = team_role_qualification_requirements(plan, &role.name);
-        let role_tokens = plan.role_qualification_budget(&role.name, None);
+        let role_tokens = plan.role_qualification_budget(&role.name, proposal.budget_tokens);
         if !crate::routes::options::route_admitted(
             runtime,
             provider,
@@ -215,8 +223,15 @@ fn team_proposal_qualification(
                 1,
                 role_tokens,
             )?;
+            let minimum = crate::routes::options::route_minimum_tokens(
+                runtime,
+                provider,
+                deployment,
+                &role_required,
+                1,
+            )?;
             return Err(format!(
-                "role `{}` route {} lacks retained qualification for [{}]",
+                "role `{}` route {} lacks retained qualification for [{}]; effective token cap={role_tokens:?}, matching record minimum={minimum:?}",
                 role.name,
                 crate::routes::options::route_label(runtime, provider, deployment),
                 missing.into_iter().collect::<Vec<_>>().join(", "),

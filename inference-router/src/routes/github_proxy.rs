@@ -36,26 +36,149 @@ struct Service {
     slots: Arc<Semaphore>,
 }
 
+impl Service {
+    fn for_state(state: &AppState) -> Result<Self, ()> {
+        let config = state
+            .services
+            .github
+            .get_or_init(|| {
+                let client = github_app::client().map_err(|_| ())?;
+                let identity = state
+                    .services
+                    .requests
+                    .scope()
+                    .ok()
+                    .filter(|_| state.services.identity_valid)
+                    .map(|scope| scope.identity);
+                Ok(Arc::new(GitHubServices::new(identity, client)))
+            })
+            .clone()?;
+        Ok(Self {
+            client: config.client.clone(),
+            slots: config.slots.clone(),
+            config,
+            blocklist: Arc::new(state.blocklist.clone()),
+            sandbox: state.sandbox_name.clone(),
+        })
+    }
+}
+
 pub fn routes(state: AppState) -> Router<AppState> {
-    // Build failure disables only the additive feature, never standalone Kars.
-    let Ok(client) = github_app::client() else {
+    let Ok(service) = Service::for_state(&state) else {
         return Router::new();
     };
-    let identity = state
-        .services
-        .requests
-        .scope()
-        .ok()
-        .filter(|_| state.services.identity_valid)
-        .map(|scope| scope.identity);
-    let service = Service {
-        config: Arc::new(GitHubServices::new(identity, client.clone())),
-        client,
-        blocklist: Arc::new(state.blocklist),
-        sandbox: state.sandbox_name,
-        slots: Arc::new(Semaphore::new(2)),
-    };
     service_routes().with_state(service)
+}
+
+pub(super) struct Fetch {
+    service: Service,
+    peer: SocketAddr,
+    request: Request,
+}
+
+impl Fetch {
+    pub(super) async fn send(self) -> Response {
+        // Preserve the socket-derived same-pod proof, never synthesize a local hop.
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            handler(State(self.service), ConnectInfo(self.peer), self.request),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            deny(
+                StatusCode::GATEWAY_TIMEOUT,
+                "GitHub fetch deadline exceeded",
+            )
+        })
+    }
+}
+
+pub(super) async fn prepare_fetch(
+    state: &AppState,
+    peer: Option<SocketAddr>,
+    req: &serde_json::Value,
+) -> Result<Option<Fetch>, Response> {
+    let url = req.get("url").and_then(|v| v.as_str()).unwrap_or("");
+    let candidate = reqwest::Url::parse(url).ok().is_some_and(|url| {
+        url.host_str().is_some_and(|host| {
+            host.trim_end_matches('.')
+                .eq_ignore_ascii_case("api.github.com")
+        })
+    });
+    if !candidate {
+        return Ok(None);
+    }
+    let service = Service::for_state(state).map_err(|_| {
+        deny(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "GitHub service configuration is unavailable",
+        )
+    })?;
+    prepare_service_fetch(service, peer, req).await
+}
+
+async fn prepare_service_fetch(
+    service: Service,
+    peer: Option<SocketAddr>,
+    req: &serde_json::Value,
+) -> Result<Option<Fetch>, Response> {
+    match service.config.current().await {
+        Ok(Some(_)) => {}
+        Ok(None) if !service.config.was_configured() => return Ok(None),
+        _ => {
+            return Err(deny(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "GitHub service configuration is unavailable",
+            ));
+        }
+    }
+    let peer = peer.filter(|peer| peer.ip().is_loopback()).ok_or_else(|| {
+        deny(
+            StatusCode::FORBIDDEN,
+            "GitHub fetch requires a same-pod peer",
+        )
+    })?;
+    let request = fetch_request(req).ok_or_else(|| {
+        deny(
+            StatusCode::FORBIDDEN,
+            "GitHub fetch requires a canonical repository GET without credentials",
+        )
+    })?;
+    Ok(Some(Fetch {
+        service,
+        peer,
+        request,
+    }))
+}
+
+fn fetch_request(req: &serde_json::Value) -> Option<Request> {
+    let url = req.get("url")?.as_str()?;
+    let path = url.strip_prefix(github_app::API)?;
+    if !path.starts_with("/repos/")
+        || path.contains('#')
+        || req.get("method").is_some_and(|v| v.as_str() != Some("GET"))
+        || req
+            .get("body")
+            .is_some_and(|v| !v.is_null() && v.as_str() != Some(""))
+        || req.get("headers").is_some_and(|v| {
+            !v.as_object().is_some_and(|headers| {
+                headers.iter().all(|(key, value)| {
+                    (key.eq_ignore_ascii_case("accept") || key.eq_ignore_ascii_case("user-agent"))
+                        && value.as_str().is_some()
+                })
+            })
+        })
+    {
+        return None;
+    }
+    // Parse the original path, not URL-normalized dot segments or encodings.
+    let uri: axum::http::Uri = format!("/gh-api{path}").parse().ok()?;
+    github_policy::target(&uri, &Method::GET, false)?;
+    Request::builder()
+        .method(Method::GET)
+        .uri(uri)
+        .body(Body::empty())
+        .ok()
 }
 
 fn service_routes() -> Router<Service> {
@@ -149,9 +272,20 @@ async fn execute(state: &Service, request: Request) -> Response {
             "Only a single gzip Content-Encoding on Git POST is supported",
         );
     }
-    // Token discovery/minting and the data plane each remain subject to the
-    // existing signed egress policy, including every signed-log download hop.
-    if !egress(state, github_app::API).await || !egress(state, &target.url).await {
+    // The validated repository binding admits only this bounded service, not
+    // opaque GitHub egress. Threat/model fences still apply; log download hosts
+    // separately require ordinary signed egress permission.
+    if state
+        .blocklist
+        .check_github_service_egress(github_app::API, &state.sandbox)
+        .await
+        .is_err()
+        || state
+            .blocklist
+            .check_github_service_egress(&target.url, &state.sandbox)
+            .await
+            .is_err()
+    {
         return deny(
             StatusCode::FORBIDDEN,
             "GitHub destination is not allowed by egress policy",
@@ -178,7 +312,8 @@ async fn execute(state: &Service, request: Request) -> Response {
     }
     let token = match app.token(&target.repo).await {
         Ok(token) => token,
-        Err(_) => {
+        Err(error) => {
+            tracing::warn!(error = %error, "GitHub installation authentication failed");
             return deny(
                 StatusCode::BAD_GATEWAY,
                 "GitHub installation authentication failed",
@@ -229,9 +364,12 @@ async fn dispatch(
             );
         }
     };
+    let url = target.url.clone();
+    #[cfg(test)]
+    let url = url.replacen(github_app::API, app.api_for_test(), 1);
     let mut builder = state
         .client
-        .request(parts.method.clone(), &target.url)
+        .request(parts.method.clone(), &url)
         .header("User-Agent", "kars-inference-router");
     if target.git {
         builder = builder.basic_auth("x-access-token", Some(&token));
@@ -351,6 +489,7 @@ async fn response(
             API_LIMIT
         },
         target.logs,
+        !target.git && !target.logs,
     )
     .await
 }
@@ -367,10 +506,30 @@ async fn download(state: &Service, location: reqwest::Url) -> Response {
         Ok(response) => response,
         Err(_) => return deny(StatusCode::BAD_GATEWAY, "GitHub signed log download failed"),
     };
-    finish(download, LOG_LIMIT, true).await
+    finish(download, LOG_LIMIT, true, false).await
 }
 
-async fn finish(upstream: reqwest::Response, limit: usize, logs: bool) -> Response {
+fn remove_repository_credentials(value: &mut serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(object) => {
+            let mut removed = object.remove("temp_clone_token").is_some();
+            for child in object.values_mut() {
+                removed |= remove_repository_credentials(child);
+            }
+            removed
+        }
+        serde_json::Value::Array(array) => {
+            let mut removed = false;
+            for child in array {
+                removed |= remove_repository_credentials(child);
+            }
+            removed
+        }
+        _ => false,
+    }
+}
+
+async fn finish(upstream: reqwest::Response, limit: usize, logs: bool, json: bool) -> Response {
     let status = upstream.status();
     if !status.is_success() {
         // Suppress signed URLs, upstream diagnostic bodies, cookies and Link
@@ -400,6 +559,27 @@ async fn finish(upstream: reqwest::Response, limit: usize, logs: bool) -> Respon
         }
         Err(_) => return deny(StatusCode::BAD_GATEWAY, "GitHub response was interrupted"),
     };
+    if json && !bytes.is_empty() {
+        let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            return deny(StatusCode::BAD_GATEWAY, "GitHub returned invalid JSON");
+        };
+        // Repository objects also appear nested in pull requests and other REST results.
+        if remove_repository_credentials(&mut value) {
+            bytes = match serde_json::to_vec(&value) {
+                Ok(bytes) if bytes.len() <= limit => bytes,
+                _ => {
+                    return deny(
+                        StatusCode::BAD_GATEWAY,
+                        "GitHub response exceeds the service limit",
+                    );
+                }
+            };
+        }
+        headers.insert(
+            "content-type",
+            "application/json; charset=utf-8".parse().unwrap(),
+        );
+    }
     if logs && bytes.len() > LOG_TAIL {
         bytes.drain(..bytes.len() - LOG_TAIL);
         headers.insert("x-kars-log-truncated", "true".parse().unwrap());
@@ -412,3 +592,7 @@ async fn finish(upstream: reqwest::Response, limit: usize, logs: bool) -> Respon
 #[cfg(test)]
 #[path = "github_proxy_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "egress_github_tests.rs"]
+mod fetch_tests;

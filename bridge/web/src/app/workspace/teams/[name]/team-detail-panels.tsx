@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import Link from "next/link";
+import Link from "@/components/navigation-link";
 import type { ReactNode } from "react";
 import type { TeamDetail } from "@/lib/types";
 
@@ -103,7 +103,7 @@ export function NowHero({
   delivered: number;
   generated: number;
   latestRun: string | null;
-  latestOutcome: "paused" | "running" | "delivered" | "delivered_with_issues" | "incomplete" | "failed" | null;
+  latestOutcome: "paused" | "running" | "delivered" | "delivered_with_issues" | "incomplete" | "failed" | "held" | null;
   lifecycleMode: TeamDetail["lifecycle_mode"];
   runtimeState: TeamDetail["runtime_state"];
   idleDeadlineAt: string | null;
@@ -131,10 +131,18 @@ export function NowHero({
   const cls = tone[health ?? ""] ?? "border-border bg-surface";
   const headline = !active
     ? paused
-      ? "Paused — no new runs are being generated"
+      ? runInFlight
+        ? "Scheduling paused — current run is finishing"
+        : "Paused — no new runs are being generated"
       : "Waiting for active team status"
+    : latestOutcome === "held"
+      ? "Run held — reviewed execution cannot proceed to synthesis"
     : health === "AwaitingReview"
       ? "Awaiting your review — no further assignment or memory promotion will proceed"
+      : runRunning
+        ? "Working — executing the current assignment"
+        : runInFlight
+          ? "Run in progress — preparing or recovering execution"
       : health === "Stalled"
       ? "On watch, but recent runs aren't delivering — needs a look"
       : health === "Unproductive"
@@ -145,12 +153,18 @@ export function NowHero({
 
   const mode: { label: string; dot: string; note: string } = !active
     ? {
-        label: paused ? "Hibernating" : "Not yet active",
+        label: paused ? "Scheduling paused" : "Not yet active",
         dot: "bg-foreground-muted",
         note: paused
-          ? "Paused — no new runs are minted until you resume. Check the latest run for any work still finishing."
+          ? "No new runs will start until you resume. Current work can finish and still uses tokens. To stop it instead, open the run and choose Emergency stop. This does not suspend or save a running process."
           : "The team is enabled, but its controller has not confirmed active operation. Check Diagnostics if this state persists.",
       }
+    : latestOutcome === "held"
+      ? {
+          label: "Run held",
+          dot: "bg-amber-500",
+          note: "Reviewed execution is held. Completed role evidence is preserved; inspect the latest run before any recovery.",
+        }
     : health === "AwaitingReview"
       ? {
           label: "Waiting on your decision",
@@ -162,7 +176,7 @@ export function NowHero({
       ? {
           label: "Working now",
           dot: "bg-signal",
-          note: "A run sandbox is live and executing the charter right now.",
+          note: "The current assignment is in progress. Open the latest run for role progress and recorded activity.",
         }
       : runInFlight
         ? {

@@ -19,6 +19,34 @@ function load(path, imports = {}) {
   return context.exports;
 }
 const api = load("lib/efficiency.ts");
+
+function assertResolution(models, history, model, reason) {
+  const actual = api.resolveRecommendedModel(models, history);
+  assert.equal(actual.model, model);
+  assert.equal(actual.reason, reason);
+}
+
+test("catalogue recommendations cannot attribute ambiguous history to a provider", () => {
+  const foundry = { provider: "azure-foundry", deployment: "gpt-5.4-mini", is_default: true };
+  const openai = { provider: "azure-openai", deployment: "gpt-5.4-mini", is_default: false };
+  const history = { recommended: "gpt-5.4-mini", total_runs: 8 };
+  for (const models of [[foundry, openai], [openai, foundry]]) {
+    assertResolution(models, history, null, "ambiguous");
+  }
+  for (const model of [foundry, openai]) {
+    assertResolution([model], history, model, "selected");
+  }
+  assertResolution([foundry, { ...foundry }], history, foundry, "selected");
+});
+
+test("catalogue recommendation fallback distinguishes unavailable, empty and unqualified history", () => {
+  const history = { recommended: "gpt-5.4-mini", total_runs: 8 };
+  assertResolution([], null, null, "unavailable");
+  assertResolution([], undefined, null, "unavailable");
+  assertResolution([], { ...history, total_runs: 0 }, null, "empty");
+  assertResolution([], { ...history, recommended: null }, null, "unqualified");
+  assertResolution([], history, null, "missing");
+});
 const row = (harness, overrides = {}) => ({
   route: "same-model", harness, runs: 2, verified_runs: 2, delivered: 2, accepted: 1,
   success_rate: 1, acceptance_rate: 0.5, measured_token_runs: 1, measured_tokens: 100,
@@ -33,6 +61,13 @@ const efficiency = routes => ({
   recommended_basis: "Best available measured route", recommended_low_confidence: true,
   total_runs: routes.reduce((sum, route) => sum + route.runs, 0), priced: false,
 });
+
+function render(node) {
+  if (Array.isArray(node)) return node.map(render);
+  if (!node || typeof node !== "object") return node;
+  if (typeof node.type === "function") return render(node.type(node.props));
+  return { type: node.type, ...node.props, children: render(node.props?.children) };
+}
 
 test("unknown measurements are absent, genuine zero stays zero and cannot beat an unknown", () => {
   for (const unknown of [null, undefined, NaN, Infinity, -1]) {
@@ -80,6 +115,7 @@ test("Insights renders nullable measurements, exact harness and measured populat
     "@/components/bar-chart": { BarChart: () => null },
     "@/components/honest-state": { HonestState: () => null },
     "@/components/live-refresh": { LiveRefresh: () => null },
+    "@/components/console-load-error": { ConsoleLoadError: () => null },
     "@/lib/efficiency": api,
     "@/lib/bff": {
       getEfficiency: async () => data,
@@ -90,12 +126,6 @@ test("Insights renders nullable measurements, exact harness and measured populat
       getInferenceBudgets: async () => null,
     },
   });
-  function render(node) {
-    if (Array.isArray(node)) return node.map(render);
-    if (!node || typeof node !== "object") return node;
-    if (typeof node.type === "function") return render(node.type(node.props));
-    return { type: node.type, ...node.props, children: render(node.props?.children) };
-  }
   const rendered = render(await page.default());
   const text = JSON.stringify(rendered);
   assert.match(text, /Measured delivered tokens/);
@@ -104,4 +134,29 @@ test("Insights renders nullable measurements, exact harness and measured populat
   assert.match(text, /missing measurements cannot win/i);
   assert.match(text, /—/);
   assert.doesNotMatch(text, /NaN|Infinity|cheaper-per-accepted-outcome/);
+});
+
+test("Insights exposes failed evidence reads without falling back to outcome counts", async () => {
+  const jsx = (type, props) => ({ type, props });
+  const page = load("app/console/insights/page.tsx", {
+    "react/jsx-runtime": { jsx, jsxs: jsx },
+    "@/components/bar-chart": { BarChart: () => null },
+    "@/components/honest-state": { HonestState: props => jsx("status", props) },
+    "@/components/live-refresh": { LiveRefresh: props => jsx("refresh", props) },
+    "@/components/console-load-error": { ConsoleLoadError: () => null },
+    "@/lib/efficiency": api,
+    "@/lib/bff": {
+      getEfficiency: async () => { throw new Error("upstream unavailable"); },
+      getInsights: async () => ({ missions_by_phase: [{ name: "Completed", count: 5 }] }),
+      getArtifacts: async () => ({ missions: [
+        { summary: "Retained output", status: "completed", review_status: "approved" },
+      ] }),
+      getInferenceBudgets: async () => null,
+    },
+  });
+  const text = JSON.stringify(render(await page.default()));
+  assert.match(text, /Efficiency evidence unavailable/);
+  assert.match(text, /not empty history/);
+  assert.match(text, /"intervalMs":8000/);
+  assert.doesNotMatch(text, /Measured delivered tokens|Accepted|outcome-funnel/);
 });

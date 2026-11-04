@@ -178,8 +178,7 @@ pub(super) async fn reconcile_revocations(
         };
         if !authorized {
             retire(tasks, task).await?;
-        } else if team.spec.paused
-            || specs::unsupported_budget(&task.spec.envelope)
+        } else if specs::unsupported_budget(&task.spec.envelope)
             || (role == Some("principal") && !within(&principal))
         {
             idle(tasks, task).await?;
@@ -261,12 +260,9 @@ pub(super) async fn apply_task(
                     "cadence slot '{name}' no longer matches its authority or run identity"
                 )));
             }
-            if team.spec.paused {
-                return idle(tasks, old).await;
-            }
             return Ok(old.clone());
         }
-        if crate::kars_task_reconciler::rebind::pending(old) && !team.spec.paused {
+        if crate::kars_task_reconciler::rebind::pending(old) {
             return Ok(old.clone());
         }
         if within_seat(&old.spec, &spec) {
@@ -284,7 +280,7 @@ pub(super) async fn apply_task(
             spec.execution = Some(execution);
         }
     }
-    if (team.spec.paused || specs::unsupported_budget(&spec.envelope))
+    if ((team.spec.paused && existing.is_none()) || specs::unsupported_budget(&spec.envelope))
         && let Some(execution) = &mut spec.execution
     {
         execution.launch = false;

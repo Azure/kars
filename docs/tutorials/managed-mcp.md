@@ -70,7 +70,18 @@ accepted; watch the service's deployment and protocol probe result separately.
 While saving, the form and catalog navigation are disabled. A failed or
 unconfirmed request retains the entered settings for inspection and retry.
 The Capabilities and Policies views use the same current-generation readiness
-presentation.
+presentation and refresh service status automatically while visible. Managed
+service cards explain startup, connection verification and configuration blockers;
+expand **Controller details** for the original reason and message. A failed
+connection check remains **Degraded**, with an explanation that the controller
+is configured to retry failed checks about once a minute. This is not a countdown
+or a guarantee of recovery. Do not remove and re-add a service just to retry.
+Persistent connection failures need operator inspection of workload logs, the
+Service and network access; missing image-pull credentials require operator
+action rather than simply waiting. **Ready** confirms initialization and tool
+discovery, not successful execution of an agent-driven browser task. Stale or
+unavailable controller reports never display successful verification or retry
+claims based on an earlier configuration.
 
 ## Invoke from either runtime
 

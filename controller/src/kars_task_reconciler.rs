@@ -32,8 +32,12 @@ use crate::status::conditions::{self, TYPE_READY, reason as cond_reason, status 
 use crate::status::phase::{PHASE_DEGRADED, PHASE_PENDING, PHASE_READY};
 
 const FIELD_MANAGER: &str = crate::field_managers::CLAW_TASK;
+#[path = "kars_task_halt.rs"]
+pub(crate) mod halt;
 #[path = "kars_task_rebind.rs"]
 pub(crate) mod rebind;
+#[path = "kars_task_promotion.rs"]
+pub(crate) mod promotion;
 const FINALIZER: &str = "kars.azure.com/karstask-cleanup";
 /// Server-Side Apply field manager for Governance Receipt writes.
 const RECEIPT_FIELD_MANAGER: &str = "kars-controller/receipt";
@@ -184,6 +188,17 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         return Ok(Action::requeue(Duration::from_secs(1)));
     }
 
+    // STOP precedes rebind, budget admission and reviewed scheduling. Those
+    // paths must neither undo the operator's gate nor retain stopped compute.
+    if halt::halted(&task) {
+        let stopped = halt::reconcile(&ctx.client, &task).await?;
+        return Ok(Action::requeue(if stopped {
+            REQUEUE_IDLE
+        } else {
+            REQUEUE_PENDING
+        }));
+    }
+
     if rebind::pending(&task)
         && task
             .spec
@@ -192,6 +207,9 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
             .is_some_and(|execution| execution.launch)
     {
         rebind::reconcile(&task, &ctx).await?;
+        return Ok(Action::requeue(REQUEUE_PENDING));
+    }
+    if promotion::process(&ctx.client, &task).await? {
         return Ok(Action::requeue(REQUEUE_PENDING));
     }
     let generation = task.metadata.generation;
@@ -281,6 +299,11 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     if new_status.phase.as_deref() == Some(PHASE_READY) {
         match crate::inference_budget::binding::prepare_task(&ctx.client, &task).await {
             Ok(prepared) => task = Arc::new(prepared),
+            // A changing read/CAS snapshot is not an authority revocation. Do
+            // not publish false readiness that would stop an accepted runtime.
+            Err(error @ crate::inference_budget::store::StoreError::Contention) => {
+                return Err(error.into());
+            }
             Err(error) => {
                 budget_pending = true;
                 new_status = degraded_status(
@@ -317,17 +340,7 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     // execute. Launch materializes a governed sandbox; un-launch tears it down.
     // Any execution error is surfaced (Degraded) but never fails the whole
     // reconcile — the governance status is already durable.
-    if budget_pending
-        && task
-            .spec
-            .execution
-            .as_ref()
-            .is_some_and(|execution| execution.launch)
-    {
-        crate::inference_budget::launch::retain_execution(&task, &mut new_status);
-    } else {
-        reconcile_execution(&ctx.client, &ns, &task, &mut new_status).await;
-    }
+    reconcile_execution(&ctx.client, &ns, &task, &mut new_status, budget_pending).await;
 
     let status_patch = json!({
         "apiVersion": "kars.azure.com/v1alpha1",
@@ -362,13 +375,33 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
 }
 
 fn requeue_delay(task: &KarsTask, status: &KarsTaskStatus) -> Duration {
+    if task.spec.requested_tier.is_some() || task.annotations().contains_key(promotion::REQUESTED) {
+        return REQUEUE_PENDING;
+    }
+    // An explicit launch change is watched immediately. Once teardown verified
+    // Idle, stopped tasks need only periodic drift checks, even if their old
+    // funding or parent is unavailable. Active authority is still checked below.
+    if !task
+        .spec
+        .execution
+        .as_ref()
+        .is_some_and(|execution| execution.launch)
+        && status.execution_phase.as_deref() == Some("Idle")
+        && status.sandbox_ref.is_none()
+    {
+        return REQUEUE_OK;
+    }
     // Retained completed phases keep their finite funding bindings. They have
     // no compute to revoke and must not poll every ancestor at active-run speed.
     if status.phase.as_deref() == Some(PHASE_READY)
         && status.execution_phase.as_deref() == Some("Idle")
         && status.sandbox_ref.is_none()
     {
-        return REQUEUE_IDLE;
+        return if crate::reviewed_execution::phase_completion_recorded(task) {
+            REQUEUE_OK
+        } else {
+            REQUEUE_IDLE
+        };
     }
     if crate::credential_grants::readiness::selected(task)
         || crate::inference_budget::binding::has_finite(&task.spec.envelope)
@@ -571,11 +604,12 @@ fn degraded_status(
 /// - Otherwise → ensure any prior sandbox is torn down; `executionPhase=Idle`.
 ///
 /// Execution errors degrade *execution* only; the governance status stands.
-async fn reconcile_execution(
+pub(crate) async fn reconcile_execution(
     client: &kube::Client,
     ns: &str,
     task: &KarsTask,
     status: &mut KarsTaskStatus,
+    budget_pending: bool,
 ) {
     let mut launched = task
         .spec
@@ -597,6 +631,12 @@ async fn reconcile_execution(
                 return;
             }
         }
+    }
+    // Pending funding must retain ambiguous/in-flight execution, but must not
+    // pin compute after a verified terminal publication.
+    if launched && budget_pending {
+        crate::inference_budget::launch::retain_execution(task, status);
+        return;
     }
     if launched && governance_ready {
         match crate::reviewed_execution::reconcile(client, task).await {
@@ -633,22 +673,32 @@ async fn reconcile_execution(
     } else if launched && crate::credential_grants::readiness::selected(task) {
         crate::credential_grants::readiness::pause(client, task, status).await;
     } else {
-        // Not launched (or not Ready): ensure no sandbox lingers from a prior
-        // launch, and report Idle.
-        match crate::kars_task_execution::teardown(client, ns, task).await {
-            Ok(true) => {
-                status.execution_phase = Some("Idle".to_string());
-                status.sandbox_ref = None;
-                status.execution_detail = None;
-            }
-            result => {
-                status.execution_phase = Some("Stopping".to_string());
-                status.sandbox_ref = task.status.as_ref().and_then(|s| s.sandbox_ref.clone());
-                status.execution_detail = Some(match result {
-                    Err(error) => format!("execution cleanup failed; retrying: {error}"),
-                    _ => "waiting for owned execution resources to terminate".into(),
-                });
-            }
+        stop_execution(client, ns, task, status).await;
+    }
+}
+
+/// Shared cleanup for unlaunch, governed tree halt and verified retirement.
+pub(crate) async fn stop_execution(
+    client: &kube::Client,
+    ns: &str,
+    task: &KarsTask,
+    status: &mut KarsTaskStatus,
+) -> bool {
+    match crate::kars_task_execution::teardown(client, ns, task).await {
+        Ok(true) => {
+            status.execution_phase = Some("Idle".to_string());
+            status.sandbox_ref = None;
+            status.execution_detail = None;
+            true
+        }
+        result => {
+            status.execution_phase = Some("Stopping".to_string());
+            status.sandbox_ref = task.status.as_ref().and_then(|s| s.sandbox_ref.clone());
+            status.execution_detail = Some(match result {
+                Err(error) => format!("execution cleanup failed; retrying: {error}"),
+                _ => "waiting for owned execution resources to terminate".into(),
+            });
+            false
         }
     }
 }
@@ -794,7 +844,7 @@ async fn reconcile_receipt(
         "spec": spec,
     });
 
-    if let Err(e) = receipts
+    let published = match receipts
         .patch(
             &name,
             &PatchParams::apply(RECEIPT_FIELD_MANAGER).force(),
@@ -802,9 +852,12 @@ async fn reconcile_receipt(
         )
         .await
     {
-        tracing::warn!(karstask = %name, ns = %ns, error = %e, "failed to emit KarsReceipt");
-        return;
-    }
+        Ok(receipt) => receipt,
+        Err(e) => {
+            tracing::warn!(karstask = %name, ns = %ns, error = %e, "failed to emit KarsReceipt");
+            return;
+        }
+    };
 
     // Enter the receipt in the hash-chained inclusion log (cross-receipt
     // tamper-evidence). Best-effort: a log failure must not block the receipt,
@@ -838,28 +891,35 @@ async fn reconcile_receipt(
 
     // Informational status echo (unsigned). Stamp issuance time on first write;
     // observedTaskGeneration tracks freshness; inclusion fields bind to the log.
-    let mut status_obj = json!({
-        "issuedAt": chrono::Utc::now().to_rfc3339(),
-        "observedTaskGeneration": task.metadata.generation,
-    });
-    if let Some(entry) = &inclusion {
-        status_obj["inclusionSeq"] = json!(entry.seq as i64);
-        status_obj["inclusionEntryHash"] = json!(entry.entry_hash);
-    }
-    let status_patch = json!({
-        "apiVersion": "kars.azure.com/v1alpha1",
-        "kind": "KarsReceipt",
-        "status": status_obj,
-    });
-    if let Err(e) = receipts
-        .patch_status(
-            &name,
-            &PatchParams::apply(RECEIPT_FIELD_MANAGER).force(),
-            &Patch::Apply(&status_patch),
-        )
-        .await
-    {
-        tracing::debug!(karstask = %name, ns = %ns, error = %e, "KarsReceipt status echo failed (non-fatal)");
+    let mut current_echo = published.status.unwrap_or_default();
+    // Conditions belong to other status writers, not this informational echo.
+    current_echo.conditions = None;
+    let next_echo = crate::kars_receipt::KarsReceiptStatus {
+        issued_at: current_echo
+            .issued_at
+            .clone()
+            .or_else(|| Some(chrono::Utc::now().to_rfc3339())),
+        observed_task_generation: task.metadata.generation,
+        inclusion_seq: inclusion.as_ref().map(|entry| entry.seq as i64),
+        inclusion_entry_hash: inclusion.as_ref().map(|entry| entry.entry_hash.clone()),
+        ..Default::default()
+    };
+    if current_echo != next_echo {
+        let status_patch = json!({
+            "apiVersion": "kars.azure.com/v1alpha1",
+            "kind": "KarsReceipt",
+            "status": next_echo,
+        });
+        if let Err(e) = receipts
+            .patch_status(
+                &name,
+                &PatchParams::apply(RECEIPT_FIELD_MANAGER).force(),
+                &Patch::Apply(&status_patch),
+            )
+            .await
+        {
+            tracing::debug!(karstask = %name, ns = %ns, error = %e, "KarsReceipt status echo failed (non-fatal)");
+        }
     }
 
     tracing::info!(karstask = %name, ns = %ns, key_id = %signer.key_id, "Governance Receipt emitted");

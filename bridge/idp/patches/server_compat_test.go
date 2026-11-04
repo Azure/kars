@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-package server
+package authflow
 
 import (
 	"fmt"
@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"testing"
 
+	"github.com/dexidp/dex/server/oauth2"
 	"github.com/dexidp/dex/storage"
 )
 
@@ -27,14 +28,14 @@ func TestKarsAuthorizationErrorDescriptionsLiteral(t *testing.T) {
 			description: `Unsupported PKCE challenge method ("unsupported").`,
 		},
 		{
-			name: "token with out-of-band redirect", method: codeChallengeMethodS256,
-			redirectURI: redirectURIOOB, responseType: "code token",
-			description: fmt.Sprintf("Cannot use response type 'token' with redirect_uri '%s'.", redirectURIOOB),
+			name: "token with out-of-band redirect", method: oauth2.PKCEMethodS256,
+			redirectURI: oauth2.RedirectURIOOB, responseType: "code token",
+			description: fmt.Sprintf("Cannot use response type 'token' with redirect_uri '%s'.", oauth2.RedirectURIOOB),
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			httpServer, server := newTestServerMultipleConnectors(t, func(c *Config) {
-				c.SupportedResponseTypes = []string{"code", "token"}
+			httpServer, server := newTestHandler(t, func(c *testFlowConfig) {
+				c.SupportedResponseTypes = map[string]bool{"code": true, "token": true}
 				c.Storage = storage.WithStaticClients(c.Storage, []storage.Client{{
 					ID: "compat-client", RedirectURIs: []string{tc.redirectURI},
 				}})
@@ -47,12 +48,12 @@ func TestKarsAuthorizationErrorDescriptionsLiteral(t *testing.T) {
 				"code_challenge": {"challenge"},
 			}
 			req := httptest.NewRequest("GET", httpServer.URL+"/auth?"+params.Encode(), nil)
-			_, err := server.parseAuthorizationRequest(req)
+			_, _, err := server.parseAuthorizationRequest(req)
 			redirected, ok := err.(*redirectedAuthErr)
 			if !ok {
 				t.Fatalf("expected redirectedAuthErr, got %T: %v", err, err)
 			}
-			if redirected.Type != errInvalidRequest || redirected.RedirectURI != tc.redirectURI ||
+			if redirected.Type != oauth2.InvalidRequest || redirected.RedirectURI != tc.redirectURI ||
 				redirected.State != params.Get("state") || redirected.Description != tc.description {
 				t.Fatalf("redirected error = %+v; expected unchanged type/state/URI and literal description %q",
 					redirected, tc.description)

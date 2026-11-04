@@ -23,6 +23,59 @@ pub enum BudgetScope {
 pub enum RootKind {
     KarsTask,
     KarsTeam,
+    /// Explicitly enrolled built-in actor; resource UID is a real Sandbox UID.
+    KarsSandbox,
+}
+
+/// Operator funding intent. Only fresh, provenance-checked Sandbox enrollment
+/// may initialize it; calendar totals are not lifetime migration evidence.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BuiltinFunding {
+    pub root: RootIdentity,
+    pub limits: Limits,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub expires_at: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unbounded_tokens: bool,
+}
+
+impl BuiltinFunding {
+    pub fn validate(&self, now: i64) -> Result<(), BudgetError> {
+        self.root.validate()?;
+        if self.root.kind != RootKind::KarsSandbox
+            || !matches!(
+                self.root.resource.name.as_str(),
+                "sre" | "bridge-orchestrator"
+            )
+            || self
+                .limits
+                .usd_micros
+                .is_some_and(|value| value > MAX_LEDGER_INTEGER)
+        {
+            return Err(BudgetError::Authorization);
+        }
+        if self.unbounded_tokens {
+            return if self.limits.tokens.is_none() && self.expires_at.is_empty() {
+                Ok(())
+            } else {
+                Err(BudgetError::Authorization)
+            };
+        }
+        if self
+            .limits
+            .tokens
+            .is_none_or(|tokens| tokens == 0 || tokens > MAX_LEDGER_INTEGER)
+        {
+            return Err(BudgetError::Authorization);
+        }
+        let expiry = chrono::DateTime::parse_from_rfc3339(&self.expires_at)
+            .map_err(|_| BudgetError::Authorization)?;
+        if expiry.timestamp() <= now {
+            return Err(BudgetError::Expired);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
@@ -153,6 +206,7 @@ impl Amounts {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TaskAuthority {
+    /// Legacy wire name: for a KarsSandbox root this is the real Sandbox identity.
     pub task: ResourceIdentity,
     pub parent_uid: Option<String>,
     pub root_task_uid: String,
@@ -165,6 +219,7 @@ pub struct TaskAuthority {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExecutionIdentity {
+    /// Legacy wire name: the Sandbox UID for a KarsSandbox root, never a fake Task UID.
     pub task_uid: String,
     pub authorization_digest: String,
     pub sandbox: ResourceIdentity,
@@ -179,6 +234,23 @@ pub struct AccountReference {
     pub namespace: String,
     pub name: String,
     pub uid: String,
+}
+
+/// Controller-verified Team accounting snapshot, without ledger authority or receipts.
+/// Freshness is carried by Team status observedGeneration and tokensObservedAt.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TeamBudgetObservation {
+    pub account: AccountReference,
+    pub team: ResourceIdentity,
+    pub original_limits: Limits,
+    pub effective_limits: Limits,
+    pub phase: AccountPhase,
+    pub unbounded_tokens: bool,
+    pub settled: Amounts,
+    pub reserved: Amounts,
+    pub uncertain: Amounts,
+    pub price_coverage_complete: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
@@ -277,7 +349,7 @@ pub struct ReserveRequest {
     pub identity: ExecutionIdentity,
     pub sequence: u64,
     pub wire_digest: String,
-    pub quote: super::tariffs::Quote,
+    pub quote: super::tariffs::AttemptQuote,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
@@ -303,7 +375,8 @@ pub struct Usage {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Settlement {
     pub attempt: AttemptCommand,
-    /// Absent/incomplete/malformed upstream usage commits the entire bound.
+    /// Missing usage commits a bounded quote's maximum; record-only attempts
+    /// retain explicit unknown-usage evidence until actual usage arrives.
     pub usage: Option<Usage>,
 }
 
@@ -315,7 +388,7 @@ pub enum BudgetError {
     Authorization,
     #[error("Governed inference account is not accepting dispatch")]
     Closed,
-    #[error("Governed inference budget capacity is exhausted")]
+    #[error("Governed inference accounting capacity is exhausted; this is not a spending limit")]
     Capacity,
     #[error("Governed inference budget ceiling would be exceeded")]
     Exhausted,

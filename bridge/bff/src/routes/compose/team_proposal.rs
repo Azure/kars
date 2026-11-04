@@ -2,13 +2,12 @@
 // Licensed under the MIT License.
 
 use super::client::extract_json;
-use super::egress::complete_egress_recommendation;
+use super::egress::normalize_proposed_egress;
 use super::execution::parse_execution_plan;
 use super::routing::{
-    catalogue_has_model_key, efficiency_basis, efficient_member_route_is_qualified,
-    recommendation_is_actionable, select_orchestrator_route, should_strengthen_team_principal,
+    catalogue_has_model_key, efficiency_basis, recommendation_is_actionable,
+    select_orchestrator_route, should_strengthen_team_principal, unique_model_for_deployment,
 };
-use super::team_qualification::default_model_route;
 use super::{
     ComposeEgress, ComposeTeamMilestone, ComposeTeamProposal, ComposeTeamRole,
     is_non_autonomous_harness,
@@ -48,8 +47,7 @@ pub(super) fn parse_and_validate_team(
     raw: &str,
     o: &crate::routes::options::Options,
     eff: &crate::routes::efficiency::EfficiencyDto,
-    charter: &str,
-) -> (ComposeTeamProposal, Option<String>) {
+) -> (ComposeTeamProposal, Option<String>, Option<String>) {
     let json = extract_json(raw).unwrap_or_else(|| serde_json::json!({}));
 
     let tier = json
@@ -88,7 +86,6 @@ pub(super) fn parse_and_validate_team(
         .and_then(|value| value.as_str())
         .map(str::trim)
         .filter(|memory| !memory.is_empty())
-        .filter(|memory| o.memories.iter().any(|option| option.name == *memory))
         .map(str::to_string);
 
     let valid_runtime = |rt: &str| o.runtimes.iter().any(|r| r.wired && r.kind == rt);
@@ -104,10 +101,11 @@ pub(super) fn parse_and_validate_team(
         .split_once("::")
         .map(|(_, deployment)| deployment)
         .unwrap_or("");
-    let selected_efficiency = eff
-        .routes
-        .iter()
-        .find(|route| route.route == selected_deployment && route.harness == "OpenClaw");
+    let selected_efficiency = eff.routes.iter().find(|route| {
+        route.route == selected_deployment
+            && route.harness == "OpenClaw"
+            && unique_model_for_deployment(&o.models, selected_deployment).is_some()
+    });
     let mut model_basis = if selected_deployment.is_empty() {
         Some("Team default — no explicit principal model was proposed.".to_string())
     } else if recommendation_is_actionable(
@@ -121,6 +119,8 @@ pub(super) fn parse_and_validate_team(
             .is_some_and(|route| Some(route.harness.as_str()) == eff.recommended_harness.as_deref())
     {
         Some(efficiency_basis(eff, selected_deployment))
+    } else if unique_model_for_deployment(&o.models, selected_deployment).is_none() {
+        Some("Chosen by the org orchestrator for this charter; the deployment name is shared by multiple providers, so historical measurements cannot endorse this provider.".to_string())
     } else if selected_efficiency.is_some() {
         Some(
             "Chosen by the org orchestrator for this charter; historical route evidence is shown for comparison."
@@ -130,39 +130,9 @@ pub(super) fn parse_and_validate_team(
         Some("Chosen by the org orchestrator for this charter; no retained route history is available yet.".to_string())
     };
     let principal_runtime = "OpenClaw";
-    let principal_route = model
-        .split_once("::")
-        .map(|(provider, deployment)| (provider.to_string(), deployment.to_string()))
-        .or_else(|| {
-            default_model_route(o).and_then(|route| {
-                route
-                    .split_once("::")
-                    .map(|(provider, deployment)| (provider.to_string(), deployment.to_string()))
-            })
-        });
-    let memory = if let Some(memory) = requested_memory {
-        Some(memory)
-    } else if let Some((provider, deployment)) = principal_route.as_ref() {
-        o.memories.iter().find_map(|option| {
-            let foundry_like = option
-                .backend
-                .as_deref()
-                .is_some_and(|backend| backend.to_ascii_lowercase().contains("foundry"));
-            let ready = option.readiness.as_deref().is_some_and(|readiness| {
-                readiness == "Ready" || readiness.starts_with("Ready=True")
-            });
-            let qualified = crate::routes::options::memory_binding_qualified_for_route(
-                principal_runtime,
-                provider,
-                deployment,
-                option,
-            )
-            .unwrap_or(false);
-            (foundry_like && ready && qualified).then(|| option.name.clone())
-        })
-    } else {
-        None
-    };
+    // Memory capability does not imply an explicit Foundry resource selection.
+    // The router selects the discovered project or private built-in backend.
+    let memory = requested_memory;
     let egress = json
         .get("egress")
         .and_then(|value| value.as_array())
@@ -188,19 +158,22 @@ pub(super) fn parse_and_validate_team(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let egress = complete_egress_recommendation(egress, charter, &mcp_servers);
-    let egress_mode = match json
-        .get("egress_mode")
-        .and_then(|value| value.as_str())
-        .unwrap_or("learning")
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "strict" => "strict",
-        _ => "learning",
-    }
-    .to_string();
+    let egress = normalize_proposed_egress(egress);
+    let egress_mode = "strict".to_string();
 
+    let mut resource_errors = Vec::new();
+    if json.get("egress_mode").is_some_and(|value| {
+        !value.is_null()
+            && !value
+                .as_str()
+                .is_some_and(|mode| mode.trim().eq_ignore_ascii_case("strict"))
+    }) {
+        resource_errors.push("Standing Teams use Strict egress; review external hosts or request access during a run. Learning is not supported for governed Team tasks.".into());
+    }
+    if json.get("memory").is_some_and(|value| !value.is_null())
+        && !memory.as_ref().is_some_and(|name| o.memories.iter().any(|option| option.name == *name)) {
+        resource_errors.push("Explicit memory binding is malformed or unavailable; it cannot be replaced by the default backend. Select a listed binding or explicitly review memory=null.".into());
+    }
     let mut roles = json
         .get("roles")
         .and_then(|v| v.as_array())
@@ -255,19 +228,27 @@ pub(super) fn parse_and_validate_team(
                                 .collect()
                         })
                         .unwrap_or_default();
+                    let resources = match r.get("resources") {
+                        Some(value) => serde_json::from_value(value.clone()).unwrap_or_else(|error| {
+                            resource_errors.push(format!("Role {name} has invalid resource selections: {error}. Review its MCP and egress selections and execution plan before launch."));
+                            crate::routes::teams::RoleResources::default()
+                        }),
+                        None => crate::routes::teams::RoleResources::default(),
+                    };
                     Some(ComposeTeamRole {
                         name,
                         system_prompt,
                         runtime,
                         model,
                         skills,
+                        resources: Some(resources),
                     })
                 })
                 .take(6)
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let execution_plan = parse_execution_plan(&json).inspect(|plan| {
+    let mut execution_plan = parse_execution_plan(&json).inspect(|plan| {
         let proposed_roles = roles.clone();
         roles = plan
             .roles
@@ -283,6 +264,7 @@ pub(super) fn parse_and_validate_team(
                         runtime: String::new(),
                         model: String::new(),
                         skills: Vec::new(),
+                        resources: Some(crate::routes::teams::RoleResources::default()),
                     });
                 if role.system_prompt.trim().is_empty() {
                     role.system_prompt = planned_role.objective.clone();
@@ -422,38 +404,17 @@ pub(super) fn parse_and_validate_team(
             .map(|(_, deployment)| deployment)
             .unwrap_or("");
         if should_strengthen_team_principal(roles.len(), current_deployment, &deployment) {
-            let current_evidence = eff.routes.iter().find(|route| {
-                route.route == current_deployment
-                    && route.harness == principal_runtime
-                    && route.verified_runs == route.runs
-            });
-            let keep_efficient_members = current_evidence.is_some_and(|route| {
-                efficient_member_route_is_qualified(route.runs, route.acceptance_rate)
-            });
-            let frontier_route = format!("{provider}::{deployment}");
-            let member_route = if keep_efficient_members {
-                current_route.clone()
-            } else {
-                frontier_route.clone()
-            };
+            // Resolve inheritance before changing the principal, so its upgrade
+            // does not silently change member routes or reservation requirements.
             for role in &mut roles {
                 if role.model.is_empty() {
-                    role.model = member_route.clone();
+                    role.model = current_route.clone();
                 }
             }
-            model = frontier_route;
-            let member_basis = if keep_efficient_members {
-                format!(
-                    "member roles retain the qualified {} route ({} historical run(s))",
-                    current_deployment,
-                    current_evidence.map(|route| route.runs).unwrap_or(0)
-                )
-            } else {
-                format!(
-                    "member roles also use {} until the proposed {} route has enough accepted outcomes to qualify",
-                    deployment, current_deployment
-                )
-            };
+            model = format!("{provider}::{deployment}");
+            let member_basis = format!(
+                "inherited member roles retain {current_route}, and explicit member routes are unchanged; route qualification and budget admission still apply"
+            );
             model_basis = Some(format!(
                 "{basis} The principal coordinates {} independent roles; {member_basis}.",
                 roles.len(),
@@ -499,13 +460,27 @@ pub(super) fn parse_and_validate_team(
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(true);
     let selected_efficiency = model.split_once("::").and_then(|(_, deployment)| {
-        eff.routes
-            .iter()
-            .find(|route| route.route == deployment && route.harness == principal_runtime)
+        eff.routes.iter().find(|route| {
+            route.route == deployment
+                && route.harness == principal_runtime
+                && unique_model_for_deployment(&o.models, deployment).is_some()
+        })
     });
+    if !resource_errors.is_empty() {
+        execution_plan = None;
+        let errors = resource_errors.join(" ");
+        rationale = Some(match rationale {
+            Some(existing) => format!("{existing} {errors}"),
+            None => errors,
+        });
+    }
     (
         ComposeTeamProposal {
+            profile: None,
             tier,
+            budget_tokens: json
+                .get("budget_tokens")
+                .and_then(serde_json::Value::as_i64),
             cadence_minutes,
             instructions,
             model,
@@ -540,5 +515,6 @@ pub(super) fn parse_and_validate_team(
             milestones,
         },
         rationale,
+        (!resource_errors.is_empty()).then(|| resource_errors.join(" ")),
     )
 }

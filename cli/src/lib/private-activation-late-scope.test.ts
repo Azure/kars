@@ -4,7 +4,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { applyReviewedGrant, credentialGrantsCommand } from "../commands/credential-grants.js";
 import { continuityFixture, privateAuthoritySnapshot } from "./private-activation-fixtures.js";
-import { PRIVATE_PREFIX as P, canonical, type Execute } from "./private-activation.js";
+import { PRIVATE_PREFIX as P, canonical, digest, type Execute } from "./private-activation.js";
+import { verifyRetiredSealedRoot } from "./private-activation-continuity.js";
+import { reviewLateScope, verifyRetiredLateScope } from "./private-activation-late-scope.js";
 import { PrivateCommandFailure } from "./private-activation-command-diagnostics.js";
 
 const HISTORY = `${P}root-retirement`;
@@ -135,6 +137,37 @@ describe("reviewed late runtime private enrollment", () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
   });
   afterEach(() => { vi.restoreAllMocks(); });
+
+  it.each(["retired", "running", "pods", "template", "secret", "namespace", "pending"])(
+    "checks the full late-enrollment proof for migration-retired execution: %s", async fault => {
+      const f = await setup();
+      await applyReviewedGrant(f.execute, await f.document());
+      const activation = f.grant("work").spec.privateActivation;
+      const scope = activation.namespaces.find((value: any) => value.namespace.name === "kars-late");
+      const root = digest(JSON.parse(f.objects.get(f.key("namespace", "core")).metadata.annotations[HISTORY]));
+      f.deployment.spec.replicas = 0;
+      f.pods.set("kars-late", []);
+      if (fault === "running") f.deployment.spec.replicas = 1;
+      if (fault === "pods") f.pods.set("kars-late", [{ metadata: { name: "retained", uid: "retained", resourceVersion: "1" } }]);
+      if (fault === "template") f.deployment.spec.template.spec.containers[0].image = "unreviewed";
+      if (fault === "secret") f.secret.metadata.resourceVersion = "replaced";
+      if (fault === "namespace") f.namespace.metadata.uid = "replaced";
+      if (fault === "pending") {
+        const proof = JSON.parse(f.namespace.metadata.annotations[HISTORY]);
+        proof.phase = "Restoring";
+        f.namespace.metadata.annotations[HISTORY] = canonical(proof);
+      }
+      if (fault === "retired") {
+        await verifyRetiredLateScope(f.execute, activation, scope, root);
+        await expect(reviewLateScope(f.execute, activation, scope, root)).rejects.toThrow();
+        f.objects.get(f.key("deployment", "kars-controller", "core")).spec.replicas = 0;
+        f.objects.set(f.key("deployment", "late", "kars-late"), f.deployment);
+        f.pods.set("core", []);
+        expect(activation.namespaces[0].namespace.name).not.toBe("core");
+        await verifyRetiredSealedRoot(f.execute, activation, [f.deployment.metadata.uid]);
+      } else await expect(verifyRetiredLateScope(f.execute, activation, scope, root)).rejects.toThrow();
+    },
+  );
 
   it.each(["uid", "spec", "task", "template", "namespace", "root", "private-key", "unchanged-version", "deadline"])(
     "does not retry a pause conflict after %s changes or lacks a fresh version", async fault => {

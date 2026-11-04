@@ -7,10 +7,39 @@ Licensed under the MIT License. */}}{{- $localInference := .Values.localInferenc
 {{- include "kars.missionDispatcher.validate" . }}
 {{- $inferenceCredentials := .Values.inferenceRouter.azure.openai.credentials | default dict }}
 {{- $budgetTls := (.Values.inferenceBudget | default dict).tls | default dict }}
+{{- $defaults := .Values.controller.inferenceDefaults }}
+{{- if not (kindIs "map" $defaults) }}
+{{- fail "controller.inferenceDefaults must contain provider and model strings" }}
+{{- end }}
+{{- $defaultProvider := get $defaults "provider" }}
+{{- $defaultModel := get $defaults "model" }}
+{{- if or (not (kindIs "string" $defaultProvider)) (not (kindIs "string" $defaultModel)) }}
+{{- fail "controller.inferenceDefaults must contain provider and model strings" }}
+{{- end }}
+{{- if or $defaultProvider $defaultModel }}
+{{- if or (not (regexMatch "^[a-z][a-z0-9-]{0,63}$" $defaultProvider)) (not (regexMatch "^[^[:space:][:cntrl:]]{1,256}$" $defaultModel)) }}
+{{- fail "controller.inferenceDefaults requires both a provider identifier and a nonempty model without whitespace" }}
+{{- end }}
+{{- end }}
 {{- $legacyEvalRunner := false }}
+{{- $explicitModelCatalog := false }}
 {{- range .Values.controller.extraEnv }}
+{{- if and $defaultModel (has .name (list "KARS_TASK_DEFAULT_MODEL" "AZURE_OPENAI_DEPLOYMENT" "KARS_TASK_DEFAULT_PROVIDER")) }}
+{{- fail "controller.extraEnv must not override controller.inferenceDefaults" }}
+{{- end }}
 {{- if eq .name "KARS_CONFORMANCE_RUNNER_IMAGE" }}
 {{- $legacyEvalRunner = true }}
+{{- end }}
+{{- if eq .name "KARS_MODEL_CATALOG" }}
+{{- $explicitModelCatalog = true }}
+{{- end }}
+{{- end }}
+{{- $contractModels := list }}
+{{- if and $defaultProvider (not $explicitModelCatalog) .Values.inferenceBudget.enabled }}
+{{- range .Values.inferenceBudget.contracts | default list }}
+{{- if and (eq .providerId $defaultProvider) (has .operation (list "ChatCompletions" "Responses")) }}
+{{- $contractModels = append $contractModels .model }}
+{{- end }}
 {{- end }}
 {{- end }}
 apiVersion: apps/v1
@@ -18,6 +47,11 @@ kind: Deployment
 metadata:
   name: kars-controller
   namespace: {{ .Release.Namespace }}
+  {{- if eq ((.Values.global | default dict).installationProfile | default "") "kind-beta" }}
+  annotations:
+    kars.azure.com/installation-profile: kind-beta
+    kars.azure.com/kind-beta-cni: {{ (.Values.kindBeta | default dict).cni | quote }}
+  {{- end }}
   labels:
     app.kubernetes.io/name: kars
     app.kubernetes.io/component: controller
@@ -35,7 +69,7 @@ spec:
         checksum/inference-credentials: {{ $inferenceCredentials.apiKey | sha256sum | quote }}
         {{- end }}
         {{- if $budgetTls.certificate }}
-        checksum/inference-budget-tls: {{ dict "certificate" $budgetTls.certificate "privateKey" $budgetTls.privateKey | toJson | sha256sum | quote }}
+        checksum/inference-budget-tls: {{ include "kars.inferenceBudget.tlsChecksum" (dict "identity" $budgetTls "existing" (lookup "v1" "Secret" .Release.Namespace .Values.inferenceBudget.tlsSecretName) "controller" (lookup "apps/v1" "Deployment" .Release.Namespace "kars-controller") "release" .Release.Name "namespace" .Release.Namespace) | quote }}
         {{- end }}
       {{- end }}
       labels:
@@ -69,6 +103,10 @@ spec:
               value: {{ required "inferenceBudget.tlsSecretName is required" .Values.inferenceBudget.tlsSecretName | quote }}
             - name: KARS_INFERENCE_BUDGET_ROUTER_DIGEST
               value: {{ required "inferenceBudget.routerImageDigest is required" .Values.inferenceBudget.routerImageDigest | quote }}
+            {{- if and .Values.sre.enabled (hasKey .Values.sre "routerImageBaseline") }}
+            - name: KARS_INFERENCE_BUDGET_FIRST_INSTALL_ROUTER_DIGEST
+              value: {{ last (splitList "@" .Values.sre.routerImageBaseline) | quote }}
+            {{- end }}
             - name: KARS_INFERENCE_BUDGET_ADDR
               value: "0.0.0.0:9447"
             {{- end }}
@@ -166,6 +204,18 @@ spec:
                   name: {{ $inferenceCredentials.existingSecret | default "kars-inference-bootstrap" | quote }}
                   key: {{ $inferenceCredentials.key | default "api-key" | quote }}
                   optional: false
+            {{- end }}
+            {{- if $defaultModel }}
+            - name: KARS_TASK_DEFAULT_MODEL
+              value: {{ $defaultModel | quote }}
+            - name: AZURE_OPENAI_DEPLOYMENT
+              value: {{ $defaultModel | quote }}
+            - name: KARS_TASK_DEFAULT_PROVIDER
+              value: {{ $defaultProvider | quote }}
+            {{- end }}
+            {{- if $contractModels }}
+            - name: KARS_MODEL_CATALOG
+              value: {{ $contractModels | uniq | toJson | quote }}
             {{- end }}
             - name: AZURE_OPENAI_ENDPOINT
               value: {{ .Values.inferenceRouter.azure.openai.endpoint | quote }}
@@ -287,4 +337,4 @@ spec:
   {{- $settings = lookup "v1" "Secret" .Release.Namespace "kars-credential-controller-settings" | default dict -}}
   {{- $grants = lookup "kars.azure.com/v1alpha1" "KarsCredentialGrant" .Release.Namespace "" | default dict -}}
 {{- end -}}
-{{- include "kars.controller.operatorSettings" (dict "deployment" $deployment "live" $live "settings" $settings "grants" $grants) }}
+{{- include "kars.controller.operatorSettings" (dict "deployment" $deployment "live" $live "settings" $settings "grants" $grants "precondition" .Values.controller.upgradePrecondition) }}

@@ -70,11 +70,11 @@ describe("Core durable mission dispatcher", () => {
     const role = docs.find(doc => doc.kind === "ClusterRole" && doc.rules.some((rule: any) => rule.resources?.includes("karssandboxes") && rule.verbs.includes("watch")));
     expect(role.rules).toContainEqual({ apiGroups: ["apps"], resources: ["replicasets"], verbs: ["get", "list"] });
   });
-  it("supports content-addressed image installation and an external official mesh", () => {
+  it.each([undefined, "latest", `latest@sha256:${"a".repeat(64)}`])("preserves a content-addressed latest image and external official mesh with tag %s", tag => {
     const digest = `sha256:${"a".repeat(64)}`;
-    const docs = render(...enabled, `missionDispatcher.image.digest=${digest}`, "missionDispatcher.relayUrl=wss://mesh.example/relay", "missionDispatcher.registryUrl=https://mesh.example/registry");
+    const docs = render(...enabled, `missionDispatcher.image.digest=${digest}`, ...(tag ? [`missionDispatcher.image.tag=${tag}`] : []), "missionDispatcher.relayUrl=wss://mesh.example/relay", "missionDispatcher.registryUrl=https://mesh.example/registry");
     const container = find(docs, "Deployment", "kars-mission-dispatcher").spec.template.spec.containers[0];
-    expect(container.image).toBe(`karsacr.azurecr.io/kars-mission-dispatcher@${digest}`);
+    expect(container.image).toBe(`karsacr.azurecr.io/kars-mission-dispatcher:latest@${digest}`);
     expect(container.env).toEqual(expect.arrayContaining([{ name: "AGENTMESH_RELAY_URL", value: "wss://mesh.example/relay" }, { name: "AGENTMESH_REGISTRY_URL", value: "https://mesh.example/registry" }]));
   });
   it("rejects a malformed image digest", () => {

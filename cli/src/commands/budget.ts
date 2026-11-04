@@ -4,6 +4,9 @@
 import { Command } from "commander";
 import { readFile } from "node:fs/promises";
 import { parseAllDocuments } from "yaml";
+import { authorizeRenewal, authorizeTopUp, fundingView } from "./budget-topup.js";
+import { reconcileCalendar } from "./budget-calendar-recovery.js";
+import { authorizeUnbounded } from "./budget-unbounded.js";
 
 type ObjectValue = Record<string, unknown>;
 type Execute = (args: string[], input?: string) => Promise<string>;
@@ -57,7 +60,8 @@ export function governedPlan(text: string, namespace: string): ObjectValue {
 function resource(kind: string): string {
   if (kind === "task") return "karstask";
   if (kind === "team") return "karsteam";
-  throw new Error("--kind must be task or team");
+  if (kind === "sandbox") return "karssandbox";
+  throw new Error("--kind must be task, team or sandbox");
 }
 
 function readObject(text: string): ObjectValue {
@@ -73,9 +77,10 @@ export async function budgetStatus(
   const owner = readObject(await execute(["get", resource(kind), name(target), "-n", name(namespace), "-o", "json"]));
   const ownerMeta = metadata(owner);
   const status = object(owner.status, "Task/Team has no controller status yet");
-  const binding = kind === "task" ? object(status.inferenceBudget, "Task has no governed-inference account binding") : undefined;
+  const binding = kind === "task" ? object(status.inferenceBudget, "Task has no governed-inference account binding")
+    : kind === "sandbox" ? object(object(owner.spec, "Sandbox spec is missing").inferenceBudgetRef, "Sandbox has no governed-inference account binding") : undefined;
   const reference = object(binding?.account ?? status.inferenceBudgetAccount, "No lifetime account has been bound");
-  if (kind === "task" && binding?.taskUid !== ownerMeta.uid) throw new Error("Task UID binding is stale");
+  if ((kind === "task" || kind === "sandbox") && binding?.taskUid !== ownerMeta.uid) throw new Error("Task/Sandbox UID binding is stale");
   const account = readObject(await execute(["get", "karsbudgetaccount", name(reference.name),
     "-n", name(reference.namespace), "-o", "json"]));
   if (metadata(account).uid !== reference.uid) throw new Error("Budget account was replaced; refusing to report a fresh zero balance");
@@ -111,15 +116,18 @@ export async function budgetStatus(
     .some((entry) => {
       const attempt = object(entry, "Malformed budget attempt");
       return ["Reserved", "InFlight"].includes(String(attempt.phase))
-        && object(attempt.quote, "Budget quote is missing").priceCovered === false;
+        && (object(attempt.quote, "Budget quote is missing").priceCovered === false
+          || object(attempt.quote, "Budget quote is missing").recordOnly !== undefined);
     });
   return {
     scope, root, account: reference, accountPhase: ledger.phase,
-    taskOrTeamPhase: status.phase, limits: ledger.limits, meters,
+    taskOrTeamPhase: status.phase, limits: ledger.limits, ...fundingView(ledger), meters,
     unpricedAttempts: String(unpriced),
+    unknownUsageAttempts: String(amount(totals.unknownUsageAttempts ?? 0)),
+    usageCoverage: amount(totals.unknownUsageAttempts ?? 0) > 0 ? "incomplete — provider token usage is unknown" : "no unresolved unknown-usage attempts",
     priceCoverage: unpriced > 0 || pendingUnpriced ? "incomplete — monetary cost is unknown" : "configured maxima only — not an invoice",
     meaning: "Governed inference tokens and configured maximum prices only; compute, tools, storage and invoice costs are excluded",
-    dispatch: "Every provider send still requires live router identity, full task authorization, valid bounds/tariffs and an atomic broker grant",
+    dispatch: "Every provider send requires live router identity, full task authorization and an atomic broker grant; finite effective ceilings also require valid bounds/tariffs",
   };
 }
 
@@ -148,10 +156,44 @@ export function budgetCommand(): Command {
     });
   command.command("status <name>")
     .description("Read the pinned durable account; never substitute absent accounting with zero")
-    .option("--kind <task|team>", "Resource owning the binding", "task")
+    .option("--kind <task|team|sandbox>", "Resource owning the binding (sandbox for built-in SRE or Bridge orchestrator)", "task")
     .option("-n, --namespace <workspace>", "Task/Team workspace", "kars-system")
     .action(async (target: string, options: { kind: string; namespace: string }) => {
       console.log(JSON.stringify(await budgetStatus(kubectl, options.kind, target, options.namespace), null, 2));
+    });
+  command.command("authorize-top-up")
+    .description("Publish an explicit operator token extension; requires ConfigMap patch and budget-account fund permission")
+    .requiredOption("-f, --file <path>", "UID-bound token top-up authorization JSON")
+    .option("-n, --namespace <accounting>", "Private accounting namespace", "kars-system")
+    .option("--catalog <name>", "Operator contracts ConfigMap", "kars-inference-budget-contracts")
+    .action(async (options: { file: string; namespace: string; catalog: string }) => {
+      console.log(JSON.stringify(await authorizeTopUp(kubectl, await readFile(options.file, "utf8"),
+        options.namespace, options.catalog), null, 2));
+    });
+  command.command("authorize-unbounded")
+    .description("Authorize indefinite tokens for one existing account; preserves currency caps and live authorization")
+    .requiredOption("-f, --file <path>", "Exact UID-bound unbounded authorization JSON with current ledger digest and prior top-up IDs")
+    .option("-n, --namespace <accounting>", "Private accounting namespace", "kars-system")
+    .option("--catalog <name>", "Operator contracts ConfigMap", "kars-inference-budget-contracts")
+    .action(async (options: { file: string; namespace: string; catalog: string }) => {
+      console.log(JSON.stringify(await authorizeUnbounded(kubectl, await readFile(options.file, "utf8"),
+        options.namespace, options.catalog), null, 2));
+    });
+  command.command("authorize-renewal")
+    .description("Explicitly renew Active first-install SRE or reactivate expired Closed Bridge funding; requires operator fund permission")
+    .requiredOption("-f, --file <path>", "Top-up JSON with prior-receipt pins and either SRE registration/intent pins or explicit Bridge Closed-ledger reactivation consent")
+    .option("-n, --namespace <accounting>", "Private accounting namespace", "kars-system")
+    .option("--catalog <name>", "Operator contracts ConfigMap", "kars-inference-budget-contracts")
+    .action(async (options: { file: string; namespace: string; catalog: string }) => {
+      console.log(JSON.stringify(await authorizeRenewal(kubectl, await readFile(options.file, "utf8"),
+        options.namespace, options.catalog), null, 2));
+    });
+  command.command("reconcile-calendar")
+    .description("Audit a narrowly bounded orphaned standalone calendar writer; preserves lifetime uncertainty and charges")
+    .requiredOption("-f, --file <path>", "Exact one-attempt, whole-account, or never-reserved orphan authorization JSON")
+    .option("--apply", "Persist conservative closure plus audit with a calendar UID/resourceVersion CAS (default: inspect only)", false)
+    .action(async (options: { file: string; apply: boolean }) => {
+      console.log(JSON.stringify(await reconcileCalendar(kubectl, await readFile(options.file, "utf8"), options.apply), null, 2));
     });
   return command;
 }

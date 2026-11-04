@@ -11,11 +11,12 @@ export interface AgentAction {
   raw: string;
   args: string;
   result: string;
+  destinations: string[];
   ok: boolean | null;
   round: number;
   ms: number | null;
   ts: string | null;
-  source: "legacy" | "router-upstream" | "model-proposed" | "harness-reported";
+  source: "legacy" | "router-upstream" | "model-proposed" | "harness-reported" | "router-policy" | "router";
   seq: number | null;
   agentInstance: string | null;
 }

@@ -3,7 +3,8 @@
 # Licensed under the MIT License.
 
 set -eu
-test "$(go env GOVERSION)" = go1.27.2
+recipe="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+test "$(go env GOVERSION)" = go1.27.3
 case "$(go env GOARCH)" in
     amd64|arm64) ;;
     *) echo "Headlamp requires a native amd64 or arm64 builder" >&2; exit 1 ;;
@@ -15,9 +16,16 @@ mkdir source
 tar --no-same-owner -xzf source.tar.gz --strip-components=2 -C source \
     headlamp-066c5be9deb14b12bcef3485b531c64a84a2a219/backend
 cd source
+HEADLAMP_UPSTREAM_SOURCE="$PWD/cmd/headlamp.go" go test "$recipe/patch-backend.go" "$recipe/patch-backend_test.go"
+go run "$recipe/patch-backend.go" "$PWD"
+cp "$recipe/static-cache.go" cmd/kars_static_cache.go
+cp "$recipe/static-cache_test.go" cmd/kars_static_cache_test.go
+cp "$recipe/oidc-navigation.go" cmd/kars_oidc_navigation.go
+cp "$recipe/oidc-navigation_test.go" cmd/kars_oidc_navigation_test.go
 go mod edit \
     -require=github.com/containerd/containerd@v1.7.33 \
-    -require=github.com/go-jose/go-jose/v4@v4.1.4 \
+    -require=github.com/go-jose/go-jose/v4@v4.1.6 \
+    -require=github.com/klauspost/compress@v1.18.7 \
     -require=github.com/moby/spdystream@v0.5.1 \
     -require=go.opentelemetry.io/otel/sdk@v1.43.0 \
     -require=golang.org/x/crypto@v0.55.0 \
@@ -25,9 +33,11 @@ go mod edit \
     -require=golang.org/x/text@v0.39.0 \
     -require=google.golang.org/grpc@v1.83.2 \
     -require=oras.land/oras-go/v2@v2.6.2
-go build -mod=mod -trimpath -buildvcs=false -p=2 -ldflags="-s -w" \
+go build -mod=mod -trimpath -buildvcs=false -p=2 \
+    -ldflags="-s -w -X github.com/kubernetes-sigs/headlamp/backend/pkg/kubeconfig.Version=0.41.0" \
     -o "$build/headlamp-server" ./cmd/
-go test -mod=mod -p=2 ./cmd ./pkg/config ./pkg/plugins
+test "$("$build/headlamp-server" -version)" = "Headlamp 0.41.0 (linux/$(go env GOARCH))"
+go test -mod=mod -p=2 ./cmd ./pkg/config ./pkg/plugins ./pkg/kubeconfig
 cp go.mod "$build/headlamp.go.mod"
 cp go.sum "$build/headlamp.go.sum"
 chmod 0555 "$build/headlamp-server"

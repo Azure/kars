@@ -81,6 +81,30 @@ describe("pending Helm release schema staging", () => {
     expect(f.writes).toEqual([]);
   });
 
+  it("keeps legacy same-Helm Update ownership on the identity-fenced replacement path", async () => {
+    const f = fixture("upgrade");
+    const old = crd();
+    old.spec.versions[0].schema.openAPIV3Schema.description = "Prior owned description";
+    f.manifests.set(2, render([old, admission(), controller]));
+    const current = f.install(old);
+    current.metadata.managedFields = [{
+      manager: "helm", operation: "Update", apiVersion: old.apiVersion,
+      fieldsType: "FieldsV1", fieldsV1: { "f:spec": { "f:versions": {} } },
+    }];
+    await expect(f.run()).resolves.toMatchObject({ revision: 3, schemas: 1, published: true });
+    const replacements = f.requests.filter(request => request.args[0] === "replace");
+    expect(replacements).toHaveLength(2);
+    expect(replacements[0].args).toContain("--dry-run=server");
+    expect(replacements[1].args).not.toContain("--dry-run=server");
+    for (const request of replacements) {
+      expect(request.args).toContain("--field-manager=helm");
+      expect(JSON.parse(request.input!).metadata).toMatchObject({
+        uid: current.metadata.uid, resourceVersion: current.metadata.resourceVersion,
+      });
+      expect(request.args.some(arg => arg.startsWith("--force"))).toBe(false);
+    }
+  });
+
   it.each(["v3.19.0", "v4.1.2", "v4.1.3-rc.1", "v4.2.0", "v5.0.0"])("refuses uninspected installer %s before any read/write", async version => {
     const f = fixture();
     await expect(f.run({ installerHelmVersion: version })).rejects.toThrow("Helm 4.1.3");

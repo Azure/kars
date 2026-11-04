@@ -86,8 +86,22 @@ export async function applyPushedImages(
     await verifyMeshHealth(execute, mesh, meshImages);
   }
   for (const plan of helmPlans.values()) {
-    const args = ["upgrade", plan.release, chart, "--namespace", plan.namespace,
-      "--reuse-values", ...plan.args, "--atomic", "--wait", "--timeout", "8m"];
+    const existing = async (name: string) => String((await execute("kubectl", ["get", "configmap", name,
+      "-n", plan.namespace, "--ignore-not-found", "-o", "json"], { stdio: "pipe" })).stdout).trim();
+    const base = ["upgrade", plan.release, chart, "--namespace", plan.namespace,
+      "--reuse-values", "--set", "schemaHook.enabled=false"];
+    const wait = ["--atomic", "--wait", "--timeout", "8m"];
+    if (await existing("kars-sre-first-install") && !await existing("kars-sre-helm-adoption")) {
+      // The chart seals the original installation before it permits image changes.
+      const adoption = [...base, ...wait];
+      await prepareCoreHelmSchemas(execute, adoption);
+      await execute("helm", adoption, { stdio: "pipe" });
+      await assertControllerMutationAllowed(execute, plan.namespace);
+      await assertSafeMutation(execute);
+      if (core) await recheckCoreOwnership(execute, core);
+      if (mesh) await recheckMeshOwnership(execute, mesh);
+    }
+    const args = [...base, ...plan.args, ...wait];
     await prepareCoreHelmSchemas(execute, args);
     await execute("helm", args, { stdio: "pipe" });
   }

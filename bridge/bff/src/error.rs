@@ -22,6 +22,10 @@ pub enum AppError {
     /// No cluster connection is configured — the BFF is running web-only.
     #[error("cluster unavailable")]
     ClusterUnavailable,
+    #[error(
+        "Kars could not confirm the workspace spending rules. Your draft is unchanged. Try again, or ask your Kars administrator to check the spending settings. Reconnecting your AI account will not fix this."
+    )]
+    SpendingPolicyUnavailable,
     /// An upstream dependency (the cluster API) failed. The detail is logged
     /// and a sanitized message is returned to the browser.
     #[error("upstream error: {0}")]
@@ -60,6 +64,11 @@ impl From<kube::Error> for AppError {
         {
             tracing::warn!(error = %error, "integration credential authority unavailable");
             Self::CredentialAuthorityUnavailable
+        } else if let kube::Error::Api(response) = &error
+            && response.code == 409
+            && response.reason == "ProviderInUse"
+        {
+            Self::Conflict(response.message.clone())
         } else {
             Self::Upstream(error.to_string())
         }
@@ -85,7 +94,9 @@ impl AppError {
     fn status(&self) -> StatusCode {
         match self {
             AppError::NotFound => StatusCode::NOT_FOUND,
-            AppError::ClusterUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            AppError::ClusterUnavailable | AppError::SpendingPolicyUnavailable => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
             AppError::Upstream(_) => StatusCode::BAD_GATEWAY,
             AppError::CredentialAuthorityUnavailable => StatusCode::CONFLICT,
             AppError::Rejected(_) => StatusCode::UNPROCESSABLE_ENTITY,
@@ -102,6 +113,7 @@ impl AppError {
         match self {
             AppError::NotFound => "not_found",
             AppError::ClusterUnavailable => "cluster_unavailable",
+            AppError::SpendingPolicyUnavailable => "spending_policy_unavailable",
             AppError::Upstream(_) => "upstream_error",
             AppError::CredentialAuthorityUnavailable => "credential_authority_unavailable",
             AppError::Rejected(_) => "rejected",
@@ -170,6 +182,19 @@ pub type AppResult<T> = Result<T, AppError>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unavailable_spending_policy_has_safe_actionable_response() {
+        let error = AppError::SpendingPolicyUnavailable;
+        assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.code(), "spending_policy_unavailable");
+        assert!(error.client_message().contains("Your draft is unchanged"));
+        assert!(
+            error
+                .client_message()
+                .contains("Reconnecting your AI account will not fix this")
+        );
+    }
 
     #[test]
     fn integration_authority_error_is_actionable_without_leaking_internal_detail() {

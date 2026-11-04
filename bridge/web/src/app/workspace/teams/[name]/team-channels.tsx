@@ -4,8 +4,8 @@
 "use client";
 
 // kars Bridge — team communication channels. Part of a standing team's envelope:
-// wire Telegram / Slack / Discord / WhatsApp so the team reports its progress and
-// deliverables to the operator. SECURITY: tokens are write-only — typed into a
+// configure Telegram reporting or inbound Slack / Discord / WhatsApp conversation.
+// Saved configuration does not establish delivery. SECURITY: tokens are write-only — typed into a
 // password field, sent to the BFF (stored only in a K8s Secret), and never shown
 // back. The UI knows which channels are enabled plus whether the current team
 // route has retained qualification evidence for each adapter.
@@ -17,10 +17,10 @@ import { Icon } from "@/components/icon";
 import type { TeamChannelStatus } from "@/lib/types";
 
 const CHANNELS: { id: string; label: string; glyph: "message"; token: string; hint: string; extra?: string }[] = [
-  { id: "telegram", label: "Telegram", glyph: "message", token: "Bot token", hint: "From @BotFather", extra: "Allowed user IDs (comma-separated)" },
-  { id: "slack", label: "Slack", glyph: "message", token: "Bot OAuth token", hint: "xoxb-…" },
-  { id: "discord", label: "Discord", glyph: "message", token: "Bot token", hint: "From the Discord developer portal" },
-  { id: "whatsapp", label: "WhatsApp", glyph: "message", token: "Enable", hint: "Type 'true' to enable pairing" },
+  { id: "telegram", label: "Telegram", glyph: "message", token: "Bot token", hint: "From @BotFather. Add chat IDs below so agents can proactively DM you updates.", extra: "Allowed chat IDs (required for agents to send you updates)" },
+  { id: "slack", label: "Slack", glyph: "message", token: "Bot OAuth token", hint: "xoxb-… — inbound conversation (agents reply to your DMs)." },
+  { id: "discord", label: "Discord", glyph: "message", token: "Bot token", hint: "From the Discord developer portal — inbound conversation." },
+  { id: "whatsapp", label: "WhatsApp", glyph: "message", token: "Enable WhatsApp", hint: "Inbound conversation. Saving enables setup only; device pairing is not completed or checked here." },
 ];
 
 export function TeamChannels({
@@ -72,9 +72,10 @@ export function TeamChannels({
     <section className="rounded-xl border border-border bg-surface p-6">
       <h2 className="text-sm font-semibold">Communication channels</h2>
       <p className="mt-0.5 text-xs text-foreground-muted">
-        Part of the team&apos;s envelope. Wire a channel and the team reports milestones and its
-        deliverables to you there. Tokens are stored encrypted-at-rest as a Kubernetes secret and are
-        never shown again.
+        Use Telegram for proactive updates, or Slack, Discord and WhatsApp for inbound conversation.
+        These settings override workspace settings for this team. Configured means settings are saved,
+        not that a message has been delivered; qualification is shown separately. Tokens are stored
+        in Kubernetes Secrets and are never displayed back here.
       </p>
 
       <div className="mt-4 grid gap-2 sm:grid-cols-2">
@@ -90,7 +91,7 @@ export function TeamChannels({
                   <span className="text-sm font-medium">{ch.label}</span>
                   {on && (
                     <span className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-600">
-                      connected
+                      configured
                     </span>
                   )}
                   {status?.qualified === true && (
@@ -133,14 +134,27 @@ export function TeamChannels({
               )}
               {isOpen && !on && (
                 <div className="mt-2 space-y-2">
-                  <input
-                    type="password"
-                    autoComplete="off"
-                    value={token}
-                    onChange={(e) => setToken(e.target.value)}
-                    placeholder={ch.token}
-                    className="w-full rounded-md border border-border bg-surface px-2.5 py-1.5 text-xs outline-none focus:border-signal"
-                  />
+                  {ch.id === "whatsapp" ? (
+                    <label className="flex items-center gap-2 text-xs">
+                      <input
+                        type="checkbox"
+                        checked={token === "true"}
+                        disabled={pending}
+                        onChange={(e) => setToken(e.target.checked ? "true" : "")}
+                      />
+                      {ch.token}
+                    </label>
+                  ) : (
+                    <input
+                      type="password"
+                      autoComplete="off"
+                      value={token}
+                      onChange={(e) => setToken(e.target.value)}
+                      placeholder={ch.token}
+                      aria-label={`${ch.label} ${ch.token}`}
+                      className="w-full rounded-md border border-border bg-surface px-2.5 py-1.5 text-xs outline-none focus:border-signal"
+                    />
+                  )}
                   {ch.extra && (
                     <input
                       type="text"

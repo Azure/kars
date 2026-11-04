@@ -62,19 +62,33 @@ fn string(secret: &Secret, key: &str) -> Result<String, String> {
         .ok_or_else(|| "Operator App store has missing or invalid material".into())
 }
 
+fn approved_scope<'grant>(
+    selection: &GitHubBinding,
+    grant: &'grant KarsCredentialGrant,
+) -> Result<&'grant GitHubConnectionGrant, String> {
+    contract::validate(selection)?;
+    grant
+        .spec
+        .github_connections
+        .iter()
+        .find(|candidate| {
+            candidate.connection == selection.connection
+                && (!selection.write || candidate.write)
+                && selection
+                    .repositories
+                    .iter()
+                    .all(|repo| candidate.repositories.contains(repo))
+        })
+        .ok_or_else(|| "GitHub scope requires one covering operator enrollment".into())
+}
+
 fn validated_material<'grant>(
     selection: &GitHubBinding,
     grant: &'grant KarsCredentialGrant,
     connection: &ConfigMap,
     store: &Secret,
 ) -> Result<(&'grant GitHubConnectionGrant, String, String), String> {
-    contract::validate(selection)?;
-    let approved = grant
-        .spec
-        .github_connections
-        .iter()
-        .find(|candidate| candidate.connection == selection.connection)
-        .ok_or("GitHub connection UID has no explicit operator grant")?;
+    let approved = approved_scope(selection, grant)?;
     let expected_name = format!(
         "kars-github-connection-{}",
         &crate::providers::signing::sha256_hex(approved.owner_subject.as_bytes())[..16]
@@ -231,12 +245,7 @@ async fn read_connection(
     selection: &GitHubBinding,
 ) -> Result<(KarsCredentialGrant, ConfigMap, Secret), String> {
     let grant = current(client, workspace, &selection.grant).await?;
-    let approved = grant
-        .spec
-        .github_connections
-        .iter()
-        .find(|candidate| candidate.connection == selection.connection)
-        .ok_or("GitHub connection requires explicit operator enrollment")?;
+    let approved = approved_scope(selection, &grant)?;
     let connection = Api::<ConfigMap>::namespaced(client.clone(), workspace)
         .get(&approved.connection.name)
         .await
@@ -263,7 +272,7 @@ pub(crate) async fn ensure(
     sandbox: &KarsSandbox,
     namespace: &Namespace,
     managed_identity: &Value,
-) -> Result<Projection, String> {
+) -> Result<Projection, credentials::IssuanceError> {
     let previous = sandbox
         .metadata
         .annotations
@@ -280,7 +289,9 @@ pub(crate) async fn ensure(
             }))).await.map_err(|e|api_error("Record private GitHub revocation",e))?;
         }
         return if previously_enrolled {
-            credentials::Projection::retired(GITHUB, sandbox).map(Projection::Retired)
+            credentials::Projection::retired(GITHUB, sandbox)
+                .map(Projection::Retired)
+                .map_err(Into::into)
         } else {
             Ok(Projection::Legacy)
         };
@@ -289,9 +300,7 @@ pub(crate) async fn ensure(
     if matches!(&result, Err(credentials::IssuanceError::Rejected(_))) && previously_enrolled {
         credentials::retire_for(client, sandbox, namespace, GITHUB).await?;
     }
-    result
-        .map(Projection::Issued)
-        .map_err(|error| error.to_string())
+    result.map(Projection::Issued)
 }
 
 pub(super) async fn revoke(client: &Client, grant: &KarsCredentialGrant) -> Result<(), String> {

@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 import type { TeamRunEvidence } from "@/lib/team-run-evidence";
+import { routerOperationSummary } from "@/lib/router-activity";
 
 function label(value: string): string {
   return value.replace(/_/g, " ").replace(/^\w/, (c) => c.toUpperCase());
@@ -28,14 +29,16 @@ export function TeamRunActivity({ evidence }: { evidence: TeamRunEvidence }) {
     ...evidence.research.map((event) => ({
       at: event.at,
       kind: "research" as const,
-      title: event.outcome === "success" ? "External source reached" : "External source blocked or failed",
+      title: event.operation ? "Router egress observation"
+        : event.outcome === "success" ? "External source reached" : "External source blocked or failed",
       actor: event.agent,
-      detail: event.host,
+      detail: event.operation ? routerOperationSummary(event.operation) : event.host,
       outcome: event.outcome,
       href: event.url,
-      meta: event.source === "router"
-        ? event.status ? `router · HTTP ${event.status}` : "router · governed egress"
-        : "agent-reported",
+      meta: event.operation ? `${event.source} · ${event.operation.flag}`
+        : event.source === "router"
+          ? event.status ? `router · HTTP ${event.status}` : "router · governed egress"
+          : "agent-reported",
     })),
   ].sort((a, b) => (a.at ?? "").localeCompare(b.at ?? ""));
   const delivered = evidence.roles.filter((role) => role.state === "delivered").length;
@@ -105,7 +108,7 @@ export function TeamRunActivity({ evidence }: { evidence: TeamRunEvidence }) {
       </ol>
       {evidence.research.length > 0 && (
         <p className="mt-4 rounded-lg border border-border bg-surface-muted/25 px-3 py-2 text-xs text-foreground-muted">
-          Governed external evidence: {evidence.research.length} request
+          Governed external evidence: {evidence.research.length} observation
           {evidence.research.length === 1 ? "" : "s"} across{" "}
           {new Set(evidence.research.map((event) => event.host).filter(Boolean)).size} host
           {new Set(evidence.research.map((event) => event.host).filter(Boolean)).size === 1

@@ -3,20 +3,28 @@
 
 "use client";
 
-import { useMemo, useState } from "react";
-import Link from "next/link";
+import { useState } from "react";
+import Link from "@/components/navigation-link";
 import type { TaskDetail } from "@/lib/types";
-import { teamRunMetrics, type TeamRunEvidence } from "@/lib/team-run-evidence";
+import { displayedPhaseRouterActivity, teamRunMetrics, type TeamRunEvidence } from "@/lib/team-run-evidence";
+import { routerProducerKey, type BoundRouterActivity } from "@/lib/router-activity";
+import { reviewedPhaseFailureMessage } from "@/lib/mission-run-evidence";
+import type { ReviewedExecution } from "@/lib/types/missions";
+import { actionsFromRouter } from "@/components/agent-graph/activity";
+import { newestLifetimeEvents } from "@/components/execution-lifetime";
 
 type FlowCategory = "team" | "tool" | "reasoning" | "outcome" | "system";
 
 type FlowEvent = {
   id: string;
   at: string | null;
+  seq?: number | null;
+  producer?: string;
   category: FlowCategory;
   actor: string;
   title: string;
   detail: string | null;
+  observationDetail?: string;
   status: "ok" | "working" | "error" | "neutral";
   count?: number;
   tokens?: number;
@@ -62,7 +70,13 @@ function assignmentTitle(event: TaskDetail["assignment_events"][number]): {
   }
 }
 
-function buildEvents(task: TaskDetail, evidence: TeamRunEvidence): FlowEvent[] {
+function buildEvents(
+  task: TaskDetail,
+  evidence: TeamRunEvidence,
+  routerActivity: BoundRouterActivity | null,
+  phases: ReviewedExecution["phases"],
+  bindings: BoundRouterActivity[],
+): FlowEvent[] {
   const metrics = teamRunMetrics(task);
   const result = metrics.currentResult;
   const failed = result != null && ["error", "failed", "rejected"].includes(result.status ?? "");
@@ -80,7 +94,7 @@ function buildEvents(task: TaskDetail, evidence: TeamRunEvidence): FlowEvent[] {
   });
 
   const toolGroups = new Map<string, FlowEvent>();
-  for (const phase of metrics.phases ?? []) {
+  for (const phase of phases) {
     const run = phase.result?.run_evidence;
     const href = phase.task_name
       ? `/workspace/missions/${encodeURIComponent(phase.task_name)}?tab=artifacts` : undefined;
@@ -96,19 +110,23 @@ function buildEvents(task: TaskDetail, evidence: TeamRunEvidence): FlowEvent[] {
       at: run?.finished_at ?? null, category: "team", actor: phase.role,
       title: `${phase.phase}: ${phase.state}`,
       detail: phase.result
-        ? [phase.result.error, phase.result.output,
+        ? [phase.state === "failed" ? reviewedPhaseFailureMessage(phase) : phase.result.error,
+          phase.state === "failed" ? null : phase.result.output,
           phase.result.usage_known ? `${phase.result.total_tokens?.toLocaleString()} tokens` : "Token usage unavailable"]
           .filter(Boolean).join(" · ")
-        : "No current terminal record is available for this phase.",
+        : phase.state === "failed" ? reviewedPhaseFailureMessage(phase)
+          : "No current terminal record is available for this phase.",
       status: phase.state === "completed" ? "ok" : phase.state === "failed" ? "error"
         : phase.state === "active" ? "working" : "neutral", href,
     });
   }
-  for (const event of metrics.activity) {
+  const activity = routerActivity ? [] : metrics.activity;
+  for (const event of activity) {
     if (event.kind !== "tool") continue;
     const key = [
       event.agent ?? "principal",
       event.name,
+      event.args_preview,
       event.ok ? "ok" : "error",
       event.result_preview,
     ].join("|");
@@ -131,7 +149,29 @@ function buildEvents(task: TaskDetail, evidence: TeamRunEvidence): FlowEvent[] {
   }
   events.push(...toolGroups.values());
 
-  const rounds = metrics.activity.filter((event) => event.kind === "round");
+  for (const binding of bindings) {
+    for (const action of actionsFromRouter(binding)) {
+      events.push({
+        id: action.id, at: action.ts, seq: action.seq,
+        producer: routerProducerKey(binding.producer),
+        category: action.source === "router-upstream" ? "reasoning" : "tool",
+        actor: binding.producer.agent_name,
+        title: action.human,
+        detail: [
+          binding.stopped ? "Stopped partial observations" : binding.provisional ? "Live provisional observations" : "Retained revision observations",
+          `Source: ${action.source}`, action.result,
+        ].join(" · "),
+        observationDetail: [
+          action.args,
+          `Run: ${binding.producer.run_nonce}`, `Assignment: ${binding.producer.assignment_id}`,
+          `Producer: ${binding.producer.agent_did}`,
+        ].join("\n"),
+        status: action.ok === false ? "error" : action.ok === true ? "ok" : "neutral",
+      });
+    }
+  }
+
+  const rounds = activity.filter((event) => event.kind === "round");
   if (rounds.length > 0) {
     events.push({
       id: "reasoning-summary",
@@ -167,7 +207,7 @@ function buildEvents(task: TaskDetail, evidence: TeamRunEvidence): FlowEvent[] {
     });
   }
 
-  return events.sort((left, right) => (left.at ?? "").localeCompare(right.at ?? ""));
+  return newestLifetimeEvents(events);
 }
 
 const FILTERS: Array<{ value: "all" | FlowCategory | "errors"; label: string }> = [
@@ -189,9 +229,11 @@ function eventTime(value: string | null): string {
 function SignalPath({
   task,
   evidence,
+  observedToolResults,
 }: {
   task: TaskDetail;
   evidence: TeamRunEvidence;
+  observedToolResults: number | null;
 }) {
   const roles = evidence.roles
     .filter((role) => role.state !== "skipped")
@@ -224,10 +266,12 @@ function SignalPath({
       tone: "border-violet-500/40 bg-violet-500/[0.06]",
     },
     {
-      label: metrics.reportedToolResults != null ? `${metrics.reportedToolResults} retained reported tool results`
+      label: observedToolResults != null ? `${observedToolResults} observed reported tool results`
+        : metrics.reportedToolResults != null ? `${metrics.reportedToolResults} retained reported tool results`
         : toolCount == null ? "Tool detail unavailable" : `${toolCount} recorded tool call${toolCount === 1 ? "" : "s"}`,
       detail:
-        toolCount == null
+        observedToolResults != null ? "producer reports; not independent execution proof"
+        : toolCount == null
           ? metrics.reportedToolResults != null ? "inspect producer records in Drill-down" : "missing detail is not zero calls"
           : failedTools != null && failedTools > 0
           ? `${failedTools} failed${running ? " · running" : ""}`
@@ -291,45 +335,76 @@ function SignalPath({
 export function TeamRunFlow({
   task,
   evidence,
+  routerActivity,
+  phases,
 }: {
   task: TaskDetail;
   evidence: TeamRunEvidence;
+  routerActivity: BoundRouterActivity | null;
+  phases: ReviewedExecution["phases"];
 }) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<(typeof FILTERS)[number]["value"]>("all");
-  const events = useMemo(() => buildEvents(task, evidence), [task, evidence]);
+  const metrics = teamRunMetrics(task);
+  const bindings = [
+    ...(routerActivity ? [routerActivity] : []),
+    ...phases.flatMap(phase => {
+      const binding = displayedPhaseRouterActivity(phase);
+      return binding ? [binding] : [];
+    }),
+  ];
+  const observed = bindings.flatMap(binding => binding.observations.state === "observed" ? [binding.observations] : []);
+  const recordedRounds = observed.flatMap(observation => observation.trace.events.filter(event => event.kind === "round"));
+  const recordedTools = observed.flatMap(observation => observation.trace.events.filter(event => event.kind === "tool_result"));
+  const observedTokens = recordedRounds.length && recordedRounds.every(event => event.usage_state === "present"
+    && event.usage?.total_tokens != null && Number.isSafeInteger(event.usage.total_tokens) && event.usage.total_tokens >= 0)
+    ? recordedRounds.reduce((sum, event) => sum + (event.usage?.total_tokens ?? 0), 0) : null;
+  const events = buildEvents(task, evidence, routerActivity, phases, bindings);
   const normalized = query.trim().toLowerCase();
   const visible = events.filter((event) => {
     if (filter === "errors" && event.status !== "error") return false;
     if (filter !== "all" && filter !== "errors" && event.category !== filter) return false;
     if (!normalized) return true;
-    return [event.actor, event.title, event.detail, event.category]
+    return [event.actor, event.title, event.detail, event.observationDetail, event.category]
       .filter(Boolean)
       .some((value) => value?.toLowerCase().includes(normalized));
   });
-  const metrics = teamRunMetrics(task);
 
   return (
-    <section className="rounded-xl border border-border bg-surface p-5">
+    <section className="min-w-0 rounded-xl border border-border bg-surface p-3 [overflow-wrap:anywhere] sm:p-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 className="text-sm font-semibold">Execution flow</h2>
           <p className="mt-1 text-xs text-foreground-muted">
-            Searchable chronology of assignment, agent handoffs, grouped tool calls, reasoning cost,
-            and the final truthfulness decision.
+            Newest timestamped records first; untimestamped records follow. Shared router observations
+            retain tool arguments and distinguish proposals from reported outcomes. Observed usage covers
+            returned records only, not complete run totals.
           </p>
         </div>
         <div className="flex flex-wrap gap-2 text-[11px] text-foreground-muted">
           <span>{metrics.phases?.length ? `${metrics.phases.length} reserved phases` : `${metrics.assignmentEvents.length} recorded lifecycle events`}</span>
-          <span>{metrics.reportedToolResults != null ? `${metrics.reportedToolResults} retained reported tool results`
+          <span>{observed.length ? `${recordedTools.length} observed reported tool results`
+            : metrics.reportedToolResults != null ? `${metrics.reportedToolResults} retained reported tool results`
             : metrics.toolCalls == null ? "Tool detail unavailable" : `${metrics.toolCalls} recorded tool calls`}</span>
-          {metrics.failedToolCalls != null && <span className={metrics.failedToolCalls > 0 ? "text-danger" : ""}>{metrics.failedToolCalls} recorded failures</span>}
-          <span>{metrics.rounds == null ? "Round count unavailable" : `${metrics.rounds} recorded rounds`}</span>
-          <span>{metrics.tokens == null ? "Token usage unavailable" : `${metrics.tokens.toLocaleString()} recorded tokens`}</span>
+          {!observed.length && metrics.failedToolCalls != null && <span className={metrics.failedToolCalls > 0 ? "text-danger" : ""}>{metrics.failedToolCalls} recorded failures</span>}
+          {observed.length > 0 && <>
+            <span>{recordedRounds.length} observed router rounds</span>
+            <span>{observedTokens != null && Number.isSafeInteger(observedTokens)
+              ? `${observedTokens.toLocaleString()} observed tokens` : "Observed token usage unavailable"}</span>
+          </>}
+          {(metrics.rounds != null || !observed.length) && <span>{metrics.rounds == null ? "Round count unavailable" : `${metrics.rounds} recorded rounds`}</span>}
+          {(metrics.tokens != null || !observed.length) && <span>{metrics.tokens == null ? "Token usage unavailable" : `${metrics.tokens.toLocaleString()} recorded tokens`}</span>}
         </div>
       </div>
 
-      <SignalPath task={task} evidence={evidence} />
+      <SignalPath task={task} evidence={evidence} observedToolResults={observed.length ? recordedTools.length : null} />
+      {bindings.map(binding => (
+        <p key={routerProducerKey(binding.producer)} className="mt-3 text-xs text-foreground-muted">
+          {binding.producer.agent_name}: {binding.stopped ? "Stopped partial observations" : binding.provisional ? "Live provisional observations" : "Retained revision observations"}.
+          {binding.observations.state === "unavailable" ? ` Observations unavailable: ${binding.observations.reason}`
+            : ` Coverage gaps — missing rounds: ${binding.observations.trace.missing_rounds.join(", ") || "none reported"}; recorder-wide dropped events: ${binding.observations.trace.dropped_events}; selection truncated: ${binding.observations.trace.truncated ? "yes" : "no"}.`}
+        </p>
+      ))}
       {task.reviewed_execution?.issue && (
         <p className="mt-3 text-xs text-warning">{task.reviewed_execution.issue}</p>
       )}
@@ -340,7 +415,8 @@ export function TeamRunFlow({
           value={query}
           onChange={(event) => setQuery(event.target.value)}
           placeholder="Search role, tool, error, URL, or stage"
-          className="min-w-64 flex-1 rounded-lg border border-border bg-surface px-3 py-2 text-sm outline-none focus:border-signal"
+          aria-label="Search execution flow"
+          className="min-w-0 basis-64 flex-1 rounded-lg border border-border bg-surface px-3 py-2 text-sm outline-none focus:border-signal"
         />
         <select
           value={filter}
@@ -358,7 +434,7 @@ export function TeamRunFlow({
         </select>
       </div>
 
-      <ol className="relative mt-5 space-y-3 before:absolute before:bottom-3 before:left-[7.1rem] before:top-3 before:w-px before:bg-border">
+      <ol className="relative mt-5 space-y-3 sm:before:absolute sm:before:bottom-3 sm:before:left-[7.1rem] sm:before:top-3 sm:before:w-px sm:before:bg-border">
         {visible.map((event) => {
           const tone =
             event.status === "error"
@@ -369,12 +445,12 @@ export function TeamRunFlow({
                   ? "border-sky-500/30 bg-sky-500/[0.04]"
                   : "border-border bg-surface-muted/20";
           return (
-            <li key={event.id} className="relative grid grid-cols-[6.25rem_1fr] gap-6">
-              <time className="pt-3 text-right text-[10px] text-foreground-muted">
+            <li key={event.id} className="relative grid min-w-0 grid-cols-1 gap-1 sm:grid-cols-[6.25rem_minmax(0,1fr)] sm:gap-6">
+              <time className="text-[10px] text-foreground-muted sm:pt-3 sm:text-right">
                 {eventTime(event.at)}
               </time>
               <span
-                className={`absolute left-[6.86rem] top-4 h-2.5 w-2.5 rounded-full border-2 border-surface ${
+                className={`absolute left-[6.86rem] top-4 hidden h-2.5 w-2.5 rounded-full border-2 border-surface sm:block ${
                   event.status === "error"
                     ? "bg-danger"
                     : event.status === "ok"
@@ -385,9 +461,9 @@ export function TeamRunFlow({
                 }`}
                 aria-hidden
               />
-              <div className={`rounded-lg border px-3 py-2.5 ${tone}`}>
+              <div className={`min-w-0 rounded-lg border px-3 py-2.5 ${tone}`}>
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="rounded bg-surface-muted px-1.5 py-0.5 font-mono text-[10px]">
+                  <span className="min-w-0 rounded bg-surface-muted px-1.5 py-0.5 font-mono text-[10px]">
                     {event.actor}
                   </span>
                   <span className="text-xs font-semibold">{event.title}</span>
@@ -402,9 +478,19 @@ export function TeamRunFlow({
                   </span>
                 </div>
                 {event.detail && (
-                  <p className="mt-1 break-words text-[11px] leading-relaxed text-foreground-muted">
+                  <p className="mt-1 whitespace-pre-wrap text-[11px] leading-relaxed text-foreground-muted">
                     {event.detail}
                   </p>
+                )}
+                {event.observationDetail && (
+                  <details className="mt-2 min-w-0 text-[11px] text-foreground-muted">
+                    <summary className="cursor-pointer rounded py-1 text-signal focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal">
+                      Arguments and provenance
+                    </summary>
+                    <p className="mt-1 whitespace-pre-wrap leading-relaxed">
+                      {event.observationDetail}
+                    </p>
+                  </details>
                 )}
               </div>
             </li>

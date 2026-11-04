@@ -42,8 +42,10 @@ kars up --resource-group <rg> --isolation confidential
 ## Controller
 - Watches `KarsSandbox` CRDs in `kars-system`
 - Creates namespace, deployment, service, networkpolicy for each sandbox
+- Singleton sandbox rollouts use zero surge and one unavailable replica: the old pod releases its capacity before the replacement starts. Expect a brief interruption during policy/image changes; router readiness checks remain enforced. Credential/Mission paths retain their explicit `Recreate` strategy.
 - Defaults: `SANDBOX_IMAGE=openclaw-sandbox:latest`, `INFERENCE_ROUTER_IMAGE=inference-router:latest`
 - DO NOT set image env vars manually — use defaults
+- Stopped KarsTasks with verified `Idle` execution and no sandbox use five-minute drift polling, including tasks with unavailable historical funding or parents. Spec changes still trigger reconciliation immediately; active execution and incomplete cleanup retain their faster checks.
 
 ## AgentMesh Infrastructure
 Beta installs manage the mesh in the Core Helm release (`agentMesh.enabled=true`).

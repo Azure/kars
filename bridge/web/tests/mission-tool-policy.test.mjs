@@ -12,6 +12,8 @@ const jsx = (type, props) => ({ type, props });
 function load(path, imports) {
   const context = { exports: {}, require(name) {
     if (name === "react/jsx-runtime") return { jsx, jsxs: jsx };
+    if (name === "@/lib/budget-review") return load("lib/budget-review.ts", {});
+    if (name === "@/components/role-budget-fields") return { RoleBudgetFields: "RoleBudgetFields" };
     assert.ok(name in imports, `Unexpected import: ${name}`);
     return imports[name];
   } };
@@ -33,7 +35,8 @@ test("Home labels omission as a tool-permitting default without changing selecti
   for (const name of ["@/components/segmented-tier", "@/components/orchestration-cube",
     "@/components/validation-checks",
     "@/components/icon", "@/components/journey-rail", "@/lib/format", "@/components/repo-access",
-    "../envelope-reveal", "./controls", "./helpers"]) imports[name] = {};
+    "../envelope-reveal", "./controls", "./helpers", "./qualification-choice"]) imports[name] = {};
+  imports["@/components/repo-access"].missionGithubWriteEnabled = () => false;
   const { renderReview } = load("app/workspace/new/intake-flow/review.tsx", imports);
   const selections = [];
   for (const toolPolicy of ["", "restricted-policy"]) {
@@ -74,7 +77,7 @@ test("proposal reveal distinguishes omitted and explicit policies without claimi
 });
 
 const { CompositionPanel } = load("app/workspace/missions/[name]/mission-detail-panels.tsx", {
-  "next/link": {}, "@/components/deliverable-view": {}, "@/components/provenance-story": {},
+  "@/components/navigation-link": {}, "@/components/deliverable-view": {}, "@/components/provenance-story": {},
   "@/lib/format": {}, "@/components/icon": {}, "@/lib/mission-run-evidence": {},
   "@/lib/router-activity": {},
 });
@@ -111,4 +114,35 @@ test("launched missions use reported runtime policy, not a planned fallback", ()
     assert.doesNotMatch(JSON.stringify(result.tree), /kars-default/);
     assert.doesNotMatch(JSON.stringify(result.tree), noToolsClaim);
   }
+});
+
+test("Mission configuration labels baseline egress without denying temporary grants", () => {
+  for (const launched of [false, true]) {
+    const output = JSON.stringify(policyPanel("kars-default", "kars-default", launched).tree);
+    assert.match(output, /Baseline network egress/);
+    assert.match(output, /No extra destinations in the baseline allowlist/);
+    assert.match(output, /approval alone does not establish installation/);
+    assert.doesNotMatch(output, /all other egress denied|effective configuration the running sandbox/);
+  }
+});
+
+test("network panel does not turn an unreported baseline into proof of no egress", () => {
+  const { NetworkMode } = load("app/workspace/missions/[name]/network-mode.tsx", {
+    react: { useEffect: () => {}, useState: value => [value, () => {}] },
+    "next/navigation": { useRouter: () => ({}) }, "@/components/icon": {},
+  });
+  const output = JSON.stringify(NetworkMode({ ns: "test", task: "mission", mode: "Strict" }));
+  assert.match(output, /Reported baseline destinations/);
+  assert.match(output, /excludes temporary grants/);
+  assert.match(output, /No baseline destinations reported/);
+  assert.doesNotMatch(output, /all other egress denied/);
+});
+
+test("Mission and Inbox copy does not promise in-place autonomy widening", () => {
+  const mission = readFileSync(new URL("../src/app/workspace/missions/[name]/page.tsx", import.meta.url), "utf8");
+  const inbox = readFileSync(new URL("../src/app/workspace/inbox/page.tsx", import.meta.url), "utf8");
+  assert.match(mission, /fresh authorized run to use a higher autonomy tier/);
+  assert.doesNotMatch(mission, /raise the tier, add a network host/);
+  assert.match(inbox, /approval does not widen an already launched run/);
+  assert.doesNotMatch(inbox, /Raises this role's authority/);
 });

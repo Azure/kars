@@ -1,0 +1,179 @@
+{
+  "ledger": {
+    "version": "governed-inference/v1",
+    "accountUid": "account-uid",
+    "root": {
+      "kind": "KarsSandbox",
+      "resource": {
+        "name": "bridge-orchestrator",
+        "namespace": "workspace",
+        "uid": "sandbox-uid"
+      },
+      "workspaceUid": "workspace-uid",
+      "clusterUid": "cluster-uid"
+    },
+    "limits": {
+      "tokens": 100
+    },
+    "scope": "GovernedInference",
+    "phase": "Closed",
+    "meters": {
+      "reserved": {
+        "tokens": 0,
+        "usdMicros": 0
+      },
+      "settled": {
+        "tokens": 40,
+        "usdMicros": 0
+      },
+      "uncertain": {
+        "tokens": 0,
+        "usdMicros": 0
+      },
+      "unpricedAttempts": 0
+    },
+    "nodes": {
+      "sandbox-uid": {
+        "active": false,
+        "authority": {
+          "task": {
+            "name": "bridge-orchestrator",
+            "namespace": "workspace",
+            "uid": "sandbox-uid"
+          },
+          "parentUid": null,
+          "rootTaskUid": "sandbox-uid",
+          "authorizationDigest": "sha256:c1c448314854f7552d2aca36c537851f19b028dc59396e9fecdd324e344b59e6",
+          "effectiveAuthorization": {
+            "root": {
+              "kind": "KarsSandbox",
+              "resource": {
+                "name": "bridge-orchestrator",
+                "namespace": "workspace",
+                "uid": "sandbox-uid"
+              },
+              "workspaceUid": "workspace-uid",
+              "clusterUid": "cluster-uid"
+            },
+            "limits": {
+              "tokens": 100
+            },
+            "expiresAt": "2020-01-01T00:00:00Z"
+          },
+          "limits": {
+            "tokens": 100
+          }
+        },
+        "meters": {
+          "reserved": {
+            "tokens": 0,
+            "usdMicros": 0
+          },
+          "settled": {
+            "tokens": 40,
+            "usdMicros": 0
+          },
+          "uncertain": {
+            "tokens": 0,
+            "usdMicros": 0
+          },
+          "unpricedAttempts": 0
+        }
+      }
+    },
+    "sessions": {
+      "2": {
+        "identity": {
+          "taskUid": "sandbox-uid",
+          "authorizationDigest": "sha256:c1c448314854f7552d2aca36c537851f19b028dc59396e9fecdd324e344b59e6",
+          "sandbox": {
+            "name": "bridge-orchestrator",
+            "namespace": "workspace",
+            "uid": "sandbox-uid"
+          },
+          "runtimeNamespaceUid": "runtime-uid",
+          "podName": "bridge-2",
+          "podUid": "2"
+        },
+        "closed": true,
+        "nextSequence": 2,
+        "closedThrough": 1
+      },
+      "10": {
+        "identity": {
+          "taskUid": "sandbox-uid",
+          "authorizationDigest": "sha256:c1c448314854f7552d2aca36c537851f19b028dc59396e9fecdd324e344b59e6",
+          "sandbox": {
+            "name": "bridge-orchestrator",
+            "namespace": "workspace",
+            "uid": "sandbox-uid"
+          },
+          "runtimeNamespaceUid": "runtime-uid",
+          "podName": "bridge-10",
+          "podUid": "10"
+        },
+        "closed": true,
+        "nextSequence": 2,
+        "closedThrough": 1
+      }
+    },
+    "attempts": {},
+    "tokenTopUps": {
+      "topup-1": {
+        "id": "topup-1",
+        "configUid": "config-uid",
+        "accountUid": "account-uid",
+        "root": {
+          "kind": "KarsSandbox",
+          "resource": {
+            "name": "bridge-orchestrator",
+            "namespace": "workspace",
+            "uid": "sandbox-uid"
+          },
+          "workspaceUid": "workspace-uid",
+          "clusterUid": "cluster-uid"
+        },
+        "originalLimits": {
+          "tokens": 100
+        },
+        "tokens": 200,
+        "expiresAt": "2020-01-01T00:00:00Z",
+        "nodes": {
+          "sandbox-uid": "sha256:c1c448314854f7552d2aca36c537851f19b028dc59396e9fecdd324e344b59e6"
+        }
+      }
+    }
+  },
+  "grant": {
+    "id": "renewal-1",
+    "configUid": "config-uid",
+    "accountUid": "account-uid",
+    "root": {
+      "kind": "KarsSandbox",
+      "resource": {
+        "name": "bridge-orchestrator",
+        "namespace": "workspace",
+        "uid": "sandbox-uid"
+      },
+      "workspaceUid": "workspace-uid",
+      "clusterUid": "cluster-uid"
+    },
+    "originalLimits": {
+      "tokens": 100
+    },
+    "tokens": 200,
+    "expiresAt": "2030-01-01T00:00:00Z",
+    "nodes": {
+      "sandbox-uid": "sha256:c1c448314854f7552d2aca36c537851f19b028dc59396e9fecdd324e344b59e6"
+    },
+    "fundingRenewal": {
+      "originalExpiresAt": "2020-01-01T00:00:00Z",
+      "previousTopUpIds": [
+        "topup-1"
+      ],
+      "bridgeReactivation": {
+        "closedLedgerDigest": "sha256:2e5ceb147247116976f9bb2a9e7c669172ab68cdaeaed2f1eb43153e8eb9d6bd"
+      }
+    }
+  }
+}

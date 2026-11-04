@@ -10,19 +10,42 @@ use crate::routes::tasks::BlueprintDto;
 // This is a necessary-condition check, not a second provider resolver. Named
 // providers and legacy defaults can have different accounting IDs for the same
 // model; the router remains authoritative for the exact destination and operation.
-fn coverage(
-    raw: &str,
-    models: &[String],
-    money_required: bool,
-    now: i64,
-    tokens: Option<i64>,
-) -> Result<(), String> {
+pub(crate) fn parse_catalog(raw: &str, now: i64) -> Result<Catalog, String> {
     let catalog: Catalog = serde_json::from_str(raw).map_err(|_| {
         "The operator inference-budget contract catalogue is malformed.".to_string()
     })?;
     catalog
         .validate(now)
         .map_err(|_| "The operator inference-budget contract catalogue is invalid.".to_string())?;
+    Ok(catalog)
+}
+
+pub(crate) async fn read_catalog(cluster: &Cluster) -> Result<String, String> {
+    let data = cluster
+        .configmap_data_result("kars-inference-budget-contracts")
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "Cannot read operator budget contracts");
+            "Cannot read the operator inference-budget contract catalogue. Retry after restoring access."
+                .to_string()
+        })?
+        .ok_or_else(|| "The operator inference-budget contract catalogue is absent.".to_string())?;
+    data.get("contracts.json")
+        .cloned()
+        .ok_or_else(|| "The operator budget catalogue has no contracts.json.".to_string())
+}
+
+pub(crate) fn coverage(
+    raw: &str,
+    models: &[String],
+    money_required: bool,
+    now: i64,
+    tokens: Option<i64>,
+) -> Result<(), String> {
+    let catalog = parse_catalog(raw, now)?;
+    if !money_required && tokens.is_none_or(|cap| cap <= 0) {
+        return Ok(());
+    }
     for model in models {
         let contracts = catalog
             .contracts
@@ -80,45 +103,99 @@ pub(super) async fn check(
     blueprint: &BlueprintDto,
     budget: Option<&TaskBudget>,
 ) -> Option<Check> {
-    let budget = budget.filter(|budget| {
-        matches!(budget.scope, Some(BudgetScope::GovernedInference))
-            && (budget.tokens.is_some_and(|cap| cap > 0)
-                || budget.usd_micros.is_some_and(|cap| cap > 0))
-    })?;
+    check_with_roster(cluster, blueprint, budget, None).await
+}
+
+async fn model_names(cluster: &Cluster, blueprint: &BlueprintDto) -> Result<Vec<String>, String> {
+    let mut models = match blueprint.model.as_ref() {
+        Some(model) => vec![model.deployment.clone()],
+        None => vec![cluster.controller_models().await.0.ok_or_else(|| {
+            "Cannot determine the inherited model for budget preflight.".to_string()
+        })?],
+    };
+    models.extend(
+        blueprint
+            .model_fallbacks
+            .iter()
+            .map(|model| model.deployment.clone()),
+    );
+    Ok(models)
+}
+
+pub(crate) async fn check_with_roster(
+    cluster: &Cluster,
+    blueprint: &BlueprintDto,
+    budget: Option<&TaskBudget>,
+    roster: Option<&[crate::kars::team::TeamRole]>,
+) -> Option<Check> {
+    // Scope enrolls accounting; finite effective ceilings also require spending contracts.
+    let budget =
+        budget.filter(|budget| matches!(budget.scope, Some(BudgetScope::GovernedInference)))?;
     let result = async {
-        let data = cluster
-            .configmap_data_result("kars-inference-budget-contracts")
-            .await
-            .map_err(|error| {
-                tracing::warn!(%error, "Budget preflight could not read operator contracts");
-                "Cannot read the operator inference-budget contract catalogue. Retry after restoring access."
-                    .to_string()
-            })?
-            .ok_or_else(|| "The operator inference-budget contract catalogue is absent.".to_string())?;
-        let raw = data
-            .get("contracts.json")
-            .ok_or_else(|| "The operator budget catalogue has no contracts.json.".to_string())?;
-        let mut models = match blueprint.model.as_ref() {
-            Some(model) => vec![model.deployment.clone()],
-            None => vec![cluster.controller_models().await.0.ok_or_else(|| {
-                "Cannot determine the inherited model for budget preflight.".to_string()
-            })?],
-        };
-        models.extend(blueprint.model_fallbacks.iter().map(|model| model.deployment.clone()));
+        let raw = read_catalog(cluster).await?;
+        let models = model_names(cluster, blueprint).await?;
         coverage(
-            raw,
+            &raw,
             &models,
             budget.usd_micros.is_some_and(|cap| cap > 0),
             chrono::Utc::now().timestamp(),
             budget.tokens,
         )?;
         if let Some(plan) = &blueprint.execution_plan {
+            if let Some(roster) = roster {
+                let names = roster
+                    .iter()
+                    .map(|entry| entry.name.as_str())
+                    .collect::<std::collections::BTreeSet<_>>();
+                let planned = plan
+                    .roles
+                    .iter()
+                    .map(|role| role.name.as_str())
+                    .collect::<std::collections::BTreeSet<_>>();
+                if names != planned
+                    || names.len() != roster.len()
+                    || planned.len() != plan.roles.len()
+                {
+                    return Err(
+                        "Team budget preflight requires an exact, unique roster/plan binding."
+                            .into(),
+                    );
+                }
+            }
             for role in &plan.roles {
+                let member =
+                    roster.and_then(|entries| entries.iter().find(|entry| entry.name == role.name));
+                // Explicit Team blueprints are complete overrides. Mission roles
+                // have no roster and continue inheriting the principal route.
+                let role_models = if let Some(member_blueprint) =
+                    member.and_then(|entry| entry.blueprint.as_ref())
+                {
+                    model_names(cluster, &super::blueprint_to_dto(member_blueprint)).await?
+                } else {
+                    models.clone()
+                };
+                let mut cap = plan.role_qualification_budget(&role.name, budget.tokens);
+                if let Some(limit) = member
+                    .and_then(|entry| entry.envelope.as_ref())
+                    .and_then(|envelope| envelope.budget.as_ref())
+                    .and_then(|budget| budget.tokens)
+                    .filter(|limit| *limit > 0)
+                {
+                    cap = Some(cap.map_or(limit, |cap| cap.min(limit)));
+                }
                 coverage(
-                    raw, &models, budget.usd_micros.is_some_and(|cap| cap > 0),
+                    &raw,
+                    &role_models,
+                    budget.usd_micros.is_some_and(|cap| cap > 0)
+                        || member
+                            .and_then(|entry| entry.envelope.as_ref())
+                            .and_then(|envelope| envelope.budget.as_ref())
+                            .and_then(|budget| budget.usd_micros)
+                            .is_some_and(|cap| cap > 0),
                     chrono::Utc::now().timestamp(),
-                    plan.role_qualification_budget(&role.name, budget.tokens),
-                ).map_err(|detail| format!("Role {:?}: {detail}", role.name))?;
+                    cap,
+                )
+                .map_err(|detail| format!("Role {:?}: {detail}", role.name))?;
             }
         }
         Ok::<(), String>(())
@@ -133,11 +210,12 @@ pub(super) async fn check(
             CheckStatus::Fail
         },
         detail: result.err().unwrap_or_else(|| {
-            "Current contracts name the requested models and no declared cap is below \
-             their minimum possible reservation. This is not proof that their \
-             exact provider, endpoint and operation match, or that the broker, account, \
-             credentials and reservation capacity are ready. The router still verifies \
-             those at execution and fails closed when unavailable."
+            "Declared finite ceilings have model-contract coverage and minimum reservation \
+             capacity. Routes with no declared ceiling do not require a spending contract. \
+             This is not runtime authorization: the broker checks current funding and every \
+             effective ancestor before allowing record-only usage; capped work still requires \
+             an exact provider, endpoint and operation contract. Credentials and runtime \
+             readiness are checked separately, and actual usage remains recorded."
                 .into()
         }),
     })
@@ -166,18 +244,287 @@ mod tests {
         })
     }
 
+    fn state_with_catalogue(raw: String) -> crate::state::AppState {
+        use axum::{
+            body::Body,
+            http::{Request, Response},
+        };
+        let service = tower::service_fn(move |request: Request<kube::client::Body>| {
+            let raw = raw.clone();
+            async move {
+                assert_eq!(request.method(), "GET");
+                assert_eq!(
+                    request.uri().path(),
+                    "/api/v1/namespaces/kars-system/configmaps/kars-inference-budget-contracts"
+                );
+                Ok::<_, std::io::Error>(
+                    Response::builder()
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            json!({"apiVersion":"v1","kind":"ConfigMap",
+                        "metadata":{},"data":{"contracts.json":raw}})
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+            }
+        });
+        crate::state::AppState::for_test_client(kube::Client::new(service, "work"), "work")
+    }
+
+    fn blueprint() -> BlueprintDto {
+        serde_json::from_value(json!({
+            "model":{"provider":"azure-foundry","deployment":"gpt-5.4-mini"},
+            "execution_plan":{"schema":"kars.execution-plan/v1","max_parallel":1,
+                "roles":[{"name":"researcher","objective":"Inspect independent evidence.",
+                    "phases":[{"name":"research","objective":"Review the retained evidence.",
+                        "execution_mode":"native","fresh_context":true,"max_tool_calls":3}]}],
+                "synthesis":{"objective":"Write an evidence-based conclusion.",
+                    "execution_mode":"native","max_tool_calls":3}}
+        }))
+        .unwrap()
+    }
+
+    fn scope_only_budget() -> TaskBudget {
+        TaskBudget {
+            scope: Some(BudgetScope::GovernedInference),
+            tokens: None,
+            usd_micros: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn scope_only_preflight_does_not_require_model_spending_contracts() {
+        let budget = scope_only_budget();
+        let bp = blueprint();
+        let mut expired = catalogue();
+        expired["contracts"][0]["validUntil"] = json!("2000-01-01T00:00:00Z");
+        let mut uncovered = catalogue();
+        uncovered["contracts"][0]["model"] = json!("another-model");
+        for (raw, expected) in [
+            (catalogue().to_string(), CheckStatus::Warn),
+            (expired.to_string(), CheckStatus::Warn),
+            (uncovered.to_string(), CheckStatus::Warn),
+            (
+                json!({"version":"test","contracts":[]}).to_string(),
+                CheckStatus::Warn,
+            ),
+            ("malformed".into(), CheckStatus::Fail),
+        ] {
+            let state = state_with_catalogue(raw);
+            let result = check(state.cluster().unwrap(), &bp, Some(&budget))
+                .await
+                .unwrap();
+            assert_eq!(result.status, expected, "{}", result.detail);
+            assert_eq!(result.id, "budget_contracts");
+        }
+        let state = state_with_catalogue(catalogue().to_string());
+        for fallback in [false, true] {
+            let mut bp = bp.clone();
+            let missing = crate::routes::tasks::ModelDto {
+                provider: "azure-foundry".into(),
+                deployment: "missing-model".into(),
+            };
+            if fallback {
+                bp.model_fallbacks.push(missing);
+            } else {
+                bp.model = Some(missing);
+            }
+            let result = check(state.cluster().unwrap(), &bp, Some(&budget))
+                .await
+                .unwrap();
+            assert_eq!(result.status, CheckStatus::Warn);
+            let finite = TaskBudget {
+                tokens: Some(1000),
+                ..budget.clone()
+            };
+            let result = check(state.cluster().unwrap(), &bp, Some(&finite))
+                .await
+                .unwrap();
+            assert_eq!(result.status, CheckStatus::Fail);
+            assert!(result.detail.contains("missing-model"));
+        }
+        for budget in [
+            None,
+            Some(TaskBudget {
+                scope: None,
+                tokens: None,
+                usd_micros: None,
+            }),
+            Some(TaskBudget {
+                scope: None,
+                tokens: Some(1000),
+                usd_micros: None,
+            }),
+        ] {
+            assert!(
+                check(state.cluster().unwrap(), &bp, budget.as_ref())
+                    .await
+                    .is_none()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn scope_only_preflight_preserves_role_routes_bindings_and_finite_ceilings() {
+        use crate::kars::team::TeamRole;
+        let state = state_with_catalogue(catalogue().to_string());
+        let cluster = state.cluster().unwrap();
+        let mut bp = blueprint();
+        let budget = scope_only_budget();
+        let roster = vec![TeamRole {
+            name: "researcher".into(),
+            ..Default::default()
+        }];
+        for (aggregate, role, member, expected) in [
+            (None, None, None, CheckStatus::Warn),
+            (Some(100), None, None, CheckStatus::Fail),
+            (Some(101), None, None, CheckStatus::Warn),
+            (None, Some(100), None, CheckStatus::Fail),
+            (None, Some(101), None, CheckStatus::Warn),
+            (None, None, Some(100), CheckStatus::Fail),
+            (None, None, Some(101), CheckStatus::Warn),
+            (Some(101), Some(1000), Some(100), CheckStatus::Fail),
+        ] {
+            let mut budget = budget.clone();
+            budget.tokens = aggregate;
+            bp.execution_plan.as_mut().unwrap().roles[0].budget_tokens = role;
+            let mut roster = roster.clone();
+            if let Some(tokens) = member {
+                roster[0].envelope = Some(
+                    serde_json::from_value(json!({"tier":2,
+                    "authorityCeiling":2,"budget":{"scope":"GovernedInference","tokens":tokens}}))
+                    .unwrap(),
+                );
+            }
+            let before = format!("{bp:?} {budget:?} {roster:?}");
+            let result = check_with_roster(cluster, &bp, Some(&budget), Some(&roster))
+                .await
+                .unwrap();
+            assert_eq!(result.status, expected, "{}", result.detail);
+            assert_eq!(format!("{bp:?} {budget:?} {roster:?}"), before);
+        }
+        bp.execution_plan.as_mut().unwrap().roles[0].budget_tokens = None;
+        for invalid in [
+            vec![],
+            vec![roster[0].clone(), roster[0].clone()],
+            vec![TeamRole {
+                name: "unknown".into(),
+                ..Default::default()
+            }],
+        ] {
+            let result = check_with_roster(cluster, &bp, Some(&budget), Some(&invalid))
+                .await
+                .unwrap();
+            assert_eq!(result.status, CheckStatus::Fail);
+            assert!(result.detail.contains("exact, unique roster/plan binding"));
+        }
+        for field in ["model", "modelFallbacks"] {
+            bp.execution_plan.as_mut().unwrap().roles[0].budget_tokens = None;
+            let mut roster = roster.clone();
+            let mut member =
+                json!({"model":{"provider":"azure-foundry","deployment":"gpt-5.4-mini"}});
+            let missing = json!({"provider":"azure-foundry","deployment":"missing-model"});
+            member[field] = if field == "model" {
+                missing
+            } else {
+                json!([missing])
+            };
+            roster[0].blueprint = Some(serde_json::from_value(member).unwrap());
+            assert_eq!(
+                check_with_roster(cluster, &bp, Some(&budget), Some(&roster))
+                    .await
+                    .unwrap()
+                    .status,
+                CheckStatus::Warn
+            );
+            bp.execution_plan.as_mut().unwrap().roles[0].budget_tokens = Some(1000);
+            let result = check_with_roster(cluster, &bp, Some(&budget), Some(&roster))
+                .await
+                .unwrap();
+            assert_eq!(result.status, CheckStatus::Fail);
+            assert!(
+                result.detail.contains("Role \"researcher\"")
+                    && result.detail.contains("missing-model")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn scope_only_preflight_keeps_explicit_currency_price_requirements() {
+        let bp = blueprint();
+        for tokens in [None, Some(1000)] {
+            let budget = TaskBudget {
+                tokens,
+                usd_micros: Some(500000),
+                ..scope_only_budget()
+            };
+            for priced in [false, true] {
+                let mut catalog = catalogue();
+                if priced {
+                    catalog["contracts"][0]["maximumPrice"] =
+                        json!({"kind":"perRequest","maximumMicros":100});
+                }
+                let state = state_with_catalogue(catalog.to_string());
+                let result = check(state.cluster().unwrap(), &bp, Some(&budget))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    result.status,
+                    if priced {
+                        CheckStatus::Warn
+                    } else {
+                        CheckStatus::Fail
+                    }
+                );
+                if !priced {
+                    assert!(result.detail.contains("maximum prices"));
+                }
+            }
+            let mut catalog = catalogue();
+            let mut unpriced = catalog["contracts"][0].clone();
+            unpriced["id"] = json!("unpriced-role");
+            unpriced["model"] = json!("role-model");
+            catalog["contracts"][0]["maximumPrice"] =
+                json!({"kind":"perRequest","maximumMicros":100});
+            catalog["contracts"].as_array_mut().unwrap().push(unpriced);
+            let state = state_with_catalogue(catalog.to_string());
+            let roster = vec![
+                serde_json::from_value(json!({"name":"researcher",
+                "blueprint":{"model":{"provider":"azure-foundry","deployment":"role-model"}}}))
+                .unwrap(),
+            ];
+            let result =
+                check_with_roster(state.cluster().unwrap(), &bp, Some(&budget), Some(&roster))
+                    .await
+                    .unwrap();
+            assert_eq!(result.status, CheckStatus::Fail);
+            assert!(
+                result.detail.contains("Role \"researcher\"")
+                    && result.detail.contains("maximum prices")
+            );
+        }
+    }
+
     #[test]
-    fn connected_copilot_without_budget_contract_is_not_launchable() {
-        assert!(
-            coverage(
-                &catalogue().to_string(),
-                &["gpt-6.1-sol".into()],
-                false,
-                1,
-                None
-            )
-            .is_err()
-        );
+    fn connected_copilot_needs_spending_contract_only_for_finite_limits() {
+        for (tokens, money, allowed) in [
+            (None, false, true),
+            (Some(1000), false, false),
+            (None, true, false),
+        ] {
+            assert_eq!(
+                coverage(
+                    &catalogue().to_string(),
+                    &["gpt-6.1-sol".into()],
+                    money,
+                    1,
+                    tokens
+                )
+                .is_ok(),
+                allowed
+            );
+        }
     }
 
     #[test]
@@ -195,7 +542,7 @@ mod tests {
                 &["gpt-5.4-mini".into(), "gpt-6.1-sol".into()],
                 false,
                 1,
-                None
+                Some(1000)
             )
             .is_err()
         );
@@ -205,7 +552,7 @@ mod tests {
                 &["gpt-5.4-mini".into()],
                 false,
                 2_000_000_000,
-                None
+                Some(1000)
             )
             .is_err()
         );
@@ -271,25 +618,26 @@ mod tests {
             });
             let state =
                 crate::state::AppState::for_test_client(kube::Client::new(service, "work"), "work");
-            let budget = TaskBudget {
-                scope: Some(BudgetScope::GovernedInference),
-                tokens: Some(40_000),
-                usd_micros: None,
-            };
-            let result = check(
-                state.cluster().unwrap(),
-                &BlueprintDto::default(),
-                Some(&budget),
-            )
-            .await
-            .unwrap();
-            assert_eq!(result.status, CheckStatus::Fail);
-            let expected = match status {
-                403 => "Cannot read",
-                404 => "absent",
-                _ => "contracts.json",
-            };
-            assert!(result.detail.contains(expected), "{}", result.detail);
+            for tokens in [None, Some(40_000)] {
+                let budget = TaskBudget {
+                    tokens,
+                    ..scope_only_budget()
+                };
+                let result = check(
+                    state.cluster().unwrap(),
+                    &BlueprintDto::default(),
+                    Some(&budget),
+                )
+                .await
+                .unwrap();
+                assert_eq!(result.status, CheckStatus::Fail);
+                let expected = match status {
+                    403 => "Cannot read",
+                    404 => "absent",
+                    _ => "contracts.json",
+                };
+                assert!(result.detail.contains(expected), "{}", result.detail);
+            }
             assert!(
                 check(state.cluster().unwrap(), &BlueprintDto::default(), None)
                     .await

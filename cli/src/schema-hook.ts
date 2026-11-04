@@ -7,6 +7,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { isIP } from "node:net";
 import { pathToFileURL } from "node:url";
 import { preparePendingCoreHelmSchemas, type CoreSchemaHookOptions } from "./lib/core-helm-schema-hook.js";
+import { completePendingCoreSre } from "./lib/core-helm-sre-hook.js";
 import type { SchemaExecute } from "./lib/schema-documents.js";
 
 async function inClusterExecute(namespace: string) {
@@ -53,7 +54,7 @@ async function inClusterExecute(namespace: string) {
 }
 
 export async function runSchemaHook(args: readonly string[], execute?: SchemaExecute) {
-  const allowed = new Set(["--release", "--namespace", "--revision", "--operation", "--installer-helm-version", "--timeout-ms"]);
+  const allowed = new Set(["--release", "--namespace", "--revision", "--operation", "--installer-helm-version", "--timeout-ms", "--phase"]);
   const values = new Map<string, string>();
   for (let index = 0; index < args.length; index += 2) {
     const flag = args[index];
@@ -63,7 +64,7 @@ export async function runSchemaHook(args: readonly string[], execute?: SchemaExe
     }
     values.set(flag, value);
   }
-  if ([...allowed].filter(flag => flag !== "--timeout-ms").some(flag => !values.has(flag))
+  if ([...allowed].filter(flag => flag !== "--timeout-ms" && flag !== "--phase").some(flag => !values.has(flag))
     || !/^[1-9][0-9]*$/.test(values.get("--revision")!)
     || (values.has("--timeout-ms") && !/^[1-9][0-9]*$/.test(values.get("--timeout-ms")!))) {
     throw new Error("Schema hook requires exact release, namespace, integer revision, operation and installer version");
@@ -72,10 +73,13 @@ export async function runSchemaHook(args: readonly string[], execute?: SchemaExe
     revision: Number(values.get("--revision")), operation: values.get("--operation") as CoreSchemaHookOptions["operation"],
     installerHelmVersion: values.get("--installer-helm-version")!,
     timeoutMs: values.has("--timeout-ms") ? Number(values.get("--timeout-ms")) : 120_000 };
-  if (execute) return preparePendingCoreHelmSchemas(execute, options);
+  const phase = values.get("--phase") ?? "schemas";
+  if (!["schemas", "sre"].includes(phase)) throw new Error("Unknown Core install phase");
+  const run = phase === "sre" ? completePendingCoreSre : preparePendingCoreHelmSchemas;
+  if (execute) return run(execute, options);
   const subprocesses = await inClusterExecute(options.namespace);
   try {
-    return await preparePendingCoreHelmSchemas(subprocesses.execute, options);
+    return await run(subprocesses.execute, options);
   } finally {
     await subprocesses.close();
   }

@@ -45,6 +45,7 @@ import { headlampCommand } from "./commands/headlamp.js";
 import { sreCommand } from "./commands/sre.js";
 import { updateCommand } from "./commands/update.js";
 import { schemasCommand } from "./commands/schemas.js";
+import { dispatcherImageCommand } from "./commands/dispatcher-image.js";
 
 export function createCli(): Command {
   const program = new Command();
@@ -72,6 +73,7 @@ export function createCli(): Command {
   program.addCommand(logsCommand());
   program.addCommand(inspectCommand());
   program.addCommand(sreCommand());
+  program.addCommand(dispatcherImageCommand());
 
   // Configuration
   program.addCommand(credentialsCommand());

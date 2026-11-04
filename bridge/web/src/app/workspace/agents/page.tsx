@@ -4,9 +4,9 @@
 // kars Bridge Workspace — Active agents. The plain answer to "what is working
 // right now, and what just finished?" Sourced from real run telemetry (not idle
 // pods): live runs pulse with what they're doing this second; recent runs show
-// their outcome, rounds, tools, and token cost. Honest empty when nothing ran.
+// their outcome, rounds, tools, and recorded root usage. Honest empty when nothing ran.
 
-import Link from "next/link";
+import Link from "@/components/navigation-link";
 import { HonestState } from "@/components/honest-state";
 import { LivePulse, LiveRefresh } from "@/components/live-refresh";
 import { FleetLive } from "@/components/fleet-live";
@@ -54,7 +54,7 @@ function AgentCard({ a, live }: { a: AgentLifecycle; live: boolean }) {
   // A team-owned scheduled run is NOT a spawned sub-agent — only runtime-spawned
   // children (a parent, with no owning team) are sub-agents.
   const isSubAgent = !!a.parent && !a.team;
-  const hasTrace = (a.rounds ?? 0) > 0 || (a.tool_calls ?? 0) > 0;
+  const hasTrace = a.rounds != null || a.tool_calls != null;
   return (
     <li className="rounded-xl border border-border bg-surface p-5">
       <div className="flex items-start justify-between gap-3">
@@ -84,16 +84,16 @@ function AgentCard({ a, live }: { a: AgentLifecycle; live: boolean }) {
       <dl className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-1 text-xs text-foreground-muted">
         {a.tier != null && <span>Tier {a.tier} · {TIER_LABELS[a.tier] ?? "?"}</span>}
         {live && !hasTrace ? (
-          <span className="italic">warming up — waiting for first model round…</span>
+          <span className="italic">Detailed activity unavailable — open Execution flow for current evidence.</span>
         ) : (
           <>
-            <span>{a.rounds} round{a.rounds === 1 ? "" : "s"}</span>
-            <span>{a.tool_calls} tool call{a.tool_calls === 1 ? "" : "s"}</span>
-            {a.tokens != null && <span>{a.tokens.toLocaleString()} tokens</span>}
+            <span>{a.rounds ?? "Unavailable"} {live ? "observed " : ""}round{a.rounds === 1 ? "" : "s"}</span>
+            <span>{a.tool_calls ?? "Unavailable"} {live ? "observed tool results" : "tool calls"}</span>
+            {a.tokens != null && <span>{a.tokens.toLocaleString()} root tokens</span>}
           </>
         )}
         {live && a.last_action && (
-          <span>now: <span className="font-mono text-foreground">{a.last_action}</span></span>
+          <span>reported: <span className="font-mono text-foreground">{a.last_action}</span></span>
         )}
         {!live && a.finished_at && <span>{ago(a.finished_at)}</span>}
       </dl>
@@ -155,25 +155,25 @@ function fmtTok(n: number): string {
   return `${n}`;
 }
 
-/** Spend-against-budget gauge for a single run — spent tokens over the envelope
- *  ceiling, with a bar and an over-budget flag. Pure surfacing of data the
- *  substrate already records (mission-output tokens + envelope budget). */
+/** Root-task receipts exclude specialist usage and are not settled account totals. */
 function SpendGauge({ spent, budget }: { spent: number | null; budget: number | null }) {
-  if (spent == null && budget == null) return null;
-  if (budget == null) {
-    return <span className="tabular-nums text-xs text-foreground-muted">{fmtTok(spent ?? 0)} tok</span>;
+  if (spent == null) {
+    return <span className="tabular-nums text-xs text-foreground-muted">Usage unavailable{budget != null ? ` · ${fmtTok(budget)} cap` : ""}</span>;
   }
-  const pct = spent != null ? Math.min(100, Math.round((spent / Math.max(budget, 1)) * 100)) : 0;
-  const over = spent != null && spent > budget;
+  if (budget == null) {
+    return <span className="tabular-nums text-xs text-foreground-muted" title="Recorded root-task tokens; specialist usage excluded">{fmtTok(spent)} root tok</span>;
+  }
+  const pct = Math.min(100, Math.round((spent / Math.max(budget, 1)) * 100));
+  const over = spent > budget;
   const near = pct >= 80 && !over;
   const tone = over ? "bg-danger" : near ? "bg-warning" : "bg-ok";
   return (
-    <span className="flex items-center gap-2" title={`${(spent ?? 0).toLocaleString()} of ${budget.toLocaleString()} token budget (${pct}%)`}>
+    <span className="flex items-center gap-2" title={`${spent.toLocaleString()} recorded root-task tokens / ${budget.toLocaleString()} declared token cap (${pct}%); specialist usage excluded`}>
       <span className="hidden h-1.5 w-16 overflow-hidden rounded-full bg-surface-muted sm:block">
-        <span className={`block h-full ${tone}`} style={{ width: `${Math.max(pct, 2)}%` }} />
+        <span className={`block h-full ${tone}`} style={{ width: `${pct}%` }} />
       </span>
       <span className={`tabular-nums text-xs ${over ? "text-danger" : "text-foreground-muted"}`}>
-        {fmtTok(spent ?? 0)}/{fmtTok(budget)}
+        {fmtTok(spent)}/{fmtTok(budget)} root/cap
       </span>
     </span>
   );
@@ -197,8 +197,8 @@ function RecentRunRow({ a }: { a: AgentLifecycle }) {
           )}
         </span>
         <span className="hidden shrink-0 gap-3 text-xs text-foreground-muted sm:flex">
-          <span>{a.rounds} rd</span>
-          <span>{a.tool_calls} tools</span>
+          <span>{a.rounds ?? "Unavailable"} rd</span>
+          <span>{a.tool_calls ?? "Unavailable"} tools</span>
           <SpendGauge spent={a.tokens} budget={a.budget_tokens} />
         </span>
         <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[11px] font-medium ${statusTone(a.status)}`}>
@@ -237,43 +237,45 @@ export default async function AgentsPage() {
           a single streaming feed of what every working agent is doing now. */}
       {!error && <FleetLive initial={fleet} />}
 
-      {/* Cost cockpit — total token spend across recent runs, and how it sits
-          against the budgets those runs carried. Surfaces data the substrate
-          already records (mission-output tokens + envelope budgets); "costs
-          opaque" is the #6 enterprise complaint, so this is a headline gauge. */}
-      {!error && agents.some((a) => a.tokens != null) && (() => {
-        const spend = agents.reduce((s, a) => s + (a.tokens ?? 0), 0);
+      {!error && agents.length > 0 && (() => {
+        const recorded = agents.filter((a) => a.tokens != null);
+        const spend = recorded.reduce((s, a) => s + a.tokens!, 0);
         const budgeted = agents.filter((a) => a.budget_tokens != null);
         const budgetSum = budgeted.reduce((s, a) => s + (a.budget_tokens ?? 0), 0);
         const overCount = agents.filter((a) => a.tokens != null && a.budget_tokens != null && a.tokens > a.budget_tokens).length;
-        const pct = budgetSum > 0 ? Math.min(100, Math.round((budgeted.reduce((s, a) => s + (a.tokens ?? 0), 0) / budgetSum) * 100)) : null;
+        const budgetUsageKnown = budgeted.length > 0 && budgeted.every((a) => a.tokens != null);
+        const pct = budgetSum > 0 && budgetUsageKnown ? Math.min(100, Math.round((budgeted.reduce((s, a) => s + a.tokens!, 0) / budgetSum) * 100)) : null;
         return (
           <section className="rounded-2xl border border-border bg-surface p-5">
             <div className="flex items-baseline justify-between">
-              <h2 className="text-sm font-semibold">Spend &amp; budget</h2>
-              <span className="text-[11px] text-foreground-muted">across {agents.length} recent run{agents.length === 1 ? "" : "s"}</span>
+              <h2 className="text-sm font-semibold">Recorded root-task usage</h2>
+              <span className="text-[11px] text-foreground-muted">receipts available for {recorded.length}/{agents.length} listed runs</span>
             </div>
+            <p className="mt-2 text-xs text-foreground-muted">
+              Specialist phases and unavailable receipts are excluded. These are not full run consumption or settled account totals.
+              Open a run for its usage breakdown, or its Team for lifetime accounting. Budget comparisons below use root receipts only.
+            </p>
             <div className="mt-3 grid grid-cols-2 gap-4 sm:grid-cols-4">
               <div>
-                <p className="text-2xl font-semibold tabular-nums">{spend.toLocaleString()}</p>
-                <p className="text-xs text-foreground-muted">tokens spent</p>
+                <p className="text-2xl font-semibold tabular-nums">{recorded.length ? spend.toLocaleString() : "Unavailable"}</p>
+                <p className="text-xs text-foreground-muted">root tokens recorded</p>
               </div>
               <div>
-                <p className="text-2xl font-semibold tabular-nums">{budgetSum > 0 ? budgetSum.toLocaleString() : "—"}</p>
+                <p className="text-2xl font-semibold tabular-nums">{budgeted.length > 0 ? budgetSum.toLocaleString() : "—"}</p>
                 <p className="text-xs text-foreground-muted">budgeted ({budgeted.length}/{agents.length} capped)</p>
               </div>
               <div>
                 <p className={`text-2xl font-semibold tabular-nums ${pct != null && pct >= 80 ? "text-warning" : ""}`}>{pct != null ? `${pct}%` : "—"}</p>
-                <p className="text-xs text-foreground-muted">of budget used</p>
+                <p className="text-xs text-foreground-muted">root receipts / declared caps</p>
               </div>
               <div>
-                <p className={`text-2xl font-semibold tabular-nums ${overCount > 0 ? "text-danger" : "text-ok"}`}>{overCount}</p>
-                <p className="text-xs text-foreground-muted">over budget</p>
+                <p className={`text-2xl font-semibold tabular-nums ${overCount > 0 ? "text-danger" : "text-foreground-muted"}`}>{budgetUsageKnown ? overCount : "—"}</p>
+                <p className="text-xs text-foreground-muted">root receipts above cap</p>
               </div>
             </div>
             {pct != null && (
               <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-surface-muted">
-                <div className={`h-full ${pct >= 100 ? "bg-danger" : pct >= 80 ? "bg-warning" : "bg-ok"}`} style={{ width: `${Math.max(pct, 2)}%` }} />
+                <div className={`h-full ${pct >= 100 ? "bg-danger" : pct >= 80 ? "bg-warning" : "bg-ok"}`} style={{ width: `${pct}%` }} />
               </div>
             )}
           </section>

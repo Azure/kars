@@ -51,7 +51,7 @@ spec:
             readOnlyRootFilesystem: true
             capabilities: {drop: ["ALL"]}
           readinessProbe:
-            exec: {command: ["python3", "/opt/witness/witness.py", "--health"]}
+            exec: {command: ["python3", "/opt/witness/witness.py", {{ ternary "--process-health" "--health" (eq (include "witness.kindBeta" .) "true") | quote }}]}
             periodSeconds: 10
           resources:
             requests: {cpu: 50m, memory: 128Mi}

@@ -7,7 +7,7 @@
 // confirms the tamper-evident record and verifies receipts independently —
 // nothing here can change the platform. Gated on the `auditor` role.
 
-import Link from "next/link";
+import Link from "@/components/navigation-link";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { Icon } from "@/components/icon";

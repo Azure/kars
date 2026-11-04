@@ -83,7 +83,7 @@ async fn chain(
     client: &Client,
     task: &KarsTask,
 ) -> Result<crate::task_identity::VerifiedTaskLineage, StoreError> {
-    let lineage = crate::task_identity::resolve(
+    let lineage = crate::task_identity::resolve_with_retry(
         client,
         task,
         crate::task_identity::LeafReadiness::AllowPending,
@@ -117,7 +117,7 @@ pub(super) async fn needs_account(client: &Client, task: &KarsTask) -> Result<bo
     // Selection must not interpret a legacy planning declaration as an
     // enforcement request. Only validate budget semantics after opt-in or an
     // existing lineage/account pin establishes governed continuity.
-    let lineage = crate::task_identity::resolve(
+    let lineage = crate::task_identity::resolve_with_retry(
         client,
         task,
         crate::task_identity::LeafReadiness::AllowPending,
@@ -161,6 +161,7 @@ pub async fn close_task(client: &Client, task: &KarsTask) -> Result<(), StoreErr
         .initialize(&binding.root, &binding.account.uid)
         .await?;
     store
+        .for_task(&binding.task_uid)
         .transact(&binding.root, &binding.account.uid, |ledger| {
             if binding.root.kind == RootKind::KarsTask
                 && binding.root.resource.uid == binding.task_uid
@@ -433,9 +434,13 @@ pub async fn ensure_task(
             effective_authorization: lineage.nodes[index].effective_authorization.clone(),
             limits: limits(&node.spec.envelope)?,
         };
+        let branch = &nodes[..=index];
+        let can_resume = team.is_none() || team_branch_can_resume(branch);
+        let dormant = paused_team && !team_branch_is_running(branch);
         store
+            .for_authority(&authority)
             .transact(&root, &account.uid, |ledger| {
-                bind_authority(ledger, &authority, paused_team)
+                bind_authority(ledger, &authority, dormant, can_resume)
             })
             .await?;
         let binding = task_binding(
@@ -451,10 +456,40 @@ pub async fn ensure_task(
     output.ok_or_else(|| BudgetError::Identity.into())
 }
 
+pub(super) fn team_branch_can_resume(tasks: &[KarsTask]) -> bool {
+    tasks.iter().all(|task| {
+        !task.annotations().contains_key("kars.azure.com/halted")
+            && task
+                .spec
+                .execution
+                .as_ref()
+                .is_none_or(|execution| execution.launch)
+    })
+}
+
+// The caller supplies verified ownership lineage. Non-executing role parents
+// use launch=false, but still need to enroll later phases of an admitted run.
+pub(super) fn team_branch_is_running(tasks: &[KarsTask]) -> bool {
+    tasks
+        .iter()
+        .all(|task| !task.annotations().contains_key("kars.azure.com/halted"))
+        && tasks.iter().any(|task| {
+            task.annotations()
+                .get("kars.azure.com/team-role")
+                .is_some_and(|role| role == "taskforce")
+                && task
+                    .spec
+                    .execution
+                    .as_ref()
+                    .is_some_and(|execution| execution.launch)
+        })
+}
+
 pub(super) fn bind_authority(
     ledger: &Ledger,
     authority: &TaskAuthority,
-    paused_team: bool,
+    dormant: bool,
+    can_resume: bool,
 ) -> Result<Mutation<()>, BudgetError> {
     let mut next = match ledger.nodes.get(&authority.task.uid) {
         Some(old) if old.authority != *authority => {
@@ -464,12 +499,12 @@ pub(super) fn bind_authority(
                 .update_authority(authority.clone())?
                 .next
         }
-        Some(_) if paused_team => ledger.close_subtree(&authority.task.uid)?.next,
         Some(_) => ledger.clone(),
-        None if paused_team => ledger.register_dormant_task(authority.clone())?.next,
+        None if dormant => ledger.register_dormant_task(authority.clone())?.next,
         None => ledger.register_task(authority.clone())?.next,
     };
-    if !paused_team && !next.nodes[&authority.task.uid].active {
+    // Team Resume must not reopen archived executions or their descendants.
+    if !dormant && can_resume && !next.nodes[&authority.task.uid].active {
         next = next
             .resume_task(&authority.task.uid, &authority.authorization_digest)?
             .next;

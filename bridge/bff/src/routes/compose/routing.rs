@@ -20,6 +20,8 @@ pub(super) fn orchestrator_quality_score(deployment: &str) -> Option<i64> {
         980
     } else if model.contains("gpt-5-4-pro") {
         970
+    } else if model.contains("gpt-5-4-mini") {
+        800
     } else if model.contains("gpt-5-4") {
         950
     } else if model.contains("claude-sonnet-5") {
@@ -47,6 +49,17 @@ pub(super) fn catalogue_has_model_key(models: &[ModelOption], key: &str) -> bool
         .is_some_and(|(provider, deployment)| catalogue_has_model(models, provider, deployment))
 }
 
+// Retained measurements identify deployments, not providers. Never resolve that
+// name through the first catalogue entry when different providers share it.
+pub(super) fn unique_model_for_deployment<'a>(
+    models: &'a [ModelOption],
+    deployment: &str,
+) -> Option<&'a ModelOption> {
+    let mut matches = models.iter().filter(|model| model.deployment == deployment);
+    let first = matches.next()?;
+    matches.all(|model| model.provider == first.provider).then_some(first)
+}
+
 pub(super) fn recommendation_is_actionable(
     recommended: Option<&str>,
     low_confidence: bool,
@@ -58,11 +71,25 @@ pub(super) fn select_orchestrator_route(
     options: &crate::routes::options::Options,
     efficiency: &crate::routes::efficiency::EfficiencyDto,
 ) -> Option<(String, String, String)> {
+    if let Some(model) = options.models.iter().find(|model| {
+        model.is_default && orchestrator_quality_score(&model.deployment).is_some()
+    }) {
+        return Some((
+            model.provider.clone(),
+            model.deployment.clone(),
+            format!(
+                "Selected {} from {} as the configured default for Mission and Team composition.",
+                model.deployment, model.provider
+            ),
+        ));
+    }
     let actionable_recommendation = efficiency.recommended.as_deref().filter(|_| {
         recommendation_is_actionable(
             efficiency.recommended.as_deref(),
             efficiency.recommended_low_confidence,
-        )
+        ) && efficiency.recommended.as_deref().is_some_and(|deployment| {
+            unique_model_for_deployment(&options.models, deployment).is_some()
+        })
     });
     options
             .models
@@ -73,6 +100,7 @@ pub(super) fn select_orchestrator_route(
                     .routes
                     .iter()
                     .find(|route| route.route == model.deployment
+                        && unique_model_for_deployment(&options.models, &model.deployment).is_some()
                         && Some(route.harness.as_str()) == efficiency.recommended_harness.as_deref()
                         && route.verified_runs == route.runs);
                 let frontier_bonus = if actionable_recommendation == Some(model.deployment.as_str()) {
@@ -169,13 +197,6 @@ pub(super) fn should_strengthen_team_principal(
     let current = orchestrator_quality_score(current_deployment).unwrap_or(0);
     let strongest = orchestrator_quality_score(strongest_deployment).unwrap_or(0);
     current < 900 && strongest >= 950
-}
-
-pub(super) fn efficient_member_route_is_qualified(runs: i64, acceptance_rate: f64) -> bool {
-    // A lower-cost member route needs repeated evidence before a newly composed
-    // team inherits it. This is intentionally stricter on sample count than a
-    // descriptive efficiency-basis label because it changes live execution.
-    runs >= 3 && acceptance_rate >= 0.67
 }
 
 #[cfg(test)]

@@ -43,6 +43,8 @@ struct State {
     calls: Vec<(String, String, Value)>,
     pods: Vec<Value>,
     create_deployment_on_post: bool,
+    strategy_conflict: bool,
+    hold_after_strategy: bool,
 }
 
 fn merge(value: &mut Value, patch: &Value) {
@@ -208,9 +210,23 @@ async fn fixture() -> (
                 return ResponseTemplate::new(409).set_body_json(json!({
                     "apiVersion":"v1","kind":"Status","status":"Failure","code":409,"reason":"Conflict"}));
             }
+            let strategy_transition=key==DEPLOYMENT && body["spec"]["strategy"]["type"]=="Recreate"
+                && body["spec"].as_object().is_some_and(|spec|spec.len()==1);
+            if strategy_transition && s.strategy_conflict {
+                return ResponseTemplate::new(409).set_body_json(json!({
+                    "apiVersion":"v1","kind":"Status","status":"Failure","code":409,"reason":"Conflict"}));
+            }
             let original=value.clone();
             let version=value["metadata"]["resourceVersion"].as_str().unwrap().parse::<u64>().unwrap()+1;
             let prior=value["spec"].clone();merge(&mut value,&body);
+            if key==DEPLOYMENT && value["spec"]["strategy"]["type"]=="Recreate"
+                && !value["spec"]["strategy"]["rollingUpdate"].is_null() {
+                return ResponseTemplate::new(422).set_body_json(json!({
+                    "apiVersion":"v1","kind":"Status","status":"Failure","code":422,"reason":"Invalid"}));
+            }
+            if strategy_transition && s.hold_after_strategy {
+                s.objects.get_mut(SANDBOX).unwrap()["metadata"]["annotations"][HOLD]=json!("task-uid");
+            }
             if value==original {return ResponseTemplate::new(200).set_body_json(original);}
             if !prior.is_null() && value["spec"]!=prior {value["metadata"]["generation"]=(value["metadata"]["generation"].as_i64().unwrap_or(1)+1).into();}
             value["metadata"]["resourceVersion"]=version.to_string().into();

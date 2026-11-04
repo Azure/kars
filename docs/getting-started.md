@@ -376,6 +376,26 @@ endpoints/deployments, and `azure.workloadIdentity.clientId`. The default chart
 does not double-deploy AgentMesh because `kars up` manages it separately; for a
 Helm-owned mesh, set `agentMesh.enabled=true`.
 
+In Bridge **Configuration → Foundry models & services**, connect using only the
+project URL (`https://<resource>.services.ai.azure.com/api/projects/<project>`).
+Kars derives the inference endpoint and reuses a saved key for that same Azure
+resource, or uses the cluster's Azure identity. Advanced authentication accepts
+an explicit key when necessary. An inference endpoint alone identifies the
+resource, not which project to use.
+
+**Refresh models & services** lists project deployments and configured service
+connections. The last successfully saved service inventory remains visible after
+reload with its discovery timestamp; refresh to check for changes.
+Failed or incomplete discovery retains the saved catalogue;
+service listings do not prove invocation or service health. Connecting saves the
+project and discovered inference routes atomically in the enrolled provider store,
+including in sealed private workspaces. It does not change controller settings,
+default models, or existing team memory, and does not automatically enable the
+listed services. Failed deployment discovery saves nothing; concurrent provider
+changes reject publication rather than overwrite newer configuration. Existing Azure
+provider **Refresh models** opens a preview: review and save its model selection
+separately. Choose a default explicitly in the Model catalogue.
+
 Register the existing infrastructure with the CLI when you want Azure lifecycle
 commands:
 

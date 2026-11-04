@@ -21,6 +21,7 @@ pub struct GovernedServices {
     pub observer: Option<Arc<crate::service_observation::Observer>>,
     pub allow_ips: Option<Vec<IpAddr>>,
     pub identity_valid: bool,
+    pub(crate) github: std::sync::OnceLock<Result<Arc<crate::github_services::GitHubServices>, ()>>,
     pub shutdown: CancellationToken,
     waits: Arc<Semaphore>,
     reset_gate: std::sync::Mutex<()>,
@@ -50,6 +51,7 @@ impl GovernedServices {
             observer: None,
             allow_ips: None,
             identity_valid: true,
+            github: std::sync::OnceLock::new(),
             shutdown: CancellationToken::new(),
             waits: Arc::new(Semaphore::new(WAIT_CAPACITY)),
             reset_gate: std::sync::Mutex::new(()),
@@ -178,8 +180,11 @@ impl GovernedServices {
         sandbox: &str,
         timeout: Duration,
     ) -> Result<(), Error> {
-        self.wait_for_egress_check(scope, id, target, sandbox, timeout, || {
-            blocklist.check_egress(target, sandbox)
+        self.wait_for_egress_check(scope, id, target, sandbox, timeout, || async {
+            blocklist
+                .check_egress_in_scope(target, sandbox, scope)
+                .await
+                .map(|_| ())
         })
         .await
     }

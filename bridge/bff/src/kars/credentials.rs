@@ -20,11 +20,20 @@ use kube::{
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod foundry;
 mod integrations;
+mod provider_lifecycle;
+pub use foundry::FoundryService;
+pub(crate) use foundry::{FoundryProject, saved_foundry_project};
 
 const GRANT: &str = "workspace";
 const PREFIX: &str = "kars-credential-input-";
 const REMOVED_KEYS: &str = "kars.azure.com/credential-removed-keys";
+
+pub(super) enum BindingRetry {
+    Never,
+    Lifecycle(Option<kube::api::DynamicObject>),
+}
 
 struct AgentCredentialWrite<'a> {
     namespace: &'a str,
@@ -293,9 +302,33 @@ impl Cluster {
         name: &str,
         mutate: impl Fn(&mut BTreeMap<String, String>),
     ) -> Result<(), kube::Error> {
+        self.mutate_integration_checked(namespace, name, None, mutate)
+            .await
+    }
+
+    /// A supplied UID/version fences a one-use registration against all changes
+    /// since preflight. It must never retry against a newer credential snapshot.
+    pub(super) async fn mutate_integration_checked(
+        &self,
+        namespace: &str,
+        name: &str,
+        expected: Option<(&str, &str)>,
+        mutate: impl Fn(&mut BTreeMap<String, String>),
+    ) -> Result<(), kube::Error> {
         let namespace = self.operator_store_namespace(namespace, name);
         for _ in 0..6 {
             let (_, secret) = self.integration_store(&namespace, name).await?;
+            if let Some((uid, version)) = expected
+                && (secret.uid().as_deref() != Some(uid)
+                    || secret.resource_version().as_deref() != Some(version))
+            {
+                return Err(kube::Error::Api(kube::core::ErrorResponse {
+                    status: "Failure".into(),
+                    reason: "Conflict".into(),
+                    message: "Integration store changed since registration started".into(),
+                    code: 409,
+                }));
+            }
             let before = secret
                 .data
                 .as_ref()
@@ -308,6 +341,10 @@ impl Cluster {
                 .map_err(|_| failure("Integration store contains non-UTF8 values"))?;
             let mut after = before.clone();
             mutate(&mut after);
+            if name == "kars-inference-providers" {
+                self.validate_provider_update(&secret, &before, &after)
+                    .await?;
+            }
             let removed = before
                 .keys()
                 .filter(|key| !after.contains_key(*key))
@@ -331,7 +368,11 @@ impl Cluster {
                 .await
             {
                 Ok(_) => return Ok(()),
-                Err(kube::Error::Api(error)) if error.code == 409 || error.code == 422 => continue,
+                Err(kube::Error::Api(error))
+                    if expected.is_none() && (error.code == 409 || error.code == 422) =>
+                {
+                    continue;
+                }
                 Err(error) => return Err(error),
             }
         }
@@ -648,6 +689,7 @@ impl Cluster {
                 .await?;
             *stored = Some(written.clone());
         }
+        let keyless_binding = keys.is_empty() && reviewed.is_none();
         let bound = if let Some(target) = &target {
             Some(
                 self.bind_credential_selection_reviewed(
@@ -660,6 +702,7 @@ impl Cluster {
                         owner: Some(target.clone()),
                     },
                     reviewed.map(|review| &review.review),
+                    if keyless_binding { BindingRetry::Lifecycle(None) } else { BindingRetry::Never },
                 )
                 .await?,
             )
@@ -685,23 +728,37 @@ impl Cluster {
         grant: &Identity,
         selection: Selection,
     ) -> Result<(), kube::Error> {
-        self.bind_credential_selection_reviewed(target, grant, selection, None)
-            .await
-            .map(|_| ())
+        self.bind_credential_selection_reviewed(
+            target,
+            grant,
+            selection,
+            None,
+            BindingRetry::Lifecycle(None),
+        )
+        .await
+        .map(|_| ())
     }
 
-    async fn bind_credential_selection_reviewed(
+    pub(super) async fn bind_credential_selection_reviewed(
         &self,
         target: &Target,
         grant: &Identity,
         selection: Selection,
         review: Option<&CredentialReview>,
+        retry: BindingRetry,
     ) -> Result<kube::api::DynamicObject, kube::Error> {
         let api = object_api(self, &target.namespace, &target.kind);
-        let object = api
-            .get(&target.name)
-            .await
-            .map_err(|e| safe("Read target before credential binding", e))?;
+        let (retry_lifecycle_conflicts, captured) = match retry {
+            BindingRetry::Never => (false, None),
+            BindingRetry::Lifecycle(captured) => (true, captured),
+        };
+        let mut object = match captured {
+            Some(object) => object,
+            None => api
+                .get(&target.name)
+                .await
+                .map_err(|e| safe("Read target before credential binding", e))?,
+        };
         if let Some(review) = review {
             self.check_reviewed_target(review, &object)?;
         }
@@ -710,13 +767,50 @@ impl Cluster {
         else {
             return Ok(object);
         };
-        let result = api.patch(&target.name,&PatchParams::default(),&Patch::Merge(json!({
-            "metadata":{"uid":target.uid,"resourceVersion":object.metadata.resource_version},"spec":spec,
-        }))).await.map_err(|e|safe("Bind the captured target and source UIDs",e))?;
-        if review.is_some() {
-            self.check_bound_credential_target(&object, &spec, &result)?;
+        let mut conflict_retries = 0;
+        loop {
+            if object
+                .metadata
+                .resource_version
+                .as_deref()
+                .is_none_or(str::is_empty)
+            {
+                return Err(failure(
+                    "Credential target resourceVersion is missing before binding",
+                ));
+            }
+            let error = match api.patch(&target.name, &PatchParams::default(), &Patch::Merge(json!({
+                "metadata":{"uid":target.uid,"resourceVersion":object.metadata.resource_version},"spec":spec,
+            }))).await {
+                Ok(result) => {
+                    if review.is_some() {
+                        self.check_bound_credential_target(&object, &spec, &result)?;
+                    }
+                    return Ok(result);
+                }
+                Err(error) => error,
+            };
+            // Creation may race controller status or initial cleanup registration.
+            // Credential writes retain their exact fence without retrying a partial write.
+            if !retry_lifecycle_conflicts
+                || review.is_some()
+                || conflict_retries == 2
+                || !matches!(&error, kube::Error::Api(response) if response.code == 409)
+            {
+                return Err(safe("Bind the captured target and source UIDs", error));
+            }
+            let refreshed = api
+                .get(&target.name)
+                .await
+                .map_err(|error| safe("Refresh conflicted credential binding target", error))?;
+            if refreshed.metadata.resource_version == object.metadata.resource_version
+                || !super::credential_targets::activation_unchanged(&object, &refreshed)?
+            {
+                return Err(safe("Bind the captured target and source UIDs", error));
+            }
+            object = refreshed;
+            conflict_retries += 1;
         }
-        Ok(result)
     }
 
     pub(super) async fn await_source_metadata(

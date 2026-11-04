@@ -28,6 +28,63 @@ let objects: Awaited<ReturnType<typeof render>>;
 beforeAll(async () => { objects = await render(); });
 
 describe("Core monitoring dependency", () => {
+  it("scopes kube-state-metrics startup headroom to Kind beta without weakening probes", async () => {
+    const profile = parse(readFileSync(`${root}deploy/helm/kars/values-kind-beta.yaml`, "utf8"));
+    const result = await render(["--set-json", `monitoring.kube-state-metrics.resources=${JSON.stringify(
+      profile.monitoring["kube-state-metrics"].resources,
+    )}`]);
+    const container = (rendered: typeof objects) => rendered.find(o => o.kind === "Deployment"
+      && o.metadata.name === "kps-kube-state-metrics").spec.template.spec.containers[0];
+    const baseline = container(objects);
+    const beta = container(result);
+    expect(baseline.resources).toEqual({
+      requests: { cpu: "25m", memory: "32Mi" }, limits: { cpu: "250m", memory: "128Mi" },
+    });
+    expect(beta.resources).toEqual({
+      requests: { cpu: "25m", memory: "64Mi" }, limits: { cpu: "500m", memory: "256Mi" },
+    });
+    expect(beta.livenessProbe).toEqual(baseline.livenessProbe);
+    expect(beta.readinessProbe).toEqual(baseline.readinessProbe);
+    expect(beta.livenessProbe.httpGet.path).toBe("/livez");
+    expect(beta.readinessProbe.httpGet.path).toBe("/readyz");
+    const { resources: _baselineResources, ...baselineConfiguration } = baseline;
+    const { resources: _betaResources, ...betaConfiguration } = beta;
+    expect(betaConfiguration).toEqual(baselineConfiguration);
+  });
+  it("binds Grafana transition normalization to the locked dependency defaults", async () => {
+    const lock = parse(readFileSync(`${root}deploy/helm/kars/Chart.lock`, "utf8"));
+    const version = lock.dependencies.find((d: { name: string }) => d.name === "kube-prometheus-stack").version;
+    const { stdout } = await execa("tar", ["-xOzf", `${root}deploy/helm/kars/charts/kube-prometheus-stack-${version}.tgz`,
+      "kube-prometheus-stack/charts/grafana/values.yaml"]);
+    expect(JSON.parse(readFileSync(`${root}deploy/helm/kars/files/monitoring/grafana-defaults.json`, "utf8"))).toEqual(parse(stdout));
+    expect(parse(readFileSync(`${root}deploy/helm/kars/values.yaml`, "utf8")).monitoring).not.toHaveProperty("grafanaBaseline");
+  });
+  it("prefers workers without requiring them and allows monitoring placement overrides", async () => {
+    const result = await render(["--set", "monitoring.grafana.enabled=true"]);
+    const grafanaRoles = result.filter(o => ["Role", "ClusterRole", "RoleBinding", "ClusterRoleBinding"].includes(o.kind)
+      && o.metadata.name.includes("grafana"));
+    expect(grafanaRoles.map(o => o.kind).sort()).toEqual(["Role", "RoleBinding"]);
+    expect(grafanaRoles.every(o => o.metadata.namespace === "monitoring")).toBe(true);
+    const expected = { nodeAffinity: { preferredDuringSchedulingIgnoredDuringExecution: [{
+      weight: 100, preference: { matchExpressions: [
+        { key: "node-role.kubernetes.io/control-plane", operator: "DoesNotExist" },
+        { key: "node-role.kubernetes.io/master", operator: "DoesNotExist" },
+      ] },
+    }] } };
+    expect(result.find(o => o.kind === "Prometheus").spec.affinity.nodeAffinity).toEqual(expected.nodeAffinity);
+    expect(result.find(o => o.kind === "Deployment" && o.metadata.name === "kps-grafana")
+      .spec.template.spec.affinity).toEqual(expected);
+    const disabled = await render(["--set", "monitoring.grafana.enabled=true",
+      "--set-json", "monitoring.grafana.affinity=null",
+      "--set-json", "monitoring.prometheus.prometheusSpec.affinity=null"]);
+    const prometheusAffinity = disabled.find(o => o.kind === "Prometheus").spec.affinity;
+    expect(prometheusAffinity.nodeAffinity).toBeUndefined();
+    expect(prometheusAffinity.podAntiAffinity)
+      .toEqual(result.find(o => o.kind === "Prometheus").spec.affinity.podAntiAffinity);
+    expect(disabled.find(o => o.kind === "Deployment" && o.metadata.name === "kps-grafana")
+      .spec.template.spec.affinity).toBeUndefined();
+  });
+
   it("preserves the proxy endpoint and uses the exact AL3 images, including admission hooks and reloader", () => {
     const podImages = objects.filter(o => o.metadata.namespace === "monitoring")
       .flatMap(o => o.spec?.template?.spec?.containers?.map((c: { image: string }) => c.image) ?? []);
@@ -75,6 +132,46 @@ describe("Core monitoring dependency", () => {
     await expect(render(["--set-json", 'monitoring.querySubjects=[{"kind":"ServiceAccount","name":"headlamp"}]']))
       .rejects.toThrow("monitoring.querySubjects");
   });
+
+  it("keeps transition baselines out of emitted image and query authority, including full revocation", async () => {
+    const defaults = parse(readFileSync(`${root}deploy/helm/kars/values.yaml`, "utf8"));
+    expect(defaults.headlamp).not.toHaveProperty("imageBaseline");
+    expect(defaults.monitoring).not.toHaveProperty("querySubjectsBaseline");
+    const original = [{ kind: "Group", name: "original:readers" }];
+    const selected = [{ kind: "User", name: "mapped:reader@example.test" }];
+    const repository = "another.registry.example:5443/qualified/headlamp";
+    const tag = `latest@sha256:${"b".repeat(64)}`;
+    const args = ["--set-string", "headlamp.imageBaseline=registry.example/headlamp:latest",
+      "--set-string", `headlamp.image.repository=${repository}`, "--set-string", `headlamp.image.tag=${tag}`,
+      "--set-json", `monitoring.querySubjectsBaseline=${JSON.stringify(original)}`];
+    for (const subjects of [selected, []]) {
+      const result = await render([...args, "--set-json", `monitoring.querySubjects=${JSON.stringify(subjects)}`]);
+      expect(result.find(o => o.kind === "Deployment" && o.metadata.name === "headlamp")
+        .spec.template.spec.containers[0].image).toBe(`${repository}:${tag}`);
+      expect(result.find(o => o.kind === "Role" && o.metadata.name === "kars-prometheus-query").rules)
+        .toEqual([{ apiGroups: [""], resources: ["services/proxy"],
+          resourceNames: ["kps-kube-prometheus-stack-prometheus:9090"], verbs: ["get"] }]);
+      const binding = result.find(o => o.kind === "RoleBinding" && o.metadata.name === "kars-prometheus-query");
+      if (subjects.length) expect(binding.subjects).toEqual(subjects.map(subject => ({ ...subject, apiGroup: "rbac.authorization.k8s.io" })));
+      else expect(binding).toBeUndefined();
+    }
+  });
+
+  it.each(["querySubjects", "querySubjectsBaseline"])("applies the same strict subject schema to monitoring.%s", async field => {
+    for (const invalid of [null, {}, "readers", [{ kind: "ServiceAccount", name: "headlamp" }],
+      [{ kind: "User", name: "reader", namespace: "headlamp" }], [{ kind: "Group", name: "" }],
+      [{ kind: "User", name: " reader" }], [{ kind: "User", name: "reader\nother" }],
+      [{ kind: "User", name: 3 }], [{ kind: "Group", name: "readers" }, { kind: "Group", name: "readers" }]]) {
+      await expect(render(["--set-json", `monitoring.${field}=${JSON.stringify(invalid)}`]))
+        .rejects.toThrow(`monitoring.${field}`);
+    }
+  });
+
+  it.each([{}, "", "registry.example/headlamp:v1", "registry.example/headlamp:latest@sha256:bad"])(
+    "rejects an invalid optional Headlamp image baseline %j", async baseline => {
+      await expect(render(["--set-json", `headlamp.imageBaseline=${JSON.stringify(baseline)}`]))
+        .rejects.toThrow("headlamp.imageBaseline");
+    });
 
   it("keeps sandbox labels and real relay fields without granting the exporter a token or host root", () => {
     const monitor = objects.find(o => o.kind === "PodMonitor" && o.metadata.name === "kars-sandbox-router");

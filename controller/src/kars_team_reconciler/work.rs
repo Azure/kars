@@ -67,12 +67,187 @@ pub(super) async fn select(client: &Client, team: &KarsTeam) -> Result<Selection
 
 pub(super) fn fragment(selection: &Selection) -> Result<String, ReconcileError> {
     match selection {
-        Selection::Item(_, item) => Ok(format!(
-            "\nAssigned work within the charter and reviewed permissions:\n{}\n",
-            serde_json::to_string(&contract::request(item))?,
-        )),
+        Selection::Item(_, item) => Ok(contract::work_fragment(item)?),
         _ => Ok(String::new()),
     }
+}
+
+pub(super) use contract::revision_source;
+
+pub(super) fn validate_revision_plan(
+    team: &KarsTeam,
+    selection: &Selection,
+) -> Result<(), ReconcileError> {
+    if let Selection::Item(_, item) = selection
+        && (revision_source(item).is_some() || contract::revision_diagnostic_source(item).is_some())
+        && let Some(plan) = team
+            .spec
+            .blueprint
+            .as_ref()
+            .and_then(|blueprint| blueprint.execution_plan.as_ref())
+    {
+        crate::task_execution_plan::validate_retained_input_execution(Some(plan), 1)
+            .map_err(invalid)?;
+    }
+    Ok(())
+}
+
+pub(super) async fn revision_documents(
+    client: &Client,
+    team: &KarsTeam,
+    selection: &Selection,
+) -> Result<
+    (
+        Vec<crate::team_memory::Document>,
+        Vec<crate::reviewed_execution::RevisionRole>,
+    ),
+    ReconcileError,
+> {
+    let Selection::Item(selected, item) = selection else {
+        return Ok((vec![], vec![]));
+    };
+    let mut documents = Vec::new();
+    let mut roles = Vec::new();
+    if let Some(attempt) = revision_source(item) {
+        documents.extend(
+            revision_attempt_documents(client, team, selected, attempt, false)
+                .await?
+                .0,
+        );
+    }
+    if let Some(attempt) = contract::revision_diagnostic_source(item) {
+        let (diagnostics, diagnostic_roles) =
+            revision_attempt_documents(client, team, selected, attempt, true).await?;
+        documents.extend(diagnostics);
+        roles = diagnostic_roles;
+    }
+    Ok((documents, roles))
+}
+
+async fn revision_attempt_documents(
+    client: &Client,
+    team: &KarsTeam,
+    selected: &contract::Binding,
+    attempt: &contract::Attempt,
+    diagnostic: bool,
+) -> Result<
+    (
+        Vec<crate::team_memory::Document>,
+        Vec<crate::reviewed_execution::RevisionRole>,
+    ),
+    ReconcileError,
+> {
+    let tasks_api = Api::<KarsTask>::namespaced(client.clone(), namespace(team)?);
+    let source = tasks_api.get(&attempt.run).await?;
+    super::requests::validate_work_run(&source)?;
+    let prior = binding(&source)?.ok_or_else(|| invalid("revision source has no work binding"))?;
+    if !tasks::owned(&source.metadata, team)
+        || source.uid().as_deref() != Some(&attempt.run_uid)
+        || source.annotations().get(ANNOT_RUN_REQUESTED) != Some(&attempt.assignment_nonce)
+        || prior.backlog_uid != selected.backlog_uid
+        || prior.item_id != selected.item_id
+    {
+        return Err(invalid(
+            "revision source differs from the retained Team/work attempt",
+        ));
+    }
+    let cms = Api::<ConfigMap>::namespaced(client.clone(), namespace(team)?);
+    let output_name = format!("kars-mission-output-{}", attempt.run);
+    let output = cms.get_opt(&output_name).await?;
+    if diagnostic {
+        let digest = attempt
+            .output_sha256
+            .as_deref()
+            .ok_or_else(|| invalid("retained failed attempt has no evidence digest"))?;
+        if let Some(output) = &output {
+            let data = output
+                .data
+                .as_ref()
+                .ok_or_else(|| invalid("revision failure output missing"))?;
+            if !super::runs::current_output(output, &source)
+                || digest != output_digest(data)?
+                || !matches!(
+                    data.get("status").map(String::as_str),
+                    Some("failed" | "rejected")
+                )
+            {
+                return Err(invalid("revision failure output changed or was not failed"));
+            }
+        }
+        let documents = crate::reviewed_execution::retained_failed_team_documents(
+            client,
+            team,
+            &source,
+            output.as_ref(),
+            digest,
+        )
+        .await?;
+        if serde_json::to_value(tasks_api.get(&attempt.run).await?)?
+            != serde_json::to_value(&source)?
+            || cms.get_opt(&output_name).await? != output
+        {
+            return Err(invalid("revision failure source changed during admission"));
+        }
+        let roles = crate::reviewed_execution::revision_roles(
+            source
+                .spec
+                .blueprint
+                .as_ref()
+                .and_then(|b| b.execution_plan.as_ref())
+                .ok_or_else(|| invalid("diagnostic source has no reviewed plan"))?,
+        );
+        return Ok((documents, roles));
+    }
+    let output = output.ok_or_else(|| invalid("revision output is missing"))?;
+    let data = output
+        .data
+        .as_ref()
+        .ok_or_else(|| invalid("revision output is missing"))?;
+    if !super::runs::current_output(&output, &source)
+        || attempt.output_sha256.as_deref() != Some(output_digest(data)?.as_str())
+        || data.get("status").map(String::as_str) != Some("ok")
+    {
+        return Err(invalid(
+            "revision source output changed or was not successful",
+        ));
+    }
+    let archive = crate::reviewed_execution::retained_team_run(client, team, &source)
+        .await?
+        .ok_or_else(|| invalid("revision source has no verified retained documents"))?;
+    if data.get("output") != Some(&archive.output) {
+        return Err(invalid("revision archive differs from the reviewed output"));
+    }
+    let required = &source
+        .spec
+        .blueprint
+        .as_ref()
+        .and_then(|blueprint| blueprint.execution_plan.as_ref())
+        .ok_or_else(|| invalid("revision source has no reviewed execution plan"))?
+        .deliverables;
+    let documents: Vec<_> = archive
+        .documents
+        .into_iter()
+        .filter(|document| {
+            required
+                .iter()
+                .any(|deliverable| deliverable.name == document.name)
+        })
+        .enumerate()
+        .map(|(index, mut document)| {
+            document.name = format!("revision-{index}");
+            document
+        })
+        .collect();
+    if documents.len() != required.len()
+        || serde_json::to_value(tasks_api.get(&attempt.run).await?)?
+            != serde_json::to_value(&source)?
+        || cms.get(&output.name_any()).await? != output
+    {
+        return Err(invalid(
+            "revision documents are incomplete or source changed during admission",
+        ));
+    }
+    Ok((documents, vec![]))
 }
 
 fn binding(task: &KarsTask) -> Result<Option<contract::Binding>, ReconcileError> {
@@ -302,7 +477,9 @@ async fn finish_item(
             item.run_uid = None;
             item.assignment_nonce = None;
             item.done_at = None;
-            item.feedback = feedback.map(str::to_string);
+            if outcome != "failed" || item.feedback.is_none() {
+                item.feedback = feedback.map(str::to_string);
+            }
         }
         Ok(())
     })
@@ -342,6 +519,7 @@ async fn review(
                 )),
                 requested_tier: None,
             },
+            requested_by: None,
             ttl: Some("P7D".into()),
             decision: None,
         },
@@ -401,6 +579,43 @@ async fn review(
         ));
     }
     Ok(approval)
+}
+
+/// Recover the already-recorded failure if idling lost its optimistic-lock race.
+pub(super) async fn retained_failure_digest(
+    client: &Client,
+    team: &KarsTeam,
+    task: &KarsTask,
+) -> Result<Option<String>, ReconcileError> {
+    let Some(binding) = binding(task)? else {
+        return Ok(None);
+    };
+    super::requests::validate_work_run(task)?;
+    let owner = owner(team)?;
+    let api = Api::<ConfigMap>::namespaced(client.clone(), &owner.namespace);
+    let (cm, items) = contract::read(&api, &owner)
+        .await
+        .map_err(persistence)?
+        .ok_or_else(|| invalid("bound work store disappeared"))?;
+    if cm.uid().as_deref() != Some(&binding.backlog_uid) {
+        return Err(invalid("bound work store UID changed"));
+    }
+    let item = items
+        .iter()
+        .find(|item| item.id == binding.item_id)
+        .ok_or_else(|| invalid("bound work item disappeared"))?;
+    let Some(attempt) = item.history.iter().find(|attempt| {
+        Some(&attempt.run_uid) == task.metadata.uid.as_ref()
+            && Some(&attempt.assignment_nonce) == task.annotations().get(ANNOT_RUN_REQUESTED)
+    }) else {
+        return Ok(None);
+    };
+    if attempt.run != task.name_any() || attempt.outcome != "failed" {
+        return Err(invalid("retained reviewed failure identity changed"));
+    }
+    Ok(Some(attempt.output_sha256.clone().ok_or_else(|| {
+        invalid("retained reviewed failure digest missing")
+    })?))
 }
 
 /// Called only after the existing run/output UID, nonce and completion fences.

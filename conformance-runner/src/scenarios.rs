@@ -15,7 +15,7 @@
 //! | `EgressConnect`   | HTTP `CONNECT host:port` through the forward proxy on `:8444`     | `EgressAllowlist`       |
 //! | `ChatCompletion`  | `POST /v1/chat/completions`                                       | `InferencePolicy`       |
 //! | `ToolCall`        | `POST /mcp` JSON-RPC `tools/call` (name = scenario.tool, args)    | `ToolPolicy`            |
-//! | `MemoryRead`      | `POST /platform/mcp` JSON-RPC `tools/call` `foundry.memory:search`| `KarsMemory`            |
+//! | `MemoryRead`      | `POST /memory_stores/{store}:search_memories` (requires `--memory-store`) | Explicit response headers only |
 //!
 //! `ToolCall` with a `burst` repeats the call up to `count` times within
 //! `window_ms`, recording each attempt's status/decision as an
@@ -35,7 +35,10 @@ use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 
 use crate::outcome::ReplayError;
-use crate::transport::{CASE_ID_HEADER, Transport, mcp_response_to_decision, response_to_decision};
+use crate::transport::{
+    CASE_ID_HEADER, Transport, mcp_response_to_decision, memory_response_to_decision,
+    response_to_decision,
+};
 
 /// Replay one [`Scenario`] against the router. `case_id` is echoed via
 /// header on every request so the router can correlate.
@@ -120,35 +123,26 @@ pub async fn replay(
             }
         }
         Scenario::MemoryRead { scope, key } => {
-            // Foundry's memory tool exposes a single `foundry.memory`
-            // tool with `operation` discriminator. `scope` is encoded
-            // in the search text so the audit log captures which
-            // sandbox-scope the eval asked for; the upstream Foundry
-            // search treats it as plain text.
-            let text = if scope.is_empty() {
-                key.clone()
-            } else {
-                format!("[scope={scope}] {key}")
-            };
-            let body = mcp_envelope(
-                "tools/call",
-                json!({
-                    "name": "foundry.memory",
-                    "arguments": {
-                        "operation": "search",
-                        "text": text,
-                    },
-                }),
-                1,
-            );
+            let store = transport.memory_store()?;
+            let mut body = json!({
+                "scope": scope,
+                "options": { "max_memories": 10 },
+            });
+            if !key.is_empty() {
+                body["items"] = json!([{
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": key }],
+                }]);
+            }
             single_call(
                 transport,
-                "/platform/mcp",
+                &format!("/memory_stores/{store}:search_memories"),
                 body,
                 PolicyKindRef::KarsMemory,
                 case_id,
                 auth_header,
-                CallStyle::McpJsonRpc,
+                CallStyle::MemoryRest,
             )
             .await
         }
@@ -164,6 +158,8 @@ enum CallStyle {
     /// Decode from the JSON-RPC envelope in the response body
     /// (MCP `tools/call`).
     McpJsonRpc,
+    /// Decode governed memory REST without inferring policy attribution.
+    MemoryRest,
 }
 
 fn messages_to_json(msgs: &[ChatMessage]) -> Vec<Value> {
@@ -195,13 +191,17 @@ async fn single_call(
         .post(transport.url(path))
         .header(CASE_ID_HEADER, case_id)
         .json(&body);
+    if matches!(style, CallStyle::McpJsonRpc) {
+        req = req.header("accept", "application/json, text/event-stream");
+    }
     if let Some(token) = auth_header {
         req = req.header("authorization", token);
     }
     let resp = req.send().await.map_err(ReplayError::request)?;
     let parts = match style {
         CallStyle::HttpStatus => response_to_decision(resp, default_kind).await?,
-        CallStyle::McpJsonRpc => mcp_response_to_decision(resp, default_kind).await?,
+        CallStyle::McpJsonRpc => mcp_response_to_decision(resp).await?,
+        CallStyle::MemoryRest => memory_response_to_decision(resp).await?,
     };
     Ok(ActualDecision {
         decision: parts.decision,
@@ -230,6 +230,7 @@ async fn burst_call(
     let window = Duration::from_millis(u64::from(burst.window_ms));
 
     let mut observations: Vec<ObservedSample> = Vec::with_capacity(burst.count as usize);
+    let mut by_policy_kind = None;
 
     for i in 0..burst.count {
         if window > Duration::ZERO && start.elapsed() >= window {
@@ -241,6 +242,9 @@ async fn burst_call(
             .post(transport.url(path))
             .header(CASE_ID_HEADER, format!("{case_id}#{i}"))
             .json(&body);
+        if matches!(style, CallStyle::McpJsonRpc) {
+            req = req.header("accept", "application/json, text/event-stream");
+        }
         if let Some(token) = auth_header {
             req = req.header("authorization", token);
         }
@@ -248,8 +252,15 @@ async fn burst_call(
         let observation = {
             let parts = match style {
                 CallStyle::HttpStatus => response_to_decision(resp, default_kind).await?,
-                CallStyle::McpJsonRpc => mcp_response_to_decision(resp, default_kind).await?,
+                CallStyle::McpJsonRpc => mcp_response_to_decision(resp).await?,
+                CallStyle::MemoryRest => memory_response_to_decision(resp).await?,
             };
+            if let Some(kind) = parts.by_policy_kind {
+                if by_policy_kind.is_some_and(|previous| previous != kind) {
+                    return Err(ReplayError::Protocol.into());
+                }
+                by_policy_kind = Some(kind);
+            }
             ObservedSample {
                 seq: i,
                 decision: parts.decision,
@@ -266,7 +277,7 @@ async fn burst_call(
     let first = observations[0].clone();
     Ok(ActualDecision {
         decision: first.decision,
-        by_policy_kind: Some(default_kind),
+        by_policy_kind,
         reason: None,
         observations,
     })
@@ -277,7 +288,7 @@ mod tests {
     use super::*;
     use kars_eval_corpus::{Burst, Decision, PolicyKindRef, Scenario};
     use std::time::Duration;
-    use wiremock::matchers::{body_partial_json, header, method, path};
+    use wiremock::matchers::{body_json, body_partial_json, header, headers, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn transport(server: &MockServer) -> Transport {
@@ -493,6 +504,7 @@ mod tests {
         let s = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/mcp"))
+            .and(headers("accept", vec!["application/json", "text/event-stream"]))
             .respond_with(ResponseTemplate::new(429).set_body_string(
                 r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"rate limit exceeded"}}"#,
             ))
@@ -516,46 +528,57 @@ mod tests {
                 .all(|o| o.decision == Decision::RateLimited)
         );
         assert_eq!(actual.decision, Decision::RateLimited);
-        assert_eq!(actual.by_policy_kind, Some(PolicyKindRef::ToolPolicy));
+        assert_eq!(actual.by_policy_kind, None);
     }
 
     #[tokio::test]
-    async fn memory_read_posts_foundry_memory_search_to_platform_mcp() {
-        let s = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/platform/mcp"))
-            .and(body_partial_json(serde_json::json!({
-                "method": "tools/call",
-                "params": {
-                    "name": "foundry.memory",
-                    "arguments": {"operation": "search"},
-                },
-            })))
-            .respond_with(ResponseTemplate::new(200).set_body_string(
-                r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"[]"}],"isError":false}}"#,
-            ))
-            .mount(&s)
-            .await;
-        let t = transport(&s);
-        let scen = Scenario::MemoryRead {
-            scope: "self".into(),
-            key: "user.preferences".into(),
-        };
-        let actual = replay(&t, &scen, "case-mem-ok", None).await.unwrap();
-        assert_eq!(actual.decision, Decision::Allowed);
+    async fn memory_read_posts_exact_rest_search_with_case_and_auth_headers() {
+        for store in ["bound-store-1".to_owned(), "a".to_owned(), "0".repeat(63)] {
+            let s = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path(format!("/memory_stores/{store}:search_memories")))
+                .and(header(CASE_ID_HEADER, "case-mem-ok"))
+                .and(header("authorization", "Bearer evaluator-test"))
+                .and(body_json(json!({
+                    "scope": "self",
+                    "options": {"max_memories": 10},
+                    "items": [{
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "user.preferences"}],
+                    }],
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"memories": []})))
+                .expect(1)
+                .mount(&s)
+                .await;
+            let t = transport(&s).with_memory_store(store);
+            let scen = Scenario::MemoryRead {
+                scope: "self".into(),
+                key: "user.preferences".into(),
+            };
+            let actual = replay(&t, &scen, "case-mem-ok", Some("Bearer evaluator-test"))
+                .await
+                .unwrap();
+            assert_eq!(actual.decision, Decision::Allowed);
+            assert_eq!(actual.by_policy_kind, None);
+        }
     }
 
     #[tokio::test]
     async fn memory_read_blocked_carries_karsmemory_kind() {
         let s = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/platform/mcp"))
-            .respond_with(ResponseTemplate::new(403).set_body_string(
-                r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"cross-sandbox read denied"}],"isError":true}}"#,
-            ))
+            .and(path("/memory_stores/bound-store:search_memories"))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .insert_header("x-kars-decision", "Blocked")
+                    .insert_header("x-kars-decision-by", "KarsMemory")
+                    .set_body_json(json!({"error": "cross-sandbox read denied"})),
+            )
             .mount(&s)
             .await;
-        let t = transport(&s);
+        let t = transport(&s).with_memory_store("bound-store");
         let scen = Scenario::MemoryRead {
             scope: "other-sandbox".into(),
             key: "secret".into(),
@@ -570,6 +593,10 @@ mod tests {
         let s = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/mcp"))
+            .and(headers(
+                "accept",
+                vec!["application/json", "text/event-stream"],
+            ))
             .and(header(CASE_ID_HEADER, "case-id-007"))
             .respond_with(ResponseTemplate::new(200).set_body_string(
                 r#"{"jsonrpc":"2.0","id":1,"result":{"content":[],"isError":false}}"#,
@@ -607,26 +634,144 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn memory_read_scope_lands_in_search_text() {
+    async fn memory_read_omits_items_only_for_an_empty_key() {
+        for key in ["", " ", "query\nwith unicode: 🔑"] {
+            let s = MockServer::start().await;
+            let mut expected = json!({"scope": "self", "options": {"max_memories": 10}});
+            if !key.is_empty() {
+                expected["items"] = json!([{
+                    "type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": key}],
+                }]);
+            }
+            Mock::given(method("POST"))
+                .and(path("/memory_stores/bound-store:search_memories"))
+                .and(body_json(expected))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"memories": []})))
+                .expect(1)
+                .mount(&s)
+                .await;
+            let t = transport(&s).with_memory_store("bound-store");
+            let scenario = Scenario::MemoryRead {
+                scope: "self".into(),
+                key: key.into(),
+            };
+            let actual = replay(&t, &scenario, "case-mem-empty-key", None)
+                .await
+                .unwrap();
+            assert_eq!(actual.decision, Decision::Allowed);
+        }
+    }
+
+    #[tokio::test]
+    async fn memory_read_missing_or_invalid_store_errors_without_io() {
+        let s = MockServer::start().await;
+        let scenario = Scenario::MemoryRead {
+            scope: "self".into(),
+            key: "secret".into(),
+        };
+        let mut stores = vec![None];
+        stores.extend(
+            [
+                "",
+                " ",
+                "store ",
+                " store",
+                "Store",
+                "store_name",
+                "store.name",
+                "-store",
+                "store-",
+                "../store",
+                "store/path",
+                "store?query",
+                "store#fragment",
+                "store%2fother",
+                "store:operation",
+                "störé",
+                "store\n",
+            ]
+            .into_iter()
+            .map(|store| Some(store.to_owned())),
+        );
+        stores.push(Some("a".repeat(64)));
+        for store in stores {
+            let mut t = transport(&s);
+            if let Some(store) = store {
+                t = t.with_memory_store(store);
+            }
+            let error = replay(&t, &scenario, "case-mem-invalid-store", None)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<ReplayError>(),
+                Some(&ReplayError::Protocol)
+            );
+            assert!(format!("{error:#}").contains("--memory-store"));
+        }
+        assert!(s.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn non_memory_replays_do_not_require_or_validate_memory_store() {
         let s = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/platform/mcp"))
-            .and(body_partial_json(serde_json::json!({
-                "params": {
-                    "arguments": {"text": "[scope=other] private-key"},
-                },
-            })))
-            .respond_with(ResponseTemplate::new(200).set_body_string(
-                r#"{"jsonrpc":"2.0","id":1,"result":{"content":[],"isError":false}}"#,
-            ))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .expect(2)
             .mount(&s)
             .await;
-        let t = transport(&s);
-        let scen = Scenario::MemoryRead {
-            scope: "other".into(),
-            key: "private-key".into(),
-        };
-        let actual = replay(&t, &scen, "case-mem-scope", None).await.unwrap();
-        assert_eq!(actual.decision, Decision::Allowed);
+        for t in [
+            transport(&s),
+            transport(&s).with_memory_store("Invalid/store"),
+        ] {
+            let scenario = Scenario::ChatCompletion {
+                messages: vec![],
+                model: None,
+            };
+            assert_eq!(
+                replay(&t, &scenario, "case-chat", None)
+                    .await
+                    .unwrap()
+                    .decision,
+                Decision::Allowed
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn memory_read_requests_actual_scope_without_changing_query() {
+        for scope in [
+            "other",
+            "tenant:other-tenant",
+            "system",
+            "*",
+            "../other",
+            "",
+        ] {
+            let s = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/memory_stores/bound-store:search_memories"))
+                .and(body_json(json!({
+                    "scope": scope,
+                    "options": {"max_memories": 10},
+                    "items": [{
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "private-key"}],
+                    }],
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"memories": []})))
+                .expect(1)
+                .mount(&s)
+                .await;
+            let t = transport(&s).with_memory_store("bound-store");
+            let scen = Scenario::MemoryRead {
+                scope: scope.into(),
+                key: "private-key".into(),
+            };
+            let actual = replay(&t, &scen, "case-mem-scope", None).await.unwrap();
+            assert_eq!(actual.decision, Decision::Allowed);
+        }
     }
 }

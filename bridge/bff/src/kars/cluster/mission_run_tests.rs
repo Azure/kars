@@ -540,6 +540,27 @@ async fn stopped_revision_rejects_incomplete_or_deleting_identity() {
     assert!(fixture.store.lock().unwrap().requests.is_empty());
 }
 
+#[tokio::test]
+async fn stopped_revision_rejects_permanent_halt_without_writes() {
+    let fixture = Fixture::new().await;
+    for decision in ["operator emergency-stop", ""] {
+        {
+            let mut store = fixture.store.lock().unwrap();
+            store.task = task();
+            store.task["spec"]["execution"]["launch"] = json!(false);
+            store.task["metadata"]["annotations"]["kars.azure.com/halted"] = json!(decision);
+        }
+        assert!(
+            fixture
+                .cluster()
+                .redrive_with_revision(&fixture.task(), "run-1", "Revise retained output.")
+                .await
+                .is_err()
+        );
+    }
+    assert!(fixture.store.lock().unwrap().requests.is_empty());
+}
+
 async fn pending_stopped_revision(fixture: &Fixture) -> (KarsTask, String) {
     fixture.store.lock().unwrap().task["spec"]["execution"]["launch"] = json!(false);
     let nonce = fixture
@@ -615,6 +636,8 @@ async fn retry_rejects_running_completed_stale_or_corrupt_context_without_writes
         ("kars.azure.com/run-objective-b64", "not base64!"),
         ("kars.azure.com/run-objective-digest", "sha256:wrong"),
         (COMPLETED, expected.as_str()),
+        ("kars.azure.com/halted", "operator emergency-stop"),
+        ("kars.azure.com/halted", ""),
     ] {
         let mut changed = before.clone();
         changed

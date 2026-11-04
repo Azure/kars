@@ -51,6 +51,7 @@ async-trait.workspace = true
 serde_yaml = "0.9"
 agentmesh.workspace = true
 agentmesh-mcp.workspace = true
+regex.workspace = true
 
 # TCP keepalive for tunnel dead-connection detection
 socket2 = "0.6"

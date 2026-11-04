@@ -3,6 +3,15 @@ Licensed under the MIT License. -->
 
 # Kars — Copilot Instructions
 
+## Kind beta delivery mandate — user-directed, 2026-10-19
+
+- **Finish beta readiness on Kind first.** Work through the normal customer workflows; do not substitute architectural rewrites, repeated historical investigation, or test infrastructure for useful delivery.
+- **Do not impose artificial beta-test limits.** The user authorizes the inference tokens needed to prove the flows. **Clarified 2026-10-20: Kind beta must use unbounded, non-expiring Kars token allowances, not merely larger finite grants or repeated renewals.** Continue recording actual usage; a Kars spending ceiling or funding expiry must not block the Bridge orchestrator or beta workflow execution. This does not promise unlimited provider capacity or waive actual provider limits. Keep production spending enforcement available as an explicit policy, without imposing it on the beta workspace. Do not keep stopping for token allowances, arbitrary per-phase tool caps (such as 20), or agent-invented per-test qualification approvals. Existing product qualification controls must not become an extra approval process invented by the coding agent.
+- **Keep production safeguards intact.** Scope beta capacity/configuration changes to the test workspace. Preserve actual accounting and failed evidence; do not reset identities or falsify successful runs. Authentication, tenant isolation, encrypted transport, governed egress, secret protection, and host/VM safety limits still apply. No global security bypass or fake production implementation.
+- **Prove every exposed UX feature and capability is real.** Exercise catalogue addition, composition, reviewed execution, Teams and Missions, both runtimes, multiple providers, MCP, skills, credentials, profiles, egress, AgentMesh collaboration, memory, SRE, live Activity and downloadable useful deliverables through their maintained customer flows. Tests/builds/Ready pods alone are not customer acceptance.
+- **Repair observed failures, then continue.** Retain failed attempts, fix their concrete cause and start fresh authorized workflow attempts as needed. Do not replay consumed execution identities, declare the work blocked by a self-imposed limit, or add repeated approval ceremonies. Keep one maintained implementation path and the existing beta board accurate.
+- **Report verified outcomes, not effort.** State what worked through the UI, what failed and what remains. Do not claim Kind beta-ready until the actual acceptance journeys pass. Azure/Entra deployment acceptance follows Kind; it must not displace the immediate Kind goal.
+
 ## What is Kars?
 
 A secure AI agent runtime on Azure AKS. OpenClaw agents run in isolated K8s sandbox pods with E2E encrypted inter-agent communication (Signal Protocol via AgentMesh). Each agent gets its own namespace, NetworkPolicy, seccomp profile, and inference router.

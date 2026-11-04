@@ -1,11 +1,11 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import { at, PRIVATE_PREFIX, record, reviewed } from "./private-activation.js";
+import { at, canonical, PRIVATE_PREFIX, record, reviewed } from "./private-activation.js";
 import { privateCommandFailure } from "./private-activation-command-diagnostics.js";
 
 export type RootGuardExecute = (file: string, args: readonly string[], options: {
-  stdio: "pipe"; timeout?: number;
+  stdio: "pipe"; timeout?: number; input?: string;
 }) => Promise<{ stdout: string }>;
 
 export class PrivateRootUpgradeBlocked extends Error {
@@ -96,13 +96,103 @@ export async function assertControllerMutationAllowed(
 
 export async function assertRenderedControllersMutable(
   execute: RootGuardExecute, documents: readonly unknown[], namespace: string,
+  previousDocuments: readonly unknown[] = [],
+  fencedHelmNoop = false,
 ): Promise<void> {
-  const namespaces = new Set<string>();
-  for (const document of documents) {
+  const controllers = new Map<string, unknown[]>();
+  for (const document of [...documents, ...previousDocuments]) {
     if (at(document, "kind") !== "Deployment" || at(document, "metadata", "name") !== "kars-controller") continue;
     const target = at(document, "metadata", "namespace") ?? namespace;
     if (typeof target !== "string" || !target) throw new PrivateRootUpgradeBlocked("unavailable");
-    namespaces.add(target);
+    if (!controllers.has(target)) controllers.set(target, []);
+    if (documents.includes(document)) controllers.get(target)!.push(document);
   }
-  for (const target of namespaces) await assertControllerMutationAllowed(execute, target);
+  for (const [target, desired] of controllers) {
+    try {
+      await assertControllerMutationAllowed(execute, target);
+    } catch (error) {
+      if (!(error instanceof PrivateRootUpgradeBlocked) || error.reason !== "protected") throw error;
+      // An absent target would delete the root. Historical manifests discover
+      // deletions but are not an upgrade's desired controller configuration.
+      if (!fencedHelmNoop || desired.length !== 1) throw error;
+      await assertFencedControllerUnchanged(execute, desired[0], target, [...documents, ...previousDocuments]);
+    }
+  }
+}
+
+async function assertFencedControllerUnchanged(
+  execute: RootGuardExecute, desired: unknown, namespace: string, releaseDocuments: readonly unknown[],
+): Promise<void> {
+  try {
+    if (["uid", "resourceVersion"].some(key => typeof at(desired, "metadata", key) !== "string"
+      || !at(desired, "metadata", key))) throw new PrivateRootUpgradeBlocked("protected");
+    const identity = reviewed(desired);
+    if (at(desired, "apiVersion") !== "apps/v1"
+      || at(desired, "metadata", "namespace") !== namespace) throw new PrivateRootUpgradeBlocked("protected");
+    const beforeNamespace = await optionalRead(execute, "namespace", namespace);
+    const live = await optionalRead(execute, "deployment", "kars-controller", namespace);
+    if (!beforeNamespace || !live || canonical(reviewed(live)) !== canonical(identity)) {
+      throw new PrivateRootUpgradeBlocked("protected");
+    }
+    const privateFields = record(at(beforeNamespace, "metadata", "annotations") ?? {});
+    const budget = ["budget-namespace", "budget-tls-name", "budget-tls-version"]
+      .map(key => privateFields[`${PRIVATE_PREFIX}${key}`]);
+    if (budget.some(value => value !== undefined)) {
+      if (budget.some(value => typeof value !== "string" || !value)
+        || releaseDocuments.some(document => at(document, "kind") === "Secret"
+          && at(document, "metadata", "name") === budget[1]
+          && (at(document, "metadata", "namespace") ?? namespace) === budget[0])) {
+        // Even identical data can receive a new revision when Helm takes SSA ownership.
+        throw new PrivateRootUpgradeBlocked("protected");
+      }
+    }
+    const annotations = record(at(live, "metadata", "annotations") ?? {});
+    const release = annotations["meta.helm.sh/release-name"];
+    if (typeof release !== "string" || !release
+      || annotations["meta.helm.sh/release-namespace"] !== namespace
+      || at(live, "metadata", "labels", "app.kubernetes.io/managed-by") !== "Helm") {
+      throw new PrivateRootUpgradeBlocked("protected");
+    }
+    const template = record(at(live, "spec", "template"));
+    for (const kind of ["containers", "initContainers"]) {
+      const containers = at(template, "spec", kind) ?? [];
+      if (!Array.isArray(containers) || (kind === "containers" && !containers.length)
+        || containers.some(container => typeof at(container, "image") !== "string"
+          || !/^[^@\s]+@sha256:[a-f0-9]{64}$/.test(String(at(container, "image"))))) {
+        throw new PrivateRootUpgradeBlocked("protected");
+      }
+    }
+    const request = structuredClone(record(desired));
+    const metadata = record(request.metadata);
+    for (const [key, value] of Object.entries({
+      "meta.helm.sh/release-name": release, "meta.helm.sh/release-namespace": namespace,
+    })) {
+      const requested = at(metadata, "annotations", key);
+      if (requested !== undefined && requested !== value) throw new PrivateRootUpgradeBlocked("protected");
+    }
+    // Helm adds its ownership metadata after template rendering.
+    metadata.labels = { ...record(metadata.labels ?? {}), "app.kubernetes.io/managed-by": "Helm" };
+    metadata.annotations = { ...record(metadata.annotations ?? {}),
+      "meta.helm.sh/release-name": release, "meta.helm.sh/release-namespace": namespace };
+    const preview = JSON.parse((await execute("kubectl", ["apply", "--server-side", "--field-manager=helm",
+      "--dry-run=server", "-f", "-", "-o", "json"],
+    { stdio: "pipe", input: JSON.stringify(request), timeout: 15000 })).stdout);
+    const projection = (object: unknown) => ({
+      identity: reviewed(object), apiVersion: at(object, "apiVersion"), kind: at(object, "kind"),
+      namespace: at(object, "metadata", "namespace"),
+      labels: at(object, "metadata", "labels") ?? {}, annotations: at(object, "metadata", "annotations") ?? {},
+      ownerReferences: at(object, "metadata", "ownerReferences") ?? [],
+      finalizers: at(object, "metadata", "finalizers") ?? [],
+      spec: at(object, "spec"),
+    });
+    if (canonical(projection(preview)) !== canonical(projection(live))
+      || canonical(await optionalRead(execute, "namespace", namespace)) !== canonical(beforeNamespace)
+      || canonical(await optionalRead(execute, "deployment", "kars-controller", namespace)) !== canonical(live)) {
+      throw new PrivateRootUpgradeBlocked("protected");
+    }
+  } catch (error) {
+    if (error instanceof PrivateRootUpgradeBlocked) throw error;
+    // Neither failed admission nor malformed evidence authorizes a real write.
+    throw new PrivateRootUpgradeBlocked("unavailable");
+  }
 }

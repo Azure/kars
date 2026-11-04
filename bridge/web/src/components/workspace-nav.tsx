@@ -6,7 +6,7 @@
 // kars Bridge Workspace — primary navigation (employee surface).
 // Plain-language, mission-first. No Kubernetes vocabulary ever.
 
-import Link from "next/link";
+import Link from "@/components/navigation-link";
 import { usePathname } from "next/navigation";
 
 const NAV = [

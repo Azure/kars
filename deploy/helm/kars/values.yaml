@@ -6,6 +6,9 @@
 #       (e.g., sha256:abc123...) and set pullPolicy to IfNotPresent.
 
 datapathWitness:
+  # After SRE adoption, scope/list/image refreshes require the original effective
+  # witness object at sre.datapathWitnessBaseline. Preserve its legacy absent scope.
+  # Only scope/list and digest-pinned runtime image references may change; nodes/safety stay sealed.
   # Core owns the optional witness; no third Helm release.
   # Set managed=false only to retain an independently owned existing witness.
   managed: true
@@ -29,11 +32,17 @@ headlamp:
     clientID: ""
     callbackURL: ""
     clientSecret:
+      # Destination Secret in headlamp; reference-only unless sourceName is set.
       name: ""
       key: client-secret
+      # Opt in to copying only key from an Opaque Secret in the Core release namespace.
+      # The copy is stored in Helm release history: protect read access to that history.
+      sourceName: ""
     scopes: "profile,email"
-    # Optional existing ConfigMap in headlamp, containing ca.crt.
+    # Destination ConfigMap in headlamp, containing public ca.crt; reference-only by default.
     caConfigMap: ""
+    # Opt in to copying only ca.crt from a ConfigMap in the Core release namespace.
+    caSourceConfigMap: ""
   nodeSelector:
     kubernetes.io/os: linux
   tolerations: []
@@ -76,6 +85,9 @@ metricsServer:
 evals:
   # Jobs are created only for operator-requested or explicitly scheduled evals.
   runnerImage: "ghcr.io/azure/kars-conformance-runner:latest"
+  # After SRE adoption, runner refreshes also require runnerImageBaseline: the
+  # exact original reference, verified against the immutable adoption digest.
+  # Selected runnerImage must then use repository:latest@sha256:<digest>.
 
 # First-install schema publication inside the Core Helm invocation. Opt-in until
 # the image and real Helm/admission/CNI lifecycle are qualified. Use --create-namespace.
@@ -118,9 +130,27 @@ inferenceBudget:
   routerImageDigest: ""
   # Opt-in governed inference only, not an all-in invoice/compute/tool budget.
   enabled: false
+  # Record-only keeps unresolved usage but waives calendar ceilings; production defaults to enforcement.
+  calendarPolicy: enforce
   catalogVersion: ""
   contracts: []
+  # Operator-classified exact non-model hosts; sandbox egress approval is still
+  # required separately. May be updated after SRE adoption without changing
+  # model contracts, original funding, receipts or existing token charges.
   nonInferenceEgressHosts: []
+  # Explicit fresh-only lifetime enrollment, never migration of calendar usage.
+  # Entries: {root: {kind: KarsSandbox, resource: {namespace, name, uid},
+  # workspaceUid, clusterUid}, limits: {tokens}, expiresAt: RFC3339}.
+  # Supported sources: exact UIDs of sre (Hermes) and bridge-orchestrator.
+  # Removed/changed/expired entries fail closed for already-bound actors.
+  builtInFunding: []
+  # Explicit UID-bound lifetime token extensions; preserve applied entries on upgrades.
+  # Requires operator karsbudgetaccounts/fund authorization, never granted to workloads.
+  tokenTopUps: []
+  # Explicit account-bound, non-expiring token allowances. Usage remains metered;
+  # currency caps, identity, provider limits and historical receipts remain intact.
+  # Requires operator fund permission. Preserve consumed receipts on upgrades.
+  unboundedTokenAllowances: []
   # Reference an existing operator TLS Secret, or supply both PEM fields below
   # to install it in this Core release. No certificates or keys are generated.
   tlsSecretName: ""
@@ -143,6 +173,11 @@ controller:
     tag: "latest"  # Pin to digest in production
     pullPolicy: Always
   replicas: 2
+  # Optional bootstrap defaults for Tasks and agents without an explicit model.
+  # Set both before private activation. SRE inherits these unless explicitly overridden.
+  inferenceDefaults:
+    provider: ""
+    model: ""
   # When true, BYO sandboxes whose
   # spec.runtime.byo.contractVersion is missing or unknown, OR whose
   # byo.image is shape-invalid, are rejected with Degraded=True
@@ -333,6 +368,8 @@ strictTools:
 foundry:
   endpoint: ""            # e.g. https://my-resource.services.ai.azure.com — AI Services base
   projectEndpoint: ""     # e.g. https://my-resource.services.ai.azure.com/api/projects/my-project — for Memory, Agents, Indexes
+  # After SRE adoption, changing projectEndpoint requires an explicit projectEndpointBaseline
+  # containing its exact original value. No default: see docs/governed-inference-budgets.md.
   deployments: ""         # JSON array of deployment names, e.g. '["gpt-4.1","text-embedding-3-small"]'
 
 # Azure AI Content Safety configuration
@@ -409,6 +446,14 @@ monitoring:
       version: v3.11.3
       retention: 2d
       retentionSize: 512MB
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - {key: node-role.kubernetes.io/control-plane, operator: DoesNotExist}
+                  - {key: node-role.kubernetes.io/master, operator: DoesNotExist}
       podMonitorSelectorNilUsesHelmValues: false
       serviceMonitorSelectorNilUsesHelmValues: false
       probeSelectorNilUsesHelmValues: false
@@ -466,6 +511,8 @@ monitoring:
       pullPolicy: Always
   grafana:
     enabled: false   # Set to true if you want Grafana dashboards
+    rbac:
+      namespaced: true
     prune: true
     grafana.ini:
       database:
@@ -474,6 +521,14 @@ monitoring:
       GOGC: "50"
     namespaceOverride: monitoring
     fullnameOverride: kps-grafana
+    affinity:
+      nodeAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            preference:
+              matchExpressions:
+                - {key: node-role.kubernetes.io/control-plane, operator: DoesNotExist}
+                - {key: node-role.kubernetes.io/master, operator: DoesNotExist}
     image:
       registry: ghcr.io
       repository: azure/kars-grafana
@@ -789,15 +844,23 @@ entraSidecar:
 # Design: docs/blueprints/07-kars-sre-proposal.md  (§7.1 slicing,
 # §7.8 privilege containment, §7.7 typed-action threat model).
 sre:
+  # Required for schemaHook + SRE cold install. Kind beta selects {unboundedTokens: true}.
+  # Production may select finite tokens + future UTC expiresAt. Never inferred or renewed.
+  firstInstallFunding: {}
+  # Optional after adoption: original repository:latest@sha256 router reference.
+  # Its digest must match the sealed first-install intent; keep this baseline on
+  # later upgrades. Permits only a same-repository tag + budget router digest
+  # refresh after the original adoption digest is proven. Never renews funding.
+  # routerImageBaseline: "<original-repository>:latest@sha256:<original-digest>"
   enabled: false
 
-  # The Azure OpenAI deployment / model name the SRE agent reasons with.
-  # Defaults to gpt-5.4; override for cost/perf tuning. The model must be
-  # available in the project the kars controller is configured with —
-  # the InferencePolicy compiles against the standard router failover
-  # chain so an unavailable model surfaces as Degraded on the sandbox.
-  model: "gpt-5.4"
-  provider: "azure-openai"
+  # Optional overrides for the SRE InferencePolicy. Empty fields inherit
+  # controller.inferenceDefaults, selected during Core onboarding.
+  # For a non-default provider, configure its named router endpoint/credentials
+  # and allowed egress first; a tag alone does not provision a route.
+  # Normal router recovery and governance still apply. See docs/local-inference.md.
+  model: ""
+  provider: ""
 
   # Per-request token ceiling. The SRE agent's typical request shape
   # (state summary + a few k of YAML/events) fits well under 32k; raise

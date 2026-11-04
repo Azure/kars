@@ -13,10 +13,16 @@ aggregator:
   windowSeconds: 15
   intervalSeconds: 30
 
-# Explicit read scope. Each name is a KarsSandbox in kars-system; its compiled
-# baseline is karssandbox-<name>-egress-allowlist in namespace kars-<name>.
-# Add/remove entries with the same Helm upgrade command.
+# Discover all KarsSandbox resources in kars-system on every sample, including
+# future Team/Mission workers. The controller grants exact baseline GETs per namespace.
+scope: all
+# Compatibility: scope=selected retains an explicit, operator-managed name list.
+# Keep this empty for scope=all; it never limits dynamically discovered workers.
 sandboxes: []
+
+# Optional exact Kubernetes node names. Nonempty confines daemon placement AND
+# collection; Kind beta requires this list. Empty preserves legacy placement.
+nodes: []
 
 # The maintained runtime includes both client and daemon. Supply its reviewed
 # digest here as well as aggregator.image; the former Debian daemon is not a default.

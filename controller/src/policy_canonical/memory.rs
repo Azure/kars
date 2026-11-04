@@ -10,6 +10,7 @@
 //!
 //! - `storeName`
 //! - `scope`
+//! - `sharedScopes` (optional exact grants; absent means private)
 //! - `retentionDays`
 //! - `deleteOnSandboxDelete`
 //! - `displayName`
@@ -25,19 +26,14 @@
 //! - Valid UTF-8
 //! - Parseable as a JSON object
 //! - Top-level keys are policy-content keys only (no `sandboxRef`)
-//! - `storeName` (when present) is a non-empty string
-//! - `scope` (when present) is a non-empty string
+//! - `storeName` and `scope` are required and satisfy `MemoryAccess` validation
+//! - `sharedScopes` contains at most 64 distinct valid scopes other than `scope`
 //! - `retentionDays` (when present) is a non-negative integer
 //! - `deleteOnSandboxDelete` (when present) is a boolean
 //! - `displayName` (when present) is a string
-//! - At least one policy-content key is present (empty bundles are
-//!   rejected — the inline path is the supported way to express
-//!   binding metadata without supply-chain verification)
-//!
-//! Semantic checks (DNS-label-style `storeName`, valid `scope`
-//! prefixes, retention floor sanity) stay in the existing
-//! `crd_validations::kars_memory_validations` admission layer and the
-//! runtime path (`cli/src/plugin.ts::ensureMemoryStore`).
+//! Partial bundles are rejected: neither a signed binding nor an inline
+//! binding may fall back to a convention-based store or scope. Scope grants
+//! are exact, without normalization, wildcard, or prefix matching.
 
 use super::{CachedValue, PolicyKind};
 use crate::policy_fetcher::{CACHE_TTL, FetchError};
@@ -58,6 +54,7 @@ pub const MEMORY_BINDING_V1_MEDIA_TYPE: &str = "application/vnd.kars.memory-bind
 const POLICY_CONTENT_KEYS: &[&str] = &[
     "storeName",
     "scope",
+    "sharedScopes",
     "retentionDays",
     "deleteOnSandboxDelete",
     "displayName",
@@ -69,6 +66,7 @@ const POLICY_CONTENT_KEYS: &[&str] = &[
 pub struct VerifiedMemoryBinding {
     pub store_name: Option<String>,
     pub scope: Option<String>,
+    pub shared_scopes: Option<Vec<String>>,
     pub retention_days: Option<u32>,
     pub delete_on_sandbox_delete: Option<bool>,
     pub display_name: Option<String>,
@@ -163,7 +161,7 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<VerifiedMemoryBinding, FetchError> {
     for key in map.keys() {
         if !POLICY_CONTENT_KEYS.contains(&key.as_str()) {
             return Err(FetchError::CanonicalFormViolation(format!(
-                "unrecognised top-level key `{key}`; allowed: storeName, scope, \
+                "unrecognised top-level key `{key}`; allowed: storeName, scope, sharedScopes, \
                  retentionDays, deleteOnSandboxDelete, displayName"
             )));
         }
@@ -171,27 +169,33 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<VerifiedMemoryBinding, FetchError> {
 
     let store_name = extract_optional_nonempty_string(map, "storeName")?;
     let scope = extract_optional_nonempty_string(map, "scope")?;
+    if store_name.is_none() || scope.is_none() {
+        return Err(FetchError::CanonicalFormViolation(
+            "memory bundle requires both storeName and scope".into(),
+        ));
+    }
+    let shared_scopes: Option<Vec<String>> = match map.get("sharedScopes") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(serde_json::from_value(value.clone()).map_err(|_| {
+            FetchError::CanonicalFormViolation("sharedScopes must be an array of strings".into())
+        })?),
+    };
+    let access = crate::memory_access::MemoryAccess {
+        store_name: store_name.clone().unwrap_or_default(),
+        scope: scope.clone().unwrap_or_default(),
+        shared_scopes: shared_scopes.clone().unwrap_or_default(),
+    };
+    access
+        .validate()
+        .map_err(|reason| FetchError::CanonicalFormViolation(reason.into()))?;
     let retention_days = extract_optional_u32(map, "retentionDays")?;
     let delete_on_sandbox_delete = extract_optional_bool(map, "deleteOnSandboxDelete")?;
     let display_name = extract_optional_string(map, "displayName")?;
 
-    if store_name.is_none()
-        && scope.is_none()
-        && retention_days.is_none()
-        && delete_on_sandbox_delete.is_none()
-        && display_name.is_none()
-    {
-        return Err(FetchError::CanonicalFormViolation(
-            "bundle has no policy content (all of storeName / scope / retentionDays / \
-             deleteOnSandboxDelete / displayName are absent or null); use the inline \
-             path for selector-only bindings"
-                .into(),
-        ));
-    }
-
     Ok(VerifiedMemoryBinding {
         store_name,
         scope,
+        shared_scopes,
         retention_days,
         delete_on_sandbox_delete,
         display_name,
@@ -287,11 +291,57 @@ mod tests {
     }
 
     #[test]
-    fn parse_store_name_only_ok() {
-        let body = br#"{"storeName":"agent-x-mem"}"#;
-        let v = parse(body).unwrap();
-        assert_eq!(v.store_name.as_deref(), Some("agent-x-mem"));
-        assert!(v.scope.is_none());
+    fn parse_partial_bundles_rejected() {
+        for body in [
+            r#"{"storeName":"agent-x-mem"}"#,
+            r#"{"scope":"agent_x"}"#,
+            r#"{"retentionDays":30}"#,
+            r#"{"sharedScopes":["team_beta"]}"#,
+            r#"{"storeName":"agent-x-mem","scope":null}"#,
+            r#"{"storeName":null,"scope":"agent_x"}"#,
+        ] {
+            let err = parse(body.as_bytes()).unwrap_err();
+            assert!(matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("requires both storeName and scope")));
+        }
+    }
+
+    #[test]
+    fn parse_private_and_shared_grants() {
+        let private = parse(br#"{"storeName":"x","scope":"agent_x"}"#).unwrap();
+        assert!(private.shared_scopes.is_none());
+        let shared = parse(br#"{"storeName":"x","scope":"agent_x","sharedScopes":["team/sub-team+name@example.org","%61gent_x"]}"#).unwrap();
+        assert_eq!(shared.shared_scopes.unwrap(), ["team/sub-team+name@example.org", "%61gent_x"]);
+        let empty = parse(br#"{"storeName":"x","scope":"agent_x","sharedScopes":[]}"#).unwrap();
+        assert_eq!(empty.shared_scopes, Some(vec![]));
+        let max_grants: Vec<String> = (0..64).map(|i| format!("team_{i}")).collect();
+        let maximal = serde_json::json!({
+            "storeName": "x".repeat(63), "scope": "x".repeat(256),
+            "sharedScopes": max_grants,
+        });
+        let parsed = parse(&serde_json::to_vec(&maximal).unwrap()).unwrap();
+        assert_eq!(parsed.shared_scopes.unwrap().len(), 64);
+    }
+
+    #[test]
+    fn parse_invalid_access_rejected() {
+        for (key, value) in [
+            ("storeName", serde_json::json!("Uppercase")),
+            ("storeName", serde_json::json!("x".repeat(64))),
+            ("scope", serde_json::json!("a/../b")),
+            ("scope", serde_json::json!("x".repeat(257))),
+            ("sharedScopes", serde_json::json!("team_beta")),
+            ("sharedScopes", serde_json::json!([42])),
+            ("sharedScopes", serde_json::json!(["*"])),
+            ("sharedScopes", serde_json::json!(["a/./b"])),
+            ("sharedScopes", serde_json::json!(["agent_x"])),
+            ("sharedScopes", serde_json::json!(["team_beta", "team_beta"])),
+            ("sharedScopes", serde_json::json!(["x".repeat(257)])),
+            ("sharedScopes", serde_json::json!((0..65).map(|i| format!("team_{i}")).collect::<Vec<_>>())),
+        ] {
+            let mut body = serde_json::json!({"storeName":"x","scope":"agent_x"});
+            body[key] = value;
+            assert!(parse(&serde_json::to_vec(&body).unwrap()).is_err(), "{body}");
+        }
     }
 
     #[test]
@@ -338,7 +388,7 @@ mod tests {
     fn parse_empty_object_rejected() {
         let err = parse(b"{}").unwrap_err();
         assert!(
-            matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("no policy content"))
+            matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("requires both storeName and scope"))
         );
     }
 
@@ -349,7 +399,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("no policy content"))
+            matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("requires both storeName and scope"))
         );
     }
 
@@ -379,7 +429,7 @@ mod tests {
 
     #[test]
     fn parse_retention_days_negative_rejected() {
-        let err = parse(br#"{"retentionDays":-1}"#).unwrap_err();
+        let err = parse(br#"{"storeName":"x","scope":"agent_x","retentionDays":-1}"#).unwrap_err();
         assert!(
             matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("non-negative"))
         );
@@ -387,7 +437,7 @@ mod tests {
 
     #[test]
     fn parse_retention_days_wrong_type_rejected() {
-        let err = parse(br#"{"retentionDays":"thirty"}"#).unwrap_err();
+        let err = parse(br#"{"storeName":"x","scope":"agent_x","retentionDays":"thirty"}"#).unwrap_err();
         assert!(
             matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("non-negative"))
         );
@@ -395,19 +445,21 @@ mod tests {
 
     #[test]
     fn parse_retention_days_overflow_rejected() {
-        let err = parse(br#"{"retentionDays":4294967296}"#).unwrap_err();
+        let err = parse(br#"{"storeName":"x","scope":"agent_x","retentionDays":4294967296}"#).unwrap_err();
         assert!(matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("u32")));
     }
 
     #[test]
     fn parse_delete_on_sandbox_delete_wrong_type_rejected() {
-        let err = parse(br#"{"deleteOnSandboxDelete":"yes"}"#).unwrap_err();
+        let err = parse(
+            br#"{"storeName":"x","scope":"agent_x","deleteOnSandboxDelete":"yes"}"#,
+        ).unwrap_err();
         assert!(matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("boolean")));
     }
 
     #[test]
     fn parse_display_name_wrong_type_rejected() {
-        let err = parse(br#"{"storeName":"x","displayName":42}"#).unwrap_err();
+        let err = parse(br#"{"storeName":"x","scope":"agent_x","displayName":42}"#).unwrap_err();
         assert!(
             matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("displayName"))
         );
@@ -418,7 +470,7 @@ mod tests {
         // zero is a valid non-negative integer; semantic "retention
         // must be > 0" is enforced by admission CEL on the CR, not
         // here on the bundle.
-        let v = parse(br#"{"retentionDays":0}"#).unwrap();
+        let v = parse(br#"{"storeName":"x","scope":"agent_x","retentionDays":0}"#).unwrap();
         assert_eq!(v.retention_days, Some(0));
     }
 }

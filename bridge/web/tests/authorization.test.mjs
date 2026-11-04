@@ -10,6 +10,7 @@ import { runInNewContext } from "node:vm";
 import test from "node:test";
 
 const require = createRequire(import.meta.url);
+require("next/dist/server/node-environment");
 const ts = require("typescript");
 const { NextRequest } = require("next/server");
 const { SignJWT } = require("jose");
@@ -258,6 +259,62 @@ test("installed Next converts a rejected RSC response into document navigation",
   const document = await service.edge.proxy(service.request(path, "GET"));
   assert.equal(document.status, 307);
   assert.equal(new URL(document.headers.get("location")).searchParams.get("returnTo"), path);
+});
+
+test("unauthenticated Server Actions request document sign-in without following or replaying a mutation", async () => {
+  for (const signed of [undefined, "forged", await token(["admin"], secret, "0s")]) {
+    const service = app({ token: signed, roleCookie: "admin", floor: "admin" });
+    for (const path of ["/console/configuration", "/workspace/missions/example?tab=activity", "/audit"]) {
+      const request = service.request(path, "POST");
+      request.headers.set("next-action", "test-action");
+      request.headers.set("accept", "text/x-component");
+      request.headers.set("x-bridge-return-to", "https://untrusted.example");
+      const response = await service.edge.proxy(request);
+      assert.equal(response.status, 303);
+      assert.equal(response.headers.get("x-action-redirect"), `/auth/login?returnTo=${encodeURIComponent(path)};push`);
+      assert.equal(response.headers.get("location"), null, "fetch must not follow a redirect to the IdP");
+      assert.equal(response.headers.get("x-middleware-next"), null, "the action must not execute");
+      assert.equal(response.headers.get("set-cookie"), null, "background requests must not replace PKCE state");
+      assert.match(response.headers.get("cache-control"), /private, no-store/);
+      assert.equal(await response.text(), "");
+    }
+    assert.equal(service.calls.length, 0);
+  }
+});
+
+test("installed Next adapter preserves the unauthenticated action redirect protocol", async () => {
+
+  const { adapter } = require("next/dist/server/web/adapter");
+  const service = app({ token: await token(["user"], secret, "0s") });
+  const request = service.request("/console/configuration", "POST");
+  request.headers.set("next-action", "test-action");
+  request.headers.set("accept", "text/x-component");
+  const { response, waitUntil } = await adapter({
+    page: "/proxy",
+    request: {
+      url: request.url,
+      method: request.method,
+      headers: Object.fromEntries(request.headers),
+      nextConfig: { basePath: "", trailingSlash: false },
+    },
+    handler: service.edge.proxy,
+  });
+  await waitUntil;
+  assert.equal(response.status, 303);
+  assert.equal(response.headers.get("location"), null);
+  assert.equal(response.headers.get("x-action-redirect"), "/auth/login?returnTo=%2Fconsole%2Fconfiguration;push");
+  assert.equal(service.calls.length, 0);
+});
+
+test("authenticated and development Server Actions still reach their existing handlers", async () => {
+  for (const options of [{ token: await token(["operator"]) }, { sso: false, roleCookie: "operator" }]) {
+    const service = app(options);
+    const request = service.request("/console/configuration", "POST");
+    request.headers.set("next-action", "test-action");
+    const response = await service.edge.proxy(request);
+    assert.equal(response.headers.get("x-middleware-next"), "1");
+    assert.equal(response.headers.get("x-action-redirect"), null);
+  }
 });
 
 test("valid sessions and development surfaces retain navigation without a login loop", async () => {

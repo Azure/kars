@@ -19,6 +19,7 @@ pub(super) struct RunStats {
     pub active: usize,
     pub succeeded: i64,
     pub barren: i64,
+    /// Retained root synthesis only, not lifetime Team or descendant usage.
     pub tokens_total: i64,
     pub last_success_at: Option<String>,
 }
@@ -45,7 +46,7 @@ pub(super) fn cadence_name(team: &KarsTeam) -> Result<String, ReconcileError> {
     ))
 }
 
-fn current_output(cm: &ConfigMap, task: &KarsTask) -> bool {
+pub(super) fn current_output(cm: &ConfigMap, task: &KarsTask) -> bool {
     let (Some(name), Some(namespace), Some(uid)) = (
         task.metadata.name.as_deref(),
         task.metadata.namespace.as_deref(),
@@ -116,7 +117,14 @@ pub(super) async fn harvest_and_retire_runs(
             .as_ref()
             .is_some_and(|execution| execution.launch);
         let Some(cm) = cms.get_opt(&format!("kars-mission-output-{run}")).await? else {
-            if launched {
+            let retained = if launched && task.spec.blueprint.as_ref().is_some_and(|blueprint| blueprint.execution_plan.is_some()) {
+                super::work::retained_failure_digest(client, team, task).await?
+            } else { None };
+            if let Some(data) = crate::reviewed_execution::failed_team_run(client, team, task, retained.as_deref()).await? {
+                super::work::harvest(client, team, task, &data, false).await?;
+                tasks::idle(tasks_api, task).await?;
+                stats.barren += 1;
+            } else if launched {
                 stats.active += 1;
             } else if let Some(current) = tasks_api.get_opt(&run).await?
                 && current.metadata.uid == task.metadata.uid

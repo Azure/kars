@@ -79,6 +79,7 @@ class RelayTransport:
         on_frame: FrameHandler,
         entra_token: str | None = None,
         connection_auth=None,
+        on_heartbeat: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._url = url
         self._identity_did = identity_did
@@ -89,6 +90,7 @@ class RelayTransport:
         self._reconnect_initial = reconnect_initial_seconds
         self._reconnect_max = reconnect_max_seconds
         self._on_frame = on_frame
+        self._on_heartbeat = on_heartbeat
         # Entra-signed JWT presented on the WS connect frame when the
         # AGT relay has Entra enforcement enabled
         # (AGENTMESH_ENTRA_ENFORCE=true → relay/app.py rejects the
@@ -344,6 +346,8 @@ class RelayTransport:
                         }
                     )
                 )
+                if self._on_heartbeat is not None:
+                    await self._on_heartbeat()
         except asyncio.CancelledError:
             pass
         except (ConnectionClosed, WebSocketException, OSError, MeshTransportError):

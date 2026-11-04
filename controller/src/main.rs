@@ -23,6 +23,9 @@ mod auth_config;
 mod auth_config_reconciler;
 mod backoff;
 mod config_hash;
+#[path = "../../shared/builtin_memory.rs"]
+#[allow(dead_code)]
+mod builtin_memory;
 #[path = "../../shared/team_memory.rs"]
 mod team_memory;
 #[path = "../../shared/constant_time.rs"]
@@ -52,11 +55,18 @@ mod inference_budget_contract;
 mod inference_budget_dispatch;
 mod inference_policy;
 mod inference_policy_compile;
+mod inference_policy_defaults;
 mod inference_policy_reconciler;
 mod kars_approval;
 mod kars_approval_reconciler;
 mod kars_eval;
 mod kars_eval_reconciler;
+// The controller validates grants; request authorization is router-only.
+#[allow(dead_code)]
+#[path = "../../shared/memory_access.rs"]
+mod memory_access;
+#[path = "../../shared/mission_record.rs"]
+mod mission_record;
 mod kars_memory;
 mod kars_memory_compile;
 mod kars_memory_reconciler;
@@ -94,6 +104,8 @@ mod private_tls;
 mod providers;
 mod reconciler;
 mod reviewed_execution;
+#[path = "../../shared/service_control.rs"]
+mod service_control;
 #[path = "../../shared/service_observer.rs"]
 mod service_observer;
 mod signer_policy;
@@ -103,6 +115,9 @@ mod skill_package;
 mod sre_authority;
 #[path = "../../shared/sre_privacy.rs"]
 mod sre_privacy;
+#[path = "../../shared/sre_report.rs"]
+#[allow(dead_code)]
+mod sre_report;
 mod sre_registration;
 mod status;
 mod task_execution_plan;
@@ -165,7 +180,8 @@ async fn main() -> Result<()> {
         "controller config hash computed; surfaced as kars_controller_config_info"
     );
 
-    let client = Client::try_default().await?;
+    let client_config = kube::Config::infer().await?;
+    let client = Client::try_from(client_config.clone())?;
     privacy_rpc::start(client.clone());
     inference_budget::start(client.clone());
 
@@ -336,7 +352,8 @@ async fn main() -> Result<()> {
         // operator installs SRE (chart sre.enabled=true creates the
         // controller RBAC + the CRD); idle otherwise.
         let client = client.clone();
-        tokio::spawn(async move { kars_sre_action_reconciler::run(client).await })
+        let connection = kars_sre_action_reconciler::writer_connection(&client_config);
+        tokio::spawn(async move { kars_sre_action_reconciler::run(client, connection).await })
     };
     let sre_authority_handle = {
         let client = client.clone();

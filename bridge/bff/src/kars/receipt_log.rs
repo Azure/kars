@@ -7,11 +7,10 @@ use std::collections::BTreeMap;
 
 use crate::providers::signing::sha256_parts;
 use k8s_openapi::api::core::v1::ConfigMap;
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::ListMeta;
-use kube::{Api, api::ListParams};
 use serde::Deserialize;
 
 use super::cluster::Cluster;
+use super::configmap_snapshot::{ConfigMapSnapshot, SnapshotError};
 
 const HEAD: &str = "kars-receipt-log";
 const PREFIX: &str = "kars-receipt-log-";
@@ -80,13 +79,23 @@ fn invalid(message: &'static str) -> ReceiptLogError {
     ReceiptLogError::Invalid(message)
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ReceiptLogSnapshot {
-    api_version: String,
-    kind: String,
-    metadata: ListMeta,
-    items: Vec<ConfigMap>,
+type ReceiptLogSnapshot = ConfigMapSnapshot<ConfigMap>;
+
+fn receipt_map(map: ConfigMap) -> Option<ConfigMap> {
+    let name = map.metadata.name.as_deref().unwrap_or_default();
+    let component = map
+        .metadata
+        .labels
+        .as_ref()
+        .and_then(|labels| labels.get(COMPONENT));
+    (name == HEAD
+        || name.starts_with(PREFIX)
+        || matches!(
+            name,
+            "kars-receipt-checkpoint" | "kars-receipt-witness" | "kars-receipt-pubkey"
+        )
+        || component.is_some_and(|value| value == SEGMENT_COMPONENT))
+    .then_some(map)
 }
 
 fn validate_identity(map: &ConfigMap, namespace: &str) -> Result<(), ReceiptLogError> {
@@ -247,25 +256,13 @@ impl Cluster {
     }
 
     async fn receipt_log_in(&self, namespace: &str) -> Result<ReceiptLog, ReceiptLogError> {
-        let maps: Api<ConfigMap> = Api::namespaced(self.client.clone(), namespace);
-        let request = kube::core::Request::new(maps.resource_url())
-            .list(&ListParams::default())
-            .map_err(|_| ReceiptLogError::Read)?;
-        // kube's JSON request helper logs malformed bodies and normalizes null
-        // list items to empty. Preserve authentication, but validate the raw reply here.
-        let response = self
-            .client
-            .send(request.map(kube::client::Body::from))
+        let snapshot = self
+            .configmap_snapshot(namespace, receipt_map)
             .await
-            .map_err(|_| ReceiptLogError::Read)?;
-        if response.status() != http::StatusCode::OK {
-            return Err(ReceiptLogError::Api(response.status().as_u16()));
-        }
-        let bytes = axum::body::to_bytes(axum::body::Body::new(response.into_body()), usize::MAX)
-            .await
-            .map_err(|_| ReceiptLogError::Read)?;
-        let snapshot =
-            serde_json::from_slice(&bytes).map_err(|_| invalid("malformed API snapshot"))?;
+            .map_err(|error| match error {
+                SnapshotError::Api(status) => ReceiptLogError::Api(status),
+                SnapshotError::Read => ReceiptLogError::Read,
+            })?;
         parse_snapshot(snapshot, namespace)
     }
 }

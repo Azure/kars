@@ -34,6 +34,9 @@ pub struct KarsTaskSpec {
     pub objective: String,
     /// The trust envelope that governs this task and bounds delegation.
     pub envelope: TaskEnvelope,
+    /// Exact tier requested for human review, not effective authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_tier: Option<i32>,
     /// Optional parent task (same namespace) this task is a delegated child of.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_ref: Option<LocalObjectRef>,
@@ -303,6 +306,7 @@ mod tests {
                     min_tool_calls: 0,
                     max_tool_calls: 0,
                     fresh_context: true,
+                    execution_mode: None,
                 }],
                 budget_tokens: None,
             }],
@@ -311,6 +315,7 @@ mod tests {
                 objective: "Publish a concise evidence-backed result.".into(),
                 capabilities: Vec::new(),
                 max_tool_calls: 0,
+                execution_mode: None,
             },
             deliverables: Vec::new(),
         };
@@ -341,6 +346,7 @@ mod tests {
                     min_tool_calls: 1,
                     max_tool_calls: 4,
                     fresh_context: true,
+                    execution_mode: None,
                 }],
                 budget_tokens: None,
             }],
@@ -349,6 +355,7 @@ mod tests {
                 objective: "Return the verified answer.".into(),
                 capabilities: Vec::new(),
                 max_tool_calls: 0,
+                execution_mode: None,
             },
             deliverables: Vec::new(),
         };

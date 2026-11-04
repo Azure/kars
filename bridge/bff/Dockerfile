@@ -14,6 +14,7 @@ WORKDIR /src
 # Compile only the real sources against the reviewed lockfile.
 COPY bridge/bff/ bridge/bff/
 COPY shared/ shared/
+COPY eval-corpus/src/builtin_names.rs eval-corpus/src/builtin_names.rs
 WORKDIR /src/bridge/bff
 RUN cargo build --release --locked && strip target/release/kars-bridge-bff
 

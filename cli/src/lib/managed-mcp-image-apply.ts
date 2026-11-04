@@ -73,10 +73,6 @@ export async function refreshManagedMcpImages(
   for (const { source, image } of plans) {
     const current = await read(execute, "mcpserver", source.metadata.name, source.metadata.namespace);
     sourceUnchanged(current, source);
-    await execute("kubectl", ["patch", "mcpserver", source.metadata.name, "-n", source.metadata.namespace!,
-      "--type=merge", "-p", JSON.stringify({ metadata: { uid: current.metadata.uid,
-        resourceVersion: current.metadata.resourceVersion, annotations: { "kars.azure.com/image-refresh": String(Date.now()) } } })],
-    { stdio: "pipe" });
     await execute("kubectl", ["wait", `mcpserver/${source.metadata.name}`, "-n", source.metadata.namespace!,
       `--for=jsonpath={.status.workloadImage}=${image}`, "--timeout=300s"], { stdio: "pipe" });
     const verified = await read(execute, "mcpserver", source.metadata.name, source.metadata.namespace);

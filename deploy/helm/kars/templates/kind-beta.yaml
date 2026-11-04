@@ -1,0 +1,208 @@
+{{/* Copyright (c) Microsoft Corporation. Licensed under the MIT License. */}}
+{{- $profile := (.Values.global | default dict).installationProfile | default "" -}}
+{{- if and $profile (ne $profile "kind-beta") -}}
+{{- fail "Unknown Core installationProfile" -}}
+{{- end -}}
+{{- if eq $profile "kind-beta" -}}
+{{- if or (ne .Release.Name "kars") (ne .Release.Namespace "kars-system") (not (semverCompare ">=1.35.0-0 <1.36.0-0" .Capabilities.KubeVersion.Version)) -}}
+{{- fail "kind-beta requires Core kars/kars-system and Kubernetes 1.35" -}}
+{{- end -}}
+{{- if or (and .Release.IsInstall (not .Values.schemaHook.enabled)) (not .Values.sre.enabled) (not .Values.inferenceBudget.enabled) (not .Values.headlamp.enabled) (not .Values.headlamp.oidc.enabled) (not .Values.agentMesh.enabled) (not .Values.datapathWitness.managed) (not .Values.datapathWitness.enabled) -}}
+{{- fail "kind-beta requires first-install schemaHook, finite Hermes SRE, genuine Headlamp OIDC, Core AgentMesh and Core-managed witness" -}}
+{{- end -}}
+{{- if or .Values.entraSidecar.enabled ((.Values.policyPrototype | default dict).enabled | default false) .Values.metricsServer.kubelet.insecureTLS (not .Values.networkPolicy.defaultDenyEgress) -}}
+{{- fail "kind-beta requires the non-Entra, enforced-egress profile without insecure kubelet TLS" -}}
+{{- end -}}
+{{- $extraEnv := .Values.controller.extraEnv | default list -}}
+{{- if gt (len $extraEnv) 1 -}}
+{{- fail "kind-beta permits only one literal IMAGE_PULL_REGISTRIES metadata entry, not controller env overrides" -}}
+{{- end -}}
+{{- range $extraEnv -}}
+{{- if or (ne (.name | default "") "IMAGE_PULL_REGISTRIES") (ne (len .) 2) (not (kindIs "string" .value)) (empty (.value | default "")) -}}
+{{- fail "kind-beta permits only one literal IMAGE_PULL_REGISTRIES metadata entry, not controller env overrides" -}}
+{{- end -}}
+{{- end -}}
+{{- $cni := (.Values.kindBeta | default dict).cni | default "" -}}
+{{- if not (has $cni (list "cilium" "calico")) -}}
+{{- fail "kind-beta requires explicit kindBeta.cni (cilium or calico), installed before Core" -}}
+{{- end -}}
+{{- if or (and (eq $cni "cilium") (or (not .Values.cilium.enabled) (not (.Capabilities.APIVersions.Has "cilium.io/v2")))) (and (eq $cni "calico") (or .Values.cilium.enabled (not (.Capabilities.APIVersions.Has "crd.projectcalico.org/v1")))) -}}
+{{- fail "kind-beta CNI selection must match installed CNI APIs and cilium.enabled" -}}
+{{- end -}}
+{{- $nodes := .Values.datapathWitness.nodes | default list -}}
+{{- if or (ne (len $nodes) 1) (ne .Values.datapathWitness.scope "all") (not (empty .Values.datapathWitness.sandboxes)) -}}
+{{- fail "kind-beta requires witness scope=all and one explicitly approved Kind node" -}}
+{{- end -}}
+{{- if ne (index (.Values.sandbox.nodeSelector | default dict) "kubernetes.io/hostname" | default "") (first $nodes) -}}
+{{- fail "kind-beta sandbox.nodeSelector kubernetes.io/hostname must match the approved Kind witness node" -}}
+{{- end -}}
+{{- $sreRoute := include "kars.sre.modelRoute" . | fromJson -}}
+{{- $provider := (.Values.controller.inferenceDefaults | default dict).provider | default $sreRoute.provider -}}
+{{- $selectedProvider := ne $provider $sreRoute.provider -}}
+{{- $adoptedRepair := and .Release.IsUpgrade (not .Values.schemaHook.enabled) (lookup "v1" "ConfigMap" .Release.Namespace "kars-sre-first-install") (lookup "v1" "ConfigMap" .Release.Namespace "kars-sre-helm-adoption") -}}
+{{- if and $selectedProvider (not (and $adoptedRepair .Values.sre.modelRouteBaseline)) -}}
+{{- fail "kind-beta selecting a different SRE provider requires the adopted model route baseline" -}}
+{{- end -}}
+{{- $endpoint := "" -}}
+{{- if eq $provider "azure-openai" -}}
+{{- if .Values.foundry.endpoint -}}{{- fail "kind-beta azure-openai must not be shadowed by foundry.endpoint" -}}{{- end -}}
+{{- $endpoint = .Values.inferenceRouter.azure.openai.endpoint -}}
+{{- else if eq $provider "foundry" -}}
+{{- if .Values.inferenceRouter.azure.openai.endpoint -}}{{- fail "kind-beta foundry requires only foundry.endpoint" -}}{{- end -}}
+{{- $endpoint = .Values.foundry.endpoint -}}
+{{- else -}}
+{{- fail "kind-beta supports the existing authenticated azure-openai or foundry routes; other provider routes require separate qualification" -}}
+{{- end -}}
+{{- if not (regexMatch "^https://[A-Za-z0-9][A-Za-z0-9.-]*(:443)?(/[^[:space:]?#]*)?$" $endpoint) -}}
+{{- fail "kind-beta requires an explicit HTTPS provider endpoint on port 443" -}}
+{{- end -}}
+{{- $credentials := .Values.inferenceRouter.azure.openai.credentials -}}
+{{- if or $credentials.apiKey (not $credentials.existingSecret) (not $credentials.key) .Values.localInference.namespaces .Values.localInference.targets -}}
+{{- fail "kind-beta requires an operator provider credential Secret reference, without inline keys or alternate local routes" -}}
+{{- end -}}
+{{- $providerStore := lookup "v1" "Secret" .Release.Namespace "kars-inference-providers" -}}
+{{- if and $selectedProvider (not (or $providerStore.data $providerStore.stringData)) -}}
+{{- fail "kind-beta selected SRE provider requires the enrolled provider store" -}}
+{{- end -}}
+{{- if or $providerStore.data $providerStore.stringData -}}
+{{- if not $adoptedRepair -}}
+{{- fail "kind-beta default provider route must not be shadowed by kars-inference-providers; retain and review existing credentials, never auto-delete" -}}
+{{- end -}}
+{{/* Bridge may enroll additional routes after adoption. Preserve only the live
+     UID-bound provider store; it must not override the sealed SRE bootstrap. */}}
+{{- $workspace := lookup "v1" "Namespace" "" .Release.Namespace -}}
+{{- $grant := lookup "kars.azure.com/v1alpha1" "KarsCredentialGrant" .Release.Namespace "workspace" -}}
+{{- $storeUid := dig "metadata" "uid" "" $providerStore -}}
+{{- $grantUid := dig "metadata" "uid" "" $grant -}}
+{{- $workspaceUid := dig "metadata" "uid" "" $workspace -}}
+{{- if or (not $storeUid) (not $grantUid) (not $workspaceUid)
+  (dig "metadata" "deletionTimestamp" "" $providerStore)
+  (dig "metadata" "deletionTimestamp" "" $workspace)
+  (dig "metadata" "deletionTimestamp" "" $grant)
+  (ne (dig "type" "" $providerStore) "Opaque")
+  (ne (dig "spec" "enabled" false $grant) true)
+  (ne (dig "spec" "workspaceUid" "" $grant) $workspaceUid)
+  (ne (dig "status" "phase" "" $grant) "Ready")
+  (not (dig "metadata" "generation" 0 $grant))
+  (ne (toString (dig "status" "observedGeneration" 0 $grant)) (toString (dig "metadata" "generation" 0 $grant)))
+  (dig "status" "integrationError" "" $grant)
+  (ne (dig "metadata" "annotations" "kars.azure.com/credential-store-grant-uid" "" $providerStore) $grantUid) -}}
+{{- fail "kind-beta provider-store continuity requires the live reconciled workspace credential authority" -}}
+{{- end -}}
+{{- $enrolled := 0 -}}
+{{- range (dig "spec" "integrationStores" list $grant) -}}
+{{- if eq (dig "secret" "name" "" .) "kars-inference-providers" -}}
+{{- if or (ne (dig "secret" "uid" "" .) $storeUid) (ne (.purpose | default "") "providers") -}}
+{{- fail "kind-beta provider-store continuity requires the enrolled providers Secret UID" -}}
+{{- end -}}
+{{- $enrolled = add1 $enrolled -}}
+{{- end -}}
+{{- end -}}
+{{- if ne (int $enrolled) 1 -}}
+{{- fail "kind-beta provider-store continuity requires exactly one enrolled providers Secret" -}}
+{{- end -}}
+{{- $defaultPrefix := printf "KARS_PROVIDER_%s_" (upper (replace "-" "_" $provider)) -}}
+{{- $defaultRoute := dict -}}
+{{- $selectedPrefix := printf "KARS_PROVIDER_%s_" (upper (replace "-" "_" $sreRoute.provider)) -}}
+{{- $selectedRoute := dict -}}
+{{- range $field := list "data" "stringData" -}}
+{{- range $key, $value := (index $providerStore $field | default dict) -}}
+{{- if and (ne $key "COPILOT_GITHUB_TOKEN") (not (regexMatch "^KARS_PROVIDER_[A-Z0-9_]+_(ENDPOINT|API_KEY|TOKEN|MODELS)$" $key)) -}}
+{{- fail "kind-beta enrolled additional providers must not inject router settings" -}}
+{{- end -}}
+{{- if has $key (list (printf "%sENDPOINT" $defaultPrefix) (printf "%sAPI_KEY" $defaultPrefix) (printf "%sTOKEN" $defaultPrefix)) -}}
+{{- if or (hasKey $defaultRoute $key) (not (kindIs "string" $value)) -}}
+{{- fail "kind-beta default provider declarations must be unique strings" -}}
+{{- end -}}
+{{- if eq $field "data" -}}{{- $value = b64dec $value -}}{{- end -}}
+{{- $_ := set $defaultRoute $key $value -}}
+{{- end -}}
+{{- if and $selectedProvider (has $key (list (printf "%sENDPOINT" $selectedPrefix) (printf "%sAPI_KEY" $selectedPrefix) (printf "%sTOKEN" $selectedPrefix))) -}}
+{{- if or (hasKey $selectedRoute $key) (not (kindIs "string" $value)) -}}
+{{- fail "kind-beta selected SRE provider declarations must be unique strings" -}}
+{{- end -}}
+{{- if eq $field "data" -}}{{- $value = b64dec $value -}}{{- end -}}
+{{- $_ := set $selectedRoute $key $value -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if $selectedProvider -}}
+{{- $selectedEndpoint := index $selectedRoute (printf "%sENDPOINT" $selectedPrefix) | default "" -}}
+{{- if not (regexMatch "^https://[A-Za-z0-9][A-Za-z0-9.-]*(:443)?(/[^[:space:]?#]*)?$" $selectedEndpoint) -}}
+{{- fail "kind-beta selected SRE provider requires an enrolled HTTPS endpoint on port 443" -}}
+{{- end -}}
+{{- if not (or (index $selectedRoute (printf "%sAPI_KEY" $selectedPrefix) | default "" | trim) (index $selectedRoute (printf "%sTOKEN" $selectedPrefix) | default "" | trim)) -}}
+{{- fail "kind-beta selected SRE provider requires its own enrolled credential" -}}
+{{- end -}}
+{{- $contractFound := false -}}
+{{- range $.Values.inferenceBudget.contracts -}}
+{{- if and (eq (.providerId | default "") $sreRoute.provider) (eq (.model | default "") $sreRoute.deployment) (eq (.endpoint | default "") $selectedEndpoint) -}}
+{{- $contractFound = true -}}
+{{- end -}}
+{{- end -}}
+{{/* Spending contracts are unnecessary for the sealed unbounded token-only
+     grant. Runtime accounting and authenticated provider enrollment still apply. */}}
+{{- if and (not $contractFound) (ne (.Values.sre.firstInstallFunding | toJson) (dict "unboundedTokens" true | toJson)) -}}
+{{- fail "kind-beta selected SRE provider requires a matching provider/model/endpoint contract" -}}
+{{- end -}}
+{{- end -}}
+{{- if $defaultRoute -}}
+{{/* Named bootstrap aliases may duplicate the original endpoint/authentication,
+     but never replace them. Secret values are compared, not rendered or stored. */}}
+{{- $bootstrap := lookup "v1" "Secret" .Release.Namespace $credentials.existingSecret -}}
+{{- $bootstrapKey := index ($bootstrap.data | default dict) $credentials.key | default "" | b64dec -}}
+{{- if or (not $bootstrapKey) (dig "metadata" "deletionTimestamp" "" $bootstrap)
+  (ne (index $defaultRoute (printf "%sENDPOINT" $defaultPrefix) | default "") $endpoint)
+  (and (not (hasKey $defaultRoute (printf "%sAPI_KEY" $defaultPrefix))) (not (hasKey $defaultRoute (printf "%sTOKEN" $defaultPrefix)))) -}}
+{{- fail "kind-beta named default provider must retain the original endpoint and credential" -}}
+{{- end -}}
+{{- range $key, $value := $defaultRoute -}}
+{{- if and (ne $key (printf "%sENDPOINT" $defaultPrefix)) (ne $value $bootstrapKey) -}}
+{{- fail "kind-beta named default provider must retain the original endpoint and credential" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if or (not .Values.inferenceBudget.catalogVersion) (not (kindIs "slice" .Values.inferenceBudget.contracts)) (not .Values.inferenceBudget.contracts) (not .Values.inferenceBudget.caBundle) (not .Values.inferenceBudget.tlsSecretName) .Values.inferenceBudget.tls.privateKey -}}
+{{- fail "kind-beta requires genuine finite provider contracts and an existing operator budget TLS Secret/CA" -}}
+{{- end -}}
+{{/* An adopted repair is checked against the sealed intent in sre.yaml; rendering
+     compatible readers neither renews funding nor makes expired authority live. */}}
+{{- if and (not $adoptedRepair) (ne (.Values.sre.firstInstallFunding | toJson) (dict "unboundedTokens" true | toJson)) -}}
+{{- fail "kind-beta requires explicit unbounded non-expiring first-install funding: unboundedTokens: true" -}}
+{{- end -}}
+{{- if not (regexMatch "^https://[A-Za-z0-9][A-Za-z0-9.-]*(:443)?(/[^[:space:]?#]*)?$" .Values.headlamp.oidc.issuerURL) -}}
+{{- fail "kind-beta requires genuine external Headlamp HTTPS OIDC on port 443 (available before Core)" -}}
+{{- end -}}
+{{- if ne .Values.controller.image.tag (printf "latest@%s" (.Values.controller.image.digest | default "")) -}}
+{{- fail "kind-beta controller image tag must match the cold-install approved digest" -}}
+{{- end -}}
+{{- $images := dict "controller" .Values.controller.image "inferenceRouter" .Values.inferenceRouter.image "sandbox" .Values.sandbox.image "headlamp" .Values.headlamp.image "agentMesh.registry" .Values.agentMesh.registry.image "agentMesh.relay" .Values.agentMesh.relay.image -}}
+{{- if .Values.metricsServer.enabled -}}{{- $_ := set $images "metricsServer" .Values.metricsServer.image -}}{{- end -}}
+{{- if .Values.monitoring.enabled -}}
+{{- $_ := set $images "monitoring.operator" .Values.monitoring.prometheusOperator.image -}}
+{{- $_ := set $images "monitoring.reloader" .Values.monitoring.prometheusOperator.prometheusConfigReloader.image -}}
+{{- $_ := set $images "monitoring.webhook" .Values.monitoring.prometheusOperator.admissionWebhooks.patch.image -}}
+{{- $_ := set $images "monitoring.prometheus" .Values.monitoring.prometheus.prometheusSpec.image -}}
+{{- $_ := set $images "monitoring.state" (index .Values.monitoring "kube-state-metrics").image -}}
+{{- $_ := set $images "monitoring.node" (index .Values.monitoring "prometheus-node-exporter").image -}}
+{{- if .Values.monitoring.jsonExporter.enabled -}}{{- $_ := set $images "monitoring.json" .Values.monitoring.jsonExporter.image -}}{{- end -}}
+{{- if or (and .Values.monitoring.grafana.enabled (not $adoptedRepair)) .Values.monitoring.inspektorGadget.enabled .Values.monitoring.alertmanager.enabled -}}
+{{- fail "kind-beta initial monitoring excludes optional Grafana/Alertmanager and duplicate Inspektor Gadget" -}}
+{{- end -}}
+{{- if .Values.monitoring.grafana.enabled -}}
+{{- $_ := set $images "monitoring.grafana" .Values.monitoring.grafana.image -}}
+{{- $_ := set $images "monitoring.grafana.sidecar" .Values.monitoring.grafana.sidecar.image -}}
+{{- end -}}
+{{- end -}}
+{{- range $name, $image := $images -}}
+{{- if or (not $image.repository) (not (regexMatch "^latest@sha256:[a-f0-9]{64}$" $image.tag)) -}}
+{{- fail (printf "kind-beta requires operator-qualified immutable %s.image (latest@sha256 digest)" $name) -}}
+{{- end -}}
+{{- end -}}
+{{- range $name, $image := dict "Hermes" .Values.runtimes.hermes.image "seccomp installer" .Values.sandbox.seccompInstallerImage -}}
+{{- if not (regexMatch "^[^[:space:]@]+@sha256:[a-f0-9]{64}$" $image) -}}
+{{- fail (printf "kind-beta requires an operator-qualified immutable %s image" $name) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}

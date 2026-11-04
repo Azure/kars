@@ -2,11 +2,11 @@
 // Licensed under the MIT License.
 
 use super::client::extract_json;
-use super::egress::complete_egress_recommendation;
+use super::egress::normalize_proposed_egress;
 use super::execution::{
     delegation_from_execution_plan, parse_execution_plan, single_agent_delegation,
 };
-use super::routing::{efficiency_basis, recommendation_is_actionable};
+use super::routing::{efficiency_basis, recommendation_is_actionable, unique_model_for_deployment};
 use super::{
     ComposeEgress, ComposeModel, ComposeProposal, default_tool_policy, is_non_autonomous_harness,
 };
@@ -17,7 +17,6 @@ pub(super) fn parse_and_validate(
     raw: &str,
     o: &crate::routes::options::Options,
     eff: &crate::routes::efficiency::EfficiencyDto,
-    intent: &str,
 ) -> (ComposeProposal, Option<String>) {
     let json = extract_json(raw).unwrap_or_else(|| serde_json::json!({}));
 
@@ -52,20 +51,18 @@ pub(super) fn parse_and_validate(
             recommendation_is_actionable(eff.recommended.as_deref(), eff.recommended_low_confidence)
         })
         .and_then(|route| {
-            o.models
-                .iter()
-                .find(|mo| mo.deployment == *route)
-                .map(|mo| ComposeModel {
-                    provider: mo.provider.clone(),
-                    deployment: mo.deployment.clone(),
-                })
+            unique_model_for_deployment(&o.models, route).map(|mo| ComposeModel {
+                provider: mo.provider.clone(),
+                deployment: mo.deployment.clone(),
+            })
         });
 
     let (model, mut model_basis, model_from_reco) = if let Some(m) = orchestrator_pick {
         let is_reco = recommendation_is_actionable(
             eff.recommended.as_deref(),
             eff.recommended_low_confidence,
-        ) && eff.recommended.as_ref().is_some_and(|r| *r == m.deployment);
+        ) && eff.recommended.as_ref().is_some_and(|r| *r == m.deployment)
+            && unique_model_for_deployment(&o.models, &m.deployment).is_some();
         let basis = if is_reco {
             efficiency_basis(eff, &m.deployment)
         } else {
@@ -88,10 +85,14 @@ pub(super) fn parse_and_validate(
         let basis = m.as_ref().map(|_| {
             if eff.total_runs == 0 {
                 "Cluster default — no completed runs yet to learn a better route.".to_string()
-            } else if eff.recommended.is_some() {
-                // There IS a learned recommendation, but it doesn't map to a live
-                // model — be honest rather than implying the default was "chosen".
-                "Cluster default — the recommended route is no longer in the catalogue.".to_string()
+            } else if eff.recommended_low_confidence && eff.recommended.is_some() {
+                "Cluster default — the measured recommendation has insufficient confidence to select an execution route.".to_string()
+            } else if let Some(deployment) = eff.recommended.as_deref() {
+                if o.models.iter().any(|model| model.deployment == deployment) {
+                    "Cluster default — the measured deployment name is shared by multiple providers; historical provider attribution is unavailable.".to_string()
+                } else {
+                    "Cluster default — the recommended route is no longer in the catalogue.".to_string()
+                }
             } else {
                 "Cluster default — the objective didn't clearly warrant another route.".to_string()
             }
@@ -248,11 +249,13 @@ pub(super) fn parse_and_validate(
         )
     };
 
-    // Memory: must be a real store; else None.
+    // Preserve explicit selections for fail-closed live-resource validation.
+    // Absence is router-selected memory, not an inferred Foundry binding.
     let memory = json
         .get("memory")
         .and_then(|v| v.as_str())
-        .filter(|m| !m.is_empty() && o.memories.iter().any(|mo| mo.name == *m))
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
         .map(str::to_string);
 
     // Egress: sanitized host list.
@@ -276,7 +279,7 @@ pub(super) fn parse_and_validate(
                 .collect()
         })
         .unwrap_or_default();
-    let egress = complete_egress_recommendation(egress, intent, &mcp_servers);
+    let egress = normalize_proposed_egress(egress);
 
     let instructions = json
         .get("instructions")
@@ -290,12 +293,7 @@ pub(super) fn parse_and_validate(
         .as_ref()
         .map(delegation_from_execution_plan)
         .unwrap_or_else(single_agent_delegation);
-    let proposed_budget = json
-        .get("budget_tokens")
-        .and_then(|v| v.as_i64())
-        .filter(|t| *t > 0)
-        .filter(|tokens| *tokens > 0);
-    let budget_tokens = proposed_budget;
+    let budget_tokens = json.get("budget_tokens").and_then(|v| v.as_i64());
 
     let rationale = json
         .get("rationale")

@@ -16,15 +16,18 @@ import type {
   ComposeTeamMilestone,
   Options,
   ProfileSummary,
-  TeamLifecycleMode,
   ValidationResult,
 } from "@/lib/types";
 import { PreflightCheck } from "@/components/preflight-check";
+import { CompositionNote } from "@/components/validation-checks";
+import { RoleBudgetFields } from "@/components/role-budget-fields";
+import { compositionSpending, roleBudgetError } from "@/lib/budget-review";
 import { OrchestrationCube } from "@/components/orchestration-cube";
 import { LoopDesigner } from "@/components/loop-designer";
 import { Icon, type IconName } from "@/components/icon";
 import { MEMBER_ARCHETYPES } from "@/lib/member-archetypes";
 import { parseTeamBudget } from "@/lib/team-budget";
+import { readTeamProfile } from "@/lib/team-profile";
 import { renderGovernancePanel, renderOrgPanel } from "./team-composer-panels";
 import type { Role } from "./team-composer-panel-types";
 
@@ -50,8 +53,9 @@ function parseEgressLines(value: string): { host: string; port?: number }[] {
     });
 }
 
-export function TeamComposer({ options, profile, profileEnvelope, initialCharter }: {
+export function TeamComposer({ options, profile, profileEnvelope, initialCharter, canQualify = false }: {
   options: Options;
+  canQualify?: boolean;
   profile?: ProfileSummary | null;
   profileEnvelope?: import("@/lib/team-profile").TeamProfileEnvelope;
   initialCharter?: string;
@@ -69,6 +73,7 @@ export function TeamComposer({ options, profile, profileEnvelope, initialCharter
     [options.memories],
   );
   const [state, action, pending] = useActionState(createTeamAction, init);
+  const [selectedProfile, setSelectedProfile] = useState(profile ?? null);
   const [name, setName] = useState("");
   const [displayName, setDisplayName] = useState(profile?.display_name ?? "");
   const [charter, setCharter] = useState(profile?.charter_template ?? initialCharter ?? "");
@@ -82,8 +87,6 @@ export function TeamComposer({ options, profile, profileEnvelope, initialCharter
   const [addNote, setAddNote] = useState<string | null>(null);
   useEffect(() => { if (!addNote) return; const t = setTimeout(() => setAddNote(null), 2500); return () => clearTimeout(t); }, [addNote]);
   const [cadence, setCadence] = useState(0);
-  const [lifecycleMode, setLifecycleMode] = useState<TeamLifecycleMode>("resourceOptimized");
-  const [warmIdleMinutes, setWarmIdleMinutes] = useState(15);
   const [reporting, setReporting] = useState("");
   const [toolPolicy, setToolPolicy] = useState(profileEnvelope?.toolPolicy ?? profile?.tool_policy ?? "");
   const [pinToolPolicy, setPinToolPolicy] = useState(!!profileEnvelope?.toolPolicy);
@@ -92,7 +95,6 @@ export function TeamComposer({ options, profile, profileEnvelope, initialCharter
   const [modelFallbacks, setModelFallbacks] = useState<string[]>([]);
   const [mcp, setMcp] = useState<string[]>([]);
   const [memory, setMemory] = useState("");
-  const [egressMode, setEgressMode] = useState<"learning" | "strict">("learning");
   const [egressText, setEgressText] = useState("");
   const [commons, setCommons] = useState(profile?.knowledge_commons ?? "");
   const [engineeringEnabled, setEngineeringEnabled] = useState(false);
@@ -108,7 +110,8 @@ export function TeamComposer({ options, profile, profileEnvelope, initialCharter
         system_prompt: r.system_prompt ?? "",
         runtime: "",
         model: "",
-        skills: (r.skills ?? []).filter((skill) => availableSkillNames.has(skill)),
+        skills: r.skills ?? [],
+        resources: { mcp_servers: [], egress: [] },
       })) ?? [],
   );
   const [milestones, setMilestones] = useState<ComposeTeamMilestone[]>([]);
@@ -118,13 +121,13 @@ export function TeamComposer({ options, profile, profileEnvelope, initialCharter
   const [validation, setValidation] = useState<ValidationResult | null>(null);
   const [validatedFingerprint, setValidatedFingerprint] = useState<string | null>(null);
   const [launch, setLaunch] = useState(false);
+  const [qualificationRun, setQualificationRun] = useState(false);
   // The team's effective package for the shared pre-flight — the same blueprint
   // shape a mission validates. The controller defaults toolPolicy to kars-default
   // and the model to the controller default, so we validate those effective
   // values. Roster-level model overrides ride on top per member.
   const teamBlueprint = useMemo(() => {
-    const roleModel = roles.map((r) => r.model).find((m) => m && m.includes("::"));
-    const effectiveModel = model.includes("::") ? model : roleModel;
+    const effectiveModel = model.includes("::") ? model : undefined;
     const modelRoute = effectiveModel
       ? { provider: effectiveModel.split("::")[0], deployment: effectiveModel.split("::")[1] }
       : null;
@@ -140,13 +143,13 @@ export function TeamComposer({ options, profile, profileEnvelope, initialCharter
       memory: memory.trim() || undefined,
       skills: [...new Set(roles.flatMap((role) => role.skills))],
       egress: parseEgressLines(egressText),
-      egress_mode: egressMode,
+      egress_mode: "strict" as const,
       execution_plan: executionPlan,
     };
-  }, [runtime, toolPolicy, roles, mcp, memory, model, modelFallbacks, egressText, egressMode, executionPlan]);
+  }, [runtime, toolPolicy, roles, mcp, memory, model, modelFallbacks, egressText, executionPlan]);
   const teamFingerprint = useMemo(
-    () => JSON.stringify({ blueprint: teamBlueprint, roles, tier, authorityCeiling, delegationDepth, budgetTokens, budgetUsdMicros, budgetScope, pinToolPolicy }),
-    [teamBlueprint, roles, tier, authorityCeiling, delegationDepth, budgetTokens, budgetUsdMicros, budgetScope, pinToolPolicy],
+    () => JSON.stringify({ blueprint: teamBlueprint, roles, tier, authorityCeiling, delegationDepth, budgetTokens, budgetUsdMicros, budgetScope, pinToolPolicy, qualificationRun, selectedRepos }),
+    [teamBlueprint, roles, tier, authorityCeiling, delegationDepth, budgetTokens, budgetUsdMicros, budgetScope, pinToolPolicy, qualificationRun, selectedRepos],
   );
   const currentValidation = validatedFingerprint === teamFingerprint ? validation : null;
   const selectedMemoryOption = useMemo(
@@ -167,30 +170,80 @@ export function TeamComposer({ options, profile, profileEnvelope, initialCharter
 
   async function compose() {
     if (charter.trim().length < 8) return;
+    const requested = compositionSpending(budgetTokens, executionPlanDraft);
+    if (requested.error !== null || parsedBudget.error !== null) {
+      setComposeNote(requested.error ?? parsedBudget.error);
+      setComposed(true);
+      return;
+    }
     setComposing(true);
+    setLaunch(false);
+    setValidation(null);
+    setValidatedFingerprint(null);
     setRationale(null);
     setModelBasis(null);
     setExpectedTokens(null);
     setEfficiencyRuns(0);
     setComposeNote(null);
     try {
-      const res = await composeTeamAction(charter.trim());
+      const res = await composeTeamAction(charter.trim(), selectedProfile?.name, qualificationRun || undefined, requested.spending);
       if (res.available && res.proposal) {
         // AI orchestrator composed the org — adopt its roster + team settings.
         const p = res.proposal;
-        setTier(p.tier);
+        if (selectedProfile && p.profile?.name !== selectedProfile.name) {
+          setComposeNote("The selected profile was omitted or replaced. The existing draft was kept; nothing was launched.");
+          return;
+        }
+        const copied = p.profile ? readTeamProfile(p.profile, options.skills, options.tool_policies) : null;
+        if (copied?.error) {
+          setComposeNote(copied.error);
+          return;
+        }
+        const missingSkills = [...new Set(p.roles.flatMap((role) => role.skills ?? []))]
+          .filter((skill) => !availableSkillNames.has(skill));
+        if (missingSkills.length > 0) {
+          setComposeNote(`Proposed skills are unavailable: ${missingSkills.join(", ")}. The existing draft was kept; no skills were silently removed.`);
+          return;
+        }
+        if (p.profile && copied?.envelope) {
+          const envelope = copied.envelope;
+          const missingRoles = p.profile.roles.some((role) => !p.roles.some((member) =>
+            member.name === role.name && (role.skills ?? []).every((skill) => member.skills.includes(skill))));
+          if (missingRoles || p.tier !== envelope.tier || (envelope.budget?.tokens != null &&
+            (p.budget_tokens == null || p.budget_tokens > envelope.budget.tokens))) {
+            setComposeNote("The proposal does not preserve the profile roles, skills, tier or lifetime budget. The existing draft was kept; nothing was launched.");
+            return;
+          }
+        }
+        setBudgetTokens(p.budget_tokens?.toString() ?? "");
+        if (!selectedProfile) {
+          setTier(p.tier);
+          if (p.profile && copied?.envelope) {
+            const envelope = copied.envelope;
+            setSelectedProfile(p.profile);
+            setDisplayName(p.profile.display_name ?? "");
+            setAuthorityCeiling(envelope.authorityCeiling.toString());
+            setDelegationDepth(envelope.delegationDepth.toString());
+            const profileCost = envelope.budget?.usd_micros;
+            const requestedCost = parsedBudget.budget?.usd_micros;
+            setBudgetUsdMicros((profileCost != null && requestedCost != null
+              ? Math.min(profileCost, requestedCost) : requestedCost ?? profileCost)?.toString() ?? "");
+            setToolPolicy(envelope.toolPolicy ?? p.profile.tool_policy ?? "");
+            setPinToolPolicy(!!envelope.toolPolicy);
+            setCommons(p.profile.knowledge_commons ?? "");
+          }
+        }
         setCadence(p.cadence_minutes);
         setModel(p.model ?? "");
         setModelFallbacks(p.model_fallbacks ?? []);
         setMcp((p.mcp_servers ?? []).filter((server) => availableMcpNames.has(server)));
         setMemory(p.memory && availableMemoryNames.has(p.memory) ? p.memory : "");
-        setEgressMode(p.egress_mode ?? "learning");
         setEgressText(
           (p.egress ?? [])
             .map((entry) => `${entry.host}${entry.port ? `:${entry.port}` : ""}`)
             .join("\n"),
         );
-        setEngineeringEnabled(p.engineering_enabled);
+        setEngineeringEnabled(!qualificationRun && p.engineering_enabled);
         setEngineeringSignals(new Set(p.engineering_signals ?? []));
         setEngineeringPoll(p.engineering_poll_interval_seconds ?? 900);
         setEngineeringAutoRun(p.engineering_auto_run ?? true);
@@ -198,11 +251,6 @@ export function TeamComposer({ options, profile, profileEnvelope, initialCharter
         setExecutionPlanDraft(p.execution_plan ? JSON.stringify(p.execution_plan, null, 2) : "");
         setExecutionPlanError(null);
         const proposedRoles = p.roles.filter((role) => role.name.trim().toLowerCase() !== "principal");
-        const unavailableSkillCount = proposedRoles.reduce(
-          (count, role) =>
-            count + (role.skills ?? []).filter((skill) => !availableSkillNames.has(skill)).length,
-          0,
-        );
         setRoles(
           (proposedRoles.length ? proposedRoles : proposeRoles()).map((r) => ({
             id: RID++,
@@ -210,29 +258,24 @@ export function TeamComposer({ options, profile, profileEnvelope, initialCharter
             system_prompt: r.system_prompt,
             runtime: "runtime" in r ? r.runtime : "",
             model: "model" in r ? r.model : "",
-            skills: (r.skills ?? []).filter((skill) => availableSkillNames.has(skill)),
+            skills: r.skills ?? [],
+            resources: r.resources ?? { mcp_servers: [], egress: [] },
           })),
         );
-        if (unavailableSkillCount > 0) {
-          setComposeNote(
-            `${unavailableSkillCount} suggested skill${unavailableSkillCount === 1 ? "" : "s"} ` +
-              "were not in the live attested catalogue and were left out.",
-          );
-        }
         setMilestones(p.milestones ?? []);
         setRationale(res.rationale ?? null);
         setModelBasis(p.model_basis ?? null);
         setExpectedTokens(p.expected_tokens_per_outcome ?? null);
         setEfficiencyRuns(p.efficiency_sample_runs ?? 0);
       } else {
-        // Honest fallback to the heuristic starter roster.
         setComposeNote(res.reason ?? null);
+        if (selectedProfile || executionPlanDraft.trim() || composed) return;
         setRoles(proposeRoles().map((r) => ({ ...r, id: RID++ })));
         setExecutionPlan(null);
         setExecutionPlanDraft("");
         setMilestones([]);
         if (/dependabot|code quality|code scanning|security finding|repository maintenance/i.test(charter)) {
-          setEngineeringEnabled(true);
+          setEngineeringEnabled(!qualificationRun);
           setEngineeringSignals(
             new Set([
               "dependabot_pr",
@@ -245,7 +288,8 @@ export function TeamComposer({ options, profile, profileEnvelope, initialCharter
         }
       }
     } catch {
-      setComposeNote("Couldn't reach the orchestrator — starting from a suggested roster you can edit.");
+      setComposeNote("Couldn't reach the orchestrator. Nothing was launched; the draft remains editable.");
+      if (selectedProfile || executionPlanDraft.trim() || composed) return;
       setRoles(proposeRoles().map((r) => ({ ...r, id: RID++ })));
       setExecutionPlan(null);
       setExecutionPlanDraft("");
@@ -268,7 +312,7 @@ export function TeamComposer({ options, profile, profileEnvelope, initialCharter
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-  const addRole = () => setRoles((r) => [...r, { id: RID++, name: "", system_prompt: "", runtime: "", model: "", skills: [] }]);
+  const addRole = () => setRoles((r) => [...r, { id: RID++, name: "", system_prompt: "", runtime: "", model: "", skills: [], resources: { mcp_servers: [], egress: [] } }]);
   // Drop a reusable member archetype (e.g. Rust Engineer) into the roster,
   // pre-filled with its charge; runtime/model stay unset to inherit the team
   // default. Skills are applied only if this cluster actually has them.
@@ -296,6 +340,7 @@ export function TeamComposer({ options, profile, profileEnvelope, initialCharter
           runtime: "",
           model: "",
           skills: a.suggestedSkills.filter((s) => availableSkillNames.has(s)),
+          resources: { mcp_servers: [], egress: [] },
         },
       ];
     });
@@ -322,7 +367,19 @@ export function TeamComposer({ options, profile, profileEnvelope, initialCharter
       ),
     );
 
-  const rolesJson = useMemo(() => JSON.stringify(roles.map(({ name, system_prompt, runtime, model, skills }) => ({ name, system_prompt, runtime, model, skills }))), [roles]);
+  const qualificationChoice = canQualify ? (
+    <label className="block rounded-lg border border-border p-3 text-xs text-foreground-muted">
+      <input type="checkbox" checked={qualificationRun} disabled={composing || pending} onChange={(event) => {
+        setQualificationRun(event.target.checked);
+        if (event.target.checked && !runtime) setRuntime("OpenClaw");
+        if (event.target.checked) setEngineeringEnabled(false);
+        setLaunch(false);
+      }} className="mr-2 accent-signal" />
+      Operator qualification: one reviewed Team attempt, then pause. Missing prior route/resource evidence is advisory, not qualified evidence. Policies, credentials, isolation, content-bound skill approval and finite budgets still apply. Approval expires after 45 minutes.
+    </label>
+  ) : null;
+
+  const rolesJson = useMemo(() => JSON.stringify(roles.map(({ name, system_prompt, runtime, model, skills, resources }) => ({ name, system_prompt, runtime, model, skills, resources }))), [roles]);
   const milestonesJson = useMemo(() => JSON.stringify(milestones), [milestones]);
   const executionPlanJson = useMemo(
     () => JSON.stringify(executionPlan),
@@ -358,6 +415,7 @@ export function TeamComposer({ options, profile, profileEnvelope, initialCharter
           <div className="mt-3">
             <LoopDesigner surface="team" initialGoal={charter} onApply={setCharter} />
           </div>
+          {qualificationChoice}
           <div className="mt-5 flex justify-end">
             <button type="button" onClick={compose} disabled={charter.trim().length < 8 || composing} className="inline-flex items-center gap-2 rounded-lg bg-signal px-5 py-2.5 text-sm font-semibold text-signal-fg disabled:opacity-50">
               {composing ? (
@@ -388,14 +446,32 @@ export function TeamComposer({ options, profile, profileEnvelope, initialCharter
     );
   }
 
+  const planError = executionPlanError ?? roleBudgetError(executionPlan);
+  function changeExecutionPlan(next: string) {
+    setExecutionPlanDraft(next);
+    try {
+      const parsed: unknown = JSON.parse(next);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        setExecutionPlan(null);
+        setExecutionPlanError("The execution plan must be a JSON object. The server validates its roles, phases and bounds.");
+        return;
+      }
+      setExecutionPlan(parsed);
+      setExecutionPlanError(roleBudgetError(parsed));
+    } catch {
+      setExecutionPlan(null);
+      setExecutionPlanError("The execution plan must be valid JSON.");
+    }
+  }
+
   // Step 2 — the org chart, editable.
   return (
     <form action={action} className="space-y-5">
+      {qualificationChoice}
+      <input type="hidden" name="qualification_run" value={qualificationRun ? "true" : "false"} />
       <input type="hidden" name="charter" value={charter} />
       <input type="hidden" name="tier" value={tier} />
       <input type="hidden" name="cadence" value={cadence} />
-      <input type="hidden" name="lifecycle_mode" value={lifecycleMode} />
-      <input type="hidden" name="warm_idle_seconds" value={warmIdleMinutes * 60} />
       <input type="hidden" name="reporting_to" value={reporting} />
       <input type="hidden" name="display_name" value={displayName} />
       <input type="hidden" name="tool_policy" value={toolPolicy} />
@@ -404,7 +480,7 @@ export function TeamComposer({ options, profile, profileEnvelope, initialCharter
       <input type="hidden" name="model_fallbacks_json" value={JSON.stringify(modelFallbacks)} />
       <input type="hidden" name="mcp_servers" value={mcp.join(",")} />
       <input type="hidden" name="memory" value={memory} />
-      <input type="hidden" name="egress_mode" value={egressMode} />
+      <input type="hidden" name="egress_mode" value="strict" />
       <input type="hidden" name="egress_json" value={JSON.stringify(parseEgressLines(egressText))} />
       <input type="hidden" name="execution_plan_json" value={executionPlanJson} />
       <input type="hidden" name="knowledge_commons" value={commons} />
@@ -415,6 +491,16 @@ export function TeamComposer({ options, profile, profileEnvelope, initialCharter
       <input type="hidden" name="engineering_poll_interval_seconds" value={engineeringPoll} />
       <input type="hidden" name="engineering_auto_run" value={engineeringAutoRun ? "true" : "false"} />
 
+      {selectedProfile && (
+        <div className="rounded-xl border border-border bg-surface-muted/50 p-4 text-sm">
+          <p className="font-semibold">Team profile proposed for review: {selectedProfile.display_name ?? selectedProfile.name}</p>
+          <p className="mt-1 text-xs text-foreground-muted">
+            {selectedProfile.name} · {selectedProfile.domain ?? "team"} · {selectedProfile.phase}
+            {selectedProfile.template_digest ? ` · Template ${selectedProfile.template_digest}` : ""}
+          </p>
+          <p className="mt-2 text-xs text-foreground-muted">Copied template defaults and bounds are shown below. Your charter remains the task. This is an editable snapshot, not profile authority or approval. Ready does not qualify MCP, skills or routes; preflight and explicit launch still apply.</p>
+        </div>
+      )}
       {rationale && (
         <div className="rounded-xl border border-signal/30 bg-signal/5 p-4">
           <p className="text-xs font-semibold text-foreground">Why this org</p>
@@ -429,14 +515,14 @@ export function TeamComposer({ options, profile, profileEnvelope, initialCharter
               ? `Historical expectation: about ${expectedTokens.toLocaleString()} tokens per delivered outcome across ${efficiencyRuns} retained run${efficiencyRuns === 1 ? "" : "s"}. `
               : "No reliable cost expectation is available yet. "}
             {profile
-              ? "Copied from the selected profile, not an AI-composed proposal. Later profile edits do not update this draft. Review the retained settings below."
+              ? "Based on the selected profile. Later profile edits do not update this draft. Review the proposed settings below; a template is not launch approval."
               : "Composed from your charter, the cluster's live capabilities, and retained efficiency evidence. Edit anything below."}
           </p>
         </div>
       )}
       {composeNote && (
         <div className="rounded-xl border border-border bg-surface-muted/50 p-4 text-sm text-foreground-muted">
-          {composeNote}
+          <CompositionNote detail={composeNote} />
         </div>
       )}
 
@@ -462,39 +548,10 @@ export function TeamComposer({ options, profile, profileEnvelope, initialCharter
         </fieldset>
         <fieldset className="mt-3 rounded-lg border border-border p-3">
           <legend className="flex items-center gap-1.5 px-1 text-xs font-medium text-foreground-muted"><Icon name="box" size={13} /> Runtime lifecycle</legend>
-          <div className="grid gap-3 sm:grid-cols-3">
-            <label className="text-xs text-foreground-muted">
-              Retention mode
-              <select
-                value={lifecycleMode}
-                onChange={(event) => setLifecycleMode(event.target.value as TeamLifecycleMode)}
-                className="mt-1 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm"
-              >
-                <option value="resourceOptimized">Resource optimized (recommended)</option>
-                <option value="persistent">Persistent</option>
-                <option value="ephemeral">Ephemeral</option>
-              </select>
-            </label>
-            {lifecycleMode === "resourceOptimized" && (
-              <label className="text-xs text-foreground-muted">
-                Warm idle window (minutes)
-                <input
-                  type="number"
-                  min={0}
-                  value={warmIdleMinutes}
-                  onChange={(event) => setWarmIdleMinutes(Number(event.target.value))}
-                  className="mt-1 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm"
-                />
-              </label>
-            )}
-            <p className="self-end text-xs text-foreground-muted sm:col-span-1">
-              {lifecycleMode === "persistent"
-                ? "Keeps the principal ready until you pause the team."
-                : lifecycleMode === "resourceOptimized"
-                  ? "Reuses the same principal while warm, then suspends it without losing identity or memory."
-                  : "Starts a clean isolated runtime for each assignment and tears it down after evidence is retained."}
-            </p>
-          </div>
+          <p className="text-xs text-foreground-muted">
+            Durable Team, on-demand agent pods. The charter, history, shared memory and lifetime budget persist
+            across isolated runs. Warm and always-on agent runtimes are not currently supported.
+          </p>
         </fieldset>
         {/* Advanced governance — real team-level access controls the create API
             supports: the tool policy that bounds every run, and the shared
@@ -517,8 +574,6 @@ export function TeamComposer({ options, profile, profileEnvelope, initialCharter
           setModel,
           modelFallbacks,
           setModelFallbacks,
-          egressMode,
-          setEgressMode,
           egressText,
           setEgressText,
         })}
@@ -531,6 +586,7 @@ export function TeamComposer({ options, profile, profileEnvelope, initialCharter
 
       {/* The org chart. */}
       {renderOrgPanel({
+        resources: { mcp_servers: mcp, egress: teamBlueprint.egress, memory: memory || null },
         name,
         tier,
         authorityCeiling,
@@ -545,44 +601,41 @@ export function TeamComposer({ options, profile, profileEnvelope, initialCharter
       })}
 
       <div className="kb-card p-5 sm:p-6">
-        <h2 className="text-sm font-semibold">Typed execution plan</h2>
+        <h2 className="text-sm font-semibold">Work plan</h2>
         <p className="mt-0.5 text-xs text-foreground-muted">
-          Explicit dependencies, phases, capabilities, tool-call bounds, and synthesis. No permissions are inferred from role names.
+          The steps each member will take, the tools they may use, and how their results come together.
+          Kars checks these permissions before work can start.
         </p>
-        <textarea
-          aria-label="Typed execution plan JSON"
-          value={executionPlanDraft}
-          onChange={(event) => {
-            const next = event.target.value;
-            setExecutionPlanDraft(next);
-            try {
-              const parsed: unknown = JSON.parse(next);
-              if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-                  setExecutionPlan(null);
-                  setExecutionPlanError("The execution plan must be a JSON object. The server validates its roles, phases and bounds.");
-                  return;
-              }
-              setExecutionPlan(parsed);
-              setExecutionPlanError(null);
-            } catch {
-              setExecutionPlan(null);
-              setExecutionPlanError("The execution plan must be valid JSON.");
-            }
-          }}
-          rows={18}
-          spellCheck={false}
-          className="mt-3 w-full resize-y rounded-lg border border-border bg-surface px-3 py-2 font-mono text-xs leading-relaxed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal"
-        />
+        {!executionPlanDraft.trim() && (
+          <div className="mt-3 rounded-lg border border-border bg-surface-muted/50 p-3 text-sm">
+            <p>This draft needs a work plan. You do not need to write technical JSON.</p>
+            <p className="mt-1 text-xs text-foreground-muted">
+              Kars can use your charter and selected template to propose a plan and update this draft for review.
+              Preparation uses AI and records usage. It does not create or launch a team, and does not increase your authority limits.
+            </p>
+            <button type="button" onClick={compose} disabled={composing || pending || charter.trim().length < 8} className="mt-3 rounded-lg bg-signal px-4 py-2 text-sm font-semibold text-signal-fg disabled:opacity-50">
+              {composing ? "Preparing work plan…" : "Prepare work plan"}
+            </button>
+          </div>
+        )}
         {executionPlanError && (
           <p role="alert" className="mt-2 text-xs text-danger">{executionPlanError}</p>
         )}
-        {!executionPlanDraft && (
-          <p className="mt-3 rounded-lg border border-danger/30 bg-danger/5 px-3 py-2 text-xs text-danger">
-            No execution plan is available. Enter a reviewed plan above, or re-run composition.
-            Its role names must exactly match the roster. The server validates the plan before creation;
-            JSON syntax alone does not authorize execution.
+        <details className="mt-3">
+          <summary className="cursor-pointer text-xs font-medium text-foreground-muted">Advanced: inspect or edit plan JSON</summary>
+          <p className="mt-2 text-xs text-foreground-muted">
+            Explicit dependencies, phases, capabilities, tool-call bounds, and synthesis. Role names must match the roster.
+            No permissions are inferred from role names; JSON syntax alone does not authorize execution.
           </p>
-        )}
+          <textarea
+            aria-label="Typed execution plan JSON"
+            value={executionPlanDraft}
+            onChange={(event) => changeExecutionPlan(event.target.value)}
+            rows={18}
+            spellCheck={false}
+            className="mt-3 w-full resize-y rounded-lg border border-border bg-surface px-3 py-2 font-mono text-xs leading-relaxed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+          />
+        </details>
       </div>
 
       <div className="kb-card p-5 sm:p-6">
@@ -696,9 +749,14 @@ export function TeamComposer({ options, profile, profileEnvelope, initialCharter
       </div>
 
       <fieldset className="rounded-xl border border-border p-4">
-        <legend className="px-1 text-xs font-medium text-foreground-muted">Shared lifetime inference budget</legend>
+        <legend className="px-1 text-sm font-semibold">Spending limits</legend>
+        <p className="mb-4 max-w-prose text-sm leading-relaxed text-foreground-muted">
+          Existing workspace and profile rules apply automatically. Add a limit only if you want
+          a tighter cap for this Team across all its work, including retries and future runs.
+          Tokens measure text the AI reads and writes; they are not dollars.
+        </p>
         <input type="hidden" name="budget_scope" value={budgetScope} />
-        <label htmlFor="team-budget-tokens" className="text-sm font-medium">Total token limit</label>
+        <label htmlFor="team-budget-tokens" className="text-sm font-medium">Total token limit (optional)</label>
         <input
           id="team-budget-tokens"
           name="budget_tokens"
@@ -706,37 +764,47 @@ export function TeamComposer({ options, profile, profileEnvelope, initialCharter
           min={1}
           max={Number.MAX_SAFE_INTEGER}
           step={1}
-          required
+          placeholder="Use existing controls"
           value={budgetTokens}
           onChange={(event) => setBudgetTokens(event.target.value)}
           aria-describedby="team-budget-help team-budget-error"
           aria-invalid={parsedBudget.error !== null}
           className="mt-2 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm"
         />
-        <p id="team-budget-help" className="mt-2 text-xs text-foreground-muted">
-          GovernedInference: one finite limit for this Team’s lifetime, shared by its principal,
-          members and all runs. Later intake does not replenish it. This is not a per-run allowance
-          or a total infrastructure spending limit. Edit cannot raise it; a different limit requires a separately
-          reviewed new Team. Pre-flight checks do not prove the live budget account is ready.
+        <p id="team-budget-help" className="mt-2 max-w-prose text-sm leading-relaxed text-foreground-muted">
+          Blank means no shared token limit is requested here. Role, profile and workspace limits
+          still apply, and usage is always recorded. This is not a new allowance for each run or
+          a limit on tools and infrastructure costs. Confirm any limit here, even if you mentioned
+          it in your request. Estimates do not change these settings.
         </p>
+        <RoleBudgetFields draft={executionPlanDraft} onChange={changeExecutionPlan} idPrefix="team-role-budget" />
+        <details className="mt-4 border-t border-border pt-3">
+          <summary className="cursor-pointer text-sm font-medium">Optional cost limit (advanced)</summary>
         <label htmlFor="team-budget-usd-micros" className="mt-3 block text-sm font-medium">Lifetime inference cost limit (micro-USD, optional)</label>
         <input id="team-budget-usd-micros" name="budget_usd_micros" type="number" min={1} max={Number.MAX_SAFE_INTEGER} step={1}
           value={budgetUsdMicros} onChange={(event) => setBudgetUsdMicros(event.target.value)}
           aria-describedby="team-cost-help team-budget-error"
           className="mt-2 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm" />
         <p id="team-cost-help" className="mt-2 text-xs text-foreground-muted">1,000,000 micro-USD = $1. When set, both token and cost limits apply; the cost limit also requires an operator pricing contract. Blank means no separate cost limit.</p>
-        <p id="team-budget-error" className="mt-2 text-xs text-danger">{parsedBudget.error}</p>
+        </details>
+        <p id="team-budget-error" role="alert" className="mt-2 text-xs text-danger">{parsedBudget.error}</p>
+        {planError && <p role="alert" className="mt-2 text-xs text-danger">{planError}</p>}
       </fieldset>
 
       <PreflightCheck
         key={teamFingerprint}
         blueprint={teamBlueprint}
+        selectedRepos={selectedRepos}
+        teamRoles={roles.map(({ name, system_prompt, runtime, model, skills, resources }) => ({ name, system_prompt, runtime, model, skills, resources }))}
         tier={tier}
+        delegationDepth={delegationDepth.trim() === "" ? undefined : Number(delegationDepth)}
         budgetTokens={parsedBudget.budget?.tokens}
         budgetUsdMicros={parsedBudget.budget?.usd_micros}
         budgetScope={budgetScope}
-        disabled={parsedBudget.error !== null || executionPlan === null || executionPlanError !== null}
+        disabled={parsedBudget.error !== null || executionPlan === null || planError !== null}
+        onReviewBudget={() => document.getElementById("team-budget-tokens")?.focus()}
         workload="team"
+        qualificationRun={qualificationRun}
         onResult={(result) => {
           setValidation(result);
           setValidatedFingerprint(teamFingerprint);
@@ -751,6 +819,7 @@ export function TeamComposer({ options, profile, profileEnvelope, initialCharter
           <input
             type="checkbox"
             checked={engineeringEnabled}
+            disabled={qualificationRun}
             onChange={(event) => setEngineeringEnabled(event.target.checked)}
             className="h-4 w-4 rounded border-border accent-signal"
           />
@@ -814,13 +883,21 @@ export function TeamComposer({ options, profile, profileEnvelope, initialCharter
         )}
       </fieldset>
 
-      <RepoAccess onSelectionChange={setSelectedRepos} />
+      <RepoAccess plan={executionPlan} selected={selectedRepos} onSelectionChange={(repos) => {
+        setSelectedRepos(repos);
+        setValidation(null);
+        setValidatedFingerprint(null);
+        setLaunch(false);
+      }} />
+      {selectedRepos.length > 0 && currentValidation?.ok !== true && (
+        <p className="text-xs text-danger">Check readiness for these repositories before creating the team. Nothing has started yet.</p>
+      )}
 
       <div className="flex flex-wrap items-center gap-3">
-        <button type="submit" disabled={pending || parsedBudget.error !== null || !name.trim() || executionPlan === null || executionPlanError !== null || (engineeringEnabled && (selectedRepos.length === 0 || engineeringSignals.size === 0)) || (currentValidation !== null && !currentValidation.ok) || (launch && currentValidation?.ok !== true)} className="rounded-lg bg-signal px-5 py-2.5 text-sm font-semibold text-signal-fg disabled:opacity-50">{pending ? "Creating…" : "Create team"}</button>
+        <button type="submit" disabled={pending || parsedBudget.error !== null || !name.trim() || executionPlan === null || planError !== null || (engineeringEnabled && (selectedRepos.length === 0 || engineeringSignals.size === 0)) || (currentValidation !== null && !currentValidation.ok) || ((launch || selectedRepos.length > 0) && currentValidation?.ok !== true)} className="rounded-lg bg-signal px-5 py-2.5 text-sm font-semibold text-signal-fg disabled:opacity-50">{pending ? "Creating…" : "Create team"}</button>
         <label className="inline-flex items-center gap-2 text-xs text-foreground-muted">
           <input type="checkbox" name="launch" checked={launch} onChange={(event) => setLaunch(event.target.checked)} className="h-3.5 w-3.5 rounded border-border" />
-          Launch immediately (otherwise created paused for your approval)
+          {qualificationRun ? "Approve one attempt of the first reviewed milestone, then pause" : "Launch immediately (otherwise created paused for your approval)"}
         </label>
         <button type="button" onClick={() => setComposed(false)} className="text-sm text-foreground-muted hover:text-foreground">← Back to charter</button>
         {!name.trim() && <p className="text-xs text-danger">Give the team a name to create it.</p>}

@@ -22,6 +22,7 @@ pub(super) const POLICIES: &[&str] = &[
     "kars-sre-private-cronjobs",
     "kars-sre-private-connect",
     "kars-sre-role-authority",
+    "kars-sre-report-authority",
 ];
 
 pub(super) async fn verify(client: &Client) -> Result<(), String> {

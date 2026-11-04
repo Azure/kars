@@ -100,6 +100,16 @@ fn has_role(principal: &Principal, required: RequiredPersona) -> bool {
     }
 }
 
+pub(crate) fn require_operator(principal: &Principal) -> AppResult<()> {
+    if has_role(principal, RequiredPersona::Operator) {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden(
+            "only an operator or admin can authorize a qualification run".into(),
+        ))
+    }
+}
+
 pub(crate) fn require_admin(principal: &Principal) -> AppResult<()> {
     if has_role(principal, RequiredPersona::Admin) {
         Ok(())

@@ -4,6 +4,7 @@
 "use client";
 
 import { Icon } from "@/components/icon";
+import { TeamRoleResourcePicker } from "@/components/team-role-resources";
 import { MEMBER_ARCHETYPES } from "@/lib/member-archetypes";
 import type { GovernancePanelInput, OrgPanelInput } from "./team-composer-panel-types";
 
@@ -15,7 +16,7 @@ function moveFallback(routes: string[], index: number, delta: number): string[] 
   return copy;
 }
 
-export function renderGovernancePanel({ name, options, mcp, setMcp, toolPolicy, setToolPolicy, commons, setCommons, memory, setMemory, selectedMemoryOption, runtime, setRuntime, model, setModel, modelFallbacks, setModelFallbacks, egressMode, setEgressMode, egressText, setEgressText }: GovernancePanelInput) {
+export function renderGovernancePanel({ name, options, mcp, setMcp, toolPolicy, setToolPolicy, commons, setCommons, memory, setMemory, selectedMemoryOption, runtime, setRuntime, model, setModel, modelFallbacks, setModelFallbacks, egressText, setEgressText }: GovernancePanelInput) {
   return (
 <details className="mt-3">
           <summary className="cursor-pointer text-xs font-medium text-foreground-muted hover:text-foreground">
@@ -52,7 +53,7 @@ export function renderGovernancePanel({ name, options, mcp, setMcp, toolPolicy, 
                   onChange={(e) => setMemory(e.target.value)}
                   className="mt-1 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm"
                 >
-                  <option value="">None — rely on the team&apos;s own commons</option>
+                  <option value="">Default — Foundry when configured, otherwise built-in</option>
                   {options.memories.map((entry) => (
                     <option key={entry.name} value={entry.name}>
                       {entry.name}
@@ -61,9 +62,15 @@ export function renderGovernancePanel({ name, options, mcp, setMcp, toolPolicy, 
                     </option>
                   ))}
                 </select>
+                {!memory && (
+                  <span className="mt-1 block text-[11px] text-foreground-muted">
+                    Private runtime memory, separate from the team&apos;s shared knowledge commons.
+                    Foundry failures do not switch to built-in memory.
+                  </span>
+                )}
                 {selectedMemoryOption && (
                   <span className="mt-1 block text-[11px] text-foreground-muted">
-                    {selectedMemoryOption.backend ?? "unknown backend"}
+                    Select this binding in each member&apos;s resources to share it; runtime/model overrides do not inherit it automatically. {selectedMemoryOption.backend ?? "unknown backend"}
                     {selectedMemoryOption.compiled_digest ? ` · digest ${selectedMemoryOption.compiled_digest}` : ""}
                     {selectedMemoryOption.readiness ? ` · ${selectedMemoryOption.readiness}` : ""}
                     {selectedMemoryOption.qualified_routes?.length
@@ -172,13 +179,10 @@ export function renderGovernancePanel({ name, options, mcp, setMcp, toolPolicy, 
                   </div>
                 )}
               </fieldset>
-              <label className="text-xs text-foreground-muted">
-                Egress mode
-                <select value={egressMode} onChange={(event) => setEgressMode(event.target.value as "learning" | "strict")} className="mt-1 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm">
-                  <option value="learning">Learning · observe new public hosts</option>
-                  <option value="strict">Strict · enforce reviewed hosts only</option>
-                </select>
-              </label>
+              <p className="text-xs text-foreground-muted">
+                Egress: Strict · reviewed hosts only. New destinations require approved access.
+                Datapath observations do not grant access.
+              </p>
               <label className="text-xs text-foreground-muted sm:col-span-2">
                 External hosts (one host[:port] per line)
                 <textarea value={egressText} onChange={(event) => setEgressText(event.target.value)} rows={3} placeholder={"api.example.com:443\nstatus.example.com:443"} className="mt-1 w-full rounded-lg border border-border bg-surface px-3 py-2 font-mono text-xs" />
@@ -191,7 +195,7 @@ export function renderGovernancePanel({ name, options, mcp, setMcp, toolPolicy, 
   );
 }
 
-export function renderOrgPanel({ name, tier, authorityCeiling, delegationDepth, roles, options, addFromArchetype, addRole, addNote, patchRole, removeRole }: OrgPanelInput) {
+export function renderOrgPanel({ name, tier, authorityCeiling, delegationDepth, roles, options, resources, addFromArchetype, addRole, addNote, patchRole, removeRole }: OrgPanelInput) {
   const ceiling = authorityCeiling.trim() === "" ? tier : Number(authorityCeiling);
   const depth = delegationDepth.trim() === "" ? null : Number(delegationDepth);
   const validAuthority = Number.isInteger(tier) && tier >= 1 && tier <= 5
@@ -250,13 +254,14 @@ export function renderOrgPanel({ name, tier, authorityCeiling, delegationDepth, 
               <div className="mt-2 grid gap-2 sm:grid-cols-2">
                 <select aria-label="Role model" value={r.model} onChange={(e) => patchRole(r.id, { model: e.target.value })} className="rounded-lg border border-border bg-surface px-2.5 py-1.5 text-xs">
                   <option value="">model: team default</option>
-                  {options.models.map((m) => <option key={`${m.provider}::${m.deployment}`} value={`${m.provider}::${m.deployment}`}>{m.deployment}</option>)}
+                  {options.models.map((m) => <option key={`${m.provider}::${m.deployment}`} value={`${m.provider}::${m.deployment}`}>{m.deployment} · {m.provider}</option>)}
                 </select>
                 <select aria-label="Role harness" value={r.runtime} onChange={(e) => patchRole(r.id, { runtime: e.target.value })} className="rounded-lg border border-border bg-surface px-2.5 py-1.5 text-xs">
                   <option value="">harness: team default</option>
                   {options.runtimes.filter((rt) => rt.wired).map((rt) => <option key={rt.kind} value={rt.kind}>{rt.label}</option>)}
                 </select>
               </div>
+              <TeamRoleResourcePicker name={r.name} value={r.resources} available={resources} onChange={(resources) => patchRole(r.id, { resources })} />
               {/* Per-role skills — a real picker from the attested KarsSkills the
                   cluster offers, so "Skills" isn't a taught concept with no control. */}
               {options.skills.length > 0 ? (

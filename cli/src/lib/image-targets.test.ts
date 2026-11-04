@@ -26,6 +26,15 @@ describe("immutable pushed artifact configuration", () => {
     expect(() => splitImage("mirror.azurecr.io/agent:latest,other=value")).toThrow();
   });
 
+  it("keeps the controller digest consistent with the selected immutable image", () => {
+    expect(coreImageValues([{ name: "controller", image: `mirror.azurecr.io/controller:latest@${digest}` }]))
+      .toMatchObject({ "controller.image.digest": digest, "controller.image.tag": `latest@${digest}` });
+    expect(coreImageValues([{ name: "controller", image: "mirror.azurecr.io/controller:latest" }]))
+      .toMatchObject({ "controller.image.digest": "" });
+    expect(coreImageValues([{ name: "router", image: `mirror.azurecr.io/router:latest@${digest}` }]))
+      .not.toHaveProperty("controller.image.digest");
+  });
+
   it.skipIf(!helmAvailable)("renders every selected core/runtime/mesh artifact through the actual chart", () => {
     const chart = fileURLToPath(new URL("../../../deploy/helm/kars", import.meta.url));
     const images = [

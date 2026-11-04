@@ -9,6 +9,7 @@ use std::sync::Mutex;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 mod request_boundary;
+mod report_publication;
 
 const PRIVATE_VALUE: &str = "PRIVATE_OPERATOR_CONTROL_VALUE";
 
@@ -50,6 +51,13 @@ struct PrivacyState {
     prior_revision: bool,
     metadata_error: Option<u16>,
     calls: Vec<(String, String, serde_json::Value)>,
+    report_target: Option<serde_json::Value>,
+    proposals: Vec<serde_json::Value>,
+    report_conflict: bool,
+    revoke_after_report_read: bool,
+    replace_after_report_read: bool,
+    revoked: bool,
+    replaced: bool,
 }
 
 impl Drop for Fixture {
@@ -71,9 +79,27 @@ async fn fixture() -> Fixture {
         let body:serde_json::Value=request.body_json().unwrap_or_default();
         state.calls.push((request.method.to_string(),path.into(),body.clone()));
         let value=match path {
+            "/api/v1/namespaces/kars-sre/configmaps/sre-health-report" => {
+                let Some(target) = state.report_target.clone() else { return ResponseTemplate::new(404); };
+                if request.method == "PUT" {
+                    if state.report_conflict || body["metadata"]["uid"] != target["metadata"]["uid"]
+                        || body["metadata"]["resourceVersion"] != target["metadata"]["resourceVersion"] {
+                        return ResponseTemplate::new(409);
+                    }
+                    let mut updated = body;
+                    updated["metadata"]["resourceVersion"] = (target["metadata"]["resourceVersion"].as_str().unwrap().parse::<u64>().unwrap()+1).to_string().into();
+                    state.report_target = Some(updated.clone());
+                    updated
+                } else {
+                    assert_eq!(request.method, "GET");
+                    state.revoked = state.revoked || state.revoke_after_report_read;
+                    state.replaced = state.replaced || state.replace_after_report_read;
+                    target
+                }
+            }
             "/apis/kars.azure.com/v1alpha1/karssreregistrations/canonical" => json!({
                 "metadata":{"uid":"registration","generation":1},
-                "spec":{"enabled":true,"sandbox":{"namespace":"kars-system","uid":"source"},"runtimeNamespace":{"uid":"namespace"}},
+                "spec":{"enabled":!state.revoked,"sandbox":{"namespace":"kars-system","uid":"source"},"runtimeNamespace":{"uid":"namespace"}},
                 "status":{"phase":"Ready","observedGeneration":1,"privacyEpoch":"epoch","legacySecretAccessDenied":true,
                     "privacyRevision":if state.prior_revision {None} else {Some(crate::sre_privacy::REVISION)}},
             }),
@@ -81,7 +107,7 @@ async fn fixture() -> Fixture {
                 "kars.azure.com/namespace-claim-version":"v1","kars.azure.com/sandbox-namespace":"kars-system",
                 "kars.azure.com/sandbox-name":"sre","kars.azure.com/sandbox-uid":"source"}}}),
             "/apis/kars.azure.com/v1alpha1/namespaces/kars-system/karssandboxes/sre" =>
-                json!({"metadata":{"uid":"source","annotations":{"kars.azure.com/namespace-uid":"namespace"}}}),
+                json!({"metadata":{"uid":if state.replaced {"new-source"} else {"source"},"annotations":{"kars.azure.com/namespace-uid":"namespace"}}}),
             "/api/v1/namespaces/kars-sre/serviceaccounts/sre-api-router" => json!({"metadata":{"uid":"router-sa"}}),
             "/apis/authorization.k8s.io/v1/subjectaccessreviews" if request.method=="POST" =>
                 json!({"status":{"allowed":state.watch_allowed && body["spec"]["resourceAttributes"]["verb"]=="watch"}}),
@@ -106,9 +132,17 @@ async fn fixture() -> Fixture {
                 return ResponseTemplate::new(200).set_body_raw("legitimate pod log\n","text/plain");
             }
             "/apis/metrics.k8s.io/v1beta1/nodes" => json!({"kind":"NodeMetricsList","items":[]}),
+            "/apis/kars.azure.com/v1alpha1/namespaces/kars-sre/karssreactions" if request.method=="GET" =>
+                json!({"apiVersion":"kars.azure.com/v1alpha1","kind":"KarsSREActionList","metadata":{},"items":state.proposals}),
             "/apis/kars.azure.com/v1alpha1/namespaces/kars-sre/karssreactions" if request.method=="POST" => {
-                let body:serde_json::Value=request.body_json().unwrap();
+                let mut body:serde_json::Value=request.body_json().unwrap();
                 assert_eq!(body["spec"]["approval"],json!({"state":"Pending"}));
+                if body["metadata"]["name"].is_null() {
+                    let prefix = body["metadata"]["generateName"].as_str().expect("proposal name or generateName");
+                    let name = format!("{prefix}{:05}", state.proposals.len() + 1);
+                    body["metadata"]["name"] = json!(name);
+                }
+                state.proposals.push(body.clone());
                 return ResponseTemplate::new(201).set_body_json(body);
             }
             "/api/v1/namespaces/kars-sre/serviceaccounts/sre-api-router/token" if request.method=="POST" =>
@@ -426,8 +460,16 @@ spec = importlib.util.spec_from_file_location("legacy.sre", source)
 sre = importlib.util.module_from_spec(spec); spec.loader.exec_module(sre)
 # Execute the unchanged plugin's real builder, including generateName and its
 # diagnostic labels, rather than merely posting a hand-written minimal object.
-sre._create_karssreaction_cr(action={"type":"RolloutRestart","namespace":"kars-demo","name":"app"},
+arguments = dict(action={"type":"RolloutRestart","namespace":"kars-demo","name":"app"},
  diagnosis="legitimate diagnosis", rationale="restart", ttl_minutes=5)
+name, created = sre._create_karssreaction_cr(**arguments)
+assert created is True and name.startswith("sre-action-")
+assert sre._create_karssreaction_cr(**arguments) == (name, False)
+items = client.get("/apis/kars.azure.com/v1alpha1/namespaces/kars-sre/karssreactions")["items"]
+assert len(items) == 2
+persisted = next(item for item in items if item["metadata"]["name"] == name)
+assert persisted["spec"]["approval"] == {"state":"Pending"}
+assert persisted["spec"]["action"] == {"type":"RolloutRestart","params":{"namespace":"kars-demo","name":"app"}}
 module.client().close()
 client.close()
 "#).output().await.unwrap();

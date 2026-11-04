@@ -233,6 +233,24 @@ RUN pip wheel --no-cache-dir --no-deps --wheel-dir /opt/kars-adapter-wheels /opt
 
 FROM ${HERMES_RUNTIME_BASE} AS runtime
 USER 0
+COPY sandbox-images/hermes/hermes-foundry-bounds.patch /tmp/hermes-foundry-bounds.patch
+RUN if echo "e4971c76a209d5dfb70a5dcf9bcbf4f9038c7ebe1f5d21e00984a419e5b2a36a  /opt/hermes/agent/auxiliary_client.py" | sha256sum --check --status -; then :; \
+    else echo "e83807074f3577ac3980f43bfd578ffcc95efb591e38a9427d0e7d33ec7d8e4a  /opt/hermes/agent/auxiliary_client.py" | sha256sum --check - \
+        && git -C /opt/hermes apply --check /tmp/hermes-foundry-bounds.patch \
+        && git -C /opt/hermes apply /tmp/hermes-foundry-bounds.patch; fi \
+    && rm /tmp/hermes-foundry-bounds.patch
+COPY sandbox-images/hermes/hermes-foundry-responses.patch /tmp/hermes-foundry-responses.patch
+RUN if echo "5c1380877a7ef073e2ff0cd94f0b9aa3aca5edfe99d0a1980d7fe068ddf3aa13  /opt/hermes/hermes_cli/models_catalog_static.py" | sha256sum --check --status -; then :; \
+    else echo "4e216ecf44d79e508319e89084c2f5471b051c1ce439231adc797f620976a923  /opt/hermes/hermes_cli/models_catalog_static.py" | sha256sum --check - \
+        && git -C /opt/hermes apply --check /tmp/hermes-foundry-responses.patch \
+        && git -C /opt/hermes apply /tmp/hermes-foundry-responses.patch; fi \
+    && echo "5c1380877a7ef073e2ff0cd94f0b9aa3aca5edfe99d0a1980d7fe068ddf3aa13  /opt/hermes/hermes_cli/models_catalog_static.py" | sha256sum --check - \
+    && rm /tmp/hermes-foundry-responses.patch
+COPY sandbox-images/hermes/azure-foundry-provider.py /tmp/kars-azure-foundry-provider.py
+RUN (python3 -c "from pathlib import Path; import sys; sys.exit(Path('/tmp/kars-azure-foundry-provider.py').read_bytes() != Path('/opt/hermes/plugins/model-providers/azure-foundry/__init__.py').read_bytes())" \
+        || echo "7463d513a89aebcaaead8888038493e5dbbe4e630b49d5b8970b4eef4fddbdb9  /opt/hermes/plugins/model-providers/azure-foundry/__init__.py" | sha256sum --check -) \
+    && install -m 0644 /tmp/kars-azure-foundry-provider.py /opt/hermes/plugins/model-providers/azure-foundry/__init__.py \
+    && rm /tmp/kars-azure-foundry-provider.py
 # Remove obsolete source and discovered-plugin files when reusing a qualified image.
 RUN rm -rf /opt/kars-runtime-hermes /opt/kars-hermes-stage/plugins/kars
 COPY runtimes/hermes/pyproject.toml runtimes/hermes/README.md /opt/kars-runtime-hermes/
@@ -243,6 +261,8 @@ RUN pip install --no-cache-dir --no-index --no-deps --force-reinstall \
     && pip check \
     && rm -rf /tmp/kars-adapter-wheels
 COPY runtimes/hermes/src/kars_runtime_hermes/plugin/ /opt/kars-hermes-stage/plugins/kars/
+# Fail incomplete adapter-refresh contexts instead of silently disabling discovery.
+COPY runtimes/hermes/src/kars_runtime_hermes/plugin/plugin.yaml /opt/kars-hermes-stage/plugins/kars/plugin.yaml
 RUN chmod -R a+rX /opt/kars-hermes-stage
 COPY sandbox-images/hermes/entrypoint.sh /usr/local/bin/kars-hermes-entrypoint.sh
 RUN chmod 0755 /usr/local/bin/kars-hermes-entrypoint.sh

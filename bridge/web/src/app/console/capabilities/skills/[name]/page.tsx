@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import Link from "next/link";
+import Link from "@/components/navigation-link";
 import { BffError, getSkillPackage } from "@/lib/bff";
 import { PageHeader, Section } from "@/components/ui";
 import { HonestState } from "@/components/honest-state";
@@ -24,7 +24,7 @@ export default async function SkillReviewPage({ params }: { params: Promise<{ na
     <LiveRefresh active={!skill.validated && skill.phase !== "Degraded"} />
     <Link href="/console/capabilities" className="text-sm text-signal underline">Back to capabilities</Link>
     <PageHeader eyebrow="Operator review" title={skill.name}
-      lead="Inspect the instructions and every file before approving. A different operator must review a submitter's changes. Manual approval is not a malware scan or cryptographic attestation." />
+      lead="Inspect the instructions and every file before approving. Administrators may approve their own submissions; other operators need a different reviewer. Manual approval is not a malware scan or cryptographic attestation." />
     <Section title="Current package" subtitle={`Version ${skill.version ?? "unavailable"} · ${skill.phase ?? "awaiting validation"}`}>
       <p className="text-sm">{skill.summary}</p>
       <p className="mt-2 break-all font-mono text-xs text-foreground-muted">UID {skill.uid} · generation {skill.generation} · {skill.version_digest ?? "No validated digest yet"}</p>

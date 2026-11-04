@@ -2918,6 +2918,7 @@ dependencies = [
  "proptest",
  "rand 0.9.4",
  "rcgen",
+ "regex",
  "reqwest 0.12.28",
  "rustls",
  "rustls-pemfile",

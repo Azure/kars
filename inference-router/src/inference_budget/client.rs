@@ -6,7 +6,7 @@ use crate::inference_budget_contract::{
     SessionRequest, Settlement, Usage,
     catalog::Catalog,
     ledger::{Reservation, Session, SettlementResult},
-    tariffs::{Operation, Quote},
+    tariffs::{AttemptQuote, Operation},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -24,19 +24,97 @@ const TOKEN_PATH: &str = "/var/run/kars/inference-budget/token";
 #[path = "client_tests.rs"]
 mod tests;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    Exhausted,
+    Capacity,
+}
+
+impl Refusal {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Exhausted => "inference_budget_exhausted",
+            Self::Capacity => "inference_budget_capacity",
+        }
+    }
+
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::Exhausted => {
+                "The required maximum input plus output reservation does not fit the remaining token or configured-price budget at the account or an ancestor limit. Review the budget authorization before resubmitting; unchanged automatic retries cannot resolve this refusal."
+            }
+            Self::Capacity => {
+                "The governed inference ledger has reached its retained-identity, session, attempt, or replay-window capacity. Review account capacity before resubmitting; automatic retries are not a recovery action."
+            }
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "Governed inference budget {stage} unavailable/denied (HTTP {status:?}); no provider fallback"
+    "Governed inference budget {stage}: {reason} (HTTP {status:?}); no provider fallback",
+    reason = .refusal.map_or("unavailable or denied", Refusal::message)
 )]
 pub struct Error {
     pub stage: &'static str,
     pub status: Option<u16>,
+    pub refusal: Option<Refusal>,
 }
 
 fn failure(stage: &'static str) -> Error {
     Error {
         stage,
         status: None,
+        refusal: None,
+    }
+}
+
+pub(super) enum BrokerDenial {
+    Refusal(Refusal),
+    PrivacyPending,
+    ReserveContention,
+}
+
+pub(super) async fn broker_denial(
+    path: &str,
+    mut response: reqwest::Response,
+) -> Option<BrokerDenial> {
+    let status = response.status().as_u16();
+    if !matches!(status, 429 | 503) {
+        return None;
+    }
+    // Read only a bounded private-broker error envelope. Never surface its free
+    // text: an intermediary may return HTML, secrets, or an unrelated throttling error.
+    const MAX_ERROR_BYTES: usize = 8192;
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.ok()? {
+        if chunk.len() > MAX_ERROR_BYTES - body.len() {
+            return None;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let body: serde_json::Value = serde_json::from_slice(&body).ok()?;
+    match (path, status, body.pointer("/error/code")?.as_str()?) {
+        (
+            "/v1/catalog"
+            | "/v1/session"
+            | "/v1/reserve"
+            | "/v1/begin"
+            | "/v1/calendar/read"
+            | "/v1/calendar/commit",
+            503,
+            "inference_privacy_pending",
+        ) => Some(BrokerDenial::PrivacyPending),
+        ("/v1/reserve", 503, "inference_budget_contention") => {
+            Some(BrokerDenial::ReserveContention)
+        }
+        ("/v1/session" | "/v1/reserve", 429, "inference_budget_exhausted") => {
+            Some(BrokerDenial::Refusal(Refusal::Exhausted))
+        }
+        ("/v1/session" | "/v1/reserve", 503, "inference_budget_capacity") => {
+            Some(BrokerDenial::Refusal(Refusal::Capacity))
+        }
+        _ => None,
     }
 }
 
@@ -80,6 +158,12 @@ struct CatalogResponse {
     catalog: Catalog,
     #[serde(rename = "moneyRequired")]
     money_required: bool,
+    #[serde(default, rename = "unboundedTokens")]
+    unbounded_tokens: bool,
+    #[serde(default, rename = "memoryServiceAllowed")]
+    memory_service_allowed: bool,
+    #[serde(default, rename = "recordOnlyAllowed")]
+    record_only_allowed: bool,
 }
 
 impl Client {
@@ -121,35 +205,62 @@ impl Client {
         path: &'static str,
         payload: T,
     ) -> Result<R, Error> {
-        let token = tokio::fs::read_to_string(&self.token_path)
-            .await
-            .map_err(|_| failure("private audience token"))?;
-        if token.trim().is_empty() {
-            return Err(failure("private audience token"));
-        }
-        let request = BrokerRequest {
-            root: self.binding.task.root.clone(),
-            payload,
-        };
-        let response = self
-            .http
-            .post(format!("{}{path}", self.endpoint))
-            .bearer_auth(token.trim())
-            .json(&request)
-            .send()
-            .await
-            .map_err(|_| failure(path))?;
-        let status = response.status();
-        if !status.is_success() {
+        // Freeze the wire envelope too: retries may refresh credentials, never
+        // the root, identity, sequence, quote or digest of an ambiguous reserve.
+        let request = bytes::Bytes::from(
+            serde_json::to_vec(&BrokerRequest {
+                root: self.binding.task.root.clone(),
+                payload,
+            })
+            .map_err(|_| failure(path))?,
+        );
+        loop {
+            let token = tokio::fs::read_to_string(&self.token_path)
+                .await
+                .map_err(|_| failure("private audience token"))?;
+            if token.trim().is_empty() {
+                return Err(failure("private audience token"));
+            }
+            let response = self
+                .http
+                .post(format!("{}{path}", self.endpoint))
+                .bearer_auth(token.trim())
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(request.clone())
+                .send()
+                .await
+                .map_err(|_| failure(path))?;
+            let status = response.status();
+            if status.is_success() {
+                return response
+                    .json()
+                    .await
+                    .map_err(|_| failure("broker response"));
+            }
+            let refusal = match broker_denial(path, response).await {
+                Some(BrokerDenial::PrivacyPending) => {
+                    // This explicit response precedes ledger mutation/provider dispatch.
+                    // Preserve the request identity and recheck live authority after migration;
+                    // dropping this future cancels the wait without spawning detached retries.
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    continue;
+                }
+                Some(BrokerDenial::ReserveContention) => {
+                    // The write may have committed. Replay the identical reservation,
+                    // never a fresh sequence or provider call; live authority is checked
+                    // again and the admission worker still owns timeout/cancellation.
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    continue;
+                }
+                Some(BrokerDenial::Refusal(refusal)) => Some(refusal),
+                None => None,
+            };
             return Err(Error {
                 stage: path,
                 status: Some(status.as_u16()),
+                refusal,
             });
         }
-        response
-            .json()
-            .await
-            .map_err(|_| failure("broker response"))
     }
 
     fn session_request(&self) -> SessionRequest {
@@ -159,22 +270,106 @@ impl Client {
         }
     }
 
-    pub async fn catalog(&self) -> Result<Catalog, Error> {
+    async fn catalog_response(&self) -> Result<CatalogResponse, Error> {
         let response: CatalogResponse = self.rpc("/v1/catalog", self.session_request()).await?;
         response
             .catalog
             .validate(chrono::Utc::now().timestamp())
             .map_err(|_| failure("operator contracts"))?;
-        Ok(response.catalog)
+        if response.record_only_allowed && response.money_required {
+            return Err(failure("inconsistent recording authority"));
+        }
+        Ok(response)
+    }
+
+    pub async fn catalog(&self) -> Result<Catalog, Error> {
+        Ok(self.catalog_response().await?.catalog)
+    }
+
+    pub async fn tokens_unbounded(&self, sandbox: &str) -> Result<bool, Error> {
+        if sandbox != self.identity.sandbox.name {
+            return Err(failure("calendar allowance identity"));
+        }
+        // Never cache authority: deleting an operator receipt revokes the override.
+        Ok(self.catalog_response().await?.unbounded_tokens)
+    }
+
+    /// Memory's internal model work has no provider-enforced token bound.
+    /// Permit it only under current, authenticated unbounded funding with no
+    /// monetary ceiling; the caller must separately authorize and audit memory.
+    pub async fn allows_bound_memory(&self, sandbox: &str) -> Result<bool, Error> {
+        if sandbox != self.identity.sandbox.name {
+            return Err(failure("memory allowance identity"));
+        }
+        let authority = self.catalog_response().await?;
+        Ok(authority.memory_service_allowed && !authority.money_required)
+    }
+
+    pub async fn requires_responses_contract(
+        &self,
+        upstream: &crate::proxy::UpstreamConfig,
+    ) -> Result<bool, Error> {
+        let catalog = self.catalog().await?;
+        let now = chrono::Utc::now().timestamp();
+        let supports = |operation| {
+            catalog
+                .select(
+                    upstream.telemetry_provider(),
+                    &upstream.endpoint,
+                    &upstream.deployment,
+                    operation,
+                    now,
+                )
+                .is_ok()
+        };
+        Ok(!supports(Operation::ChatCompletions) && supports(Operation::Responses))
+    }
+
+    pub async fn model_limits(
+        &self,
+        upstream: &crate::proxy::UpstreamConfig,
+    ) -> Result<Option<(u64, u64)>, Error> {
+        let authority = self.catalog_response().await?;
+        let catalog = authority.catalog;
+        let now = chrono::Utc::now().timestamp();
+        let operations: &[Operation] =
+            if upstream.provider == crate::provider::ProviderKind::Anthropic {
+                &[Operation::AnthropicMessages]
+            } else {
+                &[Operation::ChatCompletions, Operation::Responses]
+            };
+        let contract = operations.iter().find_map(|operation| {
+            catalog
+                .select(
+                    upstream.telemetry_provider(),
+                    &upstream.endpoint,
+                    &upstream.deployment,
+                    *operation,
+                    now,
+                )
+                .ok()
+        });
+        let Some(contract) = contract else {
+            return if authority.record_only_allowed {
+                Ok(None)
+            } else {
+                Err(failure("selected model bounds"))
+            };
+        };
+        // The attested complete-input bound is a conservative runtime context window,
+        // not a guessed provider-family default or a sum of independent maxima.
+        Ok(Some((
+            contract.maximum_input_tokens,
+            contract.maximum_output_tokens,
+        )))
     }
 
     pub async fn ready_for(&self, upstream: &crate::proxy::UpstreamConfig) -> Result<(), Error> {
-        let response: CatalogResponse = self.rpc("/v1/catalog", self.session_request()).await?;
+        let response = self.catalog_response().await?;
+        if response.record_only_allowed {
+            return Ok(());
+        }
         let now = chrono::Utc::now().timestamp();
-        response
-            .catalog
-            .validate(now)
-            .map_err(|_| failure("operator contracts"))?;
         let applicable = response.catalog.contracts.iter().any(|contract| {
             contract.provider_id == upstream.telemetry_provider()
                 && contract.endpoint.trim_end_matches('/')
@@ -199,21 +394,28 @@ impl Client {
         operation: Operation,
         wire: &[u8],
     ) -> Result<(bytes::Bytes, AttemptGuard), Error> {
-        let catalog = self.catalog().await?;
-        let contract = catalog
-            .select(
+        let authority = self.catalog_response().await?;
+        let now = chrono::Utc::now().timestamp();
+        let (body, quote) = if authority.record_only_allowed {
+            crate::inference_budget_dispatch::normalize_record_only(
                 provider_id,
                 endpoint,
                 model,
                 operation,
-                chrono::Utc::now().timestamp(),
+                wire,
+                now,
             )
-            .map_err(|_| failure("provider/operation contract"))?;
-        // The broker independently checks every ancestor's price requirement.
-        // This normalization never invents a price for a token-only contract.
-        let (body, quote) = contract
-            .normalize(wire, chrono::Utc::now().timestamp(), false)
-            .map_err(|_| failure("wire request bounds"))?;
+            .map_err(|_| failure("recorded wire request"))?
+        } else {
+            let contract = authority
+                .catalog
+                .select(provider_id, endpoint, model, operation, now)
+                .map_err(|_| failure("provider/operation contract"))?;
+            let (body, quote) = contract
+                .normalize(wire, now, authority.money_required)
+                .map_err(|_| failure("wire request bounds"))?;
+            (body, AttemptQuote::from(quote))
+        };
         let wire_digest = format!("sha256:{}", crate::providers::signing::sha256_hex(&body));
         let lock = self.reservation_lock.lock().await;
         // Refresh the durable sequence rather than resetting a process-local
@@ -232,7 +434,7 @@ impl Client {
         let reserved: Reservation = self.rpc("/v1/reserve", reserve).await?;
         if reserved.key.pod_uid != self.identity.pod_uid
             || reserved.key.sequence != session.next_sequence
-            || reserved.maximum != quote.maximum
+            || reserved.maximum != quote.maximum()
             || reserved.phase != crate::inference_budget_contract::AttemptPhase::Reserved
         {
             return Err(failure("reservation identity"));
@@ -246,13 +448,12 @@ impl Client {
         };
         let begun: Reservation = self.rpc("/v1/begin", command.clone()).await?;
         if begun.key != command.key
-            || begun.maximum != quote.maximum
+            || begun.maximum != quote.maximum()
             || begun.phase != crate::inference_budget_contract::AttemptPhase::InFlight
             || begun.expires_at != reserved.expires_at
             || begun.expires_at <= chrono::Utc::now().timestamp()
             || quote
-                .contract
-                .validate(chrono::Utc::now().timestamp())
+                .validate(chrono::Utc::now().timestamp(), authority.money_required)
                 .is_err()
         {
             return Err(failure("dispatch identity"));
@@ -287,20 +488,19 @@ impl Client {
 pub struct AttemptGuard {
     client: Arc<Client>,
     pub command: AttemptCommand,
-    pub quote: Quote,
+    pub quote: AttemptQuote,
     finalized: AtomicBool,
 }
 
 impl AttemptGuard {
-    pub async fn finish(&self, usage: Option<Usage>) -> Result<SettlementResult, Error> {
+    pub async fn finish(self, usage: Option<Usage>) -> Result<SettlementResult, Error> {
         if self.finalized.swap(true, Ordering::AcqRel) {
             return Err(failure("duplicate local settlement"));
         }
-        let result = self.client.settle(self.command.clone(), usage).await;
-        if result.is_err() {
-            self.finalized.store(false, Ordering::Release);
-        }
-        result
+        // The paired dispatch worker owns this RPC through caller cancellation.
+        // Failure or worker expiry leaves recovery to the durable broker rather
+        // than launching an unobserved second settlement from this guard's Drop.
+        self.client.settle(self.command.clone(), usage).await
     }
 }
 

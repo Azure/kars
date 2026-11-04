@@ -63,6 +63,11 @@ Microsoft Teams configuration remains separate from agent channels; no tenant
 secret is projected into an agent. The gateway stays at zero replicas until
 its enrolled configuration is complete.
 
+Read-only additional-provider and GitHub App discovery treats an absent workspace
+grant or unenrolled optional store as unconfigured, without reading Secrets.
+An enrolled store still requires a valid, current grant and matching Secret UID
+and type; forbidden reads and broken authority remain errors, not empty results.
+
 Provider, Foundry, GitHub App and dynamic provider updates use enrolled store
 UIDs. Disconnect clears the owned key collection without deleting the enrolled
 store. Core applies typed controller settings and Teams rollout/scale changes;

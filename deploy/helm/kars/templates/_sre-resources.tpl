@@ -1,0 +1,555 @@
+{{- define "kars.sre.modelRoute" -}}
+{{- $defaults := .Values.controller.inferenceDefaults | default dict -}}
+{{- $sre := .Values.sre | default dict -}}
+{{- $provider := $sre.provider | default $defaults.provider -}}
+{{- $model := $sre.model | default $defaults.model -}}
+{{- if or (not (kindIs "string" $provider)) (not (kindIs "string" $model)) -}}
+{{- fail "SRE requires provider/model strings in controller.inferenceDefaults or explicit sre.provider/sre.model" -}}
+{{- end -}}
+{{- if or (not (regexMatch "^[a-z][a-z0-9-]{0,63}$" $provider)) (not (regexMatch "^[^[:space:][:cntrl:]]{1,256}$" $model)) -}}
+{{- fail "Configure controller.inferenceDefaults before enabling SRE, or supply explicit sre.provider/sre.model" -}}
+{{- end -}}
+{{- dict "provider" $provider "deployment" $model | toJson -}}
+{{- end -}}
+
+{{- define "kars.sre.unboundedKind" -}}
+{{- $global := .Values.global | default dict -}}
+{{- $sre := .Values.sre | default dict -}}
+{{- and (eq ($global.installationProfile | default "") "kind-beta")
+  (eq ($sre.firstInstallFunding | default dict | toJson) (dict "unboundedTokens" true | toJson)) -}}
+{{- end -}}
+
+{{- define "kars.sre.resources" -}}
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}{{- /*
+kars-sre — the built-in SRE agent (Slice 1 MVP).
+
+Gated on `.Values.sre.enabled` (default: false). `kars sre install` creates
+and enrolls a fresh source. Existing installs require reviewed authority
+migration; Helm/GitOps users follow docs/how-to/sre-authority.md.
+
+What this template creates (when sre.enabled=true):
+  - InferencePolicy `sre-inference` (Release.Namespace)
+  - KarsSandbox `sre` (Release.Namespace) — runtime=Hermes, with the
+    extraEnv flag `KARS_SRE_ENABLED=true` that switches on the SRE
+    plugin inside the runtime image (the Hermes plugin tree contains
+    `sre.py` but only registers its tools when this env is set —
+    standard Hermes sandboxes don't get the SRE tool surface)
+  - ClusterRole `kars-sre-reader` — kars-CR read scope (Slice 1)
+  - No fresh privileged runtime binding. Registration reconciliation grants
+    only the separate router identity after verified legacy credential denial.
+  - ToolPolicy `sre-tools` (Release.Namespace) — gates the sre_* tool surface
+
+Per design (docs/blueprints/07-kars-sre-proposal.md §7.8 — privilege
+containment):
+  - Admission protects the registered source and private runtime identities;
+    labels alone never authorize SRE privileges.
+  - kars_spawn family deregistered when KARS_SRE_ENABLED=true
+    (enforced in the plugin __init__.py — §7.8.5)
+  - kars_mesh_* family deregistered when KARS_SRE_ENABLED=true
+    (enforced in the plugin __init__.py — §7.8.6)
+  - Mesh egress blocked at the NetworkPolicy layer below — even if
+    the deregistration were bypassed, there's no network path to
+    the relay
+*/}}
+{{- $legacyNamespace := dict }}
+{{- $retainNamespace := false }}
+{{- $legacyWriter := dict }}
+{{- $retainWriter := false }}
+{{- $retainedBindings := list }}
+{{- if .Release.IsUpgrade }}
+{{- range $name := list "kars-sre-reader" "kars-sre-action-author" }}
+{{- $binding := lookup "rbac.authorization.k8s.io/v1" "ClusterRoleBinding" "" $name }}
+{{- if $binding }}
+{{- $annotations := default dict $binding.metadata.annotations }}
+{{- if and (eq (index $annotations "meta.helm.sh/release-name") $.Release.Name) (eq (index $annotations "meta.helm.sh/release-namespace") $.Release.Namespace) }}
+{{- range $subject := default list $binding.subjects }}
+{{- if or (and (eq $subject.kind "ServiceAccount") (eq $subject.name "sandbox") (eq (default "" $subject.namespace) "kars-sre")) (and (eq $subject.kind "User") (eq $subject.name "system:serviceaccount:kars-sre:sandbox")) }}
+{{- if not (($.Values.sre | default dict).authorityStage | default false) }}
+{{- fail "Legacy SRE grants must be explicitly reviewed/enrolled and retired before this upgrade; run kars sre authority stage/preview/enroll/migrate" }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- $_ := set $binding.metadata "annotations" (mergeOverwrite (deepCopy $annotations) (dict "helm.sh/resource-policy" "keep")) }}
+{{- $_ := unset $binding.metadata "managedFields" }}
+{{- $retainedBindings = append $retainedBindings $binding }}
+{{- else if ($.Values.sre | default dict).enabled }}
+{{- fail "An existing SRE binding belongs to another release; no adoption or privilege grant is permitted" }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- $legacyNamespace = lookup "v1" "Namespace" "" "kars-sre" }}
+{{- if $legacyNamespace }}
+{{- $annotations := default dict $legacyNamespace.metadata.annotations }}
+{{- $retainNamespace = and
+      (eq (index $annotations "meta.helm.sh/release-name") .Release.Name)
+      (eq (index $annotations "meta.helm.sh/release-namespace") .Release.Namespace) }}
+{{- end }}
+{{- if (.Values.sre | default dict).enabled }}
+{{- $legacyWriter = lookup "v1" "ServiceAccount" "kars-sre" "sre-writer" }}
+{{- if $legacyWriter }}
+{{- $annotations := default dict $legacyWriter.metadata.annotations }}
+{{- $retainWriter = and
+      (eq (index $annotations "meta.helm.sh/release-name") .Release.Name)
+      (eq (index $annotations "meta.helm.sh/release-namespace") .Release.Namespace) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- range $binding := $retainedBindings }}
+---
+# Keep the reviewed retired binding, preserving unrelated subjects and CAS
+# identity. No fresh SRE privilege binding is emitted by Helm.
+{{ toYaml $binding }}
+{{- end }}
+{{- if $retainNamespace }}
+---
+# Retain an earlier release's Namespace even when disabling SRE. Dropping it
+# from an upgrade would bypass the Sandbox controller's guarded cleanup.
+# Fresh installs let the controller create and claim the runtime namespace.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kars-sre
+  annotations:
+    {{- toYaml (mergeOverwrite (deepCopy (default dict $legacyNamespace.metadata.annotations)) (dict "helm.sh/resource-policy" "keep")) | nindent 4 }}
+  labels:
+    {{- toYaml (default dict $legacyNamespace.metadata.labels) | nindent 4 }}
+{{- end }}
+{{- if (.Values.sre | default dict).enabled }}
+---
+# kars-sre InferencePolicy — the model the SRE agent uses for diagnosis.
+# Inherits Core's selected default unless the operator pins an SRE override.
+{{- $modelRoute := include "kars.sre.modelRoute" . | fromJson }}
+apiVersion: kars.azure.com/v1alpha1
+kind: InferencePolicy
+metadata:
+  name: sre-inference
+  namespace: {{ .Release.Namespace }}
+  labels:
+    kars.azure.com/sandbox: sre
+    kars.azure.com/role: sre
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: sre
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  appliesTo:
+    sandboxName: sre
+    sandboxMatchLabels: {}
+  modelPreference:
+    fallback: []
+    primary:
+      provider: {{ $modelRoute.provider | quote }}
+      deployment: {{ $modelRoute.deployment | quote }}
+  contentSafety:
+    # SRE-agent default: do NOT require Prompt Shields. The Azure OpenAI
+    # response only carries prompt_filter_results when the deployment has
+    # an Azure Content Safety Content Filter policy attached; on bare
+    # local-dev deployments (Foundry quickstart, gpt-4.1 without an
+    # explicit filter), every response gets blocked at the router with
+    # "InferencePolicy requires Prompt Shields but the upstream response
+    # carried no prompt_filter_results annotations". Operators wiring
+    # Content Safety in production can override via:
+    #   --set sre.requirePromptShields=true
+    requirePromptShields: {{ (.Values.sre | default dict).requirePromptShields | default false }}
+{{- if ne (include "kars.sre.unboundedKind" .) "true" }}
+  tokenBudget:
+    perRequestTokens: {{ (.Values.sre | default dict).tokenBudget | default 32000 }}
+    # Calendar allowance across sessions, independent of lifetime funding.
+    dailyTokens: {{ (.Values.sre | default dict).dailyTokens | default 2000000 }}
+{{- end }}
+---
+# kars-sre KarsSandbox — Hermes runtime, SRE plugin gated on env.
+{{- if ((.Values.sre | default dict).authorityStage | default false) }}
+{{- $source := lookup "kars.azure.com/v1alpha1" "KarsSandbox" .Release.Namespace "sre" }}
+{{- if not $source }}
+{{- fail "Authority staging cannot CREATE an enabled SRE source by name; stage disabled core, then use atomic authority stage-source" }}
+{{- end }}
+{{- $sourceAnnotations := default dict $source.metadata.annotations }}
+{{- if not (and (eq (index $sourceAnnotations "meta.helm.sh/release-name") .Release.Name) (eq (index $sourceAnnotations "meta.helm.sh/release-namespace") .Release.Namespace)) }}
+{{- fail "Authority staging cannot adopt an unowned SRE source; explicitly review its identity outside Helm" }}
+{{- end }}
+# Stage the controller/API without rewriting the source being reviewed.
+{{- $retainedSource := omit (deepCopy $source) "status" }}
+{{- $_ := unset $retainedSource.metadata "managedFields" }}
+{{ toYaml $retainedSource }}
+{{- else }}
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
+metadata:
+  name: sre
+  namespace: {{ .Release.Namespace }}
+  labels:
+    # Admission reserves SRE sources; this label alone never grants authority.
+    kars.azure.com/role: sre
+    kars.azure.com/channels: none
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: sre
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  runtime:
+    kind: Hermes
+    hermes:
+      # The SRE_ENABLED gate. The Hermes plugin __init__.py
+      # checks this and:
+      #   - registers the sre_* tools (sre.py)
+      #   - DEREGISTERS kars_spawn family   (§7.8.5)
+      #   - DEREGISTERS kars_mesh_* family  (§7.8.6)
+      # so this single env var carries the whole "you are the SRE agent"
+      # configuration. Standard Hermes sandboxes don't get this env and
+      # therefore don't get the SRE tools.
+      #
+      # NOTE: env is SRE_ENABLED rather than KARS_SRE_ENABLED because
+      # the controller strips KARS_-prefixed user extraEnv (the prefix is
+      # reserved for controller-side injection — see
+      # controller/src/reconciler/mod.rs:1583). The right long-term fix
+      # is for the controller to recognise the
+      # `kars.azure.com/role: sre` label below and inject
+      # KARS_SRE_ENABLED itself; tracked as a follow-up.
+      extraEnv:
+        SRE_ENABLED: "true"
+        # Hermes' gateway defaults to closed (no channels = nothing
+        # gets through). For the embedded dashboard chat we ARE the
+        # operator — there's no separate identity to allowlist — so
+        # flip the gate open. Safe here because:
+        #   1. The dashboard is reached via `kubectl port-forward` (no
+        #      external network exposure)
+        #   2. Anyone with `kubectl exec`/port-forward on this pod
+        #      already has full sandbox-pod auth — the gate adds nothing
+        # The SRE agent's tool surface is still gated by the
+        # sre-tools ToolPolicy + AGT governance hook above.
+        GATEWAY_ALLOW_ALL_USERS: "true"
+        # Channel-free, single-flight Hermes diagnosis. Each turn still needs
+        # registered SRE authority and a Ready finite inference contract.
+        SRE_WATCHER_ENABLED: "true"
+
+  # Bind API-defaulted security settings in the immutable first-install intent.
+  sandbox:
+    isolation: standard
+    seccompProfile: kars-strict
+    # Explicitly request no SELinux type; do not inherit a quoted-string default.
+    selinuxContext: ""
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    allowPrivilegeEscalation: false
+    writablePaths: ["/sandbox", "/tmp"]
+
+  inferenceRef:
+    name: sre-inference
+
+  governance:
+    enabled: true
+    toolPolicyRef:
+      name: sre-tools
+    registryMode: local
+    trustThreshold: 0
+
+  networkPolicy:
+    defaultDeny: true
+    # Slice 1 ships Learn mode so the operator can see what the agent
+    # reaches in practice; promote to Strict + signed allowlist in
+    # production (see proposal §6.6 lifecycle).
+    egressMode: Learn
+    # Intentionally NOT in the allowlist:  agentmesh-relay / agentmesh-
+    # registry. The SRE agent does not use the mesh (§7.8.6 — three
+    # layers: spec, image plugin, networkPolicy; this is layer 3).
+    allowedEndpoints:
+      # Router-only upstream; the agent uses the filtered loopback HTTPS API.
+      - host: kubernetes.default.svc.cluster.local
+        port: 443
+      # Telegram Bot API — required when the operator configures
+      # TELEGRAM_BOT_TOKEN via `kars credentials update sre
+      # --telegram-token <T>` for Slice 4 channel + watcher alerts.
+      # Always allowed (Hermes only opens the channel when the token
+      # is present, so this is dormant otherwise — no extra exposure
+      # for clusters that don't use Telegram). NetworkPolicy egress is
+      # safe-by-default because the inference-router forward-proxy
+      # still enforces blocklist + audit on every connection.
+      - host: api.telegram.org
+        port: 443
+      - host: core.telegram.org
+        port: 443
+{{- if (.Values.sre | default dict).extraAllowedEndpoints }}
+{{- range (.Values.sre | default dict).extraAllowedEndpoints }}
+      - host: {{ .host | quote }}
+        port: {{ .port }}
+{{- end }}
+{{- end }}
+{{- end }}
+---
+# kars-sre ToolPolicy — gates the sre_* tool surface.
+#
+# Lives in the SAME namespace as the KarsSandbox `sre` itself
+# ({{ .Release.Namespace }} = kars-system) because kars
+# governance refs are namespace-local — the controller looks up
+# `governance.toolPolicyRef.name: sre-tools` in the KarsSandbox's
+# own namespace, NOT in the per-sandbox runtime namespace
+# (kars-sre).  Cross-namespace ToolPolicy refs are intentionally
+# unsupported per principles.md §3.
+apiVersion: kars.azure.com/v1alpha1
+kind: ToolPolicy
+metadata:
+  name: sre-tools
+  namespace: {{ .Release.Namespace }}
+  labels:
+    kars.azure.com/sandbox: sre
+    kars.azure.com/role: sre
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: sre
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    # Marked so kars-sre's own ResourceQuotas / governance objects
+    # are protected from DeleteResourceQuota (§7.7.1 label gate).
+    kars.azure.com/managed-by: controller
+spec:
+  appliesTo:
+    sandboxMatchLabels:
+      kars.azure.com/role: sre
+  agtProfile:
+    inline: |
+      # kars-sre AGT profile — allows the 10 sre_* tools, plus the
+      # inference + content-safety actions the agent needs to use the
+      # model. Same schema as kars-default-agt-profile.yaml.
+      version: "1.0"
+      agent: kars-sre
+
+      policies:
+        # Slice 1 (read-only kars-CR diagnostics) + Slice 2 (K8s diag toolset).
+        # All 10 sre_* tools allowed without approval — the diagnostic
+        # surface is fully read-only in this build (apply lands in Slice 3
+        # with its own per-tool approval policy).
+        #
+        # NOTE on action shape: the Hermes plugin governance hook emits
+        # `tool:<name>:<first-significant-param>` for every tool call (see
+        # runtimes/hermes/.../plugin/governance.py _action_verb). Tools
+        # like sre_describe_state take no args → action is exactly
+        # `tool:sre_describe_state:` (trailing colon). Tools like
+        # sre_describe_resource take a `name` arg → action is
+        # `tool:sre_describe_resource:<resource-name>`. So allowed_actions
+        # use the `tool:sre_*:` prefix glob to match both shapes.
+        - name: sre-diagnostic-tools-allow
+          type: capability
+          allowed_actions:
+            - "tool:sre_describe_state:*"
+            - "tool:sre_logs:*"
+            - "tool:sre_diagnose:*"
+            - "tool:sre_explain_error:*"
+            - "tool:sre_propose_fix:*"
+            - "tool:sre_describe_resource:*"
+            - "tool:sre_what_changed:*"
+            - "tool:sre_endpoints_inspect:*"
+            - "tool:sre_image_probe:*"
+            - "tool:sre_top:*"
+          priority: 100
+
+        # Inference traffic: the SRE agent reasons over the diagnostic
+        # results using its configured model. The inference action shape
+        # matches what the router emits — see kars-default-agt-profile.yaml
+        # for the inference: prefix convention.
+        - name: sre-inference-allow
+          type: capability
+          allowed_actions:
+            - "inference:chat_completions:*"
+            - "inference:responses:*"
+            - "inference:content_safety:*"
+          priority: 90
+
+        # Spawn + mesh are not just denied — they are not even registered
+        # by the plugin (§7.8.5 + §7.8.6 containment). The deny rule below
+        # is defense in depth in case a future runtime accidentally
+        # registers them.
+        - name: sre-spawn-and-mesh-deny
+          type: capability
+          denied_actions:
+            - "spawn:*"
+            - "mesh:*"
+          priority: 110
+---
+# kars-sre-reader ClusterRole — Slice 1 RBAC.
+#
+# Scope: kars-owned CRs (cluster-wide read) + the SRE sandbox's own
+# namespace (workloads/pods/events). The full §7.2.1 cluster-wide
+# read on standard workload kinds lands in Slice 2 behind an opt-in
+# install flag (kars sre install --with-cluster-wide-read).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kars-sre-reader
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: sre
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+rules:
+  # kars-owned CRs (read-only, cluster-wide)
+  - apiGroups: ["kars.azure.com"]
+    resources:
+      - "karssandboxes"
+      - "inferencepolicies"
+      - "toolpolicies"
+      - "egressapprovals"
+      - "karsmemories"
+      - "karsevals"
+      - "trustgraphs"
+      - "karspairings"
+      - "a2aagents"
+      - "mcpservers"
+      - "karsauthconfigs"
+    verbs: ["get", "list", "watch"]
+  # CRD introspection — the SRE agent reads CRD schemas to spot
+  # stale-CRD-vs-controller-source drift (the exact failure mode that
+  # bit us repeatedly during the Hermes-support PR debug arc).
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list"]
+  # Read pods / logs / events in any namespace where kars sandboxes
+  # live. Slice 1 leaves this scoped to kars-* namespaces by RoleBinding
+  # composition below; cluster-wide read on workloads is the Slice 2
+  # opt-in.
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "services", "configmaps", "events", "namespaces", "serviceaccounts", "nodes", "endpoints", "resourcequotas"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  # Slice 2 — EndpointSlices (the modern endpoints API) for
+  # sre_endpoints_inspect.
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+  # Slice 2 — metrics.k8s.io for sre_top. If metrics-server isn't
+  # installed, the SubjectAccessReview path returns no-op and the
+  # tool degrades gracefully per §7.5 Q4.
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list"]
+  # Secrets metadata ONLY (the .data field is stripped by the
+  # inference-router proxy filter per proposal §6.4). The RBAC verb
+  # `get` returns full secret data; the router-side filter is the
+  # actual enforcement layer.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+---
+# Bind the kars-sre-reader ClusterRole to the SA the controller
+# creates for the `sre` KarsSandbox.
+#
+# The controller creates `kars-<sandbox-name>` as the sandbox
+# namespace and `sandbox` as the SA name (hardcoded — see
+# controller/src/reconciler/mod.rs::reconcile, the
+# `serviceAccountName: "sandbox"` line). So this binding pins to
+# (ServiceAccount, kars-sre, sandbox) — explicit subject, no group
+# binding, no wildcard, satisfying §7.8.3.
+#
+# kubectl accepts CRBs that reference not-yet-existing SAs — the
+# binding activates when the SA appears on first sandbox
+# reconciliation.
+# ---------------------------------------------------------------------
+# Slice 3 — Typed apply-fix path (KarsSREAction CRD + writer SA)
+# ---------------------------------------------------------------------
+#
+# Per proposal §7.7 + §7.8.4. When the SRE agent diagnoses an incident
+# and identifies a typed fix (e.g. "delete this ResourceQuota that's
+# blocking the deployment"), it emits a KarsSREAction CR. The operator
+# approves (CLI / Telegram), the controller mints a short-lived token
+# scoped to JUST the (verb, resource, namespace) the action needs,
+# executes via that token, and tears down the binding.
+#
+# The pieces below provide:
+#   1. Legacy chart-owned SA `sre-writer` (kars-sre), retained on upgrades.
+#      Fresh accounts are created by the Sandbox controller after claiming
+#      the namespace. No auto-mount; controller-only path.
+#   2. Two narrow writer ClusterRoles — one for `resourcequotas`, one
+#      for the workload kinds the typed actions cover. The one-shot
+#      ClusterRoleBinding the controller mints binds the RIGHT one
+#      for the action's kind, keeping blast radius small.
+#   3. ClusterRole `kars-sre-action-author` — bound to the SRE
+#      sandbox SA so the agent can CREATE KarsSREAction CRs.
+#   4. ClusterRole `kars:sre-approver` — for human / group
+#      bindings (operator-facing). Cluster admin binds it manually.
+# ---------------------------------------------------------------------
+{{- if $retainWriter }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sre-writer
+  namespace: kars-sre
+  labels:
+    {{- toYaml (default dict $legacyWriter.metadata.labels) | nindent 4 }}
+  annotations:
+    {{- toYaml (mergeOverwrite (deepCopy (default dict $legacyWriter.metadata.annotations)) (dict "kars.azure.com/no-automount" "true")) | nindent 4 }}
+automountServiceAccountToken: false
+---
+{{- end }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kars-sre-writer-quotas
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: sre
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+rules:
+  - apiGroups: [""]
+    resources: ["resourcequotas"]
+    verbs: ["delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kars-sre-writer-workloads
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: sre
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["delete"]
+---
+# Bound to the SRE sandbox SA so the agent can CREATE / GET / LIST /
+# WATCH its own KarsSREAction CRs. The agent CANNOT update
+# `.spec.approval` — that's the operator's prerogative, gated by the
+# `kars:sre-approver` ClusterRole below.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kars-sre-action-author
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: sre
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+rules:
+  - apiGroups: ["kars.azure.com"]
+    resources: ["karssreactions"]
+    verbs: ["get", "list", "watch", "create"]
+  - apiGroups: ["kars.azure.com"]
+    resources: ["karssreactions/status"]
+    verbs: ["get"]
+---
+# Operator-facing role. Cluster admin binds humans / groups to
+# this manually (e.g.
+#   kubectl create clusterrolebinding sre-approvers \
+#       --clusterrole=kars:sre-approver --group=oncall@example.com).
+# We intentionally do NOT pre-bind any subjects from the chart.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kars:sre-approver
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: sre
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+rules:
+  - apiGroups: ["kars.azure.com"]
+    resources: ["karssreactions"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: ["kars.azure.com"]
+    resources: ["karssreactions/status"]
+    verbs: ["get"]
+{{- end }}
+
+{{- end -}}

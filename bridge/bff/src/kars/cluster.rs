@@ -22,9 +22,11 @@ mod mission_runs;
 pub use mission_runs::MissionRunError;
 pub(crate) use mission_runs::run_nonce;
 mod orchestrator;
+mod orchestrator_funding;
 mod providers;
 mod resources;
 mod sandboxes;
+mod sre_reports;
 
 #[derive(Debug, Clone)]
 pub struct MissionOutputRecord {
@@ -35,6 +37,9 @@ pub struct MissionOutputRecord {
 
 pub struct MissionDeliverableRecord {
     pub output: MissionOutputRecord,
+    /// Exact producer map digest, before adding Task presentation metadata.
+    pub output_sha256: Option<String>,
+    pub task: Option<crate::kars::task::KarsTask>,
     pub current: bool,
     pub artifacts: Option<k8s_openapi::api::core::v1::ConfigMap>,
 }
@@ -164,6 +169,10 @@ pub struct GpuNodeSummary {
 }
 
 impl Cluster {
+    pub(crate) fn qualification_client(&self) -> Client {
+        self.client.clone()
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test_client(client: Client) -> Self {
         Self { client }

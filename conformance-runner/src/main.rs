@@ -24,6 +24,7 @@
 //! Without it, conclusive output remains v1 and inconclusive runs emit no report.
 
 mod cli;
+mod inference_diagnostics;
 mod outcome;
 mod pod_proxy;
 mod report;
@@ -37,6 +38,7 @@ use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
+use tracing::Instrument;
 
 use crate::cli::{Cli, CorpusSource};
 use crate::outcome::{Format, ReplayError};
@@ -93,6 +95,10 @@ async fn run(cli: Cli) -> Result<u8> {
     let mut transport =
         Transport::new(cli.router_base.clone(), cli.timeout()).context("build router transport")?;
 
+    if let Some(store) = &cli.memory_store {
+        transport = transport.with_memory_store(store.clone());
+    }
+
     let needs_forward_proxy = corpus
         .cases
         .iter()
@@ -145,6 +151,7 @@ async fn run(cli: Cli) -> Result<u8> {
             &case.id,
             cli.auth_header.as_deref(),
         )
+        .instrument(tracing::info_span!("eval_case", case_id = ?case.id))
         .await;
 
         let case_report = match replay_result {

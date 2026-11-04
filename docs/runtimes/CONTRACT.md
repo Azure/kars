@@ -94,7 +94,7 @@ The controller (AKS/local-k8s) or `inference-router/src/spawn/docker.rs` (dev) i
 | `AUTH_SIDECAR_URL` | Entra Agent ID mode | URL of the cluster-shared auth sidecar Service the router calls for tokens |
 | `EXPECTED_TENANT_ID` | Entra Agent ID mode | Pinned Entra tenant; rejects tokens from other tenants |
 | `PINNED_AGENT_IDENTITY_APP_ID` | Entra Agent ID provisioned for this sandbox | Per-sandbox Entra app ID; runtime / router MUST use this and reject any inbound query-param mutation. **Currently injected to OpenClaw + router only; A1.2 extends to Hermes.** |
-| `CLUSTER_NAME` | helm `meshPeer.clusterName` | Cluster identifier; runtime should include in memory-scope key as `agent:<cluster>/<sandbox>` |
+| `CLUSTER_NAME` | helm `meshPeer.clusterName` | Cluster identifier. Memory scope is router-owned and taken exactly from a valid binding; runtimes must not invent or normalize it. |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOW_FROM`, `SLACK_BOT_TOKEN`, `DISCORD_BOT_TOKEN` (and `WHATSAPP_ENABLED`) | `kars credentials update` populated `<sandbox>-credentials` Secret | If the runtime declares channel support, entrypoint MUST configure the matching channel in the runtime's native config. Runtimes without channel support ignore. |
 | `BRAVE_API_KEY`, `TAVILY_API_KEY`, `EXA_API_KEY`, `FIRECRAWL_API_KEY`, `PERPLEXITY_API_KEY`, `OPENAI_API_KEY` | same Secret | Third-party plugin keys; runtime entrypoint maps to the matching plugin config if supported |
 | `KARS_SUPPRESS_EXFIL_URL=1`, `KARS_SUPPRESS_CONTENT_FLAGS=violence`, `KARS_CONTENT_FLAG_MIN_SEVERITY=medium` | `KARS_DEV_PROFILE=true` | Governance noise suppressors for dev sessions |
@@ -125,7 +125,7 @@ The controller mounts these paths into the runtime container.
 | `/etc/kars/secrets/admin-token` (file: `admin-token`) | Secret `router-admin-token` | Runtime plugin → router HTTP for admin-scope endpoints (`/agt/trust` mutations, `/agt/handoff/*`) | ⚠️ OpenClaw + router only; A1.2 mounts on every v1 runtime |
 | `/etc/kars/policies/<n>.yaml` | ConfigMap `toolpolicy-<n>-profile` | Router (not runtime) — runtime calls `/agt/evaluate`, router consumes profiles | ✅ router |
 | `/etc/kars/inference/policy.json` | ConfigMap (InferencePolicy compiled) | Router | ✅ router |
-| `/etc/kars/memory/binding.json` | ConfigMap (KarsMemory compiled) | Router (runtime's `foundry_memory` tool just uses the `memory-<sandbox>` convention) | ✅ router |
+| `/etc/kars/memory/binding.json` | ConfigMap (KarsMemory compiled) | Router owns store, bound scope, and explicit shared grants; runtime forwards memory intent. With `memoryRef`, `MEMORY_BINDING_REQUIRED=true` blocks access if binding is missing/malformed; invalid/missing required reloads revoke prior grants. Multiple JSON binding files are rejected as ambiguous; no fallback. | ✅ router |
 | `/etc/kars/mcp/<server>/meta.json` | ConfigMap (McpServer compiled) | Router (kars-governed MCP) + Runtime entrypoint (translates to native MCP config) | ✅ router; runtime entrypoint translation is A1.9 |
 | `/etc/kars/mcp-signing/<server>/jwks.json` | ConfigMap (McpServer signing material) | Router | ✅ router |
 | `/etc/kars/egress/allowlist.json` | ConfigMap (egress allowlist) | Router | ✅ router |
@@ -354,8 +354,9 @@ What each CRD tells the runtime / controller / router. **Runtime-visible** colum
 | `ToolPolicy` | `spec.agtProfile.inline` (YAML) | Controller compiles → router loads | Per-action allow/deny/approval/rate-limit | Indirect (via `/agt/evaluate`) |
 | | `spec.commerce.*` | Controller | Per-tool commerce policy (AP2) | No |
 | | `spec.appliesTo.tool` / `sandboxMatchLabels` | Controller | Which sandboxes this policy applies to | No |
-| `KarsMemory` | `spec.storeName` | Controller → router | Foundry Memory Store ID for this binding. **MUST match `memory-<sandbox>` convention** for the plugin's `foundry_memory` tool to consume it | ✅ via convention |
-| | `spec.scope` (e.g. `agent:<sandbox>`) | Router | Default scope key the memory tool uses | No |
+| `KarsMemory` | `spec.storeName` | Controller → router | Required bound Foundry store name (or supplied by signed bundle); no naming convention dependency | ✅ via router |
+| | `spec.scope` (e.g. `agent_my-agent`) | Router | Required exact private partition; malformed/missing bindings never fall back | ✅ via router |
+| | `spec.sharedScopes[]` | Controller → router | Optional exact additional partitions in the same store, permitting search/update/delete_scope. At most 64 distinct grants, excluding bound scope; no normalization, wildcard, or prefix matching | ✅ via router |
 | | `spec.retentionDays` | Router | TTL on records | No |
 | | `spec.sandboxRef.name` | Controller | Back-ref binding | No |
 | `McpServer` | `spec.url` | Controller → `meta.json` | Upstream MCP server URL | ✅ via mount |
@@ -373,6 +374,8 @@ What each CRD tells the runtime / controller / router. **Runtime-visible** colum
 | `KarsPairing` | `spec.peer.amid`, `spec.peer.endpoint` | Controller | External / offload agent pairing — affects handoff + mesh trust seeding | Indirect |
 | `KarsEval` | `spec.targetSandboxRef.name` | Controller | Eval orchestration; failures can mark sandbox Degraded (operationally affects runtime availability) | Indirect |
 | | `spec.failSandboxOnDrift` | Controller | Hard-fail behavior on eval regression | No |
+
+Memory update-status polling requires an accepted update ID observed by the current router for an authorized scope; every poll rechecks current grants. The per-router application-state cache is limited to **4,096 IDs for one hour** and is lost on restart. Unknown, expired, or evicted IDs are denied; this does not mean the upstream update failed. Runtimes **must not resubmit or replay an update POST to recover status polling**. IDs cannot authorize another scope. Direct REST and MCP share the same bound-store/exact-scope authorization; store listing, whole-store deletion, and unscoped memory routes are denied.
 
 ---
 

@@ -6,10 +6,12 @@
 // roster, each a verified subset of the team's authority), and the live
 // history of task-force runs the charter loop has generated autonomously.
 
-import Link from "next/link";
+import Link from "@/components/navigation-link";
 import { notFound } from "next/navigation";
 import { HonestState } from "@/components/honest-state";
 import { TeamEdit } from "./team-edit";
+import { QualificationControl } from "./qualification-control";
+import { currentPrincipal } from "@/lib/session";
 import { LiveRefresh, LivePulse } from "@/components/live-refresh";
 import { EnvelopeDigest } from "@/components/envelope-digest";
 import {
@@ -48,12 +50,13 @@ import { TeamRosterEdit } from "./team-roster-edit";
 import { OrgTree } from "@/components/org-tree";
 import { DeployTimeline } from "@/app/workspace/missions/[name]/deploy-timeline";
 import { JourneyRail, teamBeat } from "@/components/journey-rail";
-import { analyzeTeamRun } from "@/lib/team-run-evidence";
-import { TeamRunFlow } from "@/components/team-run-flow";
+import { analyzeTeamRun, hasActiveReviewedPhases, reviewedPhases } from "@/lib/team-run-evidence";
+import { missionRunState } from "@/lib/mission-run-evidence";
 import { ExecutionExplorer } from "@/components/execution-explorer";
 import { Access, NowHero, TeamServerTabs } from "./team-detail-panels";
 import { EngineeringIntake } from "./engineering-intake";
 import { TeamTiming } from "@/components/team-timing";
+import { TeamBudgetStatus } from "./team-budget-status";
 import {
   RecentTeamOutcomes,
   TeamRunHistory,
@@ -104,7 +107,7 @@ export default async function TeamDetailPage({
   }
 
   const active = !team.paused && team.phase === "Active";
-  const runtimeWorking = !team.paused && team.runtime_state === "Working";
+  const runtimeWorking = team.runtime_state === "Working";
   const latestRun =
     (team.current_assignment_nonce ? team.principal_task : null)
     ?? team.last_generated_task
@@ -133,25 +136,19 @@ export default async function TeamDetailPage({
       || latestRunTask?.current_run_nonce == null
       || approval.run_nonce === latestRunTask.current_run_nonce,
   );
-  const awaitingAssignment = Boolean(
-    latestRunTask?.current_run_nonce
-    && latestRunTask.assignment?.task_id !== latestRunTask.current_run_nonce,
-  );
-  const assignmentInFlight = Boolean(
-    latestRunTask?.assignment?.completed_at == null
-    && (
-      latestRunTask?.assignment?.state === "Assigned"
-      || latestRunTask?.assignment?.state === "Running"
-    ),
-  );
+  const latestRunEvidence = latestRunTask ? analyzeTeamRun(team, latestRunTask) : null;
+  const latestRunState = latestRunTask ? missionRunState(latestRunTask) : null;
+  const runFailed = latestRunEvidence?.outcome === "failed";
+  const runHeld = latestRunEvidence?.outcome === "held";
+  const awaitingAssignment = Boolean(latestRunState?.awaitingAssignment && !runFailed && !runHeld);
   const runInFlight = Boolean(
-    latestRunTask
-    && latestRunTask.launched
-    && !team.paused
-    && (awaitingAssignment || assignmentInFlight),
+    latestRunTask?.launched
+    && !runFailed && !runHeld
+    && latestRunState?.assignmentInFlight,
   );
   const runRunning = Boolean(
-    runInFlight && latestRunTask?.execution_phase === "Running",
+    runInFlight && latestRunTask
+    && (latestRunTask.execution_phase === "Running" || hasActiveReviewedPhases(latestRunTask)),
   );
   // Creation redirects here before the team reconciler necessarily stamps
   // phase=Active. Poll any unpaused team with no run yet so the kickoff appears
@@ -159,8 +156,9 @@ export default async function TeamDetailPage({
   const awaitingFirstRun = !team.paused && team.generated_task_count === 0;
   const awaitingResume = !team.paused && team.phase === "Hibernating";
   const runActivity = latestRunTask?.activity ?? [];
-  const hasRunActivity = runActivity.length > 0;
-  const latestRunEvidence = latestRunTask ? analyzeTeamRun(team, latestRunTask) : null;
+  const runPhases = latestRunTask ? reviewedPhases(latestRunTask) ?? [] : [];
+  const hasRunActivity = runActivity.length > 0 || Boolean(latestRunTask?.stopped_activity)
+    || runPhases.some(phase => phase.stopped_activity);
 
   const [commonsRead, ledgerRead] = await Promise.allSettled([
     getTeamCommons(ns, name),
@@ -189,6 +187,8 @@ export default async function TeamDetailPage({
   const queuedTasks = team.tasks.filter((task) => task.status === "pending").length;
   const activeTasks = team.tasks.filter((task) => task.status === "active").length;
   const awaitingReview = team.health === "AwaitingReview";
+  const principal = await currentPrincipal();
+  const canQualify = principal.roles.some((role) => role === "operator" || role === "admin");
 
   return (
     <div className="space-y-6">
@@ -203,7 +203,7 @@ export default async function TeamDetailPage({
           <Link href="/workspace/teams" className="text-xs text-foreground-muted hover:underline">
             ← Teams
           </Link>
-          {active && <LivePulse label={awaitingReview ? "Awaiting review" : "On watch"} />}
+          {active && <LivePulse label={runHeld ? "Run held" : awaitingReview ? "Awaiting review" : runRunning ? "Working" : runInFlight ? "Run in progress" : "On watch"} />}
         </div>
         <h1 className="mt-2 text-2xl font-semibold tracking-tight">
           {team.display_name ?? team.name}
@@ -213,15 +213,19 @@ export default async function TeamDetailPage({
         )}
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          {team.phase === "Degraded" ? <HealthChip health="Degraded" /> : <RunNowControl
+          {team.qualification ? <span className="text-xs text-foreground-muted">Unqualified · single attempt</span> : team.phase === "Degraded" ? <HealthChip health="Degraded" /> : <RunNowControl
             team={team.name}
             paused={team.paused}
             inFlight={runInFlight}
+            held={runHeld}
+            stopped={latestRunTask?.launched === false && Boolean(latestRunTask.halted)}
             runKey={team.current_assignment_nonce ?? latestRun ?? null}
           />}
           <DeleteTeamControl team={team.name} />
         </div>
       </div>
+
+      <QualificationControl team={team} canQualify={canQualify} />
 
       {/* Journey spine — same seven beats as a mission; a standing team lives
           mostly in Run, cycling through Build->Run on each cadence tick. */}
@@ -235,7 +239,7 @@ export default async function TeamDetailPage({
         teamName={team.name}
         phase={team.phase}
         detail={team.detail}
-        health={team.paused ? "Hibernating" : team.health}
+        health={team.health}
         paused={team.paused}
         active={active}
         runRunning={runRunning}
@@ -258,21 +262,7 @@ export default async function TeamDetailPage({
         paused={team.paused}
       />
 
-      <section className="rounded-xl border border-border px-4 py-3" aria-label="Configured Team lifetime budget">
-        <h2 className="text-sm font-medium">Configured lifetime inference limit</h2>
-        {team.budget ? (
-          <>
-            <p className="mt-1 text-sm">
-              Scope: {team.budget.scope ?? "unscoped (not governed enrollment)"} · Tokens: {team.budget.tokens ?? "not configured"}
-              {" · Micro-USD: "}{team.budget.usd_micros ?? "not configured"}
-            </p>
-            <p className="mt-1 text-xs text-foreground-muted">
-              Shared by this Team’s principal, members and all runs; later intake does not reset it.
-              These configured limits are not a remaining balance or proof of live account readiness.
-            </p>
-          </>
-        ) : <p className="mt-1 text-xs text-foreground-muted">No explicit lifetime inference limit is configured. Tier limits are not aggregate spending protection.</p>}
-      </section>
+      <TeamBudgetStatus team={team} />
       {!team.paused && /budget/i.test(team.detail ?? "") && /(exhaust|exceeded|cap)/i.test(team.detail ?? "") && (
         <div className="rounded-xl border border-warning/50 bg-warning/[0.07] px-4 py-3">
           <div className="flex items-start gap-2">
@@ -281,8 +271,9 @@ export default async function TeamDetailPage({
               <p className="text-sm font-medium">Budget admission is blocking new work.</p>
               <p className="mt-0.5 text-xs text-foreground-muted">
                 {team.detail} Inspect the budget diagnostic and ledger, or pause the team.
-                Edit cannot increase its lifetime cap. A different lifetime limit requires a
-                separately reviewed new Team; existing funded work and evidence remain with this Team.
+                Edit cannot increase its lifetime cap. An authorized operator can publish a UID-bound
+                lifetime token top-up with kars budget authorize-top-up without replacing this Team
+                or resetting its recorded usage. Other admission controls still apply.
               </p>
             </div>
           </div>
@@ -305,6 +296,9 @@ export default async function TeamDetailPage({
                   node: (
                     <div className="space-y-4">
                       <ExecutionExplorer
+                        teamFlow={latestRunEvidence ? { task: latestRunTask, evidence: latestRunEvidence } : null}
+                        stoppedActivity={latestRunTask.stopped_activity}
+                        phases={runPhases}
                         running={runInFlight}
                         activity={latestRunTask.activity}
                         telemetry={latestRunTask.telemetry}
@@ -315,10 +309,12 @@ export default async function TeamDetailPage({
                         runNonce={latestRunTask.current_run_nonce}
                         agentLabel={team.display_name ?? team.name}
                         agentPhase={
-                          awaitingAssignment
-                            ? "Launching"
-                            : team.paused
-                              ? "Hibernating"
+                          runFailed
+                            ? "Failed"
+                            : runHeld
+                              ? "Held"
+                            : awaitingAssignment
+                              ? "Launching"
                               : latestRunTask.assignment?.state ?? latestRunTask.execution_phase ?? latestRunTask.phase
                         }
                         agentRuntime={latestRunTask.composition?.runtime}
@@ -341,9 +337,6 @@ export default async function TeamDetailPage({
                         </Link>
                       </div>
                       {runInFlight && <DeployTimeline task={latestRunTask} />}
-                      {latestRunEvidence && (
-                        <TeamRunFlow task={latestRunTask} evidence={latestRunEvidence} />
-                      )}
                     </div>
                   ),
                 },
@@ -361,14 +354,15 @@ export default async function TeamDetailPage({
         queued={queuedTasks}
         active={activeTasks}
         tokens={team.tokens_spent_total}
+        tokenScope={team.tokens_spent_scope}
       />
-      <RecentTeamOutcomes team={team.name} outcomes={team.recent_outcomes} />
+      <RecentTeamOutcomes team={team.name} outcomes={team.recent_outcomes} tasks={team.tasks} />
       {/* Charter + watching status side by side */}
       <div className="grid gap-4 md:grid-cols-3">
         <section className="rounded-xl border border-border bg-surface p-5 md:col-span-2">
           <div className="flex items-start justify-between gap-3">
             <h2 className="text-sm font-semibold">Charter</h2>
-            {(team.phase === "Degraded" || team.health) && <HealthChip health={team.phase === "Degraded" ? "Degraded" : team.paused ? "Hibernating" : team.health ?? team.phase} />}
+            {(team.phase === "Degraded" || team.health || team.paused) && <HealthChip health={team.phase === "Degraded" ? "Degraded" : team.paused ? "Scheduling paused" : team.health ?? team.phase} />}
           </div>
           <p className="mt-2 text-sm leading-relaxed text-foreground">{team.charter}</p>
           <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-foreground-muted">
@@ -385,18 +379,15 @@ export default async function TeamDetailPage({
             </span>
           </div>
           <div className="mt-4">
-            <TeamEdit
+            {!team.qualification && <TeamEdit
               ns={ns}
               name={team.name}
               charter={team.charter}
               paused={team.paused}
               everyMinutes={team.every_minutes}
-              lifecycleMode={team.lifecycle_mode}
-              warmIdleSeconds={team.warm_idle_seconds}
               mcpServers={team.mcp_servers}
               availableMcp={(options?.mcp_servers ?? []).filter((server) => server.namespace === ns)}
               egress={team.egress}
-              egressMode={team.egress_mode}
               model={team.model}
               modelFallbacks={team.model_fallbacks}
               models={options?.models ?? []}
@@ -404,7 +395,7 @@ export default async function TeamDetailPage({
               availableMemories={(options?.memories ?? []).filter((memory) => memory.namespace === ns)}
               gitWriteRepos={team.git_write_repos}
               executionPlan={team.execution_plan}
-            />
+            />}
           </div>
         </section>
         <WatchingStatus
@@ -414,6 +405,9 @@ export default async function TeamDetailPage({
           lifecycleMode={team.lifecycle_mode}
           warmIdleSeconds={team.warm_idle_seconds}
           runtimeState={team.runtime_state}
+          runInFlight={runInFlight}
+          runRunning={runRunning}
+          runHeld={runHeld}
           currentAssignment={team.current_assignment_task ?? team.current_assignment_nonce}
           idleDeadlineAt={team.idle_deadline_at}
           memoryEntries={team.commons_entry_count}
@@ -431,12 +425,12 @@ export default async function TeamDetailPage({
             badge: queuedTasks + activeTasks,
             node: (
               <div className="space-y-6">
-                <EngineeringIntake
+                {!team.qualification && <EngineeringIntake
                   team={team.name}
                   initialSource={engineeringSource}
                   connection={githubConnection}
-                />
-                <TeamTasks team={team.name} tasks={team.tasks} paused={team.paused} reviews={team.work_reviews ?? []} />
+                />}
+                <TeamTasks team={team.name} teamUid={team.uid} tasks={team.tasks} paused={team.paused} reviews={team.work_reviews ?? []} />
               </div>
             ),
           },
@@ -502,11 +496,17 @@ export default async function TeamDetailPage({
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            {options ? (
+            {options && !team.qualification ? (
               <TeamRosterEdit
                 ns={ns}
                 name={team.name}
                 roster={team.roster}
+                executionPlan={team.execution_plan}
+                paused={team.paused}
+                resources={{ memory: team.memory, mcp_servers: team.mcp_servers, egress: team.egress.map((entry) => {
+                  const [host, port] = entry.split(":");
+                  return { host, port: port ? Number(port) : 443 };
+                }) }}
                 options={{
                   ...options,
                   skills: options.skills.filter((skill) => skill.namespace === ns),
@@ -524,7 +524,7 @@ export default async function TeamDetailPage({
                 Edit org
               </button>
             )}
-            {!team.paused && <PromoteControl team={team.name} currentTier={team.tier} />}
+            {!team.qualification && !team.paused && <PromoteControl team={team.name} currentTier={team.tier} />}
           </div>
         </div>
         <div className="mt-4">
@@ -581,6 +581,7 @@ export default async function TeamDetailPage({
               <div className="space-y-6">
                 <TeamRunHistory
                   team={team.name}
+                  tasks={team.tasks}
                   runs={[
                     ...new Set([
                       ...team.recent_outcomes.map((outcome) => outcome.run),
@@ -608,19 +609,21 @@ export default async function TeamDetailPage({
             <p className="mt-0.5 text-xs text-foreground-muted">
               Run summaries and verified document archives with provenance.
               Older entries may retain only a summary. Recall uses complete recent
-              bundles within the bounded memory allowance.
+              bundles within the bounded memory allowance. New members receive shared knowledge
+              automatically on their first fresh assignment; running assignments keep their original
+              snapshot. Private member memory is not shared here.
             </p>
           </div>
           <span className="rounded-full bg-surface-muted px-2.5 py-1 text-xs font-medium text-foreground-muted">
-            {commons ? `${commons.count} entries` : "Unverified"}
+            {commons ? `${commons.count} ${commons.count === 1 ? "entry" : "entries"}` : "Unverified"}
           </span>
         </div>
         {commonsRead.status === "rejected" ? (
           <TeamReadError error={commonsRead.reason} />
         ) : commonsRead.value.entries.length === 0 ? (
           <p className="mt-4 text-xs text-foreground-muted">
-            No shared knowledge yet. The first standing-operation run to complete will deposit what
-            it learned here.
+            No shared knowledge yet. Eligible completed results appear here automatically.
+            Results that require review are shared only after approval; check Inbox for pending reviews.
           </p>
         ) : (
           <>
@@ -635,7 +638,7 @@ export default async function TeamDetailPage({
                 <details className="group rounded-lg border border-border bg-surface-muted/40">
                   <summary className="cursor-pointer list-none p-4">
                     <div className="flex items-start justify-between gap-3">
-                      <p className="text-sm font-medium">{e.title}</p>
+                      <p className="text-sm font-medium">{toPlainPreview(e.title, e.content)}</p>
                       <span className="shrink-0 font-mono text-[10px] text-foreground-muted">
                         {e.digest}
                       </span>

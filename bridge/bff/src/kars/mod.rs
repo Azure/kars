@@ -5,6 +5,7 @@
 
 pub mod approval;
 pub mod cluster;
+pub(crate) mod configmap_snapshot;
 pub mod credential_contract;
 pub mod credential_review;
 mod credential_targets;
@@ -13,6 +14,8 @@ mod credential_tests;
 mod credential_transport;
 pub mod credentials;
 pub(crate) mod execution_plans;
+#[path = "../../../../shared/github_egress.rs"]
+pub(crate) mod github_egress;
 mod github_grants;
 pub(crate) use github_grants::github_connection_name;
 pub mod operator_credentials;

@@ -1,6 +1,35 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+{{- $existing := lookup "v1" "Namespace" "" "kars-system" -}}
+{{- $render := true -}}
+{{- if $existing -}}
+{{- $metadata := $existing.metadata | default dict -}}
+{{- $labels := $metadata.labels | default dict -}}
+{{- $annotations := $metadata.annotations | default dict -}}
+{{- if $metadata.deletionTimestamp -}}
+{{- fail "Core release namespace must not be terminating" -}}
+{{- end -}}
+{{- $managedBy := index $labels "app.kubernetes.io/managed-by" | default "" -}}
+{{- $release := index $annotations "meta.helm.sh/release-name" | default "" -}}
+{{- $namespace := index $annotations "meta.helm.sh/release-namespace" | default "" -}}
+{{- if or (eq $managedBy "Helm") $release $namespace -}}
+{{- if not (and (eq $managedBy "Helm") (eq $release .Release.Name) (eq $namespace .Release.Namespace)) -}}
+{{- fail "Core release namespace has conflicting or incomplete Helm ownership" -}}
+{{- end -}}
+{{- else -}}
+{{- range $mode := list "enforce" "audit" "warn" -}}
+{{- if ne (index $labels (printf "pod-security.kubernetes.io/%s" $mode) | default "") "restricted" -}}
+{{- fail "Operator-provided Core release namespace requires restricted Pod Security enforce, audit and warn labels" -}}
+{{- end -}}
+{{- end -}}
+{{- if or (ne (index $labels "app.kubernetes.io/name" | default "") "kars") (ne (index $labels "app.kubernetes.io/component" | default "") "system") -}}
+{{- fail "Operator-provided Core release namespace requires app.kubernetes.io/name=kars and app.kubernetes.io/component=system for sandbox policy confirmation" -}}
+{{- end -}}
+{{- $render = false -}}
+{{- end -}}
+{{- end -}}
+{{- if $render }}
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -11,3 +40,4 @@ metadata:
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/audit: restricted
     pod-security.kubernetes.io/warn: restricted
+{{- end }}

@@ -13,6 +13,7 @@ import type { Options, ProfileSummary } from "@/lib/types";
 import { HonestState } from "@/components/honest-state";
 import { readTeamProfile, type TeamProfileEnvelope } from "@/lib/team-profile";
 import { TeamComposer } from "./team-composer";
+import { currentPrincipal } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
 
@@ -22,6 +23,8 @@ export default async function NewTeamPage({
   searchParams: Promise<{ profile?: string; intent?: string }>;
 }) {
   const { profile: profileName, intent } = await searchParams;
+  const principal = await currentPrincipal();
+  const canQualify = principal.roles.some((role) => role === "operator" || role === "admin");
   let options: Options | null = null;
   let optionsError = false;
   try {
@@ -74,7 +77,7 @@ export default async function NewTeamPage({
       ) : profileError ? (
         <HonestState variant="not_wired" title="This profile cannot be used yet" detail={profileError} />
       ) : (
-        <TeamComposer options={options} profile={profile} profileEnvelope={profileEnvelope} initialCharter={intent} />
+        <TeamComposer options={options} profile={profile} profileEnvelope={profileEnvelope} initialCharter={intent} canQualify={canQualify && options.per_run_qualification_available === true} />
       )}
     </div>
   );

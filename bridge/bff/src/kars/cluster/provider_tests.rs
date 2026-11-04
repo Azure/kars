@@ -29,8 +29,50 @@ fn controller_model_catalog_accepts_json_and_legacy_csv_without_inventing_models
 }
 
 #[test]
+fn bootstrap_model_preserves_the_explicit_core_provider_and_default() {
+    use super::providers::configured_bootstrap_model;
+    use k8s_openapi::api::core::v1::EnvVar;
+    let mut env = vec![
+        json!({"name":"AZURE_OPENAI_DEPLOYMENT","value":"legacy-model"}),
+        json!({"name":"FOUNDRY_ENDPOINT","value":"https://bootstrap.example"}),
+        json!({"name":"KARS_TASK_DEFAULT_PROVIDER","value":"github-copilot"}),
+        json!({"name":"KARS_TASK_DEFAULT_MODEL","value":"selected-model"}),
+    ];
+    for _ in 0..env.len() {
+        env.rotate_left(1);
+        let model = configured_bootstrap_model(
+            &serde_json::from_value::<Vec<EnvVar>>(json!(env)).unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(model.provider, "github-copilot");
+        assert_eq!(model.deployment, "selected-model");
+    }
+    for env in [
+        json!([{"name":"KARS_TASK_DEFAULT_PROVIDER","value":"github-copilot"}]),
+        json!([
+            {"name":"KARS_TASK_DEFAULT_PROVIDER","value":"github-copilot"},
+            {"name":"AZURE_OPENAI_DEPLOYMENT","value":"legacy-model"},
+        ]),
+        json!([
+            {"name":"KARS_TASK_DEFAULT_PROVIDER","value":"github-copilot"},
+            {"name":"AZURE_OPENAI_DEPLOYMENT","value":"legacy-model"},
+            {"name":"KARS_TASK_DEFAULT_MODEL","value":" "},
+        ]),
+        json!([{"name":"KARS_TASK_DEFAULT_PROVIDER","valueFrom":{"configMapKeyRef":{"name":"settings","key":"provider"}}}]),
+        json!([
+            {"name":"KARS_TASK_DEFAULT_PROVIDER","value":"github-copilot"},
+            {"name":"AZURE_OPENAI_DEPLOYMENT","value":"legacy-model"},
+            {"name":"KARS_TASK_DEFAULT_MODEL","valueFrom":{"configMapKeyRef":{"name":"settings","key":"model"}}},
+        ]),
+    ] {
+        assert!(configured_bootstrap_model(&serde_json::from_value::<Vec<EnvVar>>(env).unwrap()).is_err());
+    }
+}
+
+#[test]
 fn provider_switch_requires_a_retained_route_for_the_previous_default() {
-    use super::providers::{inherited_model_settings, inherited_provider_registered};
+    use super::providers::inherited_provider_registered;
     use k8s_openapi::api::core::v1::EnvVar;
     let azure: Vec<EnvVar> = serde_json::from_value(json!([
         {"name":"FOUNDRY_ENDPOINT","value":"https://example.cognitiveservices.azure.com/"},
@@ -60,8 +102,6 @@ fn provider_switch_requires_a_retained_route_for_the_previous_default() {
     assert!(inherited_provider_registered(&copilot, &keys));
     keys.remove("COPILOT_GITHUB_TOKEN");
     assert!(!inherited_provider_registered(&copilot, &keys));
-    assert!(inherited_model_settings(&copilot, "github-copilot", "azure-only").is_none());
-    assert!(inherited_model_settings(&copilot, "github-copilot", "copilot-model").is_some());
     assert!(inherited_provider_registered(&[], &BTreeMap::new()));
 }
 
@@ -111,10 +151,6 @@ async fn unregistered_bootstrap_default_cannot_be_discarded_by_a_provider_switch
     };
     for error in [
         cluster
-            .set_copilot_as_default("copilot-model")
-            .await
-            .unwrap_err(),
-        cluster
             .set_controller_catalog("new-model", Some("https://new.example"), None)
             .await
             .unwrap_err(),
@@ -126,139 +162,15 @@ async fn unregistered_bootstrap_default_cannot_be_discarded_by_a_provider_switch
     server.abort();
 }
 
-#[test]
-fn inherited_model_selection_preserves_bootstrap_provider_and_credentials() {
-    use super::providers::inherited_model_settings;
-    use k8s_openapi::api::core::v1::EnvVar;
-
-    for (provider, endpoint, override_name) in [
-        (
-            "azure-foundry",
-            "https://example.cognitiveservices.azure.com/",
-            None,
-        ),
-        (
-            "github-models",
-            "https://models.github.ai/inference",
-            Some("github-models"),
-        ),
-        (
-            "github-copilot",
-            "https://api.githubcopilot.com",
-            Some("github-copilot"),
-        ),
-        (
-            "local-inference",
-            "http://model.kars-local-inference.svc.cluster.local",
-            None,
-        ),
-    ] {
-        for catalog in [r#"["first","selected"]"#, "first,selected"] {
-            let mut raw = vec![
-                json!({"name":"FOUNDRY_ENDPOINT","value":endpoint}),
-                json!({"name":"FOUNDRY_DEPLOYMENTS","value":catalog}),
-                json!({"name":"AZURE_OPENAI_API_KEY","valueFrom":{"secretKeyRef":{"name":"bootstrap","key":"key"}}}),
-                json!({"name":"AZURE_CLIENT_ID","value":"workload-client"}),
-            ];
-            if let Some(name) = override_name {
-                raw.push(json!({"name":"KARS_PROVIDER","value":name}));
-            }
-            let envs: Vec<EnvVar> = serde_json::from_value(json!(raw)).unwrap();
-            assert_eq!(
-                inherited_model_settings(&envs, provider, "selected").unwrap(),
-                vec![
-                    json!({"name":"KARS_TASK_DEFAULT_MODEL","value":"selected"}),
-                    json!({"name":"AZURE_OPENAI_DEPLOYMENT","value":"selected"}),
-                ]
-            );
-            for (wrong_provider, wrong_model) in [
-                (provider, "unserved"),
-                (provider, ""),
-                ("other", "selected"),
-            ] {
-                assert!(inherited_model_settings(&envs, wrong_provider, wrong_model).is_none());
-            }
-            assert_eq!(serde_json::to_value(&envs).unwrap(), json!(raw));
-        }
-    }
-}
-
-#[tokio::test]
-async fn inherited_model_selection_requires_enrollment_and_propagates_read_errors() {
-    use axum::{
-        Json, Router,
-        extract::State,
-        http::{Method, StatusCode, Uri},
-        response::IntoResponse,
-    };
-    use std::sync::{Arc, Mutex};
-
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    type Fixture = Arc<(bool, Mutex<Vec<String>>)>;
-    async fn handle(
-        State(state): State<Fixture>,
-        method: Method,
-        uri: Uri,
-    ) -> axum::response::Response {
-        assert_eq!(method, Method::GET, "No writes without enrollment");
-        state.1.lock().unwrap().push(uri.path().to_string());
-        if state.0 && uri.path().ends_with("/deployments/kars-controller") {
-            return Json(json!({
-                "apiVersion":"apps/v1","kind":"Deployment",
-                "metadata":{"name":"kars-controller"},
-                "spec":{"selector":{"matchLabels":{"app":"controller"}},
-                    "template":{"spec":{"containers":[{"name":"controller","env":[
-                        {"name":"FOUNDRY_ENDPOINT","value":"https://example.cognitiveservices.azure.com"},
-                        {"name":"FOUNDRY_DEPLOYMENTS","value":"[\"selected\"]"}
-                    ]}]}}}
-            })).into_response();
-        }
-        (
-            StatusCode::FORBIDDEN,
-            Json(json!({
-                "apiVersion":"v1","kind":"Status","status":"Failure",
-                "reason":"Forbidden","message":"read denied","code":403
-            })),
-        )
-            .into_response()
-    }
-    for deployment_readable in [false, true] {
-        let state: Fixture = Arc::new((deployment_readable, Mutex::new(Vec::new())));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let config = kube::Config::new(
-            format!("http://{}", listener.local_addr().unwrap())
-                .parse()
-                .unwrap(),
-        );
-        let app = Router::new().fallback(handle).with_state(state.clone());
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let cluster = super::Cluster {
-            client: kube::Client::try_from(config).unwrap(),
-        };
-        assert!(
-            cluster
-                .try_set_inherited_model("azure-foundry", "selected")
-                .await
-                .is_err()
-        );
-        let requests = state.1.lock().unwrap();
-        assert!(requests[0].ends_with("/deployments/kars-controller"));
-        if deployment_readable {
-            assert!(
-                requests
-                    .iter()
-                    .any(|path| path.contains("/karscredentialgrants/"))
-            );
-        } else {
-            assert_eq!(requests.len(), 1);
-        }
-        server.abort();
-    }
-}
-
 #[tokio::test]
 async fn orchestrator_bootstrap_uses_the_controller_route_instead_of_a_fixed_provider() {
-    use axum::{Json, Router, body::Bytes, extract::State, http::Method};
+    use axum::{
+        Json, Router,
+        body::Bytes,
+        extract::State,
+        http::{Method, StatusCode, Uri},
+        response::{IntoResponse, Response},
+    };
     use std::sync::{Arc, Mutex};
 
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -266,31 +178,51 @@ async fn orchestrator_bootstrap_uses_the_controller_route_instead_of_a_fixed_pro
     async fn handle(
         State(state): State<Fixture>,
         method: Method,
+        uri: Uri,
         body: Bytes,
-    ) -> Json<serde_json::Value> {
-        if method == Method::PATCH {
-            let document: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    ) -> Response {
+        if method == Method::PATCH || method == Method::POST {
+            let mut document: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(method, Method::POST);
             state.1.lock().unwrap().push(document.clone());
-            Json(document)
+            document["metadata"]["uid"] = json!("orchestrator-uid");
+            document["metadata"]["resourceVersion"] = json!("1");
+            Json(document).into_response()
         } else {
             assert_eq!(method, Method::GET);
-            Json(state.0.clone())
+            if uri.path().ends_with("/inferencepolicies/bridge-orchestrator-inference")
+                || uri.path().ends_with("/karssandboxes/bridge-orchestrator")
+            {
+                return (StatusCode::NOT_FOUND, Json(json!({"kind":"Status", "apiVersion":"v1", "status":"Failure", "reason":"NotFound", "message":"not found", "code":404}))).into_response();
+            }
+            Json(state.0.clone()).into_response()
         }
     }
 
-    for (default, catalog, expected) in [
+    for (default, catalog, expected, provider) in [
         (
             Some("gpt-5.4-mini"),
             r#"["gpt-4.1", "gpt-5.4-mini"]"#,
             Some("gpt-5.4-mini"),
+            None,
         ),
-        (None, r#"["gpt-4.1", "gpt-5.4-mini"]"#, Some("gpt-4.1")),
-        (None, "", None),
+        (None, r#"["gpt-4.1", "gpt-5.4-mini"]"#, Some("gpt-4.1"), None),
+        (None, "", None, None),
+        (
+            Some("selected-model"),
+            "legacy-model",
+            Some("selected-model"),
+            Some("github-copilot"),
+        ),
     ] {
         let mut env = vec![
             json!({"name":"FOUNDRY_ENDPOINT","value":"https://example.cognitiveservices.azure.com/"}),
             json!({"name":"FOUNDRY_DEPLOYMENTS","value":catalog}),
         ];
+        if let Some(provider) = provider {
+            env.push(json!({"name":"AZURE_OPENAI_DEPLOYMENT","value":"legacy-model"}));
+            env.push(json!({"name":"KARS_TASK_DEFAULT_PROVIDER","value":provider}));
+        }
         if let Some(default) = default {
             env.push(json!({"name":"KARS_TASK_DEFAULT_MODEL","value":default}));
         }
@@ -321,12 +253,112 @@ async fn orchestrator_bootstrap_uses_the_controller_route_instead_of_a_fixed_pro
         if let Some(expected) = expected {
             assert_eq!(
                 writes[0]["spec"]["modelPreference"]["primary"],
-                json!({"provider":"azure-foundry","deployment":expected})
+                json!({"provider":provider.unwrap_or("azure-foundry"),"deployment":expected})
             );
         } else {
             assert!(writes[0]["spec"].get("modelPreference").is_none());
         }
         assert_eq!(writes[1]["kind"], "KarsSandbox");
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn orchestrator_bootstrap_preserves_existing_or_concurrently_created_policy() {
+    use axum::{
+        Json, Router,
+        body::Bytes,
+        extract::State,
+        http::{Method, StatusCode, Uri},
+        response::{IntoResponse, Response},
+    };
+    use std::sync::{Arc, Mutex};
+    type Fixture = Arc<(StatusCode, Mutex<Vec<(Method, String)>>)>;
+    async fn handle(
+        State(state): State<Fixture>,
+        method: Method,
+        uri: Uri,
+        body: Bytes,
+    ) -> Response {
+        state
+            .1
+            .lock()
+            .unwrap()
+            .push((method.clone(), uri.path().into()));
+        if uri.path().contains("/inferencepolicies") {
+            let status = if method == Method::POST {
+                StatusCode::CONFLICT
+            } else {
+                state.0
+            };
+            if status == StatusCode::OK {
+                return Json(json!({
+                    "apiVersion":"kars.azure.com/v1alpha1", "kind":"InferencePolicy",
+                    "metadata":{"name":"bridge-orchestrator-inference", "namespace":"kars-system"},
+                    "spec":{"modelPreference":{"primary":{"provider":"azure-openai", "deployment":"selected"}}}
+                })).into_response();
+            }
+            return (status, Json(json!({"apiVersion":"v1", "kind":"Status", "status":"Failure", "reason":match status { StatusCode::NOT_FOUND => "NotFound", StatusCode::CONFLICT => "AlreadyExists", _ => "Forbidden" }, "message":"fixture", "code":status.as_u16()}))).into_response();
+        }
+        if uri.path().contains("/karssandboxes") {
+            if method == Method::GET {
+                return (StatusCode::NOT_FOUND, Json(json!({"apiVersion":"v1", "kind":"Status", "status":"Failure", "reason":"NotFound", "message":"fixture", "code":404}))).into_response();
+            }
+            assert_eq!(method, Method::POST);
+            let mut document: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(document["kind"], "KarsSandbox");
+            document["metadata"]["uid"] = json!("orchestrator-uid");
+            document["metadata"]["resourceVersion"] = json!("1");
+            return Json(document).into_response();
+        }
+        Json(json!({"apiVersion":"apps/v1", "kind":"Deployment", "metadata":{"name":"kars-controller"},
+            "spec":{"selector":{"matchLabels":{"app":"controller"}},"template":{"spec":{"containers":[{"name":"controller", "env":[]}]}}}}
+        )).into_response()
+    }
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    for status in [StatusCode::OK, StatusCode::NOT_FOUND, StatusCode::FORBIDDEN] {
+        let state: Fixture = Arc::new((status, Mutex::new(Vec::new())));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let config = kube::Config::new(
+            format!("http://{}", listener.local_addr().unwrap())
+                .parse()
+                .unwrap(),
+        );
+        let app = Router::new().fallback(handle).with_state(state.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let cluster = super::Cluster {
+            client: kube::Client::try_from(config).unwrap(),
+        };
+        let result = cluster.ensure_orchestrator_sandbox().await;
+        assert_eq!(result.is_ok(), status != StatusCode::FORBIDDEN);
+        let requests = state.1.lock().unwrap();
+        assert!(
+            !requests
+                .iter()
+                .any(|(method, path)| *method == Method::PATCH
+                    && path.contains("/inferencepolicies"))
+        );
+        if status == StatusCode::OK {
+            assert_eq!(
+                requests.len(),
+                3,
+                "existing policy must not trigger controller default reads or policy writes"
+            );
+        } else if status == StatusCode::FORBIDDEN {
+            assert_eq!(
+                requests.len(),
+                2,
+                "unreadable policy must not be overwritten"
+            );
+        } else {
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|(method, _)| *method == Method::POST)
+                    .count(),
+                2
+            );
+        }
         server.abort();
     }
 }
@@ -713,6 +745,87 @@ fn copilot_endpoint_is_copilot() {
         id(classify_provider(None, &eps, None)).as_deref(),
         Some("github-copilot")
     );
+}
+
+#[tokio::test]
+async fn controller_settings_refuse_sealed_or_replaced_workspaces_before_secret_access() {
+    use axum::{
+        Json, Router,
+        http::{Method, Uri},
+    };
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    for (profile, phase, replaced) in [
+        ("kcm-certificate", "Qualified", false),
+        ("service-accounts", "Qualified", false),
+        ("service-accounts", "Pending", false),
+        ("service-accounts", "Qualified", true),
+    ] {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let observed = reads.clone();
+        let app = Router::new().fallback(move |method: Method, uri: Uri| {
+            let reads = reads.clone();
+            async move {
+                assert_eq!(method, Method::GET, "Refused settings must never mutate objects");
+                if uri.path().contains("/karscredentialgrants/") {
+                    return Json(json!({
+                        "apiVersion":"kars.azure.com/v1alpha1", "kind":"KarsCredentialGrant",
+                        "metadata":{"name":"workspace", "uid":"grant", "generation":1},
+                        "spec":{"enabled":true, "workspaceUid":"workspace",
+                            "controller":{"name":"kars-controller", "uid":"controller"},
+                            "integrationStores":[], "agentKeys":[]},
+                        "status":{"phase":"Ready", "observedGeneration":1,
+                            "sources":[], "legacySources":[]}
+                    }));
+                }
+                assert!(uri.path().starts_with("/api/v1/namespaces/")
+                    && !uri.path().contains("/secrets/"), "No Secret reads or other resource access: {uri}");
+                let read = reads.fetch_add(1, Ordering::SeqCst);
+                Json(json!({"apiVersion":"v1", "kind":"Namespace", "metadata":{
+                    "name":"kars-system", "uid":if replaced && read > 0 { "replacement" } else { "workspace" },
+                    "annotations":{"kars.azure.com/private-enabled":"true",
+                        "kars.azure.com/private-state":phase,
+                        "kars.azure.com/private-controller-profile":profile}
+                }}))
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let config = kube::Config::new(
+            format!("http://{}", listener.local_addr().unwrap())
+                .parse()
+                .unwrap(),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let cluster = super::Cluster {
+            client: kube::Client::try_from(config).unwrap(),
+        };
+        let error = cluster
+            .write_controller_environment(vec![
+                json!({"name":"KARS_TASK_DEFAULT_MODEL", "value":"new-model"}),
+            ])
+            .await
+            .unwrap_err();
+        server.abort();
+        assert_eq!(observed.load(Ordering::SeqCst), 2);
+        match error {
+            kube::Error::Api(status) => {
+                assert_eq!(status.code, 409);
+                assert!(
+                    status.message.contains(if replaced {
+                        "identity changed"
+                    } else {
+                        "No controller settings were saved"
+                    }),
+                    "{}",
+                    status.message
+                );
+            }
+            error => panic!("Unexpected refusal: {error}"),
+        }
+    }
 }
 
 #[test]

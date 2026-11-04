@@ -1,0 +1,64 @@
+--- a/server/connectors/password.go
++++ b/server/connectors/password.go
+@@ -66,6 +66,22 @@
+ 	}, true, nil
+ }
+ 
++// PreparePasswordDBRefresh reads the built-in password database before a refresh
++// token transaction starts. The returned callback defers consumption of both the
++// identity and error until rotation actually needs them. Other connectors return
++// nil: their Refresh call must remain inside rotation's claim/reuse checks to
++// avoid consuming an upstream refresh token more than once.
++func PreparePasswordDBRefresh(ctx context.Context, conn connector.Connector, scopes connector.Scopes, identity connector.Identity) func() (connector.Identity, error) {
++	db, ok := conn.(passwordDB)
++	if !ok {
++		return nil
++	}
++	refreshed, err := db.Refresh(ctx, scopes, identity)
++	return func() (connector.Identity, error) {
++		return refreshed, err
++	}
++}
++
+ func (db passwordDB) Refresh(ctx context.Context, s connector.Scopes, identity connector.Identity) (connector.Identity, error) {
+ 	// If the user has been deleted, the refresh token will be rejected.
+ 	p, err := db.s.GetPassword(ctx, identity.Email)
+--- a/server/grants/refresh.go
++++ b/server/grants/refresh.go
+@@ -104,6 +104,21 @@
+ 		authTime = userIdent.LastLogin
+ 	}
+ 
++	// Storage reads must finish before Rotate enters UpdateRefreshToken: memory
++	// holds its mutex and SQLite holds its only connection in that updater. Keep
++	// errors deferred until freshIdentity is needed so reuse remains unchanged.
++	var connectorData []byte
++	var connectorDataErr error
++	var passwordRefresh func() (connector.Identity, error)
++	if userIdent == nil {
++		connectorData, connectorDataErr = g.refreshConnectorData(ctx, refreshToken)
++		if connectorDataErr == nil {
++			identity := tokens.IdentityFromClaims(refreshToken.Claims)
++			identity.ConnectorData = connectorData
++			passwordRefresh = connectors.PreparePasswordDBRefresh(ctx, conn.Connector, tokens.ParseScopes(scopes), identity)
++		}
++	}
++
+ 	// When sessions are enabled, downstream refresh is disconnected from the
+ 	// upstream provider: use the claims cached in UserIdentity at the last login
+ 	// instead of contacting the connector (which may fail if the upstream token
+@@ -112,9 +127,11 @@
+ 		if userIdent != nil {
+ 			return tokens.IdentityFromClaims(userIdent.Claims), nil
+ 		}
+-		connectorData, err := g.refreshConnectorData(ctx, refreshToken)
+-		if err != nil {
+-			return connector.Identity{}, err
++		if connectorDataErr != nil {
++			return connector.Identity{}, connectorDataErr
++		}
++		if passwordRefresh != nil {
++			return passwordRefresh()
+ 		}
+ 		return g.refreshWithConnector(ctx, conn, connectorData, scopes, tokens.IdentityFromClaims(refreshToken.Claims))
+ 	}

@@ -439,6 +439,76 @@ async fn backlog_errors_and_uid_replacement_never_become_an_empty_queue_or_a_new
 }
 
 #[tokio::test]
+async fn revision_input_preflight_rejects_before_run_request_or_plan_mutation() {
+    use crate::kars::task::execution_plan;
+    use crate::routes::teams::{backlog::validate_revision_plan, work};
+    for (runtime, outcome) in ["OpenClaw", "Hermes"].into_iter().flat_map(|runtime| {
+        ["changes_requested", "failed"].map(|outcome| (runtime, outcome))
+    }) {
+        for missing in ["capability", "allowance"] {
+            let (cluster, state, _server) = fixture().await;
+            let mut team = team();
+            let mut plan = execution_plan::tests::filesystem_plan();
+            plan.roles[0].name = "benchmark-research".into();
+            plan.roles[0].phases[0].execution_mode = Some("native".into());
+            plan.synthesis.execution_mode = Some("native".into());
+            if missing == "capability" {
+                plan.roles[0].phases[0].capabilities = vec!["network".into(), "filesystem-write".into()];
+            } else {
+                plan.roles[0].phases[0].max_tool_calls = 0;
+            }
+            team.spec.blueprint = Some(crate::kars::task::TaskBlueprint {
+                runtime: Some(runtime.into()), execution_plan: Some(plan),
+                tool_policy: Some("customer-denied-tools".into()), ..Default::default()
+            });
+            let mut item: work::TeamTask = serde_json::from_value(json!({
+                "id":"a","title":"Monitoring package","status":"pending","review_required":true
+            })).unwrap();
+            validate_revision_plan(&team, &[item.clone()]).unwrap();
+            item.history.push(work::Attempt {
+                run: "delivered-run".into(), run_uid: "delivered-uid".into(), assignment_nonce: "delivered-nonce".into(),
+                outcome: outcome.into(), finished_at: "2026-10-31T20:00:00Z".into(),
+                output_sha256: Some("a".repeat(64)), feedback: Some("Improve the delivered package".into()),
+            });
+            item.feedback = Some("Improve the delivered package".into());
+            let mut stored = backlog();
+            stored["data"]["tasks.json"] = json!(serde_json::to_string(&vec![item.clone()]).unwrap());
+            {
+                let mut state = state.lock().unwrap();
+                state.team = json!(team);
+                state.backlog = Some(stored.clone());
+            }
+            let error = request_team_run(&cluster, "work", "eng", &principal()).await.unwrap_err().to_string();
+            for text in ["ReviewedInputCapabilityRequired", "benchmark-research", "previous work", "Save input permissions"] {
+                assert!(error.contains(text), "{error}");
+            }
+            let snapshot = state.lock().unwrap();
+            assert_eq!(snapshot.team, json!(team));
+            assert_eq!(snapshot.backlog, Some(stored));
+            assert!(snapshot.tasks.is_empty());
+            assert!(snapshot.calls.iter().all(|(method, _, _)| *method == Method::GET));
+            drop(snapshot);
+            let phase = &mut team.spec.blueprint.as_mut().unwrap().execution_plan.as_mut().unwrap().roles[0].phases[0];
+            phase.capabilities = vec!["network".into(), "filesystem-write".into(), "filesystem-read".into()];
+            phase.max_tool_calls = 8;
+            let reviewed = json!(team);
+            validate_revision_plan(&team, &[item]).unwrap();
+            assert_eq!(json!(team), reviewed, "preflight never removes a bound tool policy or changes permissions");
+        }
+    }
+}
+
+#[tokio::test]
+async fn team_qualification_blocks_normal_and_automatic_run_without_writes() {
+    for marker in [crate::routes::teams::qualification::contract::PENDING, crate::routes::teams::qualification::contract::RECORD, crate::routes::teams::qualification::contract::CONSUMED] {
+        let (cluster, state, _server) = fixture().await;
+        state.lock().unwrap().team["metadata"]["annotations"][marker] = json!("bound-attempt");
+        assert!(matches!(request_team_run(&cluster, "work", "eng", &principal()).await, Err(AppError::BadRequest(_))));
+        assert!(state.lock().unwrap().calls.iter().all(|(method, _, _)| *method == Method::GET));
+    }
+}
+
+#[tokio::test]
 async fn request_records_only_fenced_intent_and_repeated_calls_preserve_it() {
     let (cluster, state, _server) = fixture().await;
     let result = request_team_run(&cluster, "work", "eng", &principal())

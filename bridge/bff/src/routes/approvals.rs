@@ -54,13 +54,16 @@ pub struct ApprovalDto {
     pub run_nonce: Option<String>,
     pub resource_version: String,
     pub generation: i64,
-    /// Whether a human can still act on this (only a Pending approval).
+    /// Whether a human can still act on this (Pending with no recorded decision).
     pub actionable: bool,
 }
 
 fn to_dto(ns: &str, a: &KarsApproval) -> ApprovalDto {
     let status = a.status.clone().unwrap_or_default();
-    let phase = status.phase.unwrap_or_else(|| "Pending".to_string());
+    let mut phase = status.phase.unwrap_or_else(|| "Pending".to_string());
+    if phase == "Pending" && a.spec.decision.is_some() {
+        phase = "DecisionRecorded".to_string();
+    }
     let actionable = phase == "Pending";
     let metadata_value = |key: &str| {
         a.annotations()
@@ -76,10 +79,24 @@ fn to_dto(ns: &str, a: &KarsApproval) -> ApprovalDto {
         milestone: metadata_value("kars.azure.com/milestone"),
         action_kind: a.spec.action.kind.clone(),
         summary: a.spec.action.summary.clone(),
-        detail: a.spec.action.detail.clone(),
+        detail: a
+            .annotations()
+            .get("kars.azure.com/promotion-detail")
+            .map(|outcome| {
+                format!(
+                    "{}\n\nAuthority outcome: {outcome}",
+                    a.spec.action.detail.as_deref().unwrap_or_default()
+                )
+            })
+            .or_else(|| a.spec.action.detail.clone()),
         requested_tier: a.spec.action.requested_tier,
         phase,
-        decider: status.decider,
+        decider: status.decider.or_else(|| {
+            a.spec
+                .decision
+                .as_ref()
+                .map(|decision| decision.decider.clone())
+        }),
         requested_at: status.requested_at,
         decided_at: status.decided_at,
         expires_at: status.expires_at,
@@ -155,7 +172,7 @@ pub async fn list_approvals(
         .map(|a| to_dto(&ns, a))
         .collect();
     if q.pending {
-        dtos.retain(|d| d.phase == "Pending");
+        dtos.retain(|d| d.actionable);
     }
     // Pending first (actionable), then the rest; stable by name within a group.
     dtos.sort_by(|a, b| {
@@ -205,6 +222,33 @@ pub struct DecisionRequest {
     pub bound_envelope_digest: Option<String>,
 }
 
+fn validate_decision_reason(current: &KarsApproval, req: &DecisionRequest) -> AppResult<()> {
+    if req.verdict == "approve"
+        && current.spec.action.kind == "clarification"
+        && req
+            .reason
+            .as_ref()
+            .is_some_and(|reason| reason.len() > 8192)
+    {
+        return Err(AppError::Rejected(
+            "clarification answers must not exceed 8192 UTF-8 bytes".into(),
+        ));
+    }
+    if req.reason.as_deref().unwrap_or("").trim().is_empty() {
+        if req.verdict == "approve" && current.spec.action.kind == "clarification" {
+            return Err(AppError::Rejected(
+                "answering a clarification requires a written answer".into(),
+            ));
+        }
+        if req.verdict == "deny" && is_team_milestone_review(current) {
+            return Err(AppError::Rejected(
+                "requesting changes for a Team milestone requires written feedback".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// `POST /api/namespaces/:ns/approvals/:name/decision` — record a human
 /// decision by patching `spec.decision`. The controller drives the transition.
 pub async fn decide_approval(
@@ -223,19 +267,7 @@ pub async fn decide_approval(
     let cluster = require_cluster(&state)?;
     let api: Api<KarsApproval> = cluster.approvals(&ns);
     let current = api.get(&name).await.map_err(map_kube_err)?;
-    if req.verdict == "deny"
-        && is_team_milestone_review(&current)
-        && req
-            .reason
-            .as_deref()
-            .map(str::trim)
-            .unwrap_or("")
-            .is_empty()
-    {
-        return Err(AppError::Rejected(
-            "requesting changes for a Team milestone requires written feedback".into(),
-        ));
-    }
+    validate_decision_reason(&current, &req)?;
     let can_expand_authority = principal
         .roles
         .iter()
@@ -293,6 +325,11 @@ pub async fn decide_approval(
         ));
     }
 
+    if req.verdict == "deny" {
+        super::teams::preflight_checkpoint_rejection(cluster, &ns, &current, req.reason.as_deref())
+            .await?;
+    }
+
     let decision = ApprovalDecision {
         verdict: req.verdict,
         decider: principal.name,
@@ -334,6 +371,20 @@ mod tests {
     use crate::kars::approval::{ApprovalAction, KarsApproval, KarsApprovalSpec};
     use crate::kars::task::LocalObjectRef;
 
+    #[test]
+    fn promotion_outcome_distinguishes_human_approval_from_effective_authority() {
+        let mut approval = approval(Some("customer"));
+        approval.spec.action.kind = "tierRaise".into();
+        approval.spec.action.detail = Some("Exact tier 3 review".into());
+        approval.metadata.annotations.as_mut().unwrap().insert(
+            "kars.azure.com/promotion-detail".into(),
+            "A fresh authorized run is required; current authority is unchanged.".into(),
+        );
+        let detail = to_dto("workspace", &approval).detail.unwrap();
+        assert!(detail.contains("Exact tier 3 review"));
+        assert!(detail.contains("Authority outcome: A fresh authorized run"));
+    }
+
     fn approval(owner: Option<&str>) -> KarsApproval {
         let mut value = KarsApproval::new(
             "ask",
@@ -360,6 +411,68 @@ mod tests {
                 .insert("kars.azure.com/owner-sub".into(), owner.into());
         }
         value
+    }
+
+    #[test]
+    fn clarification_requires_answer_without_changing_other_decision_requirements() {
+        for reason in [
+            None,
+            Some(""),
+            Some(" \n\t"),
+            Some("Use the Kind workspace."),
+        ] {
+            for verdict in ["approve", "deny"] {
+                for kind in ["clarification", "egress", "tierRaise", "checkpoint"] {
+                    let mut current = approval(Some("subject-a"));
+                    current.spec.action.kind = kind.into();
+                    if kind == "checkpoint" {
+                        current.metadata.labels = Some(
+                            [
+                                ("kars.azure.com/team".into(), "engineering".into()),
+                                ("kars.azure.com/milestone".into(), "review".into()),
+                            ]
+                            .into(),
+                        );
+                    }
+                    let req = super::DecisionRequest {
+                        verdict: verdict.into(),
+                        reason: reason.map(String::from),
+                        resource_version: "1".into(),
+                        bound_envelope_digest: Some("sha256:reviewed".into()),
+                    };
+                    let requires_text = (kind == "clarification" && verdict == "approve")
+                        || (kind == "checkpoint" && verdict == "deny");
+                    assert_eq!(
+                        super::validate_decision_reason(&current, &req).is_ok(),
+                        !requires_text || reason.is_some_and(|text| !text.trim().is_empty()),
+                        "{kind} {verdict} {reason:?}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn clarification_answer_bound_matches_router_utf8_limit() {
+        let mut current = approval(Some("subject-a"));
+        current.spec.action.kind = "clarification".into();
+        for (answer, accepted) in [
+            ("a".repeat(8192), true),
+            ("a".repeat(8193), false),
+            ("😀".repeat(2048), true),
+            ("😀".repeat(2049), false),
+        ] {
+            let req = super::DecisionRequest {
+                verdict: "approve".into(),
+                reason: Some(answer),
+                resource_version: "7".into(),
+                bound_envelope_digest: None,
+            };
+            assert_eq!(
+                super::validate_decision_reason(&current, &req).is_ok(),
+                accepted
+            );
+        }
     }
 
     #[test]
@@ -411,5 +524,46 @@ mod tests {
         assert_eq!(dto.milestone.as_deref(), Some("pr-34"));
         assert!(dto.actionable);
         assert!(is_team_milestone_review(&approval));
+    }
+
+    #[test]
+    fn recorded_decision_is_not_actionable_before_controller_reconciliation() {
+        for verdict in ["approve", "deny"] {
+            for status in [
+                serde_json::Value::Null,
+                serde_json::json!({"phase": "Pending"}),
+            ] {
+                let mut value = serde_json::to_value(approval(Some("subject-a"))).unwrap();
+                value["spec"]["decision"] = serde_json::json!({
+                    "verdict": verdict, "decider": "reviewer", "deciderSubject": "subject-a"
+                });
+                value["status"] = status;
+                let approval: KarsApproval = serde_json::from_value(value).unwrap();
+                let dto = to_dto("kars-system", &approval);
+                assert!(!dto.actionable);
+                assert_eq!(dto.phase, "DecisionRecorded");
+                assert_eq!(dto.decider.as_deref(), Some("reviewer"));
+                assert!(dto.decided_at.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn controller_terminal_decision_remains_authoritative() {
+        for phase in ["Approved", "Denied", "Expired", "Stale"] {
+            let mut value = serde_json::to_value(approval(Some("subject-a"))).unwrap();
+            value["spec"]["decision"] = serde_json::json!({
+                "verdict": "approve", "decider": "requester"
+            });
+            value["status"] = serde_json::json!({
+                "phase": phase, "decider": "controller-receipt", "decidedAt": "2026-10-12T21:30:00Z"
+            });
+            let approval: KarsApproval = serde_json::from_value(value).unwrap();
+            let dto = to_dto("kars-system", &approval);
+            assert!(!dto.actionable);
+            assert_eq!(dto.phase, phase);
+            assert_eq!(dto.decider.as_deref(), Some("controller-receipt"));
+            assert_eq!(dto.decided_at.as_deref(), Some("2026-10-12T21:30:00Z"));
+        }
     }
 }

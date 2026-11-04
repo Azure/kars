@@ -19,8 +19,14 @@ export function currentCoreSchemas(): ObjectMap[] {
 }
 
 export function canonicalMigrationSchemas(evalV2 = false): { before: ObjectMap[]; after: ObjectMap[] } {
-  // The closed migration predates credential, execution-plan and skill-package extensions.
+  // The closed migration predates built-in funding, stable status publication,
+  // credential, execution-plan and skill-package extensions.
   // Reconstruct its exact pinned targets, not a permit for today's schemas.
+  const compiledDescriptions: Readonly<Record<string, string>> = {
+    A2AAgent: "RFC-3339 timestamp of the last successful compile.",
+    InferencePolicy: "Last time the policy was compiled and pushed.",
+    ToolPolicy: "Last time the policy was compiled to an AGT profile and pushed.",
+  };
   const authBaseline = schemaDocuments(readFileSync(
     new URL("../../../deploy/helm/kars/files/auth-config-schema-baseline.yaml", import.meta.url), "utf8",
   ))[0];
@@ -29,6 +35,23 @@ export function canonicalMigrationSchemas(evalV2 = false): { before: ObjectMap[]
     if (kind === "KarsAuthConfig") return authBaseline;
     const root = object.spec.versions[0].schema.openAPIV3Schema;
     const spec = root.properties.spec;
+    if (compiledDescriptions[kind]) {
+      root.properties.status.properties.lastCompiledAt.description = compiledDescriptions[kind];
+    }
+    if (kind === "KarsReceipt") {
+      root.properties.status.properties.issuedAt.description =
+        "RFC3339 issuance time (unsigned \u2014 not part of the attested payload).";
+    }
+    if (kind === "KarsTask") {
+      root.properties.status.properties.inferenceBudget.properties.root.properties.kind.enum = ["KarsTask", "KarsTeam"];
+    }
+    if (kind === "KarsBudgetAccount") {
+      spec.properties.root.properties.kind.enum = ["KarsTask", "KarsTeam"];
+    }
+    if (kind === "KarsSandbox") {
+      spec.properties.inferenceBudgetRef.description =
+        "Controller-generated Task/account UID binding; validated against live task authority before private routing";
+    }
     if (kind === "KarsSkill") {
       for (const key of ["package", "files", "packageDigest"]) delete spec.properties[key];
     }

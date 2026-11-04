@@ -9,9 +9,10 @@
 //
 // Server-renderable: react-markdown + remark-gfm run fine in RSC.
 
-import Markdown from "react-markdown";
+import Markdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Children, isValidElement } from "react";
+import { Children, isValidElement, type ReactNode } from "react";
+import { resolveRevisionArtifactLink, revisionArtifactUrl, type RevisionArtifactContext } from "@/lib/mission-run-evidence";
 import { formatEvidenceTime } from "@/lib/format";
 import type { Components } from "react-markdown";
 import { Icon, type IconName } from "@/components/icon";
@@ -209,19 +210,7 @@ const mdComponents: Components = {
       {checked ? "✓" : ""}
     </span>
   ),
-  a: ({ href, children }) => (
-    <a
-      href={href}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="font-medium text-signal underline-offset-2 hover:underline"
-    >
-      {children}
-      <span className="ml-0.5 text-[0.7em] opacity-60" aria-hidden>
-        ↗
-      </span>
-    </a>
-  ),
+  a: DeliverableLink,
   strong: ({ children }) => <strong className="font-semibold text-foreground">{children}</strong>,
   blockquote: ({ children }) => (
     <blockquote className="my-3 rounded-r-md border-l-2 border-signal/50 bg-surface-muted/50 px-3 py-1.5 text-sm text-foreground-muted">
@@ -284,8 +273,14 @@ const mdComponents: Components = {
  * markers, emphasis, links (keep text), table pipes, and mangled-emoji "?".
  * For compact previews (commons entries, cards) where full markdown would be
  * noise in a clamped box. */
-export function toPlainPreview(raw: string): string {
-  return cleanDeliverable(raw)
+export function toPlainPreview(raw: string, fallback?: string | null): string {
+  // Older title DTOs may truncate a link or strip its opening bracket. Recover
+  // the label from retained prose, without altering the source or its digest.
+  const brokenLink = /^\[[^\]]*$/.test(raw.trim()) || (!raw.includes("[") && raw.includes("]("));
+  const source = brokenLink && fallback
+    ? fallback.split(/\r?\n/).find((line) => line.trim()) ?? raw
+    : raw;
+  return cleanDeliverable(source)
     .replace(/^#{1,6}\s+/gm, "") // heading markers
     .replace(/\*\*([^*]+)\*\*/g, "$1") // bold
     .replace(/\*([^*]+)\*/g, "$1") // italic
@@ -299,11 +294,43 @@ export function toPlainPreview(raw: string): string {
     .trim();
 }
 
-export function DeliverableBody({ output }: { output: string }) {
+function DeliverableLink({ href, children, download }: { href?: string; children?: ReactNode; download?: string }) {
+  if (!href) return <span title="Link unavailable">{children}</span>;
+  return (
+    <a
+      href={href}
+      download={download}
+      target={download ? undefined : "_blank"}
+      rel="noopener noreferrer"
+      className="font-medium text-signal underline-offset-2 hover:underline"
+    >
+      {children}
+      {download ? <Icon name="download" size={12} className="ml-1 inline" /> : (
+        <span className="ml-0.5 text-[0.7em] opacity-60" aria-hidden>↗</span>
+      )}
+    </a>
+  );
+}
+
+export function DeliverableBody({ output, artifactContext }: { output: string; artifactContext?: RevisionArtifactContext }) {
   const clean = cleanDeliverable(output);
   return (
     <div className="text-sm">
-      <Markdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+      <Markdown
+        remarkPlugins={[remarkGfm]}
+        urlTransform={(url, key) => {
+          if (key !== "href") return defaultUrlTransform(url);
+          const artifact = resolveRevisionArtifactLink(url, artifactContext);
+          if (artifact) return artifact;
+          if (/^(?:sandbox:|\/sandbox(?:\/|$)|(?:\.\/)?exports(?:\/|$))/i.test(url)) return "";
+          return defaultUrlTransform(url);
+        }}
+        components={{ ...mdComponents, a: ({ href, children }) => (
+          <DeliverableLink href={href} download={artifactContext?.artifacts.find(artifact =>
+            href && href === revisionArtifactUrl(artifactContext.namespace, artifactContext.task, artifact.name, artifactContext.runNonce),
+          )?.name}>{children}</DeliverableLink>
+        ) }}
+      >
         {clean}
       </Markdown>
     </div>
@@ -316,8 +343,10 @@ export function DeliverableView({
   totalTokens,
   finishedAt,
   artifactCount,
+  artifactContext,
 }: {
   output: string;
+  artifactContext?: RevisionArtifactContext;
   model?: string | null;
   totalTokens?: number | null;
   finishedAt?: string | null;
@@ -388,14 +417,14 @@ export function DeliverableView({
             {kind === "recommendation" ? "The gist" : "In brief"}
           </p>
           <div className="mt-1">
-            <DeliverableBody output={summary.text} />
+            <DeliverableBody output={summary.text} artifactContext={artifactContext} />
           </div>
         </div>
       )}
 
       {/* Full body */}
       <div className="max-h-[32rem] overflow-auto bg-surface px-5 py-4">
-        <DeliverableBody output={body} />
+        <DeliverableBody output={body} artifactContext={artifactContext} />
       </div>
     </section>
   );

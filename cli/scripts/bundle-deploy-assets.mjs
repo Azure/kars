@@ -42,10 +42,10 @@ if (existsSync(coreChart)) {
   }
 }
 
-// Repo-relative asset → bundled under dist/deploy preserving the layout the
-// resolver expects (it looks up "deploy/<...>").
+// Repo-relative assets retain their paths under dist/ for the shared resolver.
 const assets = [
   "deploy/helm/kars",            // Helm chart + values-local-dev.yaml + templates + CRDs
+  "bridge/deploy/helm/kars-bridge", // Maintained second product release for Kind beta
   "deploy/bicep",                // AKS/Foundry infra templates for `kars up --release`
   "deploy/agentmesh-agt.yaml",   // AgentMesh relay+registry manifest
   "deploy/agentmesh-ingress.yaml",
@@ -62,10 +62,10 @@ for (const rel of assets) {
     missing.push(rel);
     continue;
   }
-  // rel always starts with "deploy/"; place under dist/deploy/<rest>.
+  // Include both Core and Bridge without flattening either chart's layout.
   const dest = path.join(cliRoot, "dist", rel);
   mkdirSync(path.dirname(dest), { recursive: true });
-  if (rel === "deploy/helm/kars") rmSync(dest, { recursive: true, force: true });
+  if (rel === "deploy/helm/kars" || rel === "bridge/deploy/helm/kars-bridge") rmSync(dest, { recursive: true, force: true });
   cpSync(src, dest, { recursive: true });
   copied++;
 }
@@ -80,7 +80,7 @@ if (missing.length) {
   // The chart + agentmesh manifest are REQUIRED for the release K8s path —
   // fail the build if either load-bearing asset is missing so we never
   // publish a broken package.
-  const required = ["deploy/helm/kars", "deploy/agentmesh-agt.yaml"];
+  const required = ["deploy/helm/kars", "bridge/deploy/helm/kars-bridge", "deploy/agentmesh-agt.yaml"];
   const missingRequired = missing.filter((m) => required.includes(m));
   if (missingRequired.length) {
     console.error(

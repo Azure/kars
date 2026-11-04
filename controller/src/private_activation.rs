@@ -5,6 +5,7 @@
 
 mod consumers;
 mod late_scope;
+mod reconciliation;
 mod runtime;
 mod verification;
 

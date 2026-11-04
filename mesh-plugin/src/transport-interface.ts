@@ -40,6 +40,13 @@ export interface FileTransferAck {
   error?: string;
 }
 
+export interface MeshSendOperation {
+  signal: AbortSignal;
+  /** Absolute deadline in milliseconds since the Unix epoch. */
+  deadline: number;
+  assertCurrent(): void;
+}
+
 export interface IMeshTransport {
   // ── Connection lifecycle ─────────────────────────────────────
   connect(opts?: { capabilities?: string[]; displayName?: string }): Promise<void>;
@@ -61,8 +68,9 @@ export interface IMeshTransport {
   readonly currentDid: string;
 
   // ── Messaging ────────────────────────────────────────────────
-  send(toAmid: string, payload: unknown): Promise<string | undefined>;
-  onMessage(handler: (fromAmid: string, payload: unknown, security: MessageSecurity) => void): void;
+  send(toAmid: string, payload: unknown, operation?: MeshSendOperation): Promise<string | undefined>;
+  onMessage(handler: (fromAmid: string, payload: unknown, security: MessageSecurity, ingress?: unknown) => void,
+    captureIngress?: () => unknown): void;
   onKnock(
     handler: (fromAmid: string, intent: unknown) => Promise<{ accept: boolean }>,
   ): void;

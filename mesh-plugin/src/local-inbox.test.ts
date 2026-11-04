@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 import { describe, it, expect } from "vitest";
-import { LocalInbox } from "./local-inbox.js";
+import { LocalInbox, MessageWaitTimeoutError } from "./local-inbox.js";
 
 describe("LocalInbox", () => {
   it("defaults legacy delivery to unknown, not encrypted", () => {
@@ -112,6 +112,15 @@ describe("LocalInbox", () => {
     );
     expect(got).toBe(1);
     expect(inbox.getInbox()).toHaveLength(1);
+  });
+
+  it("removes timed-out waiters before a later reply arrives", async () => {
+    const inbox = new LocalInbox({ buildHash: "test" });
+    await expect(inbox.waitForMessage(content => content, 5)).rejects.toBeInstanceOf(MessageWaitTimeoutError);
+    expect(inbox.deliver("alice", "retained reply", "encrypted")).toBe(false);
+    expect(await inbox.waitForMessage(content => content, 5)).toBe("retained reply");
+    expect(inbox.getInbox()).toHaveLength(0);
+    expect(inbox.getDiagnostics().consumed_by_waiter).toBe(1);
   });
 
   it("drainInbox returns and clears all entries", () => {

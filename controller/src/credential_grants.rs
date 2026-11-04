@@ -18,7 +18,7 @@ pub(crate) async fn verify_observation_writers(
 pub(crate) mod observation_network;
 mod observer_metadata;
 mod observer_rbac;
-mod observer_runtime;
+pub(crate) mod observer_runtime;
 mod rbac;
 pub(crate) mod sources;
 mod writers;

@@ -35,6 +35,16 @@ export async function proxy(req: NextRequest) {
   );
   if (surface && ssoConfigured()
       && (await requestRoles((name) => req.cookies.get(name)?.value)).length === 0) {
+    // Server Actions need a router redirect, not a fetch redirect into the IdP.
+    if (method === "POST" && req.headers.has("next-action")) {
+      return new NextResponse(null, {
+        status: 303,
+        headers: {
+          "x-action-redirect": `${loginPath(`${pathname}${req.nextUrl.search}`)};push`,
+          "cache-control": "private, no-store",
+        },
+      });
+    }
     // RSC fetches must not follow the document login redirect into the IdP.
     // Next treats a non-Flight failure as a full-page navigation when needed.
     if ((method === "GET" || method === "HEAD") && req.headers.get("rsc") === "1") {

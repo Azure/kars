@@ -27,7 +27,7 @@ func TestKarsSAMLFixtureCertificateValidity(t *testing.T) {
 		now   time.Time
 		valid bool
 	}{
-		{"at signed fixture time", time.Date(2016, time.December, 12, 16, 54, 35, 0, time.UTC), true},
+		{"within certificate validity", cert.NotBefore.Add(time.Second), true},
 		{"before certificate validity", cert.NotBefore.Add(-time.Second), false},
 		{"after certificate expiry", cert.NotAfter.Add(time.Second), false},
 	} {

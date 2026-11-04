@@ -23,6 +23,30 @@ import (
 	"time"
 )
 
+func TestConfigurationForcesFreshRefreshRotation(t *testing.T) {
+	dir := t.TempDir()
+	if err := configure("http://dex:5556/dex", dir, "memory"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config struct {
+		Expiry struct {
+			RefreshTokens struct {
+				ReuseInterval string `json:"reuseInterval"`
+			} `json:"refreshTokens"`
+		} `json:"expiry"`
+	}
+	if err := json.Unmarshal(data, &config); err != nil {
+		t.Fatal(err)
+	}
+	if config.Expiry.RefreshTokens.ReuseInterval != "0s" {
+		t.Fatal("probe must disable the reuse window to exercise fresh rotation")
+	}
+}
+
 type continuityJWK struct {
 	Kty string `json:"kty"`
 	Kid string `json:"kid"`
@@ -140,12 +164,14 @@ func TestSigningKeyContinuity(t *testing.T) {
 		missingIdentity bool
 		expiredToken    bool
 		wrongUserinfo   bool
+		reusedRefresh   bool
 		wantError       string
 	}{
 		{name: "lost signing keys despite working refresh", wantError: "pre-restart ID token verification failed"},
 		{name: "replacement key reuses old kid", sameKid: true, wantError: "pre-restart ID token verification failed"},
 		{name: "rotation retains old verification key", retainOldKey: true},
 		{name: "unchanged signing key", unchanged: true},
+		{name: "refresh reuse cannot mask fresh rotation", unchanged: true, reusedRefresh: true, wantError: "instead of exercising fresh rotation"},
 		{name: "saved key identity differs", retainOldKey: true, changedIdentity: true, wantError: "pre-restart signing-key identity changed"},
 		{name: "missing old token", retainOldKey: true, missingToken: true, wantError: "continuity evidence missing"},
 		{name: "missing verified key identity", retainOldKey: true, missingIdentity: true, wantError: "continuity evidence missing"},
@@ -253,6 +279,9 @@ func TestSigningKeyContinuity(t *testing.T) {
 				Access: "new-access", Refresh: "renewed-refresh", Type: "Bearer",
 				ID: continuityToken(t, activeKey, issuer, activeKid, nonce, time.Now().Add(time.Hour)),
 			}
+			if tc.reusedRefresh {
+				newTokens.Refresh = creds.Refresh
+			}
 			mu.Lock()
 			keys = []continuityJWK{continuityKey(activeKid, activeKey)}
 			if tc.retainOldKey {
@@ -294,7 +323,9 @@ func TestSigningKeyContinuity(t *testing.T) {
 			if !tc.missingToken && !tc.missingIdentity {
 				wantRequests = append(wantRequests, "/dex/keys")
 			}
-			if tc.wantError == "" || tc.wrongUserinfo {
+			if tc.reusedRefresh {
+				wantRequests = append(wantRequests, "/dex/token")
+			} else if tc.wantError == "" || tc.wrongUserinfo {
 				wantRequests = append(wantRequests, "/dex/token", "/dex/keys", "/dex/userinfo")
 			}
 			if !slices.Equal(gotRequests, wantRequests) {

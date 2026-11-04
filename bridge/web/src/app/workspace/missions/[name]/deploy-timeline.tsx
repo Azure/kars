@@ -1,9 +1,14 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+"use client";
+
 import type { TaskDetail } from "@/lib/types";
-import { activityForRevision, missionRunState } from "@/lib/mission-run-evidence";
-import { reviewedPhases, reviewedPhaseRouterActivity } from "@/lib/team-run-evidence";
+import { useLiveTrace } from "@/components/use-live-trace";
+import { activityForRevision } from "@/lib/mission-run-evidence";
+import { missionPresentation } from "@/lib/mission-presentation";
+import { displayedPhaseRouterActivity, reviewedPhases } from "@/lib/team-run-evidence";
+import { liveRouterActivity, reviewedPhaseKey, type LiveRouterActivity } from "@/lib/router-activity";
 import { formatEvidenceTime } from "@/lib/format";
 
 type StepState = "done" | "active" | "pending" | "failed";
@@ -18,22 +23,40 @@ function dotClass(s: StepState): string {
       : "bg-surface-muted";
 }
 
-export function DeployTimeline({ task }: { task: TaskDetail }) {
+export function LiveDeployTimeline({ task, observing }: { task: TaskDetail; observing: boolean }) {
+  const { events, routerActivity, phaseActivity } = useLiveTrace(
+    task.namespace, task.name, observing, task.activity, task.current_run_nonce,
+  );
+  return <DeployTimeline task={{ ...task, activity: events }} liveActivity={routerActivity} phaseActivity={phaseActivity} />;
+}
+
+export function DeployTimeline({ task, liveActivity = null, phaseActivity: livePhases = {} }: {
+  task: TaskDetail;
+  liveActivity?: LiveRouterActivity | null;
+  phaseActivity?: Record<string, LiveRouterActivity>;
+}) {
   const phase = task.execution_phase;
   const running = phase === "Running";
   const launching = phase === "Launching" || phase === "Pending";
   const hasSandbox = !!task.sandbox;
   const lastSeen = formatEvidenceTime(task.agent_identity?.last_seen);
   const identityObserved = lastSeen !== "Time unavailable";
+  const { failed, realDelivery: succeeded, status, executionStarted, routerActivity } = missionPresentation(task);
+  const observing = task.launched && !failed && !succeeded && status !== "stopped" && status !== "stopping";
+  const live = observing && task.current_run_nonce
+    ? liveRouterActivity(liveActivity, task.current_run_nonce) : null;
+  const observations = routerActivity ?? live?.observations;
   const principalActivity = (task.activity ?? []).some(
     event => activityForRevision(event, task.current_run_nonce ?? ""),
-  );
+  ) || (observations?.state === "observed" && observations.trace.events.length > 0);
   const phaseActivity = (reviewedPhases(task) ?? []).filter(phase => {
-    const observations = reviewedPhaseRouterActivity(phase)?.observations;
+    const observations = displayedPhaseRouterActivity({
+      ...phase, live_router_activity: observing ? livePhases[reviewedPhaseKey(phase)] ?? null : null,
+    })?.observations;
     return observations?.state === "observed" && observations.trace.events.length > 0;
   }).length;
   const firstActivity = principalActivity || phaseActivity > 0;
-  const { failed, realDelivery: succeeded } = missionRunState(task);
+  const held = status === "blocked" || status === "stopping" || status === "stopped" || status === "unavailable";
 
   const steps: { label: string; detail: string; state: StepState }[] = [
     {
@@ -73,7 +96,7 @@ export function DeployTimeline({ task }: { task: TaskDetail }) {
         : phaseActivity
         ? `Revision-bound router activity is retained for ${phaseActivity} reviewed ${phaseActivity === 1 ? "phase" : "phases"}. Inspect Activity for their reported outcomes; this does not establish principal readiness.`
         : "Waiting for the first revision-bound model round or tool record.",
-      state: failed ? "failed" : succeeded ? "done" : firstActivity || running ? "active" : "pending",
+      state: failed ? "failed" : succeeded ? "done" : !held && status === "running" ? "active" : "pending",
     },
   ];
 
@@ -84,7 +107,7 @@ export function DeployTimeline({ task }: { task: TaskDetail }) {
     <section className="rounded-xl border border-border bg-surface p-6">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <h2 className="text-sm font-semibold">{failed ? "Run failed" : succeeded ? "Delivered" : firstActivity ? "Execution observed" : "Starting execution"}</h2>
+          <h2 className="text-sm font-semibold">{failed ? "Run failed" : status === "blocked" ? "Execution held" : status === "unavailable" ? "Execution evidence unavailable" : status === "stopping" ? "Stopping" : status === "stopped" ? "Stopped" : succeeded ? "Delivered" : status === "waiting" ? "Awaiting next phase" : firstActivity || (executionStarted && status === "running") ? "Execution observed" : "Starting execution"}</h2>
           <p className="mt-0.5 text-xs text-foreground-muted">
             {failed
               ? "The recorded outcome is unsuccessful; it does not establish which provisioning checks passed."

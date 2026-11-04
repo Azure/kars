@@ -34,7 +34,7 @@ def render(*extra, kubeconfig=None, release="kars-datapath-witness", chart=CHART
 
 
 def enabled(*extra, **kwargs):
-    return render("--set", "enabled=true", "--set", "sandboxes={demo}",
+    return render("--set", "enabled=true", "--set", "scope=selected", "--set", "sandboxes={demo}",
                   "--set", "aggregator.image=" + IMAGE,
                   "--set", "gadget.image=" + IMAGE, *extra, **kwargs)
 
@@ -55,9 +55,11 @@ RESOURCES = {
 
 
 class FakeApi:
-    def __init__(self, objects=(), denied=False):
+    def __init__(self, objects=(), denied=False, version="1.31.0", resources=None):
         self.objects = list(objects)
         self.denied = denied
+        self.version = version
+        self.resources = resources or RESOURCES
         self.calls = []
 
     def __enter__(self):
@@ -99,16 +101,16 @@ class FakeApi:
 
     def get(self, path):
         if path == "/version":
-            return 200, {"major": "1", "minor": "31", "gitVersion": "v1.31.0"}
+            return 200, {"major": self.version.split(".")[0], "minor": self.version.split(".")[1], "gitVersion": "v" + self.version}
         if path == "/api":
             return 200, {"kind": "APIVersions", "versions": ["v1"]}
         if path == "/apis":
             return 200, {"kind": "APIGroupList", "groups": [
-                {"name": group, "versions": [{"groupVersion": group + "/v1", "version": "v1"}],
-                 "preferredVersion": {"groupVersion": group + "/v1", "version": "v1"}}
-                for group in ("apps", "rbac.authorization.k8s.io")
+                {"name": version.split("/")[0], "versions": [{"groupVersion": version, "version": version.split("/")[1]}],
+                 "preferredVersion": {"groupVersion": version, "version": version.split("/")[1]}}
+                for version in self.resources if "/" in version
             ]}
-        for version, resources in RESOURCES.items():
+        for version, resources in self.resources.items():
             base = "/api/v1" if version == "v1" else "/apis/" + version
             if path == base:
                 return 200, {"kind": "APIResourceList", "groupVersion": version, "resources": [
@@ -144,7 +146,7 @@ class ChartTests(unittest.TestCase):
         self.assertEqual([o["metadata"]["name"] for o in owned], ["kars-datapath-witness-settings"])
         self.assertEqual(owned[0]["metadata"]["annotations"]["meta.helm.sh/release-name"], "kars")
         on = documents(render(
-            "--set", "datapathWitness.enabled=true",
+            "--set", "datapathWitness.enabled=true", "--set", "datapathWitness.scope=selected",
             "--set", "datapathWitness.sandboxes={demo}",
             "--set", "datapathWitness.aggregator.image=" + IMAGE,
             "--set", "datapathWitness.gadget.image=" + IMAGE,
@@ -198,6 +200,27 @@ class ChartTests(unittest.TestCase):
     def test_enabled_manifest_and_minimal_authority(self):
         objects = documents(enabled())
         self.assertEqual(sum(o["kind"] == "DaemonSet" for o in objects), 1)
+        observer = next(o for o in objects if o["kind"] == "DaemonSet")["spec"]["template"]["spec"]["containers"][0]
+        for name in ("readinessProbe", "livenessProbe", "startupProbe"):
+            probe = observer[name]
+            self.assertEqual(probe["exec"]["command"], ["/usr/bin/kars-witness-health"])
+            self.assertEqual(probe["periodSeconds"], 5)
+            self.assertEqual(probe["timeoutSeconds"], 5)
+            self.assertEqual(probe.get("failureThreshold", 3), 24 if name == "startupProbe" else 3)
+        self.assertEqual(observer["resources"]["limits"], {"cpu": "1", "memory": "1Gi"})
+        memory_limits = [env["value"] for env in observer["env"] if env["name"] == "GOMEMLIMIT"]
+        self.assertEqual(memory_limits, ["768MiB"])
+        cpu_bindings = [env for env in observer["env"] if env["name"] == "GOMAXPROCS"]
+        self.assertEqual(cpu_bindings, [{"name": "GOMAXPROCS", "valueFrom": {
+            "resourceFieldRef": {"containerName": "gadget", "resource": "limits.cpu", "divisor": "1"}}}])
+        self.assertFalse(any(env["name"] == "GODEBUG" for env in observer["env"]))
+        runtime = next(o for o in objects if o["metadata"]["name"] == "witness-runtime")
+        config = runtime["data"]["config.json"]
+        self.assertEqual(json.loads(config)["gadget_go_memory_limit"], memory_limits[0])
+        self.assertEqual(json.loads(config)["gadget_go_max_procs"], observer["resources"]["limits"]["cpu"])
+        settings = next(o for o in objects if o["metadata"]["name"] == "kars-datapath-witness-settings")
+        self.assertEqual(json.loads(settings["data"]["settings.json"])["config_digest"],
+                         hashlib.sha256(config.rstrip("\n").encode()).hexdigest())
         self.assertFalse(any(o["kind"] in ("Secret", "Job", "CustomResourceDefinition", "PersistentVolumeClaim") for o in objects))
         namespace = next(o for o in objects if o["kind"] == "Namespace")
         self.assertEqual(namespace["metadata"]["name"], NS)
@@ -246,6 +269,46 @@ class ChartTests(unittest.TestCase):
                                  ("batch", ["jobs", "cronjobs"])):
             self.assertIn({"apiGroups": [group], "resources": resources, "verbs": ["get"]},
                           gadget_role["rules"])
+
+    def test_default_fleet_scope_binds_runtime_and_only_lists_kars_sandboxes(self):
+        objects = documents(render("--set", "enabled=true", "--set", "aggregator.image=" + IMAGE,
+                                   "--set", "gadget.image=" + IMAGE))
+        settings = json.loads(next(o for o in objects if o["metadata"]["name"].endswith("-settings"))["data"]["settings.json"])
+        runtime = json.loads(next(o for o in objects if o["metadata"]["name"] == "witness-runtime")["data"]["config.json"])
+        for value in (settings, runtime):
+            self.assertEqual(value["scope"], "all")
+            self.assertEqual(value["sandboxes"], [])
+        self.assertFalse(any(o["metadata"].get("namespace", "").startswith("kars-demo") for o in objects))
+        discovery = next(o for o in objects if o["kind"] == "Role" and o["metadata"]["namespace"] == "kars-system")
+        self.assertIn({"apiGroups": ["kars.azure.com"], "resources": ["karssandboxes"], "verbs": ["get", "list"]}, discovery["rules"])
+        for role in (o for o in objects if o["kind"] in ("Role", "ClusterRole")):
+            for rule in role["rules"]:
+                if "configmaps" in rule["resources"]:
+                    self.assertEqual(role["kind"], "Role")
+                    self.assertIn(role["metadata"]["namespace"], (NS, "kars-system"))
+                self.assertNotIn("secrets", rule["resources"])
+        selected = documents(enabled())
+        selected_settings = json.loads(next(o for o in selected if o["metadata"]["name"].endswith("-settings"))["data"]["settings.json"])
+        self.assertNotEqual(settings["config_digest"], selected_settings["config_digest"])
+        for args in (("--set", "scope=all", "--set", "sandboxes={demo}"),
+                     ("--set", "scope=selected", "--set-json", "sandboxes=[]"),
+                     ("--set", "scope=automatic",)):
+            self.assertNotEqual(render("--set", "enabled=true", "--set", "aggregator.image=" + IMAGE,
+                                       "--set", "gadget.image=" + IMAGE, *args).returncode, 0)
+
+    def test_fleet_migration_fences_removed_selected_roles(self):
+        objects = documents(enabled())
+        args = ("--set", "enabled=true", "--set", "aggregator.image=" + IMAGE,
+                "--set", "gadget.image=" + IMAGE)
+        with FakeApi(objects) as api:
+            result = documents(render(*args, kubeconfig=api.kubeconfig))
+            self.assertFalse(any(o["metadata"].get("namespace") == "kars-demo" for o in result))
+        role = next(o for o in objects if o["kind"] == "Role" and o["metadata"]["namespace"] == "kars-demo")
+        role["metadata"]["annotations"]["meta.helm.sh/release-name"] = "foreign"
+        with FakeApi(objects) as api:
+            result = render(*args, kubeconfig=api.kubeconfig)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("ownership conflict", result.stderr)
 
     def test_schema_no_dev_fallback_or_ambiguous_release(self):
         for args in [
@@ -296,7 +359,7 @@ class ChartTests(unittest.TestCase):
                                  ("Role", "RoleBinding", "ClusterRole", "ClusterRoleBinding")]
         self.assertEqual(roles(default), roles(alternate))
         core = documents(render(
-            "--set", "datapathWitness.enabled=true", "--set", "datapathWitness.sandboxes={demo}",
+            "--set", "datapathWitness.enabled=true", "--set", "datapathWitness.scope=selected", "--set", "datapathWitness.sandboxes={demo}",
             "--set", "datapathWitness.aggregator.image=" + IMAGE,
             "--set", "datapathWitness.gadget.image=" + IMAGE,
             "--set", "datapathWitness.gadget.hookMode=podinformer",

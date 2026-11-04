@@ -123,6 +123,7 @@ mod tests {
             "mission",
             KarsTaskSpec {
                 objective: "Review changes".into(),
+                requested_tier: None,
                 envelope: TaskEnvelope {
                     tier: 4,
                     authority_ceiling: 3,

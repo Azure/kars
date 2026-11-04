@@ -15,6 +15,12 @@ cluster. The chart deploys:
 - optional Microsoft Teams gateway resources, with zero replicas by default.
 
 It does not install Kars or provision a Kubernetes cluster.
+Configure the inference endpoint, credentials and default provider/model in Core
+before adding Bridge. Core's SRE inherits `controller.inferenceDefaults` unless
+explicitly overridden; Bridge reads that same Core selection when initializing
+its orchestrator. Adding Bridge does not require a second provider configuration
+or reinstalling Core, and existing orchestrator policies remain authoritative.
+
 Kars remains usable without Bridge. Install the complete compatible Kars
 runtime first; the public foundation PRs alone are insufficient. This is
 integration-preview deployment guidance, not a public image-availability or
@@ -246,6 +252,13 @@ Upgrade Kars first when a Bridge release requires new CRD fields or controller
 behavior. The compatibility matrix must identify the required order.
 
 ## Uninstall
+
+Core and Bridge must use independently available authentication when Core
+Headlamp or the Kubernetes API server uses OIDC. The Kind beta profile requires
+an external issuer and disables Bridge-owned Dex. In other installations,
+Bridge's optional Dex is deleted with its release: if Core clients share it,
+first migrate those clients to an independently managed issuer and verify login.
+Do not treat namespace retention as identity-service retention.
 
 ```bash
 helm uninstall kars-bridge -n kars-system

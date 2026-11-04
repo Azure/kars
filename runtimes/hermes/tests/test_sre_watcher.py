@@ -25,7 +25,8 @@ def configured(monkeypatch, tmp_path):
                  "SRE_HEALTH_INTERVAL_SECONDS", "SRE_HEALTH_TIMEOUT_SECONDS"):
         monkeypatch.delenv(name, raising=False)
     (tmp_path / "config.yaml").write_text(
-        "model:\n  provider: azure-foundry\n  base_url: http://127.0.0.1:8443/v1\n"
+        "model:\n  default: gpt-5.4-mini\n  provider: azure-foundry\n"
+        "  base_url: http://127.0.0.1:8443/v1\n"
         "plugins:\n  enabled: [kars]\n", encoding="utf-8",
     )
     plugin = tmp_path / "plugins/kars"
@@ -33,6 +34,10 @@ def configured(monkeypatch, tmp_path):
     (plugin / "__init__.py").write_text("# test-only installed entry point\n")
     kube = MagicMock()
     kube.get.side_effect = lambda path: {"ready": True} if path == "/readyz" else {"items": []}
+    kube.post.side_effect = lambda path, json: {
+        "persisted": True, "sweep_id": json["sweep_id"], "digest": "a" * 64,
+        "accepted_at_ms": json["finished_at_ms"], "enforcement_changed": False,
+    }
     monkeypatch.setattr(watcher.sre_kube, "client", lambda: kube)
     router = MagicMock()
     monkeypatch.setattr(watcher.router_client, "call", router)
@@ -84,7 +89,14 @@ def test_missing_authority_or_budget_never_starts_inference(configured, monkeypa
     assert record["turn_status"] == "blocked"
     assert record["error"]
     turn.assert_not_called()
-    assert not kube.post.called
+    if failure == "unprojected":
+        kube.post.assert_not_called()
+        assert record["publication_error"]
+    else:
+        kube.post.assert_called_once()
+        assert kube.post.call_args.args == ("/reports/latest",)
+        assert kube.post.call_args.kwargs["json"]["turn_status"] == "blocked"
+        assert record["publication"]["persisted"] is True
 
 
 def test_duplicate_supervisor_never_runs_or_waits(configured, monkeypatch):
@@ -95,6 +107,23 @@ def test_duplicate_supervisor_never_runs_or_waits(configured, monkeypatch):
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         watcher.run()
     sweep.assert_not_called()
+
+
+@pytest.mark.parametrize("model", [None, "", "   ", 54, ["gpt-5.4-mini"]])
+def test_missing_or_invalid_configured_model_blocks_before_inference(configured, monkeypatch, model):
+    home, kube, router = configured
+    path = home / "config.yaml"
+    config = watcher.yaml.safe_load(path.read_text())
+    config["model"]["default"] = model
+    path.write_text(watcher.yaml.safe_dump(config))
+    turn = MagicMock()
+    monkeypatch.setattr(watcher, "_run_hermes", turn)
+    result = watcher._sweep(home, 180)
+    assert result["turn_status"] == "blocked"
+    assert "explicit installed Hermes model" in result["error"]
+    turn.assert_not_called()
+    router.assert_not_called()
+    kube.get.assert_not_called()
 
 
 def test_blocked_startup_rechecks_without_starting_inference(configured, monkeypatch):
@@ -143,19 +172,21 @@ def test_notification_failure_does_not_discard_the_turn(configured, monkeypatch)
 @pytest.mark.parametrize("timeout", [False, True])
 def test_native_turn_pins_router_tools_and_reaps_process_group(configured, monkeypatch, timeout):
     home, _, _ = configured
+    monkeypatch.setenv("HERMES_INFERENCE_MODEL", "unrelated-ambient-model")
     original_popen = subprocess.Popen
     processes = []
 
     def popen(command, **options):
-        assert command[:8] == ["hermes", "--accept-hooks", "--cli", "--provider",
-                               "azure-foundry", "--toolsets", "sre", "-z"]
+        assert command[:10] == ["hermes", "--accept-hooks", "--cli", "--provider",
+                                "azure-foundry", "--model", "gpt-5.4-mini",
+                                "--toolsets", "sre", "-z"]
         assert options["env"]["AZURE_FOUNDRY_BASE_URL"] == "http://127.0.0.1:8443/v1"
         assert options["env"]["AZURE_FOUNDRY_API_KEY"] == "router-managed"
         assert options["stdin"] == subprocess.DEVNULL
         assert options["start_new_session"] is True
         assert options["stdout"] == subprocess.PIPE
         assert options["stderr"] == subprocess.STDOUT
-        script = "import time; time.sleep(10)" if timeout else "print('actual subprocess output')"
+        script = "import time; print('partial diagnosis', flush=True); time.sleep(10)" if timeout else "print('actual subprocess output')"
         process = original_popen([sys.executable, "-c", script], **options)
         processes.append(process)
         return process
@@ -168,7 +199,9 @@ def test_native_turn_pins_router_tools_and_reaps_process_group(configured, monke
     kill.assert_called_once_with(processes[0].pid, signal.SIGKILL)
     assert processes[0].poll() is not None
     assert processes[0].stdout.closed
-    if not timeout:
+    if timeout:
+        assert result["output"] == "partial diagnosis\n"
+    else:
         assert result["output"] == "actual subprocess output\n"
         assert result["output_truncated"] is False
 
@@ -199,6 +232,9 @@ def test_combined_output_is_bounded_and_overflow_fails(configured, monkeypatch, 
     assert len(data) == limit
     assert data == b"a" * (limit // 2) + b"b" * (limit // 2)
     assert result["turn_status"] == ("failed" if extra_bytes else "finished")
+    assert result["output"].startswith("a" * 100)
+    assert result["output"].endswith("b" * 100)
+    assert len(result["output"].encode()) <= 65536
     if extra_bytes:
         assert "log limit" in result["error"]
         assert result["output_truncated"] is True

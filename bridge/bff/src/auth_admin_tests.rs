@@ -216,6 +216,84 @@ async fn budget_and_retention_handlers_require_admin_even_without_route_middlewa
 }
 
 #[tokio::test]
+async fn github_manifest_registration_requires_signed_admin_and_keeps_upload_operator_access() {
+    const PATH: &str = "/api/operator/github-app";
+    // The existing upload/delete contract is operator-or-admin. POST adds its
+    // own stricter handler check, including when called without middleware.
+    assert_eq!(
+        required_persona(PATH, &Method::PUT),
+        RequiredPersona::Operator
+    );
+    assert_eq!(
+        required_persona(PATH, &Method::DELETE),
+        RequiredPersona::Operator
+    );
+    for principal in [
+        None,
+        Some("forged".into()),
+        Some(signed(
+            &["admin"],
+            "wrong-key",
+            chrono::Utc::now().timestamp() + 3600,
+        )),
+        Some(signed(
+            &["admin"],
+            SECRET,
+            chrono::Utc::now().timestamp() - 3600,
+        )),
+    ] {
+        let (state, api) = fixture();
+        let response = app(state)
+            .oneshot(request(
+                PATH,
+                Method::POST,
+                principal.as_deref(),
+                json!({"code":"SECRET_CODE"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(api.lock().unwrap().calls.is_empty());
+    }
+    for role in ["user", "operator", "auditor", "viewer", "admin"] {
+        let (state, api) = fixture();
+        let principal = Principal {
+            sub: "alice".into(),
+            name: "Alice".into(),
+            roles: vec![role.into()],
+        };
+        for router in [
+            app(state.clone()),
+            crate::routes::router(state.clone()).layer(Extension(principal)),
+        ] {
+            // Invalid input proves authorized admins reach validation without
+            // consuming a real code or requiring any Kubernetes calls.
+            let response = router
+                .oneshot(request(
+                    PATH,
+                    Method::POST,
+                    Some(&token(&[role])),
+                    json!({"code":"../SECRET_CODE"}),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                if role == "admin" {
+                    StatusCode::BAD_REQUEST
+                } else {
+                    StatusCode::FORBIDDEN
+                },
+                "{role}"
+            );
+            let body = to_bytes(response.into_body(), 4096).await.unwrap();
+            assert!(!std::str::from_utf8(&body).unwrap().contains("SECRET_CODE"));
+        }
+        assert!(api.lock().unwrap().calls.is_empty());
+    }
+}
+
+#[tokio::test]
 async fn signed_admins_can_set_and_clear_each_budget_scope_and_retention() {
     for (index, path) in MUTATIONS.iter().enumerate() {
         let (state, api) = fixture();

@@ -70,6 +70,10 @@ pub(crate) fn task_digest(task: &KarsTask) -> Result<String, ReconcileError> {
         Some(binding) => digest(&(spec, binding)),
         None => digest(&spec),
     }?;
+    let sealed = match task.annotations().get(super::qualification::contract::RECORD) {
+        Some(approval) => digest(&(sealed, approval))?,
+        None => sealed,
+    };
     let sealed = match task
         .annotations()
         .get(crate::reviewed_execution::TEAM_ROLES)
@@ -77,11 +81,15 @@ pub(crate) fn task_digest(task: &KarsTask) -> Result<String, ReconcileError> {
         Some(roles) => digest(&(sealed, roles)),
         None => Ok(sealed),
     }?;
-    match task
+    let sealed = match task
         .annotations()
         .get(crate::reviewed_execution::TEAM_MEMORY)
     {
-        Some(memory) => digest(&(sealed, memory)),
+        Some(memory) => digest(&(sealed, memory))?,
+        None => sealed,
+    };
+    match task.annotations().get(crate::reviewed_execution::TEAM_REVISION) {
+        Some(revision) => digest(&(sealed, revision)),
         None => Ok(sealed),
     }
 }
@@ -148,6 +156,7 @@ fn validate_task(
             "reserved Task ownership, UID, authority or request identity changed",
         ));
     }
+    super::qualification::task_binding(team, task, &record.request)?;
     match task.annotations().get(STATE).map(String::as_str) {
         Some("admitted") => Ok(()),
         Some("staged")
@@ -160,7 +169,15 @@ fn validate_task(
                     .iter()
                     .all(|key| !task.annotations().contains_key(*key)) =>
         {
-            Ok(())
+            let input_count = crate::reviewed_execution::staged_team_input_count(task)?;
+            crate::task_execution_plan::validate_retained_input_execution(
+                task.spec
+                    .blueprint
+                    .as_ref()
+                    .and_then(|blueprint| blueprint.execution_plan.as_ref()),
+                input_count,
+            )
+            .map_err(ReconcileError::Invalid)
         }
         _ => Err(invalid(
             "Task has invalid staging state or already-executed staging evidence",
@@ -177,7 +194,7 @@ pub(super) async fn enqueue_cadence(
     teams: &Api<KarsTeam>,
     team: &KarsTeam,
 ) -> Result<(), ReconcileError> {
-    if pending(team)?.is_some() || team.spec.paused {
+    if super::qualification::marked(team) || pending(team)?.is_some() || team.spec.paused {
         return Err(invalid(
             "cadence cannot replace a pending request or resume a paused Team",
         ));
@@ -219,6 +236,7 @@ pub(super) async fn prepare(
     let Some(request) = pending(team)? else {
         return Ok(None);
     };
+    super::qualification::authorization(team, request)?;
     let requested_sequence = sequence(request)?;
     let previous = reservation(team);
     let prior_sequence = previous
@@ -244,6 +262,7 @@ pub(super) async fn prepare(
             return Ok(None);
         }
         if task.annotations().get(STATE).map(String::as_str) == Some("staged") {
+            super::qualification::before_admission(client, team, request).await?;
             work::claim(client, team, &task, true).await?;
         }
         return Ok(Some(Prepared {
@@ -254,22 +273,28 @@ pub(super) async fn prepare(
     if !can_admit {
         return Ok(None);
     }
+    let qualification = super::qualification::before_admission(client, team, request).await?;
     let authority_digest = digest(&team.spec)?;
     let task = match existing {
         Some(task) => task,
         None => {
             let selection = work::select(client, team).await?;
+            if let Some(approval) = &qualification {
+                match &selection {
+                    work::Selection::Item(binding, _) => super::qualification::binding(approval, binding)?,
+                    _ => return Err(invalid("Qualification requires its exact pending backlog item")),
+                }
+            }
             if matches!(
                 selection,
                 work::Selection::Blocked | work::Selection::AwaitingReview
             ) {
                 return Ok(None);
             }
+            work::validate_revision_plan(team, &selection)?;
             let assigned = work::fragment(&selection)?;
-            let allowance = specs::run_knowledge_budget(team).map_err(ReconcileError::Invalid)?;
-            let remaining = allowance
-                .checked_sub(assigned.chars().count())
-                .ok_or_else(|| invalid("queued work exceeds the bounded objective allowance"))?;
+            let remaining = specs::run_history_budget(team, &assigned)
+                .map_err(ReconcileError::Invalid)?;
             let history = crate::team_commons::prior_knowledge(client, team, remaining).await?;
             let knowledge = format!("{assigned}{history}");
             let mut spec = specs::run_spec(team, &knowledge).map_err(ReconcileError::Invalid)?;
@@ -292,11 +317,14 @@ pub(super) async fn prepare(
                 ]
                 .into(),
             );
-            if let work::Selection::Item(binding, _) = selection {
+            if let work::Selection::Item(binding, _) = &selection {
                 task.annotations_mut().insert(
                     work::contract::ANNOTATION.into(),
                     serde_json::to_string(&binding)?,
                 );
+            }
+            if let Some(raw) = team.annotations().get(super::qualification::contract::RECORD) {
+                task.annotations_mut().insert(super::qualification::contract::RECORD.into(), raw.clone());
             }
             crate::reviewed_execution::seal_team_roles(team, &mut task)?;
             if task
@@ -305,7 +333,22 @@ pub(super) async fn prepare(
                 .as_ref()
                 .is_some_and(|blueprint| blueprint.execution_plan.is_some())
             {
+                let (revision, diagnostic_roles) =
+                    Box::pin(work::revision_documents(client, team, &selection)).await?;
+                crate::reviewed_execution::seal_team_revision(
+                    &mut task,
+                    &revision,
+                    &diagnostic_roles,
+                )?;
                 let memory = crate::team_commons::prior_documents(client, team).await?;
+                crate::task_execution_plan::validate_retained_input_execution(
+                    task.spec
+                        .blueprint
+                        .as_ref()
+                        .and_then(|blueprint| blueprint.execution_plan.as_ref()),
+                    revision.len() + memory.len(),
+                )
+                .map_err(ReconcileError::Invalid)?;
                 if !memory.is_empty() {
                     task.annotations_mut().insert(
                         crate::reviewed_execution::TEAM_MEMORY.into(),
@@ -367,6 +410,7 @@ async fn ready_to_activate(
     team: &KarsTeam,
     record: &TeamRunAdmission,
 ) -> Result<(), ReconcileError> {
+    super::qualification::before_admission(client, team, &record.request).await?;
     let effective = capabilities::effective_team(client, team).await?;
     if effective.spec.paused
         || specs::unsupported_budget(&effective.spec.envelope)
@@ -439,6 +483,10 @@ pub(super) async fn finish(
             return Err(error);
         }
     }
+    let mut annotations = json!({ (REQUEST): null });
+    if super::qualification::marked(&fresh) {
+        annotations[super::qualification::contract::CONSUMED] = json!(&record.task_uid);
+    }
     teams
         .patch(
             &fresh.name_any(),
@@ -447,7 +495,7 @@ pub(super) async fn finish(
                 "metadata": {
                     "uid": tasks::owner_ref(&fresh)?.uid,
                     "resourceVersion": resource_version(&fresh)?,
-                    "annotations": { (REQUEST): null }
+                    "annotations": annotations
                 }
             })),
         )

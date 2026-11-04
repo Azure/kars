@@ -30,6 +30,8 @@ use failure::ForwardFailure;
 
 #[cfg(test)]
 mod authentication_tests;
+#[cfg(test)]
+mod request_compatibility_tests;
 
 /// Upstream configuration for a single request.
 #[derive(Clone)]
@@ -252,10 +254,96 @@ fn record_metrics(
     }
 }
 
-/// Forward an inference request to the appropriate Azure backend.
-///
-/// - **Dev mode** (API key): Azure OpenAI `/openai/deployments/{model}/{path}?api-version=...`
-/// - **AKS mode** (Workload Identity / IMDS): Foundry `/openai/v1/{path}` with model in body
+/// Read capacity metadata from the resolved provider, never an inference route.
+/// These values configure runtime context; they do not authorize spending.
+pub(crate) async fn model_capacity(
+    auth: &WorkloadIdentityAuth,
+    copilot: Option<&CopilotTokenCache>,
+    client: &Client,
+    upstream: &UpstreamConfig,
+) -> Result<(u64, u64)> {
+    let path = if upstream.provider == ProviderKind::Anthropic {
+        "v1/models"
+    } else {
+        "models"
+    };
+    let (url, _) = build_upstream_url(auth, upstream, path, Bytes::new())?;
+    let credential = credential_for_upstream(auth, copilot, upstream).await?;
+    let headers = build_upstream_headers(&HeaderMap::new(), auth, &credential, &upstream.endpoint)?;
+    let mut response = client
+        .get(url)
+        .headers(headers)
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await?
+        .error_for_status()?;
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        anyhow::ensure!(
+            body.len() + chunk.len() <= 1_048_576,
+            "Provider model metadata exceeds response bound"
+        );
+        body.extend_from_slice(&chunk);
+    }
+    let value: serde_json::Value = serde_json::from_slice(&body)?;
+    selected_model_capacity(&value, upstream)
+}
+
+fn selected_model_capacity(
+    value: &serde_json::Value,
+    upstream: &UpstreamConfig,
+) -> Result<(u64, u64)> {
+    let model = upstream.deployment.as_str();
+    let models = value
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("Provider model metadata has no model list"))?;
+    let mut matching = models
+        .iter()
+        .filter(|entry| entry.get("id").and_then(serde_json::Value::as_str) == Some(model));
+    let entry = matching
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("Selected model is absent from provider metadata"))?;
+    anyhow::ensure!(
+        matching.next().is_none(),
+        "Selected model metadata is ambiguous"
+    );
+    let context = entry
+        .pointer("/capabilities/limits/max_context_window_tokens")
+        .or_else(|| entry.get("context_window"));
+    let output = entry
+        .pointer("/capabilities/limits/max_output_tokens")
+        .or_else(|| entry.get("max_output_tokens"));
+    let positive = |value: Option<&serde_json::Value>| {
+        value
+            .and_then(serde_json::Value::as_u64)
+            .filter(|value| *value > 0 && *value <= 9_007_199_254_740_991)
+    };
+    match (positive(context), positive(output)) {
+        (Some(context), Some(output)) => Ok((context, output)),
+        (None, None)
+            if context.is_none()
+                && output.is_none()
+                && upstream.provider == ProviderKind::AzureOpenAI
+                && endpoint_host(&upstream.endpoint)
+                    .is_some_and(|host| is_azure_ai_host(&host))
+                && entry.get("status").and_then(serde_json::Value::as_str) == Some("succeeded")
+                && entry
+                    .pointer("/capabilities/inference")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+                && model == "gpt-6.1-sol" =>
+        {
+            // Azure lists this exact model without limits. Its first-party catalogue
+            // supplies runtime capacity, not a spending allowance or family default:
+            // https://ai.azure.com/catalog/models/gpt-6.1-sol (verified 2026-11-04).
+            Ok((1_050_000, 128_000))
+        }
+        _ => anyhow::bail!("Selected model has no provider-reported context/output capacity"),
+    }
+}
+
+/// Forward an inference request to the resolved Azure or compatible backend.
 #[allow(clippy::too_many_arguments)]
 pub async fn forward(
     auth: &WorkloadIdentityAuth,
@@ -848,6 +936,25 @@ fn build_upstream_url(
             if let Some(include) = obj.get_mut("include").and_then(|v| v.as_array_mut()) {
                 include.retain(|s| s.as_str() != Some("reasoning.encrypted_content"));
             }
+        }
+        // Copilot's Claude chat route rejects the OpenAI effort value `none`.
+        // Use its default request without explicit thinking controls instead.
+        // Normalize before budget admission so the quote binds the actual wire.
+        if upstream.provider == ProviderKind::AzureOpenAI
+            && is_copilot_endpoint(&upstream.endpoint)
+            && path.trim_start_matches('/') == "chat/completions"
+            && body_json
+                .get("model")
+                .and_then(|v| v.as_str())
+                .is_some_and(|model| model.starts_with("claude-"))
+            && body_json.get("reasoning_effort").and_then(|v| v.as_str()) == Some("none")
+            && body_json.get("thinking").is_none()
+            && body_json.get("reasoning").is_none()
+        {
+            body_json
+                .as_object_mut()
+                .unwrap()
+                .remove("reasoning_effort");
         }
         rewrite_unsupported_thinking(&mut body_json);
         serde_json::to_vec(&body_json)?.into()

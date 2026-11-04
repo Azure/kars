@@ -6,9 +6,20 @@ Licensed under the MIT License. -->
 **Off by default. No installation is required for core Kars or Bridge.**
 This add-on takes bounded kernel DNS/TCP samples through upstream
 [Inspektor Gadget v0.53.2](https://github.com/inspektor-gadget/inspektor-gadget/releases/tag/v0.53.2)
-and compares explicitly selected sandboxes with the controller's compiled
-egress baselines. It observes; it does not enforce policy, sign attestations,
+and compares all discovered Kars sandboxes with the controller's compiled
+egress baselines. Explicit selected scope remains supported for existing operators. It observes; it does not enforce policy, sign attestations,
 or establish complete kernel coverage.
+
+**An empty external-traffic row is not the same as a stopped collector.** The
+in-scope event count includes internal traffic, DNS replies and TCP accept/close
+events. Sandbox rows show only non-cluster DNS queries and connect attempts to
+global IP addresses. Check the report timestamp, sample status and reported
+sandbox rows before interpreting zero external activity. Enabled installations
+now default to `scope: all`: each sample discovers current `KarsSandbox` resources
+in `kars-system`, including newly created Team and Mission workers. Capture uses
+only those exact sandbox namespaces; an empty fleet never launches an unfiltered
+capture. Kind beta requires this fleet scope. Operators retaining a static list
+must explicitly set `scope: selected`. Bridge does not enable or broaden scope.
 
 Core includes the maintained witness chart as its local `datapathWitness`
 dependency: use `datapathWitness.enabled=true` / `false`, without a third release.
@@ -91,6 +102,10 @@ builder. No Debian runtime files, shell or package manager enter the final
 image. The builder prepares a runtime tree with searchable directories,
 read-only source/provenance and both static executables; the final stage
 copies that tree without a runtime shell or permission-changing command.
+A runtime-base refresh must retain the static executable and source/provenance
+hashes, record the actual build and runtime bases separately, and repeat native
+checks plus a fresh whole-image vulnerability scan. A clean Go dependency scan
+does not cover Expat/OpenSSL or other packages inherited from the AL3 base.
 Record the source revision and publish to your own authorized registry:
 
 ```sh
@@ -118,6 +133,47 @@ It is built without the client's `withoutebpf` tag and retains upstream embedded
 BPF objects from the checksum-verified source archive. No host-hook installers
 or global cleanup executable are added. The chart explicitly selects this
 daemon entrypoint; the image default remains the unprivileged aggregator.
+Probes use the small `kars-witness-health` binary rather than initializing the
+full daemon executable on every check. It calls the same upstream Unix-socket
+gRPC health service (`/run/hook-liveness.socket`, empty service name), accepts
+only `SERVING`, and reports connection, deadline and unhealthy-state failures.
+The RPC retains its two-second deadline. Kubelet gives each exec probe five
+seconds, including process startup and teardown; its outer timeout must not
+race the RPC deadline. Probe periods remain five seconds, failure thresholds
+remain three (24 during startup), and resource limits are unchanged. This
+timeout separation is not proof of stability under contention: installed
+qualification still requires fresh captures without probe-induced restarts.
+The client is built and tested with the same reviewed Go module locks; its source
+and binary hashes are retained in the image provenance. This reduces probe
+startup overhead; it does not establish capture availability or full coverage.
+The daemon sets `GOMEMLIMIT=768MiB` within its unchanged `1Gi` container limit,
+leaving 256MiB for memory outside Go's managed-memory accounting and probe
+processes. The soft target prompts collection before the container ceiling; it
+is not a hard heap cap and does not fix retained-object leaks. The setting is
+included in the published configuration digest, so reports from the previous
+runtime configuration do not qualify the new one. Installed observation must
+still demonstrate bounded memory, fresh captures and unchanged restart counts.
+`GOMAXPROCS` comes from the gadget container's CPU limit through the Downward
+API, with a one-core divisor. This binds Go execution slots to the unchanged
+one-core quota instead of relying on automatic detection through the host
+cgroup mount. The expected value is also included in the configuration digest.
+This prevents host-sized Go scheduling concurrency; it does not fix retained
+memory or establish probe stability. Diagnostic GC logging is not enabled by
+the chart. Installed qualification must verify the effective setting and the
+same capture, memory and restart criteria.
+The build applies one checksum-bound upstream lifecycle repair: `KubeManager`
+now calls its existing `PostGadgetRun` cleanup from `Close`, matching the local
+manager's shutdown path. Without that call, the global container collection
+keeps subscriptions to stopped gadgets, including their DNS WASM state, and
+continues sending them container events. The build checks both the original
+and repaired source hashes and runs a kernel-independent regression covering
+metadata-only, normal shutdown and aborted startup. No tracing privilege,
+gadget verification, capture policy or memory limit is relaxed. The recipe,
+regression source and patch hashes are retained in image provenance. Remove
+this downstream repair only when a reviewed upstream refresh includes the
+cleanup and passes the same regression. The isolated actual-DNS reproduction
+is not installed acceptance; a rebuilt image still needs the stability and
+capture qualification described above.
 The daemon's elevated host access and the separately pinned OCI gadget artifacts
 still require operator review and actual kernel-capture qualification.
 
@@ -201,14 +257,23 @@ aggregator:
   intervalSeconds: 30
 gadget:
   image: YOUR_REGISTRY/kars-datapath-witness-aggregator@sha256:YOUR_PUBLISHED_INDEX_DIGEST
-sandboxes:
-  - demo
+scope: all
+sandboxes: []
 ```
 
-The schema rejects empty scope, either missing runtime image, mutable tags, and unknown values
-when enabled. This does not prove registry reachability; image pull failures,
-missing BTF, failed capture or missing/invalid baselines keep the aggregator
-unready and `--wait` fails instead of reporting successful enablement.
+For a static list, use `scope: selected` and `sandboxes: [demo]` instead.
+When upgrading old selected installations with `--reuse-values`, explicitly add
+`scope=selected` (or `datapathWitness.scope=selected` for Core) to retain their
+existing scope. Migrating to fleet scope requires explicitly clearing the old
+list and selecting `all`; a nonempty list with `all` is rejected, not silently
+expanded. Preserve the release's existing owner and review removed static grants.
+
+The schema rejects unknown scope, all scope with a static list, enabled selected
+scope with no names, either missing runtime image, mutable tags, and unknown values.
+This does not prove registry reachability; image pull failures, missing BTF and
+failed capture keep the aggregator unready. Fleet rows with unavailable baselines
+retain actual observations but cannot establish policy comparison. A ready process
+or successful Helm rollout does not qualify those rows.
 
 ```sh
 export KARS_CONTEXT='YOUR_REVIEWED_CONTEXT'
@@ -285,17 +350,30 @@ the dedicated observer namespace**. The pinned client uses an explicit
 `--gadget-namespace` and exact ready node list; Kubernetes port-forward creation
 is confined to that namespace (RBAC cannot constrain rotating pod names by
 label). Treat membership of that namespace as an operator security boundary.
-It GETs only configured KarsSandbox names in `kars-system` and each exact
+In all scope it lists only `KarsSandbox` resources in `kars-system`; selected
+scope retains named GETs. For all scope, the controller validates enabled
+Helm-owned intent and observer identity, then maintains an exact namespace-local
+baseline GET Role/Binding for each sandbox. Grants bind sandbox, namespace,
+settings, observer and Role identities, without adopting foreign grants. Settings
+and observer changes reconcile existing sandboxes; new workers receive grants
+through normal sandbox reconciliation. Disabled, removed or selected intent
+revokes only controller-owned fleet grants using identity/version fences; Core
+continues without the optional observer. Selected scope retains Helm-managed
+static grants. Both paths read only the exact
 `karssandbox-<name>-egress-allowlist` ConfigMap in `kars-<name>`. No global
-ConfigMap/pod enumeration is granted to the aggregator.
+ConfigMap/pod enumeration or Secret access is granted to the aggregator.
 
 The elevated IG identity separately requires read-only cluster node/pod/namespace
 and service discovery plus `nodes/proxy:get` for upstream runtime enrichment.
 Its ConfigMap informer can read only the dedicated namespace, with no writer
-rights. Both foreground gadgets sample all namespaces on targeted Linux nodes;
-only configured sandbox aggregates are retained. Raw events are bounded to
-temporary files (8 MiB per stream) and discarded after computation. Published
-fields contain hostnames, counts and node names, never credentials or raw logs.
+rights. Both foreground gadgets use exact `--namespace kars-<sandbox>,...`
+collection selectors, not `--all-namespaces` followed by report filtering. The
+pinned IG KubeManager applies this selector to its container subscriptions and
+mount-namespace tracer map before attachment. Explicit nonempty `nodes` restricts
+DaemonSet placement by node name and requires the ready capture set to match;
+empty preserves legacy node placement. Raw events are bounded to temporary files
+(8 MiB per stream) and discarded after computation. Published fields contain
+hostnames, counts and node names, never credentials or raw logs.
 
 The sole write grant is **GET/UPDATE with resourceNames on the precreated
 `kars-system/kars-datapath-witness` ConfigMap**. No CREATE, PATCH, or unrestricted
@@ -306,9 +384,22 @@ cannot refresh old evidence; Bridge eventually shows stale or read-unavailable.
 
 Capture exit failures, stderr warnings/errors (including upstream dropped-event
 warnings), invalid JSON/schema/attribution, output/deadline limits, readiness
-gaps, changing node sets, and missing/invalid/changing baselines produce an
-`unavailable` report and fail readiness. A clean but empty capture produces
-`empty`, not compliant. Strict deny-all with no traffic stays `NO-TRAFFIC`;
+gaps, changing node sets or changing baselines produce an `unavailable` report
+and fail qualification (`--health`). Fleet discovery is paginated and bounded;
+new/deleted/replaced sandbox identities or policy changes during capture invalidate
+the sample rather than misattribute events. The next cycle rediscovers the fleet;
+status-only CR updates do not invalidate it. Missing, forbidden, malformed or
+deleting fleet baselines instead mark the affected row `UNAVAILABLE`, with no
+claimed egress mode or policy verdict, while preserving actual DNS/connect events
+and healthy rows. Selected-mode baseline failures still invalidate the report.
+Generic readiness uses the sample probe unchanged. The Core Kind beta profile
+instead uses `--process-health` for Helm rollout: any successfully published fresh
+report proves process progress, not baseline/capture qualification. Publication
+failure clears both markers; both expire after 180 seconds. Fleet baseline RBAC
+is controller-managed after namespace creation, never a reason for Helm to
+precreate/adopt controller-owned sandbox namespaces. See
+[the two-release lifecycle](../../bridge/docs/public-beta-helm.md#mandatory-operations-inputs-and-cold-ordering).
+A clean but empty capture produces `empty`, not compliant. Strict deny-all with no traffic stays `NO-TRAFFIC`;
 Learn comes from the actual CRD mode, not a missing ConfigMap. Baseline wildcard
 comparison covers DNS names, not approved runtime overlays or port policy.
 TCP counts include failed **connect attempts**, excluding accepts/closes and
@@ -321,6 +412,20 @@ only a fresh validated nonempty sample, never installed/enforcing. API 404,
 pending publication, malformed data, stale data, legacy reports, explicit off,
 and API/transport/permission failure are distinct. Installation remains
 **unknown** because Bridge reads reports, not Helm/workload inventory.
+The Console refreshes this read-only projection every five seconds while
+visible, including after unavailable or stale reads. Returning to the tab
+refreshes it without resetting open client controls. This does not change
+the collector's capture frequency or turn its samples into a live stream.
+Validated unavailable reports expose allowlisted explanations for inventory,
+node or declaration changes, expired windows, capture readiness and capture
+failures. Unknown diagnostic strings are never echoed; they retain the generic
+operator-log guidance. These explanations do not bypass identity, scope or
+freshness checks and never restore rows from an invalidated window.
+The Console links to Active agents, current Sandboxes, Teams and Missions:
+temporary workers are sampled only while their sandboxes exist and are in scope;
+retained run history and deliverables belong to the Team or Mission, not this
+sampled view. Each sample row links to a name-filtered current sandbox search,
+not a historical identity lookup; compare the displayed CR UID when correlating.
 
 The witness is sampled, not continuous: by default 15-second foreground DNS/TCP
 windows separated by 30 seconds plus control-plane work. It does not cover all
@@ -338,6 +443,13 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s deploy/ebpf-witness/ag
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s deploy/ebpf-witness/tests -p test_chart.py
 cd bridge/web && node --test tests/datapath-witness.test.mjs
 ```
+
+For the aggregator suite inside the production image, mount `test_witness.py`,
+`build-runtime.py`, `client.go.mod`, and the source `Dockerfile` read-only beside
+`/opt/witness/witness.py`; do not replace the image's witness implementation.
+The subprocess fixture runs through the current Python interpreter, so these
+checks require neither `/usr/bin/env` nor an executable temporary filesystem.
+Keep the non-root, read-only-root and `noexec` temporary-filesystem constraints.
 
 The core Helm gate runs render/package/runtime and loopback fake-API ownership
 tests. Bridge's existing gates run the registered BFF read-only/negative tests,

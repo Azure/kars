@@ -24,14 +24,12 @@ Licensed under the MIT License. */}}
 {{- if or (ne ($spec.workspaceUid | default "") $workspace.metadata.uid) (not (hasKey $spec "enabled")) (not $spec.enabled) -}}
 {{- fail "workspaceEnrollment refuses a replaced workspace or disabled grant" -}}
 {{- end -}}
-{{- range $key, $value := $spec -}}
-{{- if not (has $key (list "workspaceUid" "enabled")) -}}
-{{- if or (not (has $key (list "writers" "agentKeys" "integrationStores" "legacyImports" "observationTargets" "githubConnections"))) (not (kindIs "slice" $value)) (gt (len $value) 0) -}}
-{{- fail "workspaceEnrollment refuses to overwrite expanded grant authority; disable enrollment before reviewed operator changes" -}}
+{{- if ne (index $annotations "helm.sh/resource-policy") "keep" -}}
+{{- fail "workspaceEnrollment requires the existing grant's keep policy before releasing bootstrap ownership" -}}
 {{- end -}}
-{{- end -}}
-{{- end -}}
-{{- end -}}
+{{/* The initial kept grant becomes operator-managed. Never render its live authority
+     into Helm: even a copied spec could overwrite a concurrent operator change. */}}
+{{- else -}}
 apiVersion: kars.azure.com/v1alpha1
 kind: KarsCredentialGrant
 metadata:
@@ -51,4 +49,5 @@ spec:
   legacyImports: []
   observationTargets: []
   githubConnections: []
+{{- end }}
 {{- end }}

@@ -11,11 +11,18 @@
 // sole writer of team membership + generated tasks.
 
 mod backlog;
+mod budget_status;
 mod channels;
 mod commons;
+mod efficiency;
 mod lifecycle;
 mod mutations;
+pub(crate) mod preflight;
+pub(crate) mod qualification;
 mod queries;
+mod role_resources;
+pub use qualification::qualify_team;
+pub use role_resources::RoleResources;
 #[path = "../../../../shared/team_run_names.rs"]
 mod run_names;
 mod validation;
@@ -58,6 +65,7 @@ mod run_naming_tests {
 pub use backlog::*;
 pub use channels::*;
 pub use commons::*;
+pub(crate) use efficiency::accepted_work_output;
 pub use lifecycle::*;
 pub use mutations::*;
 pub use queries::*;
@@ -84,11 +92,13 @@ pub struct TeamRoleDto {
     pub runtime: Option<String>,
     /// Per-member model deployment — `None` means inherit the team default.
     pub model: Option<String>,
+    pub resources: Option<RoleResources>,
 }
 
 /// Browser-facing team summary for the Teams index.
 #[derive(Debug, Serialize)]
 pub struct TeamSummaryDto {
+    pub qualification: Option<qualification::QualificationStatus>,
     pub name: String,
     pub display_name: Option<String>,
     pub charter: String,
@@ -122,7 +132,9 @@ pub struct TeamSummaryDto {
 /// Browser-facing team detail (charter, org chart, watching status, history).
 #[derive(Debug, Serialize)]
 pub struct TeamDetailDto {
+    pub qualification: Option<qualification::QualificationStatus>,
     pub name: String,
+    pub uid: String,
     pub display_name: Option<String>,
     pub charter: String,
     pub phase: String,
@@ -132,6 +144,7 @@ pub struct TeamDetailDto {
     pub authority_ceiling: i32,
     pub delegation_depth: i32,
     pub budget: Option<crate::routes::tasks::BudgetDto>,
+    pub budget_status: budget_status::TeamBudgetStatusDto,
     pub paused: bool,
     pub every_minutes: Option<u32>,
     pub lifecycle_mode: String,
@@ -151,7 +164,8 @@ pub struct TeamDetailDto {
     pub detail: Option<String>,
     pub health: Option<String>,
     pub runs_succeeded: i64,
-    pub tokens_spent_total: i64,
+    pub tokens_spent_total: Option<i64>,
+    pub tokens_spent_scope: String,
     pub commons_entry_count: i64,
     pub last_success_at: Option<String>,
     pub created_at: Option<String>,
@@ -232,19 +246,28 @@ pub(crate) async fn require_owned_team(
 fn effective_lifecycle_mode(team: &KarsTeam) -> String {
     team.status
         .as_ref()
+        .filter(|status| {
+            team.metadata.generation.is_some()
+                && status.observed_generation == team.metadata.generation
+        })
         .and_then(|status| status.lifecycle_mode.clone())
-        .or_else(|| team.spec.lifecycle_mode.clone())
         .unwrap_or_else(|| "ephemeral".into())
 }
 
 fn runtime_state(team: &KarsTeam) -> Option<String> {
     team.status
         .as_ref()
+        .filter(|status| {
+            team.metadata.generation.is_some()
+                && status.observed_generation == team.metadata.generation
+        })
         .and_then(|status| status.runtime_state.clone())
 }
 
 #[derive(Debug, Deserialize)]
 pub struct CreateTeamRequest {
+    #[serde(default)]
+    pub qualification_run: bool,
     pub name: String,
     pub charter: String,
     #[serde(default)]
@@ -260,11 +283,10 @@ pub struct CreateTeamRequest {
     #[serde(default)]
     pub memory: Option<String>,
     pub cadence_minutes: Option<u32>,
-    /// Runtime retention policy. Older clients omit this and retain ephemeral
-    /// behavior; the Bridge composer recommends resource-optimized operation.
+    /// Legacy input: only omitted/ephemeral is supported by the current controller.
     #[serde(default)]
     pub lifecycle_mode: Option<String>,
-    /// Idle window before a resource-optimized runtime is suspended.
+    /// Legacy input: nonzero warm retention is rejected, not silently pruned.
     #[serde(default)]
     pub warm_idle_seconds: Option<i64>,
     /// Governance policy that bounds every run this team mints. When omitted the
@@ -294,8 +316,8 @@ pub struct CreateTeamRequest {
     /// Network destinations inherited by every run.
     #[serde(default)]
     pub egress: Vec<CreateEgress>,
-    /// `learning` for discovery or `strict` for allowlist enforcement.
-    #[serde(default)]
+    /// Standing Teams always enforce Strict; other modes are rejected.
+    #[serde(default, deserialize_with = "validation::deserialize_team_egress_mode")]
     pub egress_mode: Option<String>,
     /// Connected MCP servers every run this team mints receives. Each name must
     /// resolve to an installed McpServer; preflight validates readiness before
@@ -344,6 +366,8 @@ pub struct CreateRole {
     pub model: Option<String>,
     #[serde(default)]
     pub skills: Vec<String>,
+    #[serde(default)]
+    pub resources: Option<RoleResources>,
 }
 struct TeamModelRoutes<'a> {
     namespace: &'a str,
@@ -359,6 +383,10 @@ struct TeamModelRoutes<'a> {
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateTeamRequest {
+    /// Explicit evidence review, never an automatic qualification transition.
+    #[serde(default)]
+    pub qualification_reviewed: bool,
+    pub qualification_team_uid: Option<String>,
     #[serde(
         default,
         rename = "budget",
@@ -403,8 +431,8 @@ pub struct UpdateTeamRequest {
     /// Replace the declared egress destinations for future runs.
     #[serde(default)]
     pub egress: Option<Vec<CreateEgress>>,
-    /// Change future runs between learning and strict egress modes.
-    #[serde(default)]
+    /// Confirm Strict egress for future runs; other modes are rejected.
+    #[serde(default, deserialize_with = "validation::deserialize_team_egress_mode")]
     pub egress_mode: Option<String>,
     /// Change the retention override for this team's future task-force runs.
     /// `0` disables retention; absent leaves the current setting unchanged.
@@ -419,6 +447,37 @@ pub struct UpdateTeamRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configured_or_stale_retention_is_not_an_observed_runtime_mode() {
+        let mut team: KarsTeam = serde_json::from_value(serde_json::json!({
+            "apiVersion": "kars.azure.com/v1alpha1", "kind": "KarsTeam",
+            "metadata": {"name": "durable-team", "generation": 2},
+            "spec": {
+                "charter": "Retain the shared review history.",
+                "envelope": {"tier": 2, "authorityCeiling": 1},
+                "lifecycleMode": "persistent", "warmIdleSeconds": 900
+            }
+        }))
+        .unwrap();
+        assert_eq!(effective_lifecycle_mode(&team), "ephemeral");
+        assert_eq!(runtime_state(&team), None);
+        team.status = Some(
+            serde_json::from_value(serde_json::json!({
+                "observedGeneration": 1, "lifecycleMode": "persistent", "runtimeState": "Warm"
+            }))
+            .unwrap(),
+        );
+        assert_eq!(effective_lifecycle_mode(&team), "ephemeral");
+        assert_eq!(runtime_state(&team), None);
+        team.status.as_mut().unwrap().observed_generation = Some(2);
+        assert_eq!(effective_lifecycle_mode(&team), "persistent");
+        assert_eq!(runtime_state(&team).as_deref(), Some("Warm"));
+        team.metadata.generation = None;
+        team.status.as_mut().unwrap().observed_generation = None;
+        assert_eq!(effective_lifecycle_mode(&team), "ephemeral");
+        assert_eq!(runtime_state(&team), None);
+    }
 
     #[test]
     fn workspace_team_visibility_requires_exact_owner_even_for_operators() {
@@ -491,7 +550,7 @@ mod tests {
             "model_fallbacks": ["github-copilot::gpt-5.6-sol"],
             "lifecycle_mode": "persistent",
             "warm_idle_seconds": 1800,
-            "egress_mode": "learning",
+            "egress_mode": " Strict ",
             "egress": []
         }))
         .expect("update request");
@@ -504,9 +563,33 @@ mod tests {
             update.model_fallbacks,
             Some(vec!["github-copilot::gpt-5.6-sol".into()])
         );
-        assert_eq!(update.egress_mode.as_deref(), Some("learning"));
+        assert_eq!(update.egress_mode.as_deref(), Some("strict"));
         assert_eq!(update.egress.map(|entries| entries.len()), Some(0));
         assert_eq!(update.lifecycle_mode.as_deref(), Some("persistent"));
         assert_eq!(update.warm_idle_seconds, Some(1800));
+    }
+
+    #[test]
+    fn team_requests_reject_unsupported_egress_before_mutation() {
+        for mode in ["learning", "Learn", "observe", "", "strict-and-learn"] {
+            let request = serde_json::json!({
+                "name": "review-board", "charter": "Review the release", "egress_mode": mode
+            });
+            assert!(serde_json::from_value::<CreateTeamRequest>(request.clone())
+                .unwrap_err().to_string().contains("Standing Teams use Strict egress"));
+            assert!(serde_json::from_value::<UpdateTeamRequest>(request)
+                .unwrap_err().to_string().contains("Standing Teams use Strict egress"));
+        }
+        for mode in [serde_json::Value::Null, serde_json::json!("Strict"), serde_json::json!(" strict ")] {
+            let request = serde_json::json!({
+                "name": "review-board", "charter": "Review the release", "egress_mode": mode
+            });
+            assert!(serde_json::from_value::<CreateTeamRequest>(request.clone()).is_ok());
+            assert!(serde_json::from_value::<UpdateTeamRequest>(request).is_ok());
+        }
+        assert!(serde_json::from_value::<CreateTeamRequest>(serde_json::json!({
+            "name": "review-board", "charter": "Review the release"
+        })).is_ok());
+        assert!(serde_json::from_value::<UpdateTeamRequest>(serde_json::json!({})).is_ok());
     }
 }

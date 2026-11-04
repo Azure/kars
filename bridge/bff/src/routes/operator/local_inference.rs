@@ -358,13 +358,14 @@ pub async fn delete_local_model_deployment(
     axum::extract::Path(name): axum::extract::Path<String>,
 ) -> AppResult<Json<serde_json::Value>> {
     let cluster = require_cluster(&state)?;
+    let tag = format!("local-{name}");
+    cluster.require_provider_removable(&tag).await.map_err(AppError::from)?;
     cluster
         .delete_model_deployment(&name)
         .await
         .map_err(upstream)?;
     // Best-effort: also drop it from the additional-providers secret if it
     // was auto-wired. Not fatal if it wasn't (e.g. deleted before Ready).
-    let tag = format!("local-{name}");
     let tag_upper = tag.to_ascii_uppercase().replace('-', "_");
     let _ = cluster
         .mutate_secret_keys(INFERENCE_PROVIDERS_NS, INFERENCE_PROVIDERS_SECRET, |keys| {

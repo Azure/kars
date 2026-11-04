@@ -52,11 +52,11 @@ export function readTeamProfile(
     const raw = envelope.budget;
     if (typeof raw !== "object" || Array.isArray(raw)
       || Object.keys(raw).some((key) => !["scope", "tokens", "usdMicros"].includes(key))
-      || !("tokens" in raw) || typeof raw.tokens !== "number"
+      || ("tokens" in raw && raw.tokens != null && typeof raw.tokens !== "number")
       || ("usdMicros" in raw && raw.usdMicros != null && typeof raw.usdMicros !== "number")) {
       return fail("The profile budget cannot be preserved. Review its scope, token limit and optional micro-USD limit.");
     }
-    const parsed = parseTeamBudget(String(raw.tokens), "scope" in raw ? raw.scope : undefined,
+    const parsed = parseTeamBudget("tokens" in raw && raw.tokens != null ? String(raw.tokens) : "", "scope" in raw ? raw.scope : undefined,
       "usdMicros" in raw && raw.usdMicros != null ? String(raw.usdMicros) : undefined);
     if (parsed.error !== null) return fail(`The profile budget is invalid: ${parsed.error}`);
     budget = parsed.budget;
@@ -74,6 +74,9 @@ export function readTeamProfile(
       return fail("The profile toolPolicyRef conflicts with its default tool policy. Resolve the conflict before copying it.");
     }
     toolPolicy = ref.name;
+  }
+  if (profile.tool_policy && !toolPolicies.some((policy) => policy.name === profile.tool_policy)) {
+    return fail("The profile default tool policy is unavailable in this workspace. It has not been replaced.");
   }
   return { envelope: { tier, authorityCeiling, delegationDepth,
     ...(budget ? { budget } : {}), ...(toolPolicy ? { toolPolicy } : {}) }, error: null };

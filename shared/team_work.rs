@@ -14,6 +14,75 @@ pub const ANNOTATION: &str = "kars.azure.com/team-work";
 pub const TASK_UID: &str = "kars.azure.com/team-work-task-uid";
 pub const RUN_NONCE: &str = "kars.azure.com/team-work-run-nonce";
 
+/// Matches the KarsTask objective CEL rule. Count Unicode scalar values, not bytes.
+pub const MAX_OBJECTIVE_CHARS: usize = 4096;
+
+pub fn run_objective_prefix(display_name: &str, charter: &str) -> String {
+    format!("Standing-operation run for team '{display_name}'. Charter: {charter}")
+}
+
+pub fn work_fragment(task: &TeamTask) -> Result<String, serde_json::Error> {
+    Ok(format!(
+        "\nAssigned work within the charter and reviewed permissions:\n{}\n",
+        serde_json::to_string(&request(task))?,
+    ))
+}
+
+/// Reserve the exact serialized work before allocating optional commons history.
+pub fn remaining_objective_chars(
+    display_name: &str,
+    charter: &str,
+    assigned: &str,
+) -> Result<usize, String> {
+    let fixed = run_objective_prefix(display_name, charter).chars().count();
+    let actual = assigned.chars().count();
+    let allowed = MAX_OBJECTIVE_CHARS.saturating_sub(fixed);
+    if fixed > MAX_OBJECTIVE_CHARS || actual > allowed {
+        return Err(format!(
+            "queued work uses {actual} serialized characters; allowed {allowed} after the team identity and charter (fixed prefix: {fixed} characters). Objective actual: {}, allowed: {MAX_OBJECTIVE_CHARS}. Shorten the work details, acceptance criteria or revision feedback, or shorten the charter/display name; JSON escaping counts and nothing is truncated",
+            fixed + actual,
+        ));
+    }
+    Ok(allowed - actual)
+}
+
+#[allow(
+    dead_code,
+    reason = "BFF preflight; controller consumes the same budget arithmetic directly"
+)]
+pub fn validate_run_intent(
+    display_name: &str,
+    charter: &str,
+    task: &TeamTask,
+) -> Result<(), Error> {
+    remaining_objective_chars(display_name, charter, &work_fragment(task)?)
+        .map(|_| ())
+        .map_err(Error::Invalid)
+}
+
+/// Amend next-run intent only; compare the entire snapshot, including evidence.
+#[allow(
+    dead_code,
+    reason = "BFF mutation; the contract is also compiled into the controller"
+)]
+pub fn amend_pending_feedback(
+    items: &mut [TeamTask],
+    expected: &TeamTask,
+    feedback: Option<String>,
+) -> Result<TeamTask, Error> {
+    let item = items
+        .iter_mut()
+        .find(|item| item.id == expected.id)
+        .ok_or_else(|| Error::Conflict("work item disappeared; refresh before editing".into()))?;
+    if item != expected || item.status != "pending" {
+        return Err(Error::Conflict(
+            "work item changed or was assigned; refresh before editing feedback".into(),
+        ));
+    }
+    item.feedback = feedback;
+    Ok(item.clone())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Binding {
@@ -118,6 +187,25 @@ pub struct Attempt {
     pub output_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feedback: Option<String>,
+}
+
+/// The last rejected delivery remains the revision source across failed or cancelled retries.
+pub fn revision_source(item: &TeamTask) -> Option<&Attempt> {
+    item.history
+        .iter()
+        .rev()
+        .find(|attempt| !matches!(attempt.outcome.as_str(), "cancelled" | "failed"))
+        .filter(|attempt| attempt.outcome == "changes_requested")
+}
+
+/// Only the latest failed retry after the last delivery can supply diagnostic inputs.
+/// Cancellation supplies no evidence and never promotes a failed run to a delivery.
+pub fn revision_diagnostic_source(item: &TeamTask) -> Option<&Attempt> {
+    item.history
+        .iter()
+        .rev()
+        .find(|attempt| attempt.outcome != "cancelled")
+        .filter(|attempt| attempt.outcome == "failed")
 }
 
 #[derive(Debug, Clone)]
@@ -393,6 +481,70 @@ mod tests {
     }
 
     #[test]
+    fn objective_budget_counts_exact_unicode_and_json_escaping_without_history() {
+        for feedback in ["é🦀", "\"\\\n\t\u{0001}", "plain text"] {
+            let mut item = pending("a");
+            item.feedback = Some(feedback.into());
+            let fragment = work_fragment(&item).unwrap();
+            let prefix = run_objective_prefix("Équipe 🦀", "Charter");
+            assert_eq!(
+                remaining_objective_chars("Équipe 🦀", "Charter", &fragment).unwrap(),
+                MAX_OBJECTIVE_CHARS - prefix.chars().count() - fragment.chars().count()
+            );
+            assert!(fragment.contains(&serde_json::to_string(feedback).unwrap()));
+            let remaining = remaining_objective_chars("Équipe 🦀", "Charter", &fragment).unwrap();
+            let charter = format!("Charter{}", "é".repeat(remaining));
+            validate_run_intent("Équipe 🦀", &charter, &item).unwrap();
+            let error = validate_run_intent("Équipe 🦀", &format!("{charter}🦀"), &item)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("Objective actual: 4097, allowed: 4096"),
+                "{error}"
+            );
+        }
+        assert!(remaining_objective_chars("team", &"a".repeat(4096), "").is_err());
+    }
+
+    #[test]
+    fn feedback_amendment_preserves_all_fields_except_next_run_feedback() {
+        let mut original = pending("a");
+        original.feedback = Some("x".repeat(4096));
+        original.history.push(Attempt {
+            run: "run".into(),
+            run_uid: "uid".into(),
+            assignment_nonce: "nonce".into(),
+            outcome: "changes_requested".into(),
+            finished_at: "2026-10-15T00:00:00Z".into(),
+            output_sha256: Some("a".repeat(64)),
+            feedback: original.feedback.clone(),
+        });
+        let mut items = vec![original.clone()];
+        let changed =
+            amend_pending_feedback(&mut items, &original, Some("Fix the checklist".into()))
+                .unwrap();
+        validate(&items).unwrap();
+        validate_run_intent("team", "Charter", &changed).unwrap();
+        let mut expected = original.clone();
+        expected.feedback = changed.feedback.clone();
+        assert_eq!(changed, expected);
+        assert_ne!(
+            request_digest(&original).unwrap(),
+            request_digest(&changed).unwrap()
+        );
+        for status in ["active", "awaiting_review", "done", "retired"] {
+            let mut item = original.clone();
+            item.status = status.into();
+            assert!(amend_pending_feedback(&mut [item.clone()], &item, None).is_err());
+        }
+        assert!(amend_pending_feedback(&mut items, &original, None).is_err());
+        let mut stale_history = changed.clone();
+        stale_history.history[0].feedback = Some("other evidence".into());
+        assert!(amend_pending_feedback(&mut items, &stale_history, None).is_err());
+        assert!(amend_pending_feedback(&mut [], &original, None).is_err());
+    }
+
+    #[test]
     fn malformed_unknown_partial_and_cyclic_work_is_not_an_empty_queue() {
         for raw in [
             "null",
@@ -579,6 +731,21 @@ pub async fn update<T>(
     create: bool,
     change: impl Fn(&mut Vec<TeamTask>) -> Result<T, Error>,
 ) -> Result<T, Error> {
+    update_guarded(api, owner, expected_uid, create, change, || {
+        std::future::ready(Ok(()))
+    })
+    .await
+}
+
+/// Recheck external authority before every CAS attempt, including retries.
+pub async fn update_guarded<T, F: std::future::Future<Output = Result<(), Error>>>(
+    api: &Api<ConfigMap>,
+    owner: &Owner,
+    expected_uid: Option<&str>,
+    create: bool,
+    change: impl Fn(&mut Vec<TeamTask>) -> Result<T, Error>,
+    guard: impl Fn() -> F,
+) -> Result<T, Error> {
     if owner.uid.is_empty() || owner.name.is_empty() || owner.namespace.is_empty() {
         return Err(Error::Invalid("missing Team identity".into()));
     }
@@ -611,6 +778,7 @@ pub async fn update<T>(
         let original = items.clone();
         let result = change(&mut items)?;
         validate(&items)?;
+        guard().await?;
         if existed && original == items {
             return Ok(result);
         }

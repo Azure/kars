@@ -13,13 +13,46 @@ describe("negotiated provisional activity", () => {
   const routerObservations = JSON.stringify({ version: 1, source: "runtime-forwarded-router-observations", coverage: "returned-responses-only",
     responses: 1, rounds: [1], state: "unavailable", reason: "Router observations unavailable after execution (reset, expiry or read failure)" });
   const progress = { ...reply, status: "running", activityFormat: "router-observations-v1", routerObservations };
+  it("reserves Activity bytes without widening ordinary message or artifact budgets", () => {
+    const large = routerObservations + " ".repeat(300 * 1024);
+    expect(parseMissionMessage({ ...progress, routerObservations: large })).not.toBeNull();
+    expect(parseMissionMessage({ ...progress, routerObservations: large, unrelated: "x".repeat(192 * 1024) })).toBeNull();
+    expect(parseMissionMessage({ ...assignment, content: "x".repeat(192 * 1024) })).toBeNull();
+    expect(validMissionArtifacts({ "report.md": "x".repeat(120 * 1024), "kars-router-observations.json": large })).toBe(true);
+    expect(validMissionArtifacts({ "report.md": "x".repeat(128 * 1024), "kars-router-observations.json": large })).toBe(false);
+    expect(validMissionArtifacts({ "kars-router-observations.json": "x".repeat(384 * 1024) })).toBe(false);
+    expect(parseMissionMessage({ ...progress, routerObservations: routerObservations + " ".repeat(384 * 1024) })).toBeNull();
+    expect(parseMissionMessage({ ...reply, activityFormat: "router-observations-v1", artifactFormat: "text-v1",
+      artifacts: { "report.md": "x".repeat(120 * 1024), "kars-router-observations.json": large } })).not.toBeNull();
+    // Base64 expansion of the maximum plaintext leaves framing headroom below
+    // the maintained Python relay client's existing 1 MiB WebSocket limit.
+    expect(Math.ceil(MAX_MISSION_MESSAGE_BYTES / 3) * 4).toBe(768 * 1024);
+  });
   it("keeps bounded activity outside evidence and installed authority", () => {
     expect(parseMissionMessage(progress)).toMatchObject({ routerObservations, evidence: reply.evidence });
     expect(parseMissionContract({ version: 1, activityFormat: "router-observations-v1" })).toBeNull();
     expect(parseMissionMessage({ ...assignment, activityFormat: "router-observations-v1" })).not.toBeNull();
     expect(parseMissionMessage(assignment)).not.toHaveProperty("activityFormat");
   });
-  it.each(["ready", "accepted", "succeeded", "failed", "rejected"])("rejects provisional bytes on %s", status => {
+  it.each([undefined, "Exact-host approval is needed.", "🔥".repeat(4096), null, {}, "", " ", "🔥".repeat(4097)])("validates failed explanation bytes independently of success: %j", output => {
+    const failed = { ...reply, status: "failed", error: "Required exports missing", output };
+    const valid = output === undefined || (typeof output === "string" && !!output.trim() && Buffer.byteLength(output) <= 16384);
+    expect(parseMissionMessage(failed) !== null).toBe(valid);
+  });
+  it("retains negotiated failure diagnostics without allowing failed deliverables", () => {
+    expect(parseMissionMessage({ ...progress, status: "failed", output: undefined, error: "Write failed" }))
+      .toMatchObject({ status: "failed", routerObservations });
+    expect(parseMissionMessage({ ...progress, status: "failed", artifactFormat: "text-v1", artifacts: { "brief.md": "Not delivered" } })).toBeNull();
+  });
+  it("retains only the reserved bounded machine Python receipt on failure", () => {
+    const failed = { ...reply, status: "failed", error: "App failed", artifactFormat: "text-v1",
+      artifacts: { "kars-python-executions.json": JSON.stringify({ version: 1, runs: [{ exit_code: 1 }] }) } };
+    expect(parseMissionMessage(failed)).not.toBeNull();
+    expect(parseMissionMessage({ ...failed, artifactFormat: undefined })).toBeNull();
+    expect(parseMissionMessage({ ...failed, artifacts: { ...failed.artifacts, "report.md": "not completed" } })).toBeNull();
+    expect(parseMissionMessage({ ...failed, artifacts: { "kars-python-executions.json": "x".repeat(65537) } })).toBeNull();
+  });
+  it.each(["ready", "accepted", "succeeded", "rejected"])("rejects provisional bytes on %s", status => {
     expect(parseMissionMessage({ ...progress, status })).toBeNull();
   });
   it.each([undefined, "unknown"])("rejects unnegotiated activity (%s)", activityFormat => {
@@ -27,6 +60,154 @@ describe("negotiated provisional activity", () => {
   });
   it.each(["{", "null", "{}", "x".repeat(32769), JSON.stringify({ state: "observed" })])("rejects malformed or oversized snapshots (%#)", value => {
     expect(parseMissionMessage({ ...progress, routerObservations: value })).toBeNull();
+  });
+});
+
+describe("native tool-correlated provisional activity", () => {
+  const fixture = () => ({ version: 1, source: "runtime-forwarded-router-observations", coverage: "native-tool-correlated-only",
+    correlated_tools: 1, scope_id: "scope-a", rounds: [7], state: "observed", trace: {
+      scope_id: "scope-a", rounds: [7], coverage: "native-tool-correlated-only", durable: false,
+      missing_rounds: [], dropped_events: 0, truncated: false, events: [
+        { kind: "round", scope_id: "scope-a", round: 7, seq: 10, source: "router-upstream", provider: "foundry",
+          model: "model", http_status: 200, accepted: true, outcome: "complete", usage: null, usage_state: "missing",
+          finish_reason: "tool_calls", partial_observation: false, ms: 2, tool_calls_observed: 3 },
+        { kind: "tool_proposed", scope_id: "scope-a", round: 7, seq: 11, source: "model-proposed",
+          call_id: "write-1", name: "kars_mission_file_write", ok: null },
+        { kind: "tool_result", scope_id: "scope-a", round: 7, seq: 14, source: "harness-reported",
+          call_id: "write-1", name: "kars_mission_file_write", ok: true,
+          result_summary: { kind: "file_write", bytes: 17, artifact_name: "briefing.md" } },
+      ],
+    } });
+  const parse = (observations: unknown) => parseMissionMessage({ ...reply, status: "running",
+    activityFormat: "router-observations-v1", routerObservations: JSON.stringify(observations) });
+  it.each(["timeout", "cancelled", "output_limit", "process_limit", "launch_failed", "cleanup_failed"])(
+    "retains a correlated Python %s failure without allowing a false success", reason => {
+      for (const name of ["python_execute", "kars_mission_python_execute"]) {
+        const observations = fixture();
+        observations.trace.events[1].name = name;
+        Object.assign(observations.trace.events[2], { name, ok: false, result_summary: {
+          kind: "python_execution", bytes: 512, receipt_sha256: `sha256:${"a".repeat(64)}`,
+          exit_code: null, reason,
+        } });
+        expect(parse(observations)).not.toBeNull();
+        observations.trace.events[2].ok = true;
+        expect(parse(observations)).toBeNull();
+      }
+    },
+  );
+  it("retains bounded argument previews without weakening native call correlation", () => {
+    const observations = fixture();
+    const preview = { text: '{"path":"/sandbox/report.md","content":"Useful handoff"}', truncated: false, redacted: false };
+    Object.assign(observations.trace.events[1], { argument_preview: preview });
+    expect(parse(observations)).toMatchObject({ routerObservations: JSON.stringify(observations) });
+    for (const invalid of [null, { ...preview, text: "🦀".repeat(513) }, { ...preview, raw: "hidden" },
+      { ...preview, redacted: "true" }, { ...preview, text: "" }]) {
+      Object.assign(observations.trace.events[1], { argument_preview: invalid });
+      expect(parse(observations)).toBeNull();
+    }
+  });
+  it("accepts real call correlation without responses or a fabricated reporting round", () => {
+    const observations = fixture();
+    expect(parse(observations)).toMatchObject({ routerObservations: JSON.stringify(observations) });
+    observations.trace.events.pop();
+    expect(parse(observations)).not.toBeNull();
+  });
+  const withOperation = (extra: Record<string, unknown> = {}) => {
+    const value = fixture();
+    const operation = { kind: "router_operation", scope_id: "scope-a", round: 7, seq: 12,
+      source: "router-policy", call_id: "write-1", name: "kars_mission_file_write", ms: 1,
+      operation: "tool_policy", flag: "governance", allowed: true, http_status: null, complete: null,
+      destination_host: null, destination_port: null, ...extra };
+    return { ...value, trace: { ...value.trace,
+      events: [...value.trace.events.slice(0, 2), operation, value.trace.events[2]] } };
+  };
+  it("transports correlated router decisions and fetch facts without replacing harness outcomes", () => {
+    for (const extra of [
+      {}, { flag: "rate_limit", allowed: false },
+      { operation: "egress_policy", flag: "egress_check", destination_host: "source.example", destination_port: 443 },
+      { operation: "egress_policy", flag: "private_target", allowed: false },
+      { operation: "egress_fetch", source: "router", flag: "response", allowed: null, http_status: 403, complete: true },
+      { operation: "egress_fetch", source: "router", flag: "body_error", allowed: null, http_status: 200, complete: false },
+      { operation: "egress_fetch", source: "router", flag: "transport_error", allowed: null, complete: false },
+    ]) {
+      const value = withOperation(extra);
+      expect(parse(value)).toMatchObject({ routerObservations: JSON.stringify(value) });
+    }
+  });
+  it("retains the router's GitHub-service denial without accepting an allow or uncorrelated decision", () => {
+    const value = withOperation({ operation: "egress_policy", flag: "github_service", allowed: false,
+      destination_host: "api.github.com", destination_port: 443 });
+    for (const event of value.trace.events) {
+      if ("name" in event) event.name = "kars_mission_http_fetch";
+      if (event.kind === "tool_result") Object.assign(event, { ok: false,
+        result_summary: { kind: "failure", reason: "tool_execution_failed" } });
+    }
+    expect(parse(value)).not.toBeNull();
+    const operation = value.trace.events[2];
+    Object.assign(operation, { allowed: true });
+    expect(parse(value)).toBeNull();
+    Object.assign(operation, { allowed: false, call_id: "uncorrelated" });
+    expect(parse(value)).toBeNull();
+  });
+  it("rejects uncorrelated or invented router operation fields", () => {
+    for (const extra of [
+      { call_id: "another" }, { name: "another" }, { round: 8 }, { seq: 10 },
+      { source: "harness-reported" }, { ms: -1 }, { ms: 3_600_001 },
+      { flag: "guessed-safe" }, { allowed: "yes" }, { flag: "rate_limit", allowed: true },
+      { destination_host: "source.example", destination_port: null },
+      { operation: "egress_policy", flag: "egress_check", destination_host: "source.example/private?key=secret", destination_port: 443 },
+      { operation: "egress_policy", flag: "private_target", allowed: true },
+      { operation: "egress_fetch", source: "router", flag: "response", allowed: null, http_status: 700, complete: true },
+      { operation: "egress_fetch", source: "router", flag: "body_error", allowed: null, http_status: 200, complete: true },
+    ]) expect(parse(withOperation(extra)), JSON.stringify(extra)).toBeNull();
+  });
+  it("retains OpenClaw and Hermes native file-read summaries and legacy aliases", () => {
+    for (const name of ["kars_mission_file_read", "kars_mission_read", "file_read", "read_file"]) {
+      const value = fixture();
+      value.trace.events[1].name = name; value.trace.events[2].name = name;
+      Object.assign(value.trace.events[2], { result_summary: { kind: "file_read", bytes: 17, returned_bytes: 8, truncated: true } });
+      expect(parse(value)).not.toBeNull();
+    }
+  });
+  it.each(["file_write", "write_file", "kars_mission_write", "kars_mission_file_write"])("retains bounded native %s summaries", name => {
+    const value = fixture();
+    value.trace.events[1].name = name; value.trace.events[2].name = name;
+    expect(parse(value)).not.toBeNull();
+    Object.assign(value.trace.events[2].result_summary!, { content: "unredacted file content" });
+    expect(parse(value)).toBeNull();
+  });
+  it("accepts only the fixed native unavailable reason without response IDs", () => {
+    const { trace: _trace, ...value } = fixture();
+    const unavailable = { ...value, state: "unavailable", reason:
+      "Native tool-correlated observations unavailable (reset, expiry, truncation or read failure)" };
+    expect(parse(unavailable)).not.toBeNull();
+    expect(parse({ ...unavailable, scope_id: null, rounds: [] })).not.toBeNull();
+    expect(parse({ ...unavailable, reason: "Response correlation changed or was invalid" })).toBeNull();
+    expect(parse({ ...unavailable, responses: null })).toBeNull();
+  });
+  it("rejects uncorrelated, duplicate, incomplete and fabricated coverage", () => {
+    const changes: Array<(v: ReturnType<typeof fixture>) => void> = [
+      v => { Object.assign(v, { responses: 1 }); },
+      v => { v.correlated_tools = 0; }, v => { v.correlated_tools = 257; }, v => { v.correlated_tools = 2; },
+      v => { v.trace.events[0].accepted = false; },
+      v => { v.trace.events[2].call_id = "another-call"; },
+      v => { v.trace.events[2].name = "another-tool"; },
+      v => { v.trace.events[2].round = 8; },
+      v => { Object.assign(v.trace.events[2], { reported_in_round: null }); },
+      v => { Object.assign(v.trace.events[2], { reported_in_round: 7 }); },
+      v => { Object.assign(v.trace.events[2], { reported_in_round: 8 }); },
+      v => { v.trace.events[1].seq = 12; v.trace.events.splice(1, 0, { ...v.trace.events[2], seq: 11 }); },
+      v => { v.trace.events.push({ ...v.trace.events[1], seq: 15 }); },
+      v => { v.trace.events.push({ ...v.trace.events[2], seq: 15 }); },
+      v => { v.trace.events.shift(); },
+      v => { v.trace.events.push({ ...v.trace.events[0], seq: 15 }); },
+      v => { v.trace.truncated = true; }, v => { v.trace.dropped_events = 1; },
+      v => { Object.assign(v.trace, { missing_rounds: [7] }); },
+      v => { v.rounds.push(8); v.trace.rounds.push(8); v.correlated_tools = 2; },
+      v => { Object.assign(v.trace.events[2].result_summary!, { content: "raw contents" }); },
+      v => { v.trace.scope_id = "other"; },
+    ];
+    for (const change of changes) { const value = fixture(); change(value); expect(parse(value), String(change)).toBeNull(); }
   });
 });
 
@@ -39,6 +220,33 @@ describe("immutable input mission contract", () => {
   } }];
   const contract = missionContract(phase, inputs);
   const assigned = { ...assignment, ...contract, inputArtifacts: inputs };
+
+  it("transports a research bundle above 64KiB but still bounds the whole assignment", () => {
+    const documents = [31553, 26140, 10785].map((bytes, i) => {
+      const content = "x".repeat(bytes - 4) + "\n✓";
+      return { ...inputs[0], name: `research-${i}.md`, content, sha256: missionInputContentDigest(content) };
+    });
+    const large = { ...assignment, ...missionContract(phase, documents), inputArtifacts: documents };
+    expect(Buffer.byteLength(JSON.stringify(large))).toBeGreaterThan(65536);
+    expect(parseMissionMessage(large)).toMatchObject({ inputArtifacts: documents });
+    expect(parseMissionMessage({ ...large, content: "x".repeat(192 * 1024 - 65536) })).not.toBeNull();
+    expect(parseMissionMessage({ ...large, content: "x".repeat(192 * 1024) })).toBeNull();
+  });
+
+  it("reserves independently bounded inputs without spending ordinary metadata capacity", () => {
+    const documents = [63000, 63000, 63000].map((size, i) => {
+      const content = "x".repeat(size);
+      return { ...inputs[0], name: `memory-${i}.md`, content, sha256: missionInputContentDigest(content) };
+    });
+    const large = { ...assignment, ...missionContract(phase, documents), inputArtifacts: documents, content: "x".repeat(8192) };
+    expect(Buffer.byteLength(JSON.stringify(documents))).toBeLessThan(192 * 1024);
+    expect(Buffer.byteLength(JSON.stringify(large))).toBeGreaterThan(192 * 1024);
+    expect(parseMissionMessage(large)).toMatchObject({ inputArtifacts: documents });
+    expect(parseMissionMessage({ ...large, content: "x".repeat(192 * 1024) })).toBeNull();
+    const oversized = [...documents, { ...documents[0], name: "extra.md" }];
+    expect(parseMissionMessage({ ...large, inputArtifacts: oversized })).toBeNull();
+    expect(parseMissionMessage({ ...large, type: "mission:probe", challenge: "challenge" })).toBeNull();
+  });
 
   it("pins a canonical digest independently of assignment bytes and freezes its snapshot", () => {
     expect(contract).toMatchObject({ version: 3, inputDigest: missionInputsDigest(inputs) });

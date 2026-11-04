@@ -164,17 +164,18 @@ export async function planCoreSchemaDocuments(
     plans.push({ desired, current, uid: schemaIdentity(current).uid, change });
   }
   const writeRequest = (plan: PlannedSchema) => buildSchemaWriteRequest(plan.desired, plan.current, owner);
-  if (options.reviewedSreMigration && !options.checkOnly) {
-    await recheckSreSchemaMigration(options.reviewedSreMigration);
+  if (!options.checkOnly) {
+    if (options.reviewedSreMigration) await recheckSreSchemaMigration(options.reviewedSreMigration);
     for (const plan of plans.filter(plan => plan.change)) {
       const { object, args } = writeRequest(plan);
+      if (!options.reviewedSreMigration && args[0] !== "replace") continue;
       schemaStep("schema-server-preview", plan.desired.spec.names.kind);
       const checked: ObjectMap = JSON.parse((await execute("kubectl", [...args, "--dry-run=server", "--request-timeout=20s"],
         { stdio: "pipe", input: JSON.stringify(object), timeout: 25_000 })).stdout);
       schemaStep("schema-preview-identity", plan.desired.spec.names.kind, checked);
       verifySchemaWritePreview(checked, plan.desired, owner, plan.uid);
     }
-    await recheckSreSchemaMigration(options.reviewedSreMigration);
+    if (options.reviewedSreMigration) await recheckSreSchemaMigration(options.reviewedSreMigration);
   }
   // Every plan and server dry-run completes before any real schema/action write.
   return async () => {

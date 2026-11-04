@@ -5,11 +5,69 @@
 
 use super::*;
 
+const MODEL_DEFAULT: &str = "kars.azure.com/default-model";
+
 impl Cluster {
-    pub async fn write_controller_environment(
+    pub async fn model_default(&self) -> Result<Option<crate::kars::task::TaskModel>, kube::Error> {
+        let Some((_, secret)) = self
+            .optional_integration_store(&self.core_namespace(), "kars-inference-providers")
+            .await?
+        else {
+            return Ok(None);
+        };
+        secret
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|annotations| annotations.get(MODEL_DEFAULT))
+            .map(|raw| {
+                serde_json::from_str(raw).map_err(|_| {
+                    failure("Saved model default is malformed; select a configured model again")
+                })
+            })
+            .transpose()
+    }
+
+    pub async fn write_model_default(
         &self,
-        changes: Vec<Value>,
+        model: &crate::kars::task::TaskModel,
+        expected: &Secret,
     ) -> Result<(), kube::Error> {
+        let namespace = self.core_namespace();
+        let (_, current) = self
+            .integration_store(&namespace, "kars-inference-providers")
+            .await?;
+        if current.uid() != expected.uid()
+            || current.resource_version() != expected.resource_version()
+        {
+            return Err(kube::Error::Api(kube::core::ErrorResponse {
+                status: "Failure".into(), reason: "Conflict".into(), code: 409,
+                message: "Provider configuration changed while selecting the default; refresh and try again".into(),
+            }));
+        }
+        let mut annotations = current.metadata.annotations.unwrap_or_default();
+        annotations.insert(
+            MODEL_DEFAULT.into(),
+            serde_json::to_string(model).map_err(|_| failure("Model default encoding failed"))?,
+        );
+        let patch: json_patch::Patch = serde_json::from_value(json!([
+            {"op":"test","path":"/metadata/uid","value":expected.uid()},
+            {"op":"test","path":"/metadata/resourceVersion","value":expected.resource_version()},
+            {"op":"add","path":"/metadata/annotations","value":annotations}
+        ]))
+        .map_err(|_| failure("Model default patch encoding failed"))?;
+        Api::<Secret>::namespaced(self.client.clone(), &namespace)
+            .patch(
+                "kars-inference-providers",
+                &PatchParams::default(),
+                &Patch::Json::<Secret>(patch),
+            )
+            .await
+            .map_err(|error| safe("Save enrolled model default", error))?;
+        Ok(())
+    }
+
+    pub async fn require_controller_environment(&self) -> Result<Grant, kube::Error> {
         let namespace = self.core_namespace();
         let grant = self.credential_grant(&namespace).await?;
         if grant.document.data["spec"]["controller"]["name"] != "kars-controller"
@@ -21,6 +79,35 @@ impl Cluster {
                 "The controller Deployment UID must be enrolled before provider configuration",
             ));
         }
+        let workspace = Api::<Namespace>::all(self.client.clone())
+            .get(&namespace)
+            .await
+            .map_err(|error| safe("Recheck controller settings workspace", error))?;
+        if workspace.metadata.deletion_timestamp.is_some()
+            || grant.document.data["spec"]["workspaceUid"] != json!(workspace.metadata.uid)
+        {
+            return Err(failure("Controller settings workspace identity changed"));
+        }
+        if workspace
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|annotations| annotations.get("kars.azure.com/private-enabled"))
+            .is_some_and(|enabled| enabled == "true")
+        {
+            return Err(failure(
+                "Controller defaults cannot be changed on a sealed private workspace. No controller settings were saved. Configure defaults before private activation; per-agent model selection is separate.",
+            ));
+        }
+        Ok(grant)
+    }
+
+    pub async fn write_controller_environment(
+        &self,
+        changes: Vec<Value>,
+    ) -> Result<(), kube::Error> {
+        let namespace = self.core_namespace();
+        let grant = self.require_controller_environment().await?;
         let mut incoming = Vec::new();
         for entry in changes {
             let name = entry["name"]

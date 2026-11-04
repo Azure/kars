@@ -12,7 +12,7 @@ use serde_json::Value;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
-use super::{created_of, name_of, ns_of, require_cluster, s, spec, status, upstream};
+use super::{annotation, created_of, name_of, ns_of, require_cluster, s, spec, status, upstream};
 
 // ─── MCP servers (connected services) ────────────────────────────────────────
 
@@ -259,25 +259,44 @@ pub async fn create_inferencepolicy(
 pub struct PatchInferenceBudgetRequest {
     /// New daily token cap for this policy (0 clears the cap).
     pub daily_tokens: i64,
+    /// Explicitly remove daily, monthly and per-request caps, regardless of SSA ownership.
+    #[serde(default)]
+    pub clear_all: bool,
 }
 
 /// `PATCH /api/operator/inferencepolicies/{name}` — edit a policy's daily token
-/// budget in place (a merge patch on `spec.tokenBudget.dailyTokens`). For a
-/// controller-generated policy the durable source is the mission's envelope
-/// budget, so the reconciler may re-derive it; for an operator-authored policy
-/// the edit sticks.
+/// budget in place, or explicitly remove all token caps with `clear_all`.
+/// A merge patch removes foreign-owned fields that SSA omission retains. For a
+/// controller-generated policy the durable source is its owner's configuration;
+/// direct edits are rejected rather than reporting a change that will be reverted.
 pub async fn patch_inferencepolicy(
     State(state): State<AppState>,
     axum::extract::Path(name): axum::extract::Path<String>,
     Json(req): Json<PatchInferenceBudgetRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
     let cluster = require_cluster(&state)?;
-    let budget = if req.daily_tokens > 0 {
-        serde_json::json!({ "dailyTokens": req.daily_tokens })
+    let current = cluster
+        .get_kind("kars-system", "InferencePolicy", &name)
+        .await
+        .map_err(apply_err)?
+        .ok_or(AppError::NotFound)?;
+    ensure_operator_authored(Some(&current))?;
+    if req.clear_all && req.daily_tokens != 0 {
+        return Err(AppError::BadRequest(
+            "clear_all requires daily_tokens=0".into(),
+        ));
+    }
+    let budget = if req.clear_all {
+        Value::Null
     } else {
-        serde_json::Value::Null
+        serde_json::json!({
+            "dailyTokens": (req.daily_tokens > 0).then_some(req.daily_tokens)
+        })
     };
-    let patch = serde_json::json!({ "spec": { "tokenBudget": budget } });
+    let patch = serde_json::json!({
+        "metadata": { "resourceVersion": current.metadata.resource_version },
+        "spec": { "tokenBudget": budget }
+    });
     cluster
         .merge_patch_kind("kars-system", "InferencePolicy", &name, patch)
         .await
@@ -379,6 +398,11 @@ pub(super) fn apply_err(e: kube::Error) -> AppError {
     if let kube::Error::Api(ae) = &e {
         match ae.code {
             400 | 422 => return AppError::Rejected(ae.message.clone()),
+            409 if ae.message.contains("the object has been modified") => {
+                return AppError::Rejected(
+                    "The resource changed while saving. Reload it and review your changes before retrying; forcing ownership does not resolve a stale resource version.".into(),
+                );
+            }
             409 => {
                 return AppError::Rejected(format!(
                     "field-ownership conflict: {} — another manager owns a field this apply sets; re-apply with force:true to take ownership",
@@ -428,16 +452,13 @@ pub(super) async fn apply_governance(
         .as_deref()
         .unwrap_or("kars-system")
         .to_string();
-    let body = serde_json::json!({
-        "apiVersion": "kars.azure.com/v1alpha1",
-        "kind": kind,
-        "metadata": {
-            "name": name,
-            "namespace": ns,
-            "labels": { "app.kubernetes.io/managed-by": "kars-bridge" },
-        },
-        "spec": req.spec,
-    });
+    let current = cluster.get_kind(&ns, kind, name).await.map_err(apply_err)?;
+    if kind == "InferencePolicy"
+        && current.as_ref().and_then(|p| annotation(p, super::MODEL_SOURCE)).as_deref() == Some("cluster")
+        && current.as_ref().map(spec).and_then(|s| s.pointer("/modelPreference/primary")) != req.spec.pointer("/modelPreference/primary") {
+        return Err(AppError::Rejected("This component inherits the cluster default. Change its model under Configuration → Component models, or select an explicit override there first. Other policy fields can still be edited here.".into()));
+    }
+    let body = governance_manifest(kind, name, &ns, req.spec, current.as_ref())?;
     let applied = cluster
         .apply_kind(&ns, kind, body, req.force)
         .await
@@ -449,6 +470,55 @@ pub(super) async fn apply_governance(
         "namespace": ns,
         "note": "Server-Side Apply (field manager kars-bridge): created on first apply, edited on re-apply."
     })))
+}
+
+fn ensure_operator_authored(current: Option<&DynamicObject>) -> AppResult<()> {
+    if let Some(owner) = current
+        .and_then(|object| object.metadata.owner_references.as_ref())
+        .and_then(|owners| owners.iter().find(|owner| owner.controller == Some(true)))
+    {
+        return Err(AppError::Rejected(format!(
+            "This resource is generated by {} {}. Edit the owning resource's configuration instead; direct edits, including forced edits, would be overwritten by its controller.",
+            owner.kind, owner.name
+        )));
+    }
+    Ok(())
+}
+
+fn governance_manifest(
+    kind: &str,
+    name: &str,
+    namespace: &str,
+    spec: Value,
+    current: Option<&DynamicObject>,
+) -> AppResult<Value> {
+    ensure_operator_authored(current)?;
+    let mut body = serde_json::json!({
+        "apiVersion": "kars.azure.com/v1alpha1",
+        "kind": kind,
+        "metadata": { "name": name, "namespace": namespace },
+        "spec": spec,
+    });
+    if let Some(current) = current {
+        if let Some(source) = annotation(current, super::MODEL_SOURCE) {
+            body["metadata"]["annotations"] = serde_json::json!({super::MODEL_SOURCE:source});
+        }
+        // Even a forced spec edit must not relabel a Helm-owned resource. The
+        // resource version rejects ownership changes after this read.
+        if let Some(version) = &current.metadata.resource_version {
+            body["metadata"]["resourceVersion"] = serde_json::json!(version);
+        }
+        if let Some(manager) = current
+            .metadata
+            .labels
+            .as_ref()
+            .and_then(|labels| labels.get("app.kubernetes.io/managed-by"))
+        {
+            body["metadata"]["labels"] =
+                serde_json::json!({"app.kubernetes.io/managed-by": manager});
+        }
+    }
+    Ok(body)
 }
 
 /// `PUT /api/operator/toolpolicies` — author/edit a `ToolPolicy` (SSA).
@@ -556,10 +626,14 @@ pub async fn delete_egress(
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_err, to_mcp};
-    use crate::error::AppError;
+    use super::{
+        ApplyCrdRequest, PatchInferenceBudgetRequest, apply_err, create_inferencepolicy,
+        governance_manifest, patch_inferencepolicy, to_mcp,
+    };
+    use crate::{error::AppError, state::AppState};
+    use axum::{Json, extract::State};
     use kube::core::DynamicObject;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     fn mcp() -> DynamicObject {
         serde_json::from_value(json!({
@@ -575,6 +649,184 @@ mod tests {
                 }]
             }
         })).unwrap()
+    }
+
+    #[test]
+    fn governance_edits_preserve_installer_labels_and_fence_concurrent_edits() {
+        for manager in [Some("Helm"), Some("kars-bridge"), Some("gitops"), None] {
+            let mut current = mcp();
+            current.metadata.resource_version = Some("42".into());
+            if let Some(manager) = manager {
+                current.metadata.labels = Some(std::collections::BTreeMap::from([
+                    ("app.kubernetes.io/managed-by".into(), manager.into()),
+                    ("unrelated".into(), "retained-on-server".into()),
+                ]));
+            }
+            let spec = json!({"modelPreference":{"primary":{"provider":"github-copilot","deployment":"claude-opus-5.5"}}});
+            let body = governance_manifest(
+                "InferencePolicy",
+                "sre-inference",
+                "kars-system",
+                spec.clone(),
+                Some(&current),
+            )
+            .unwrap();
+            assert_eq!(body["spec"], spec);
+            assert_eq!(body["metadata"]["resourceVersion"], "42");
+            assert_eq!(
+                body["metadata"]["labels"]["app.kubernetes.io/managed-by"].as_str(),
+                manager
+            );
+            assert!(body["metadata"]["labels"].get("unrelated").is_none());
+        }
+    }
+
+    #[test]
+    fn governance_edits_reject_controller_owners_but_allow_noncontrolling_references() {
+        for controller in [Some(true), Some(false), None] {
+            let mut current = mcp();
+            current.metadata.owner_references = Some(serde_json::from_value(json!([
+                {"apiVersion":"v1", "kind":"ConfigMap", "name":"reference", "uid":"reference-uid"},
+                {"apiVersion":"kars.azure.com/v1alpha1", "kind":"KarsTask", "name":"mission",
+                 "uid":"task-uid", "controller":controller}
+            ])).unwrap());
+            for kind in ["InferencePolicy", "ToolPolicy", "McpServer"] {
+                let result = governance_manifest(
+                    kind,
+                    "generated",
+                    "kars-system",
+                    json!({}),
+                    Some(&current),
+                );
+                if controller == Some(true) {
+                    let Err(AppError::Rejected(message)) = result else {
+                        panic!("controller-generated resource must reject edits");
+                    };
+                    assert!(message.contains("KarsTask mission"));
+                    assert!(message.contains("including forced edits"));
+                } else {
+                    assert!(result.is_ok());
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn policy_apply_and_budget_patch_check_live_owner_before_writing() {
+        use axum::body::{Body, to_bytes};
+        use http::{Method, Request, Response};
+        use std::sync::{Arc, Mutex};
+        use tower::service_fn;
+
+        for controlled in [true, false] {
+            let object = json!({
+                "apiVersion":"kars.azure.com/v1alpha1", "kind":"InferencePolicy",
+                "metadata": {
+                    "name":"policy", "namespace":"kars-system", "resourceVersion":"42",
+                    "labels":{"app.kubernetes.io/managed-by":"Helm"},
+                    "ownerReferences":[{"apiVersion":"kars.azure.com/v1alpha1", "kind":"KarsTask",
+                        "name":"mission", "uid":"task-uid", "controller":controlled}]
+                },
+                "spec":{"tokenBudget":{"dailyTokens":17,"monthlyTokens":31,"perRequestTokens":7}}
+            });
+            let writes = Arc::new(Mutex::new(Vec::<Value>::new()));
+            let recorded = writes.clone();
+            let service = service_fn(move |request: Request<_>| {
+                let object = object.clone();
+                let recorded = recorded.clone();
+                async move {
+                    assert_eq!(
+                        request.uri().path(),
+                        "/apis/kars.azure.com/v1alpha1/namespaces/kars-system/inferencepolicies/policy"
+                    );
+                    if request.method() == Method::PATCH {
+                        assert!(!controlled, "generated policy must not be written");
+                        let bytes = to_bytes(Body::new(request.into_body()), 65536)
+                            .await
+                            .unwrap();
+                        recorded
+                            .lock()
+                            .unwrap()
+                            .push(serde_json::from_slice(&bytes).unwrap());
+                    } else {
+                        assert_eq!(request.method(), Method::GET);
+                    }
+                    Ok::<_, std::io::Error>(
+                        Response::builder()
+                            .header("content-type", "application/json")
+                            .body(Body::from(object.to_string()))
+                            .unwrap(),
+                    )
+                }
+            });
+            let state =
+                AppState::for_test_client(kube::Client::new(service, "kars-system"), "kars-system");
+            for force in [false, true] {
+                let result = create_inferencepolicy(
+                    State(state.clone()),
+                    Json(ApplyCrdRequest {
+                        name: "policy".into(),
+                        namespace: None,
+                        spec: json!({}),
+                        force,
+                    }),
+                )
+                .await;
+                assert_eq!(result.is_ok(), !controlled);
+            }
+            for (daily_tokens, clear_all) in [(0, false), (100, false), (0, true)] {
+                let result = patch_inferencepolicy(
+                    State(state.clone()),
+                    axum::extract::Path("policy".into()),
+                    Json(PatchInferenceBudgetRequest {
+                        daily_tokens,
+                        clear_all,
+                    }),
+                )
+                .await;
+                assert_eq!(result.is_ok(), !controlled);
+            }
+            let invalid = patch_inferencepolicy(
+                State(state.clone()),
+                axum::extract::Path("policy".into()),
+                Json(PatchInferenceBudgetRequest {
+                    daily_tokens: 100,
+                    clear_all: true,
+                }),
+            )
+            .await;
+            assert!(invalid.is_err());
+            let writes = writes.lock().unwrap();
+            assert_eq!(writes.len(), if controlled { 0 } else { 5 });
+            for patch in writes.iter() {
+                assert_eq!(patch["metadata"]["resourceVersion"], "42");
+            }
+            if !controlled {
+                assert_eq!(
+                    writes[0]["metadata"]["labels"]["app.kubernetes.io/managed-by"],
+                    "Helm"
+                );
+                assert_eq!(
+                    writes[2]["spec"]["tokenBudget"],
+                    json!({"dailyTokens":null})
+                );
+                assert_eq!(writes[3]["spec"]["tokenBudget"], json!({"dailyTokens":100}));
+                assert_eq!(
+                    writes[4],
+                    json!({"metadata":{"resourceVersion":"42"},"spec":{"tokenBudget":null}})
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn governance_creation_leaves_installer_labels_unclaimed() {
+        let body =
+            governance_manifest("ToolPolicy", "custom", "kars-system", json!({}), None).unwrap();
+        assert_eq!(
+            body["metadata"],
+            json!({"name":"custom","namespace":"kars-system"})
+        );
     }
 
     #[test]
@@ -653,6 +905,21 @@ mod tests {
         match apply_err(e) {
             AppError::Rejected(m) => assert!(m.contains("field not declared in schema")),
             other => panic!("expected Rejected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_err_explains_concurrent_changes_without_recommending_force() {
+        match apply_err(api_err(
+            409,
+            "the object has been modified; please apply your changes to the latest version and try again",
+        )) {
+            AppError::Rejected(message) => {
+                assert!(message.contains("Reload"));
+                assert!(message.contains("forcing ownership does not resolve"));
+                assert!(!message.contains("force:true"));
+            }
+            other => panic!("unexpected error: {other:?}"),
         }
     }
 

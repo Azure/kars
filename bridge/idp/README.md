@@ -3,21 +3,50 @@ Licensed under the MIT License. -->
 
 # Kars Dex security rebuild
 
-**Status: NTLM security update is in the checked-in locks; final-image
-qualification remains required.** Both `locks/requests.txt` and
-`locks/generated/` select `github.com/Azure/go-ntlmssp@v0.1.1` for
-CVE-2026-32952. Normal image builds verify the lock checksums and exact requests;
-they never resolve replacement versions implicitly. No module checksums were
-edited by hand.
+**Status: repaired Linux ARM64 image installed on Kind; Bridge → Headlamp
+automatic sign-in, directional sharing and confirmed logout accepted.** These
+results do not establish timed expiry, installed SQLite persistence, AMD64 or
+Azure/Entra acceptance. On October 28, 2026 the Go 1.27.3 build passed CGO
+compilation, memory/SQLite refresh-deadlock
+regressions and session/authflow/SAML race tests. The corrected probe and unchanged
+upstream root/API/NTLM race-suite commands also passed; environment-dependent
+skips do not establish external connector coverage.
+
+The actual AL3 image
+`sha256:b8362c2c945b3e8297ba25a7ce6805039d426409268fcf24b730272e09522c75`
+passed memory and SQLite login with fresh refresh-token rotation, SQLite
+restart/signing continuity, base inventory/trust and native linkage. Trivy
+0.70.0 with a freshly downloaded database found zero HIGH/CRITICAL findings,
+without ignores, suppression or waivers. All four reviewed distrusted root
+fingerprints are absent from its 226-certificate bundle.
+
+The previous image remains failed: SQLite refresh deadlocked while its rotation
+callback read storage, and its scan found nine HIGH package findings across
+OpenSSL, JOSE, `x/net` and Go x509. The earlier network-isolated discovery failure
+and the probe request-order fixture failure also remain failed evidence.
+Genuine Go 1.27.3 resolver output has now been reviewed and promoted: only JOSE
+4.1.5 → 4.1.6 and `x/net` 0.59.0 → 0.60.0 changed in root-module selections;
+API selections and upstream snapshots are unchanged. Generated metadata was
+not hand-edited.
+
+The local compiler host reuses a checksum-verified Go distribution in a cached
+Rust builder; it does not prove execution of the official Bookworm builder.
+`verify-source-toolchain.sh` still rejects requirements newer than the pinned
+compiler before resolution or manifest rewriting. Do not lower upstream
+requirements or enable automatic toolchain downloads. Shipping builds consume
+reviewed locks read-only. The repaired final image must independently pass
+fresh rotation in both memory and SQLite, restart/signing continuity, trust,
+linkage, inventory and a fresh zero-HIGH/CRITICAL scan before installation.
 
 The lock artifact records the resolver's compiler and architecture. Native
 Linux AMD64 and ARM64 builds may consume the same locked module graph, but both
 the recorded resolver and actual compiler must use the pinned Go version.
 The build preserves resolver provenance in `locks/toolchain.txt` and records
-the actual compiler and target in `build-info.txt`. Fresh ARM64 lock generation
-matched the checked-in AMD64 artifact except for that toolchain record and its
-checksum; this does not substitute for final-image runtime qualification.
-The successful hosted attempt on September 16, 2026 compiled Dex with CGO,
+the actual compiler and target in `build-info.txt`. The current generated
+artifact records Linux ARM64; final-image runtime qualification remains separate.
+For the previous v2.45.1 graph, ARM64 regeneration matched its AMD64 artifact
+except for the compiler record and checksum. The successful historical hosted
+attempt on September 16, 2026 compiled Dex with CGO,
 completed license collection, passed the compatibility cases, completed the
 upstream root/API race-suite commands with exit code zero, passed all nine
 signing-key-continuity regression subcases under the race detector, and compiled
@@ -37,61 +66,114 @@ success is **not** final-image qualification or permission to deploy. This
 wiring does not enable the optional IdP or change chart/default/installation
 behavior.
 
-This is a packaging/dependency correction for the existing optional Dex IdP,
-not another IdP or authentication framework. It starts from **Dex v2.45.1**
-application source at
-[`11d2eeb52b42e1980e14cb91e69dd9e3faab2076`](https://github.com/dexidp/dex/tree/11d2eeb52b42e1980e14cb91e69dd9e3faab2076).
-The [stable release](https://github.com/dexidp/dex/releases/tag/v2.45.1) was
-published March 3, 2026. The binary identifies itself as **v2.45.1-kars.1**,
-and image labels and installed notices disclose both the dependency rebuild
-and the bounded source changes.
+This upgrades the existing optional Dex IdP, not the authentication framework.
+The source is **Dex v2.46.1** at
+[`75eb19238e10fc4750e7efb05a4031b254b04029`](https://github.com/dexidp/dex/tree/75eb19238e10fc4750e7efb05a4031b254b04029).
+The [stable release](https://github.com/dexidp/dex/releases/tag/v2.46.1) was
+published **2026-10-21T14:33:21Z**. On October 28, GitHub's annotated tag
+`886e3245accf6f914f3fb58cee3c166a26ccd012` resolved to that commit; the bounded
+codeload download below supplied the measured archive checksum. The intended
+binary version is **v2.46.1-kars.1**. Labels/notices describe the prospective
+build, not the still-installed v2.45.1 image.
+
+The release's official-image CA fix is not automatically inherited by this
+separate AL3 recipe. Upstream's [backport](https://github.com/dexidp/dex/pull/5095)
+updates both Go to 1.27.3 (rejecting the compromised intermediates) and its
+Alpine CA package (removing affected roots). This recipe retains AL3 and pins
+Go 1.27.3. The updated AL3 payload has OpenSSL 3.3.7-7.azl3 and 226 TLS
+certificates; all four published affected root fingerprints, including the
+cross-signing roots, are absent. The maintained final-image gate verifies those
+fingerprints again against the unchanged AL3 bundle. This is trust-payload
+parity; the ARM64 final-image gate and fresh scan also passed. Live external
+connector acceptance remains separate.
+
+## Persistent installed sessions
+
+The Bridge chart supports the existing SQLite backend with
+`idp.dex.persistence.enabled=true`. The Kind beta values opt into this setting
+when an operator enables the optional IdP; the general compatibility default
+remains memory storage. This is not a migration of a running memory database.
+Schedule an explicit sign-in cutover when changing an existing installation;
+do not restart the current issuer during outstanding token-expiry validation.
+
+The chart mounts `/var/lib/dex/dex.db` from the `dex-data` ReadWriteOnce PVC,
+uses UID/fsGroup 1001, and replaces its single Dex Pod with `Recreate` so an
+upgrade never introduces a second SQLite writer. It requests 1Gi by default.
+`idp.dex.persistence.size` and `storageClass` select the requested capacity and
+provisioner; null uses the cluster default, while an empty string requires a
+pre-provisioned volume. Kind's `standard` local-path provisioner survives Pod
+replacement but not deletion of the Kind cluster or its node disk.
+
+An operator may instead set `idp.dex.persistence.existingClaim` to a writable
+claim in the Bridge namespace. The chart neither creates nor adopts that claim.
+A chart-created PVC has `helm.sh/resource-policy: keep`: uninstall retains signing
+keys and refresh sessions. Treat this data as credentials, retain it with the
+issuer's identity and client/session Secrets, and explicitly select the retained
+claim on reinstall. Do not delete it as routine rollout cleanup. External backup,
+HA and cross-cluster identity migration are not provided by this single-writer
+SQLite option.
+
+Rendering tests and the earlier AL3 SQLite runtime checks do not establish an
+installed persistence result. Acceptance requires a real login/refresh, actual
+Dex Pod replacement with the same bound PVC, then verification that the old
+unexpired token and freshly rotated session still work. The current memory-backed
+issuer must not be reported as passing this gate.
 
 ## Pinned inputs and security changes
 
-Public metadata was checked September 16, 2026. Pins are not a substitute for
-a fresh final-image scan; a new advisory can block acceptance.
+Dex release metadata/source, Go builder manifests and the updated AL3 manifests
+were checked October 28, 2026. Pins are not a substitute for a fresh final-image
+scan; a new advisory can block acceptance.
 
 | Input | Selected pin / reason |
 | --- | --- |
-| Dex source | `https://codeload.github.com/dexidp/dex/tar.gz/11d2eeb52b42e1980e14cb91e69dd9e3faab2076`, SHA-256 `18bf92e8ccbf53e86814c2beb39b7d59f28fb07c84639e9f47a9bb5ea764e0b9` (863,553 bytes when checked) |
-| Compiler/builder | `golang:1.26.8-bookworm@sha256:9fdc884aacc3bec89b20ffc69f4bb369c78210e3e4f600387b5128b12c199f81` |
-| Builder amd64 manifest | `sha256:bc6beb46032d45f421cf400036bf031cdc64f683ba9cdc124e31d063e71670bd` |
-| Runtime | `mcr.microsoft.com/azurelinux/distroless/base:3.0@sha256:4377af4aa7a810b7d59f691eae5066895a71aa3eee4cfb4eba527bbebff16479` |
-| Runtime amd64 manifest | `sha256:0198b6345e0aeffd6c2e455ebc4c74b1d644ac1dfcb5aa5236972f17fd281f27` |
+| Dex source | `https://codeload.github.com/dexidp/dex/tar.gz/75eb19238e10fc4750e7efb05a4031b254b04029`, SHA-256 `b5b0d6d2ffb0c4596dda7144593e6009cf2c37f0e3b8551805d09d84bbc3fb95` (1,200,632 bytes when checked) |
+| Compiler/builder index | `golang:1.27.3-bookworm@sha256:d9b6a1beb9474adc2a1ce842573639b44b2a0dd49b6669f51d3821baf9ec37c9` (CVE-2026-111943) |
+| Builder linux/amd64 manifest | `sha256:e482b31b5d30c31f9e495f4b8cbdf41429b2d74955dfbcd9c0a904483d738390` |
+| Builder linux/arm64/v8 manifest | `sha256:ae675cdbf1bb782b6de4a56b157c8f91a5c89a594d8fa6475bb71efc4be3cfcb` |
+| Runtime | `mcr.microsoft.com/azurelinux/distroless/base:3.0@sha256:6b85a86416a29cdcfd404e9fbd9c5ef49cc0612882cecc702535dcac39c9446c` |
+| Runtime amd64 manifest | `sha256:28cdc9c25371b329318d63242084302021b33708c63f59ce72bbc21e50c831fd` |
+| Runtime arm64 manifest | `sha256:96c7bfde3e1e5c502033f44446f6e1eea7f5ae60200b39025c4a8107cc124170` |
 
-[Official Go download metadata](https://go.dev/dl/?mode=json&include=all)
-selects **go1.26.8**, the latest stable 1.26 patch when checked.
-[Release notes](https://go.dev/doc/devel/release#go1.26.8) date it September 1.
-The official linux-amd64 Go archive SHA-256 is
-`d0f743b33e8d8945e6b1f432edd15785c70507121d6e2a723b21285eddf8b57b`;
-the Docker build uses the pinned official builder, not an unchecked download.
-`GOTOOLCHAIN=local` forbids automatic replacement of the selected compiler.
+The Go 1.27.3 index was read from the public Docker Hub Registry API at
+`https://registry-1.docker.io/v2/library/golang/manifests/1.27.3-bookworm`;
+the AL3 index came from Microsoft's public container registry. Each native
+child was fetched by its index descriptor digest. SHA-256 of response bytes
+matched `Docker-Content-Digest` and each child descriptor, with exact child
+sizes checked. This inspection downloaded manifest metadata only, not image
+layers. The recipes pin indexes to retain native AMD64/ARM64 support. Metadata
+inspection does not establish compiler execution or image qualification.
+`GOTOOLCHAIN=local` forbids automatic replacement; the verifier requires both
+resolver and builder to report **go1.27.3** on a supported native Linux target.
 
 `locks/requests.txt` is a **resolution request, not a fake go.sum**:
 
-| Module | Upstream | Requested selection | Authoritative fix / dependency reason |
-| --- | --- | --- | --- |
-| `github.com/Azure/go-ntlmssp` | `v0.0.0-20221128193559-754e69321358` | 0.1.1 | [CVE-2026-32952 / GHSA-pjcq-xvwq-hhpj](https://github.com/advisories/GHSA-pjcq-xvwq-hhpj): malformed NTLM challenges can panic before 0.1.1 |
-| `github.com/go-jose/go-jose/v4` | 4.1.3 | 4.1.4 | [GO-2026-4945](https://vuln.go.dev/ID/GO-2026-4945.json) |
-| `github.com/russellhaering/goxmldsig` | 1.5.0 | 1.6.0 | [GO-2026-4753](https://vuln.go.dev/ID/GO-2026-4753.json) |
-| `go.opentelemetry.io/otel`, `/metric`, `/trace` | 1.39.0 | 1.44.0 | [GO-2026-5506](https://vuln.go.dev/ID/GO-2026-5506.json) fixes 1.41; [GO-2026-5158](https://vuln.go.dev/ID/GO-2026-5158.json) and gRPC require 1.44 |
-| `golang.org/x/crypto` | 0.48.0 | 0.56.0 | 0.55 fixes [GO-2026-6303](https://vuln.go.dev/ID/GO-2026-6303.json), but September advisories [GO-2026-6354](https://vuln.go.dev/ID/GO-2026-6354.json) / [6355](https://vuln.go.dev/ID/GO-2026-6355.json) require 0.56 |
-| `golang.org/x/mod` | 0.32.0 | 0.40.0 | [GO-2026-6179](https://vuln.go.dev/ID/GO-2026-6179.json), [6180](https://vuln.go.dev/ID/GO-2026-6180.json) |
-| `golang.org/x/net` | 0.50.0 | 0.58.0 | 0.56 fixes [GO-2026-5942](https://vuln.go.dev/ID/GO-2026-5942.json); gRPC requires 0.58 |
-| `golang.org/x/text` | 0.34.0 | 0.41.0 | 0.39 fixes [GO-2026-5970](https://vuln.go.dev/ID/GO-2026-5970.json); gRPC/crypto require 0.41 |
-| `google.golang.org/grpc` | 1.79.1 | 1.83.2 | [Stable security release](https://github.com/grpc/grpc-go/releases/tag/v1.83.2), [GO-2026-6443](https://vuln.go.dev/ID/GO-2026-6443.json) explicitly fixes the 1.83 branch in 1.83.2 |
+The requests preserve released dependency versions except for the observed
+security fixes: JOSE 4.1.6 (CVE-2026-116587) and `x/net` 0.60.0
+(CVE-2026-78669). The regenerated, reviewed locks select both exact versions.
+NTLM/OpenPGP guards, exact-version enforcement and zero-HIGH/CRITICAL
+scan requirements remain unchanged. The AL3 refresh must remove OpenSSL
+CVE-2026-72897, CVE-2026-84782 and CVE-2026-84784 without altering base files.
 
-The exact module manifests are public at
-`https://proxy.golang.org/<module>/@v/<version>.mod`; their `.info` siblings
-record upstream commit and publication metadata.
-[gRPC 1.83.2](https://proxy.golang.org/google.golang.org/grpc/@v/v1.83.2.mod)
-requires Go 1.25 and raises OTel/net/text.
-[crypto 0.56.0](https://proxy.golang.org/golang.org/x/crypto/@v/v0.56.0.mod)
-requires **Go 1.26.0**, so both root and nested API module directives are
-deliberately raised from upstream's 1.25.0 / 1.24.0 to 1.26.0. The root's
-`replace github.com/dexidp/dex/api/v2 => ./api/v2` is retained.
-`x/mod` also requires `x/tools` 0.49.0; let Go resolve the full graph rather
-than hand-editing transitive versions or checksums.
+| Module | v2.46.1 / requested selection |
+| --- | --- |
+| `github.com/Azure/go-ntlmssp` | 0.1.1 (retains CVE-2026-32952 fix) |
+| `github.com/go-jose/go-jose/v4` | 4.1.6 |
+| `github.com/russellhaering/goxmldsig` | 1.6.1 |
+| `go.opentelemetry.io/otel`, `/metric`, `/trace` | 1.45.0 |
+| `golang.org/x/crypto` | 0.57.0 |
+| `golang.org/x/mod` | 0.41.0 |
+| `golang.org/x/net` | 0.60.0 |
+| `golang.org/x/text` | 0.42.0 |
+| `google.golang.org/grpc` | 1.84.0 |
+
+The root's released **Go 1.27.0** directive and
+`replace github.com/dexidp/dex/api/v2 => ./api/v2` are preserved. The existing
+API resolver policy raises its released Go 1.25.0 directive to 1.26.0 and
+requests gRPC 1.84.0/crypto 0.57.0. Go must generate the complete root/API graph,
+including transitive requirements and checksums; any higher required directive
+or unexpected selection requires review. The selected Go 1.27.3 satisfies the
+released source requirement; `GOTOOLCHAIN=local` remains enforced.
 
 Only the separate **`Dockerfile.locks`** maintenance recipe runs `go get` with exact
 versions, followed by real `go mod tidy`, `download`, `verify` and `list`.
@@ -110,7 +192,7 @@ The exact NTLM release is
 [`bd8579c18d41bf5d91a5f74b1117c958f635b866`](https://github.com/Azure/go-ntlmssp/tree/bd8579c18d41bf5d91a5f74b1117c958f635b866).
 Its [module metadata](https://proxy.golang.org/github.com/!azure/go-ntlmssp/@v/v0.1.1.mod)
 requires Go 1.24 and declares no module dependencies, compatible with the
-unchanged Go 1.26.8 builder. The hosted upstream-tests stage requires the
+selected Go 1.27.3 builder. The hosted upstream-tests stage requires the
 actual `TestNewAuthenticateMessage_ChallengeTargetInfoOffsetOverflowNoPanics`
 regression to be registered, then runs `go test -json -count=1 -race
 github.com/Azure/go-ntlmssp/...`. The actual JSON is retained as
@@ -121,8 +203,8 @@ is introduced.
 
 [GO-2026-5932](https://vuln.go.dev/ID/GO-2026-5932.json) concerns
 `golang.org/x/crypto/openpgp` and its subpackages, not every package in
-`golang.org/x/crypto`. The crypto pin remains **v0.56.0**, with no module
-suppression, exclusion or waiver.
+`golang.org/x/crypto`. The released crypto request is **v0.57.0**, with no
+module suppression, exclusion or waiver.
 
 Each build now retains the actual
 `go list -deps -json=ImportPath,Module ./cmd/dex` result as
@@ -138,39 +220,35 @@ has already passed.
 
 ## Disclosed source compatibility patches
 
-The original upstream commit and archive SHA-256 have **not** changed.
-No new dependency versions, module locks, compiler pins or base images are
-introduced by these compatibility corrections.
+v2.46.1 moved the authorization parser to `server/authflow/request.go` and
+fixed both nonconstant format callers upstream. The old production patch is
+removed, not reapplied or bypassed. The regression follows the real parser's
+new package, helper and three-result signature. Upstream also renewed the OAM
+SAML fixture certificate, so the old 2016 clock patch is removed. No upstream
+production or test file is patched; only the two regression files are added.
 
 | Reviewed input | Scope and reason |
 | --- | --- |
-| `patches/0001-literal-oauth-error-descriptions.patch` | Exactly two production calls in `server/oauth2.go`, originally lines 477 and 561, pass already-built descriptions as `"%s", description` / `"%s", err`. This satisfies Go vet and preserves literal percent characters instead of formatting the text twice. Error type, state, redirect URI and authorization decisions are unchanged. |
-| `patches/0002-saml-fixture-validation-clock.patch` | Test-only change to `connector/saml/saml_test.go`. Only `TestVerifyUnsignedMessageAndSignedAssertionWithRootXmlNs` opts into a validation clock at the signed XML's `2016-12-12T16:54:35Z` IssueInstant. Existing helper callers keep a nil clock, which means the real clock. |
-| `patches/server_compat_test.go` | Installed into the fetched source as `server/kars_compat_test.go`; exercises the real authorization parser, including literal `%s%[1]s%%` input and the out-of-band redirect error. |
-| `patches/saml_compat_test.go` | Installed as `connector/saml/kars_compat_test.go`; the real signature verifier must accept the unchanged signed assertion at fixture time and reject it before certificate validity and after expiry. |
+| `patches/server_compat_test.go` | Installed as `server/authflow/kars_compat_test.go`; exercises the released authorization parser, including literal `%s%[1]s%%` input, the out-of-band redirect error, and unchanged type/state/URI. |
+| `patches/saml_compat_test.go` | Installed as `connector/saml/kars_compat_test.go`; the real signature verifier must accept the unchanged signed assertion within certificate validity and reject it before validity and after expiry. |
 
-The OAM fixture certificate is valid from **2016-06-30T04:54:16Z** through
-**2026-06-28T04:54:16Z**. Its signed XML's IssueInstant is inside that interval.
-This is an XML namespace/signature fixture, not a wall-clock expiry test.
-The supported test-clock API is
-[`NewFakeClockAt`](https://github.com/russellhaering/goxmldsig/blob/878c8c615feb628064040115d00e105a137fcfa7/clock.go);
-[production validation](https://github.com/russellhaering/goxmldsig/blob/878c8c615feb628064040115d00e105a137fcfa7/validate.go)
-still enforces the trusted certificate's `NotBefore` and `NotAfter`.
-No certificate, signed XML, production SAML code, trust setting or vet setting
-is weakened or replaced.
+The released OAM certificate is valid from **2026-07-02T12:04:52Z** through
+**2125-07-02T12:04:52Z**; the old patch would now validate it at an invalid
+2016 time. The retained regression derives test times from the actual
+certificate, independently of the XML IssueInstant. The certificate, signed
+XML, upstream tests and production expiry checks remain byte-identical to the
+release. There is no global clock override, test skip, `-vet=off`, or waiver.
 
-`patches/SHA256SUMS` pins the patch order, both patches, regression sources and
-the before/after file-hash manifests. The source stage first verifies the
-original archive, inventories and verifies the **original** source, then
-applies the reviewed patches with `git apply`. It verifies the reviewed post-patch hashes and
-derives the expected `source.sha256` from the original inventory plus only
-the four declared changed/added files. It compares that expected inventory
-against the entire actual source inventory, rejecting additional files,
-missing files, tampered patches, drift and double application.
-Only the four dependency manifests are excluded from source inventory, as
-before; they are independently checked against the generated Go locks.
-The changed source files are **not** excluded or accepted by recomputing
-their expected hashes from whatever a patch happens to produce.
+`patches/SHA256SUMS` pins both regression sources and their installed hashes.
+Source fetch records and verifies a complete upstream inventory. It adds the
+two regressions only if their target paths do not already exist, then
+constructs the **expected** inventory from the unchanged original inventory
+plus reviewed addition hashes. The actual tree must match that inventory
+exactly, rejecting extra/missing files, tampering, drift and double application.
+Every upstream file except the four separately pinned Go lock files is covered.
+Obsolete patch files, series and pre-patch hash inventory are removed together
+with their apply loop. Expected hashes are never recomputed from arbitrary
+output.
 
 Original and patched source inventories and the complete disclosed patch
 bundle are included in `/usr/share/doc/dex/`. The British-spelled `LICENCE`
@@ -184,8 +262,55 @@ PYTHONDONTWRITEBYTECODE=1 KARS_DEX_PATCH_NETWORK=1 \
 ```
 
 Without that opt-in, offline source contracts still run; actual patch-application
-tests are reported as skipped. Neither mode is a replacement for the hosted
-Go behavior regressions or runtime qualification.
+tests are reported as skipped. While v2.45.1 locks remain, the active-lock
+validation must fail (`resolver input drift: inputs.lock`); with network checks,
+the separate upstream-snapshot comparison must also fail. Keep those gates,
+do not suppress them to present source preparation as qualification. Neither
+mode replaces hosted Go behavior regressions or runtime qualification.
+
+October 28 source-preparation result after the Go 1.27.2 update: the exact
+command above ran **41 tests: 39 passed, one failure and one error**, solely
+the two stale-lock gates above. Released root/API directives pass the new
+compiler preflight; regression coverage still rejects the old compiler and
+requirements newer than 1.27.2. The earlier 40-test run had 38 passes and the
+same stale-lock gates after removing the obsolete SAML clock patch.
+Shell syntax and `git diff --check -- bridge/idp` passed; `git diff --quiet --
+bridge/idp/locks/generated` confirmed no generated changes. No Go compilation,
+resolver, image pull/build, container, installation or browser acceptance ran.
+
+## Bridge to Headlamp browser sessions
+
+The released `server/session` and `server/authflow/sessionlogin.go` provide the
+maintained session implementation; Kars does not add a cookie/token relay.
+The parent-owned runtime configuration must enable `DEX_SESSIONS_ENABLED=true`
+and supply `sessions` settings. Keep `sessions.ssoSharedWithDefault: "none"`;
+on the **Bridge source client**, explicitly set `ssoSharedWith` to the actual
+Headlamp client ID. Sharing is one-way and independent of `trustedPeers`.
+Do not use `"*"` or global `"all"` as a shortcut. Retain existing client IDs,
+redirect URIs, secrets, users, signing keys and persistent SQLite data.
+
+Configure finite session absolute/idle lifetimes and a stable protected
+`sessions.cookieEncryptionKey` (16/24/32 bytes); no key or password ships here.
+Dex scopes its HttpOnly, SameSite=Lax cookie to the issuer path and sets Secure
+for an HTTPS issuer. Bridge and Headlamp must use the same browser-reachable
+Dex issuer. A pre-upgrade Bridge login has no Dex session cookie: after the
+upgrade, one normal login must establish it before click-through can reuse it.
+Expired/revoked sessions, `prompt=login`, consent/MFA and `max_age` must still
+require their normal authentication/approval steps.
+
+The `session-tests` target runs the real upstream session/authflow suites with
+race detection before the full upstream suite; the source contracts verify
+these implementations remain unpatched. The October 28 Kind installation passed
+normal Bridge login followed by both Configuration → SRE and Fleet Health →
+Headlamp navigation without a second password or Headlamp Sign In click.
+Headlamp received its own client audience; a Kubernetes SelfSubjectReview
+identified the existing administrator and configured admin group. Reverse
+Headlamp → Bridge silent sharing was denied. Bridge Sign out followed by Dex's
+normal Log Out confirmation cleared both sessions, and revisiting Bridge
+required credentials. This does not claim revocation of already-issued Headlamp
+access tokens. The installed test issuer uses memory storage: timed expiry and
+installed SQLite/key continuity remain separate checks, not inferred from image
+qualification. Bridge uses ordinary top-level links, not a scripted login popup.
 
 ## Compatibility and shipping boundary
 
@@ -223,6 +348,11 @@ of the generated graph and bundled native code is still an acceptance gate.
 
 ## Active locks versus archival baseline data
 
+The following records the earlier v2.45.1 representation migration. That
+artifact remains byte-for-byte preserved during source preparation. A reviewed
+v2.46.1 resolver artifact must replace its baselines with the new release's
+actual module files while retaining this `.snapshot` layout.
+
 The verified hosted artifact's four historical module baselines are now
 explicit **data snapshots**, not active Go manifests. The change is a
 deterministic path-only migration of the already-verified artifact: all four
@@ -259,25 +389,30 @@ names. `dependencies.patch` also keeps its logical `upstream/go.mod` and
 `upstream/api/v2/go.mod` source labels; those labels are not stored manifest
 files or compile inputs. Future generation emits the new snapshot layout
 directly. The importer and validator require that layout and reject legacy or
-mixed active-looking baseline names; do not overwrite the migrated files by
-reimporting an old-layout log or re-resolving dependencies.
+mixed active-looking baseline names; do not reimport an old-layout log.
+Source upgrades require fresh Go generation and reviewed promotion, not
+rewriting existing snapshots.
 
-Representation contracts compare every generated file digest with the
-pre-migration verified artifact, require exactly four normally named active
-Go locks, and exercise archive import/rejection. With the verified-archive
+Representation contracts compare baseline digests with the reviewed artifact
+manifest, require exactly four normally named active Go locks, and exercise
+archive import/rejection. With the verified-archive
 source tests enabled, each baseline snapshot is also compared byte-for-byte
 with its original file from the pinned upstream tarball.
 
 ## Hosted lock generation
 
-Local Docker and Go were unavailable and disk was below the 8.5 GiB floor.
-Do not install Go, compile, populate a global cache or run these builds locally.
+The earlier hosted workflow was selected when local Docker/Go were unavailable
+and disk was below its admission floor; that is historical evidence, not a
+fresh resource check. The parent owns fresh resource admission and serial heavy
+operations. Do not install Go, compile or populate caches during source preparation.
 The following task uses an operator-approved ACR's compute but **does not push
 an image**, deploy, or touch cluster state.
 The context is this public-only directory, not private repository config.
 
-For the current NTLM change, use the concrete staged-review procedure below;
-do not remove or overwrite the currently qualified generated locks merely
+For v2.46.1, the Go 1.27.3 compiler input satisfies the released source
+requirement. The commands below remain an alternative hosted resolver path,
+not evidence of a hosted run or installed upgrade acceptance. Use the staged
+review procedure for future changes; do not overwrite generated locks merely
 to make the default importer run.
 
 From the public Kars worktree root, set `SUBSCRIPTION_ID`, `ACR_NAME` and
@@ -350,12 +485,36 @@ option for this independent replay; do not assume the quick-build CLI exposes
 that option. Neither replay nor generation is reachable from the normal
 `Dockerfile`.
 
-### Parent-only no-push NTLM lock-generation and review
+### Offline compilation/testing and execution bounds
+
+The lock resolver has **no built-in bounded offline compilation/testing mode**.
+`lock-generation` only runs online module resolution/download/verification and
+exports the real graph. It does not run Dex compilation or behavioral tests.
+Its script sets `GOFLAGS=-mod=mod`; it exposes no concurrency, memory or CPU
+build arguments. The documented ACR `--timeout 3600` is a task wall-clock
+limit, not a CPU/memory limit. The parent must admit the worker separately.
+
+`lock-replay` compares artifacts but depends on a fresh `lock-generation`;
+it is not an offline replay target. The separate runtime recipe has maintained
+`compatibility-tests`, `session-tests`, `upstream-tests` and `test-tools`
+targets with the real race suites, but currently does not enforce network-off
+execution or expose resource-bound test options. A warm cache alone is not
+proof of offline execution. Do not disable checksum verification, race checks
+or required suites to call the existing path an offline/bounded validator.
+Source-only Python contracts remain the small validation path used here.
+
+### Parent-only no-push v2.46.1 lock-generation and review
 
 Set `SUBSCRIPTION_ID`, `ACR_NAME` and an existing `ARTIFACT_DIR` **outside the
 source checkout** to approved operator values. The task below only resolves
 the exact requested Go graph on the pinned worker image; it does not build or
-push a Dex image. Only the parent submits it.
+push a Dex image. Only the parent submits it after fresh worker admission.
+Exact current inputs are the v2.46.1 commit/archive above, all eleven
+`locks/requests.txt` requests (including the reviewed JOSE and `x/net` updates),
+the Go 1.27.3 builder index/platform manifests above, and the maintained patches
+and regression bundle. The pinned distroless digest applies to the later
+runtime build, not the resolver. Current locks came from the successful local
+native Linux ARM64 resolver; these commands do not imply another hosted run.
 
 ```sh
 (
@@ -364,11 +523,11 @@ push a Dex image. Only the parent submits it.
     --subscription "$SUBSCRIPTION_ID" --registry "$ACR_NAME" \
     --platform linux/amd64 --no-push --timeout 3600 \
     --target lock-generation --file Dockerfile.locks .
-) > "$ARTIFACT_DIR/ntlm-lock-generation.log" 2>&1
+) > "$ARTIFACT_DIR/dex-v2.46.1-lock-generation.log" 2>&1
 
 PYTHONDONTWRITEBYTECODE=1 python3 bridge/idp/scripts/import-locks.py \
-  "$ARTIFACT_DIR/ntlm-lock-generation.log" \
-  --output "$ARTIFACT_DIR/ntlm-reviewed-locks"
+  "$ARTIFACT_DIR/dex-v2.46.1-lock-generation.log" \
+  --output "$ARTIFACT_DIR/dex-v2.46.1-reviewed-locks"
 ```
 
 `--output` validates the complete archive, current request stamp and exact
@@ -379,14 +538,15 @@ and existing qualified locks untouched.
 
 Before promotion, review the generated root/API manifests, sums, module
 inventories, graph and `dependencies.patch`. Confirm NTLM is exactly v0.1.1,
-the crypto/toolchain/base/source pins are unchanged, and original `.snapshot`
-baselines still match their pinned upstream bytes. Keep the old artifact and
+all eleven requested selections match the released source, the approved
+compiler is compatible, and original `.snapshot` baselines match v2.46.1's
+pinned upstream bytes. The AL3 digest remains unchanged. Keep the old artifact and
 raw generation logs outside the repository as historical provenance. Only
 after that review may the parent replace `locks/generated/` with the verified
 new artifact; this source change does not perform that replacement.
 
 Then rerun source contracts, the hosted notice-guard Go tests, NTLM package
-regressions, compatibility/root/API/probe race suites, the full actual
+regressions, compatibility/session/root/API/probe race suites, the full actual
 distroless runtime qualifier and fresh scans. Require zero HIGH/CRITICAL
 findings **and** confirmed resolution of the current NTLM advisory. Retain
 the new package inventory and establish a new binary/payload reference.

@@ -4,7 +4,7 @@
 import type { Dispatch, SetStateAction } from "react";
 import type { Options } from "@/lib/types";
 
-export type Role = { id: number; name: string; system_prompt: string; runtime: string; model: string; skills: string[] };
+export type Role = { id: number; name: string; system_prompt: string; runtime: string; model: string; skills: string[]; resources?: import("@/lib/types/teams").TeamRoleResources | null };
 
 export interface GovernancePanelInput {
   name: string;
@@ -24,13 +24,12 @@ export interface GovernancePanelInput {
   setModel: Dispatch<SetStateAction<string>>;
   modelFallbacks: string[];
   setModelFallbacks: Dispatch<SetStateAction<string[]>>;
-  egressMode: "learning" | "strict";
-  setEgressMode: Dispatch<SetStateAction<"learning" | "strict">>;
   egressText: string;
   setEgressText: Dispatch<SetStateAction<string>>;
 }
 
 export interface OrgPanelInput {
+  resources: import("@/lib/types/teams").TeamRoleResources;
   name: string;
   tier: number;
   authorityCeiling: string;

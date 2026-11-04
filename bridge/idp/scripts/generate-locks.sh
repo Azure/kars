@@ -4,6 +4,7 @@
 
 set -eu
 . /packaging/locks/inputs.lock
+sh /packaging/scripts/verify-source-toolchain.sh "$GO_VERSION" go.mod api/v2/go.mod
 export GOFLAGS=-mod=mod
 mkdir -p /out/api/v2
 
@@ -11,13 +12,14 @@ mkdir -p /out/api/v2
 (
     cd api/v2
     go mod edit -go=1.26.0 -toolchain="$GO_VERSION"
-    go get google.golang.org/grpc@v1.83.2 golang.org/x/crypto@v0.56.0
+    go get google.golang.org/grpc@v1.84.0 golang.org/x/crypto@v0.57.0
     go mod tidy
     go mod download
     go mod verify
     go list -m -json all > /out/api-modules.json
 )
-go mod edit -go=1.26.0 -toolchain="$GO_VERSION"
+# Keep the released root module's Go requirement; never force it downward.
+go mod edit -toolchain="$GO_VERSION"
 set --
 while IFS= read -r request; do
     test -n "$request"

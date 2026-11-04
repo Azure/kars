@@ -16,6 +16,10 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 const REG: &str = "/apis/kars.azure.com/v1alpha1/karssreregistrations/canonical";
 const SRE: &str = "/apis/kars.azure.com/v1alpha1/namespaces/kars-system/karssandboxes/sre";
 const NORMAL: &str = "/apis/kars.azure.com/v1alpha1/namespaces/kars-system/karssandboxes/normal";
+const REPORTS: &str = "/api/v1/namespaces/kars-sre/configmaps";
+const REPORT: &str = "/api/v1/namespaces/kars-sre/configmaps/sre-health-report";
+const RENEW_ROLE: &str =
+    "/apis/rbac.authorization.k8s.io/v1/namespaces/kars-sre/roles/sre-api-self-renew";
 
 struct State {
     objects: BTreeMap<String, Value>,
@@ -229,6 +233,30 @@ async fn fixture() -> (MockServer, Client, Arc<Mutex<State>>) {
             return ResponseTemplate::new(201).set_body_json(json!({"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview",
                 "spec":body["spec"],"status":{"allowed":state.allowed}}));
         }
+        if method=="POST" && path==REPORTS {
+            assert_eq!(body["metadata"]["name"],crate::sre_report::NAME);
+            assert_eq!(body["metadata"]["namespace"],crate::sre_report::NAMESPACE);
+            if state.objects.contains_key(REPORT) {return failure(409);}
+            let mut created=body;
+            created["metadata"]["uid"]=json!("report-target");
+            created["metadata"]["resourceVersion"]=json!("1");
+            state.objects.insert(REPORT.into(),created.clone());
+            return ResponseTemplate::new(201).set_body_json(created);
+        }
+        if method=="PUT" && matches!(path, REPORT | RENEW_ROLE) {
+            let Some(existing)=state.objects.get(path) else {return failure(404)};
+            if body["metadata"]["uid"]!=existing["metadata"]["uid"]
+                || body["metadata"]["resourceVersion"]!=existing["metadata"]["resourceVersion"]
+                || body["metadata"]["name"]!=existing["metadata"]["name"]
+                || body["metadata"]["namespace"]!=existing["metadata"]["namespace"] {
+                return failure(409);
+            }
+            let revision=existing["metadata"]["resourceVersion"].as_str().unwrap().parse::<u32>().unwrap()+1;
+            let mut updated=body;
+            updated["metadata"]["resourceVersion"]=json!(revision.to_string());
+            state.objects.insert(path.into(),updated.clone());
+            return ResponseTemplate::new(200).set_body_json(updated);
+        }
         if method=="PATCH" {
             let key=path.strip_suffix("/status").unwrap_or(path);
             let Some(value)=state.objects.get_mut(key) else {return failure(404)};
@@ -289,6 +317,24 @@ fn context(client: Client) -> Arc<super::super::Context> {
 
 fn object<T: serde::de::DeserializeOwned>(state: &Arc<Mutex<State>>, key: &str) -> T {
     serde_json::from_value(state.lock().unwrap().objects[key].clone()).unwrap()
+}
+
+fn assert_report_continuity(state: &State) {
+    let identity = crate::sre_report::Identity::from_registration(&state.objects[REG]).unwrap();
+    assert!(identity.matches_target(&state.objects[REPORT]));
+    assert_eq!(state.objects[REPORT]["metadata"]["uid"], "report-target");
+    assert_eq!(state.objects[REPORT]["metadata"]["resourceVersion"], "1");
+    assert_eq!(
+        state.calls.iter().filter(|(method, path, _)| method == "POST" && path == REPORTS).count(),
+        1
+    );
+    assert!(
+        !state.calls.iter().any(|(method, path, _)| path == REPORT && method != "GET")
+    );
+    assert_eq!(
+        state.calls.iter().filter(|(method, path, _)| method == "PUT" && path == RENEW_ROLE).count(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -366,6 +412,7 @@ async fn interleaved_full_sre_and_sandbox_credential_reconcile_keep_qualified_ep
             .unwrap();
         super::ensure(&client, &sandbox, &namespace).await.unwrap();
         let state = state.lock().unwrap();
+        assert_report_continuity(&state);
         assert_eq!(state.objects[REG]["status"]["phase"], "Ready");
         for name in ["sre", "normal"] {
             assert_eq!(
@@ -390,6 +437,7 @@ async fn interleaved_full_sre_and_sandbox_credential_reconcile_keep_qualified_ep
     );
     assert!(super::ensure(&client, &sandbox, &namespace).await.is_err());
     let state = state.lock().unwrap();
+    assert_report_continuity(&state);
     assert_eq!(state.objects[REG]["status"]["phase"], "Blocked");
     assert_eq!(
         state.objects["/apis/apps/v1/namespaces/kars-normal/deployments/normal"]["spec"]["replicas"],
@@ -400,9 +448,15 @@ async fn interleaved_full_sre_and_sandbox_credential_reconcile_keep_qualified_ep
 #[tokio::test]
 async fn credential_transition_qualifies_before_authority_dependent_sre_availability() {
     let (_server, client, state) = fixture().await;
-    {
+    let consumer = "/apis/apps/v1/namespaces/kars-normal/deployments/normal";
+    let pods = "/api/v1/namespaces/kars-normal/pods";
+    let drain = "kars.azure.com/sre-control-drain";
+    let replacement = {
         let mut state = state.lock().unwrap();
-        let mut old = state.objects["/api/v1/namespaces/kars-normal/pods"]["items"][0].clone();
+        let mut replacement = state.objects[pods]["items"][0].clone();
+        replacement["metadata"]["name"] = "replacement-router".into();
+        replacement["metadata"]["uid"] = "replacement-router".into();
+        let mut old = state.objects[pods]["items"][0].clone();
         old["metadata"]["name"] = "old-cached-router".into();
         old["metadata"]["uid"] = "old-cached-router".into();
         old["metadata"]["deletionTimestamp"] = "2026-09-08T00:00:00Z".into();
@@ -414,7 +468,9 @@ async fn credential_transition_qualifies_before_authority_dependent_sre_availabi
             .as_array_mut()
             .unwrap()
             .push(old);
-    }
+        state.objects.get_mut(consumer).unwrap()["status"]["replicas"] = json!(2);
+        replacement
+    };
     let reg: KarsSRERegistration = object(&state, REG);
     assert!(
         crate::sre_authority::reconcile(&client, &reg)
@@ -433,24 +489,52 @@ async fn credential_transition_qualifies_before_authority_dependent_sre_availabi
     );
     {
         let mut state = state.lock().unwrap();
+        assert_report_continuity(&state);
+        assert_eq!(state.objects[REG]["status"]["phase"], "Migrating");
+        assert_eq!(state.objects[consumer]["spec"]["replicas"], 0);
+        assert_eq!(
+            state.objects[consumer]["metadata"]["annotations"][drain],
+            format!("{}:1", reg.epoch())
+        );
+        // Scale-to-zero removes every selected Pod, not just the old cached consumer.
+        state.objects.get_mut(pods).unwrap()["items"] = json!([]);
+    }
+    let reg: KarsSRERegistration = object(&state, REG);
+    assert!(crate::sre_authority::reconcile(&client, &reg).await.is_err());
+    {
+        let mut state = state.lock().unwrap();
+        assert_eq!(state.objects[REG]["status"]["phase"], "Migrating");
+        assert_eq!(state.objects[consumer]["spec"]["replicas"], 0);
+        // Restoration also waits for Deployment status to acknowledge the drain.
+        let deployment = state.objects.get_mut(consumer).unwrap();
+        deployment["status"] = json!({
+            "observedGeneration": deployment["metadata"]["generation"],
+            "replicas": 0, "updatedReplicas": 0, "availableReplicas": 0
+        });
+    }
+    let reg: KarsSRERegistration = object(&state, REG);
+    assert!(crate::sre_authority::reconcile(&client, &reg).await.is_err());
+    {
+        let mut state = state.lock().unwrap();
+        assert_report_continuity(&state);
         assert_eq!(state.objects[REG]["status"]["phase"], "Migrating");
         assert_eq!(
             state.objects["/apis/apps/v1/namespaces/kars-normal/deployments/normal"]["spec"]["replicas"],
             1
         );
+        assert!(state.objects[consumer]["metadata"]["annotations"].get(drain).is_none());
         assert!(
             state
                 .calls
                 .iter()
                 .all(|(_, _, body)| body.get("stringData").is_none())
         );
-        state
-            .objects
-            .get_mut("/api/v1/namespaces/kars-normal/pods")
-            .unwrap()["items"]
-            .as_array_mut()
-            .unwrap()
-            .retain(|pod| pod["metadata"]["uid"] != "old-cached-router");
+        state.objects.get_mut(pods).unwrap()["items"] = json!([replacement]);
+        let deployment = state.objects.get_mut(consumer).unwrap();
+        deployment["status"] = json!({
+            "observedGeneration": deployment["metadata"]["generation"],
+            "replicas": 1, "updatedReplicas": 1, "availableReplicas": 0
+        });
         for name in ["sre", "normal"] {
             assert_eq!(
                 state.objects[&format!("/apis/apps/v1/namespaces/kars-{name}/deployments/{name}")]
@@ -471,6 +555,7 @@ async fn credential_transition_qualifies_before_authority_dependent_sre_availabi
             .is_some()
     );
     let state = state.lock().unwrap();
+    assert_report_continuity(&state);
     assert_eq!(state.objects[REG]["status"]["phase"], "Ready");
     assert_eq!(
         state.objects["/apis/apps/v1/namespaces/kars-sre/deployments/sre"]["status"]["availableReplicas"],

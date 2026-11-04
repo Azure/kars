@@ -22,6 +22,16 @@ const GRANTS: &[(&str, &str)] = &[
     ("kars-sre-private-renew", "kars-sre-router-renew"),
 ];
 
+fn private_namespaced_rules(report: bool) -> serde_json::Value {
+    let mut rules = vec![json!({"apiGroups":[""],"resources":["serviceaccounts/token"],
+        "resourceNames":[ROUTER_SA],"verbs":["create"]})];
+    if report {
+        rules.push(json!({"apiGroups":[""],"resources":["configmaps"],
+            "resourceNames":[crate::sre_report::NAME],"verbs":["get","update"]}));
+    }
+    json!(rules)
+}
+
 pub(crate) fn legacy_subject(subject: &Subject) -> bool {
     (subject.kind == "ServiceAccount"
         && subject.name == "sandbox"
@@ -330,10 +340,8 @@ pub(super) async fn validate_private_targets(
         .await
         .map_err(|e| api_error("Preflight renewal Role", e))?
         && (!owned(&role.metadata, reg)
-            || serde_json::to_value(&role.rules).ok()
-                != Some(json!([{
-                    "apiGroups":[""],"resources":["serviceaccounts/token"],"resourceNames":[ROUTER_SA],"verbs":["create"],
-                }])))
+            || ![private_namespaced_rules(false), private_namespaced_rules(true)]
+                .iter().any(|rules| serde_json::to_value(&role.rules).ok().as_ref() == Some(rules)))
     {
         return Err(
             "Reserved renewal Role belongs to another owner or has different authority".into(),
@@ -421,7 +429,7 @@ pub(super) async fn grant_private(
         "apiVersion":"rbac.authorization.k8s.io/v1","kind":"Role",
         "metadata":{"name":"sre-api-self-renew","namespace":RUNTIME_NAMESPACE,"annotations":{
             OWNER:reg.metadata.uid,"kars.azure.com/namespace-uid":reg.spec.runtime_namespace.uid}},
-        "rules":[{"apiGroups":[""],"resources":["serviceaccounts/token"],"resourceNames":[ROUTER_SA],"verbs":["create"]}],
+        "rules":private_namespaced_rules(true),
     })).map_err(|_| "SRE token renewal Role serialization failed")?;
     match roles
         .get_opt("sre-api-self-renew")
@@ -435,6 +443,13 @@ pub(super) async fn grant_private(
                 .map_err(|e| api_error("Create renewal Role", e))?;
         }
         Some(existing) if owned(&existing.metadata, reg) && existing.rules == role.rules => {}
+        Some(mut existing) if owned(&existing.metadata, reg)
+            && serde_json::to_value(&existing.rules).ok() == Some(private_namespaced_rules(false)) => {
+            super::live::verify(client, reg).await?;
+            existing.rules = role.rules;
+            roles.replace("sre-api-self-renew", &PostParams::default(), &existing).await
+                .map_err(|e| api_error("Add exact SRE report target authority", e))?;
+        }
         Some(_) => {
             return Err(
                 "Existing SRE token renewal Role is not owned or has different authority".into(),

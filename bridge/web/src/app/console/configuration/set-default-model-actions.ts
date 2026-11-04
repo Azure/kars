@@ -8,8 +8,7 @@ import { BffError, setDefaultModel } from "@/lib/bff";
 
 export interface SetDefaultModelState { error: string | null; ok: string | null }
 
-/** Make one specific model the cluster default (Model catalogue "Set as
- *  default"). The BFF promotes the model's provider and pins the model. */
+/** Save the provider-qualified default for new missions and teams. */
 export async function setDefaultModelAction(_p: SetDefaultModelState, form: FormData): Promise<SetDefaultModelState> {
   const deployment = String(form.get("deployment") ?? "").trim();
   const provider = String(form.get("provider") ?? "").trim();
@@ -17,7 +16,7 @@ export async function setDefaultModelAction(_p: SetDefaultModelState, form: Form
   try {
     await setDefaultModel(deployment, provider);
     revalidatePath("/console/configuration");
-    return { error: null, ok: `Default selection saved for ${deployment}. The controller applies this asynchronously; refresh to check the current default.` };
+    return { error: null, ok: `${deployment} is now the cluster default. Inheriting Orchestrator/SRE policies will reconcile automatically; check their Applied status. Existing explicit and reviewed routes are unchanged.` };
   } catch (e) {
     return { error: e instanceof BffError ? e.message || e.code : "couldn't set default", ok: null };
   }

@@ -91,6 +91,14 @@ const DEFAULT_MEMORY_STORE_PREFIX: &str = "memory-";
 /// inject a default). Mirrors the value the runtime plugins use.
 const MEMORY_API_VERSION: &str = "2025-11-15-preview";
 
+fn memory_model_deployment(name: &str, default: &str) -> String {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| default.to_owned())
+}
+
 /// A single conversation item in the Foundry Memory Store contract
 /// shape. Both `:update_memories` and `:search_memories` take an
 /// `items` array of Responses-API message items — NOT a `messages`
@@ -104,22 +112,11 @@ fn memory_item(text: &str) -> Value {
     })
 }
 
-/// Coerce an arbitrary scope string to the Foundry Memory Store charset.
-/// Foundry partitions memories by `scope` and accepts only letters,
-/// digits, and `_ - . % + @ /`. Anything else (most commonly a colon
-/// from a legacy `agent:foo` convention) is rejected with HTTP 400, so
-/// we map every out-of-charset byte to `_`. A no-op for already-valid
-/// scopes.
-fn sanitize_scope(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '%' | '+' | '@' | '/') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
+fn memory_policy_denial(output: &ToolCallOutput) -> Option<DispatchError> {
+    (output.extensions.get("karsMemoryPolicyDenied") == Some(&Value::Bool(true))).then(|| DispatchError::PolicyDenied {
+        tool: "foundry.memory".into(), policy_kind: "KarsMemory".into(),
+        reason: "memory scope is no longer authorized".into(),
+    })
 }
 
 /// Sync-path return for any `foundry.*` tool. The async path
@@ -193,7 +190,7 @@ pub fn foundry_tool_catalog() -> ToolCatalog {
         },
         ToolDefinition {
             name: "foundry.memory".into(),
-            description: "Persistent agent memory via Azure AI Foundry Memory Store. Use \
+            description: "Persistent governed memory: configured Foundry, otherwise Bridge built-in private lexical memory. Failures never change backend. Use \
                 'search' to recall, 'update' to store new knowledge, 'delete_scope' to \
                 wipe a partition. Store name and scope come from the bound KarsMemory CRD."
                 .into(),
@@ -211,11 +208,16 @@ pub fn foundry_tool_catalog() -> ToolCatalog {
                     },
                     "query": {
                         "type": "string",
-                        "description": "Alias for 'text' on 'search' (empty = list all in scope)."
+                        "description": "Alias for 'text' on 'search' (empty = static recall without model input)."
+                    },
+                    "role": {
+                        "type": "string",
+                        "enum": ["user", "assistant"],
+                        "description": "For 'update': source message role (default user)."
                     },
                     "scope": {
                         "type": "string",
-                        "description": "Memory partition. Defaults to the CRD/convention scope. Use '_' as the separator (e.g. 'session_<id>', 'user_<id>') — colons are rejected by the API."
+                        "description": "Exact authorized memory partition. Defaults to the bound private scope. Other scopes require an explicit KarsMemory sharedScopes grant; no normalization, wildcards, or prefix matching."
                     },
                     "top_k": {
                         "type": "integer",
@@ -332,6 +334,7 @@ enum EnsureOutcome {
     /// surfaces the original 404 envelope back to the agent. The
     /// embedded status is informational for log lines.
     AuthFailed(u16),
+    PolicyDenied,
     /// Transport error, 4xx other than 401/403/409, or 5xx. The
     /// caller falls through to the existing `MemoryStoreMissing:`
     /// record path so the operator still sees something on the CRD.
@@ -342,22 +345,20 @@ enum EnsureOutcome {
 /// catalog and forwards each tool call into the same router process
 /// over loopback so the existing governance/policy/safety/budget
 /// pipeline applies uniformly.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PlatformDispatcher {
     catalog: ToolCatalog,
     base_url: String,
     sandbox_name: String,
     memory_store_id: String,
-    /// Slice 3b.3: optional handle into the KarsMemory binding loaded
-    /// by `memory_binding_loader`. When `Some` and the handle resolves
-    /// to a binding with a non-empty `store_name`, that value wins
-    /// over the chart-fed `FOUNDRY_MEMORY_STORE_ID` env (i.e. CRD
-    /// trumps env). When `None`, or when the binding is missing/empty
-    /// (mount absent, parse failed), we fall back to
-    /// `memory_store_id`. This is the consumer that closes the Slice
-    /// 3a `MEMORY_STORE_ID` deferred work without changing any other
-    /// behaviour — non-`foundry.memory` tools are unaffected.
+    memory_chat_model: String,
+    memory_embedding_model: String,
+    /// Explicit bindings always select Foundry and override its conventional
+    /// store/scope. Missing required or invalid bindings deny every backend.
     memory_binding: Option<crate::memory_binding_loader::LoadedMemoryBindingHandle>,
+    memory_foundry_configured: bool,
+    memory_backend: Arc<tokio::sync::OnceCell<bool>>,
+    memory_governance: Option<Arc<crate::governance::Governance>>,
     /// Slice 3b.4 — optional handle into the per-process
     /// `PolicyStatusRegistry`. When set, `foundry.memory` records an
     /// `AuthMisconfigured:` prefixed `last_error` on the `Memory`
@@ -370,6 +371,16 @@ pub struct PlatformDispatcher {
     /// via the normal envelope but never reach the CRD status.
     policy_status: Option<Arc<PolicyStatusRegistry>>,
     http: reqwest::Client,
+}
+
+impl std::fmt::Debug for PlatformDispatcher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PlatformDispatcher")
+            .field("tools_total", &self.catalog.tools().len())
+            .field("memory_foundry_configured", &self.memory_foundry_configured)
+            .field("memory_governance_configured", &self.memory_governance.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl PlatformDispatcher {
@@ -406,10 +417,23 @@ impl PlatformDispatcher {
             base_url,
             sandbox_name,
             memory_store_id,
+            memory_chat_model: memory_model_deployment("FOUNDRY_MEMORY_CHAT_MODEL", "gpt-4.1"),
+            memory_embedding_model: memory_model_deployment(
+                "FOUNDRY_MEMORY_EMBEDDING_MODEL",
+                "text-embedding-3-small",
+            ),
             memory_binding: None,
+            memory_foundry_configured: std::env::var("FOUNDRY_PROJECT_ENDPOINT").is_ok_and(|v| !v.trim().is_empty()),
+            memory_backend: Arc::new(tokio::sync::OnceCell::new()),
+            memory_governance: None,
             policy_status: None,
             http,
         }
+    }
+
+    pub fn with_memory_governance(mut self, governance: Arc<crate::governance::Governance>) -> Self {
+        self.memory_governance = Some(governance);
+        self
     }
 
     /// Custom-base-URL constructor for integration tests that point the
@@ -417,6 +441,7 @@ impl PlatformDispatcher {
     pub fn with_base_url(base_url: impl Into<String>) -> Self {
         let mut d = Self::standard();
         d.base_url = base_url.into();
+        d.memory_foundry_configured = true;
         d
     }
 
@@ -433,13 +458,8 @@ impl PlatformDispatcher {
         self
     }
 
-    /// Slice 3b.3: attach a `KarsMemory` binding handle. When the
-    /// handle resolves to a binding with a non-empty `store_name`,
-    /// `foundry.memory` calls use that store id instead of the
-    /// env-fed `memory_store_id`. Lets the CRD-driven binding take
-    /// precedence over the legacy chart env without breaking the
-    /// env-only fallback path (sandboxes with no `spec.memoryRef`
-    /// keep working exactly as before).
+    /// Attach the compiled store and exact scope grants. Invalid or unavailable
+    /// bindings fail closed; only unbound sandboxes use conventional private memory.
     pub fn with_memory_binding(
         mut self,
         handle: crate::memory_binding_loader::LoadedMemoryBindingHandle,
@@ -460,55 +480,22 @@ impl PlatformDispatcher {
         self
     }
 
-    /// Resolve the effective Memory Store id for a `foundry.memory`
-    /// call. Returns the KarsMemory binding's `store_name` when one
-    /// is loaded with a non-empty value; otherwise the configured
-    /// env-fed `memory_store_id`. The CRD-driven binding wins.
-    async fn effective_memory_store_id(&self) -> String {
-        if let Some(handle) = self.memory_binding.as_ref() {
-            let guard = handle.read().await;
-            if let Some(binding) = guard.as_ref() {
-                let name = binding.store_name.trim();
-                if !name.is_empty() {
-                    return name.to_string();
-                }
-            }
-        }
-        self.memory_store_id.clone()
-    }
-
-    /// Resolve the effective memory `scope` (partition key) for a
-    /// `foundry.memory` call. Precedence: an explicit `scope` arg from
-    /// the agent → the KarsMemory binding's `scope` → the convention
-    /// `agent_<cluster>_<sandbox>` (or `agent_<sandbox>` when no cluster
-    /// is set). Every branch is run through [`sanitize_scope`] so an
-    /// out-of-charset value (e.g. a legacy colon scope baked into a CRD)
-    /// can never reach the upstream and 400 the whole call.
-    async fn effective_scope(&self, args: &Value) -> String {
-        if let Some(s) = args.get("scope").and_then(|v| v.as_str()) {
-            let s = s.trim();
-            if !s.is_empty() {
-                return sanitize_scope(s);
-            }
-        }
-        if let Some(handle) = self.memory_binding.as_ref() {
-            let guard = handle.read().await;
-            if let Some(binding) = guard.as_ref() {
-                let s = binding.scope.trim();
-                if !s.is_empty() {
-                    return sanitize_scope(s);
-                }
-            }
-        }
-        let sandbox = sanitize_scope(self.sandbox_name.trim());
-        match std::env::var("CLUSTER_NAME")
-            .ok()
-            .map(|c| c.trim().to_string())
-            .filter(|c| !c.is_empty())
-        {
-            Some(cluster) => format!("agent_{}_{}", sanitize_scope(&cluster), sandbox),
-            None => format!("agent_{sandbox}"),
-        }
+    async fn memory_target(&self, args: &Value) -> Result<(String, String), DispatchError> {
+        let access = crate::memory_binding_loader::resolve_access(
+            self.memory_binding.as_ref(), &self.sandbox_name, &self.memory_store_id,
+        ).await.map_err(|reason| DispatchError::ExecutionFailed {
+            tool: "foundry.memory".into(), reason,
+        })?;
+        let denied = |reason: &str| DispatchError::PolicyDenied {
+            tool: "foundry.memory".into(), policy_kind: "KarsMemory".into(), reason: reason.into(),
+        };
+        let scope = match args.get("scope") {
+            None => access.scope.as_str(),
+            Some(Value::String(scope)) => scope.as_str(),
+            Some(_) => return Err(denied("memory scope must be an authorized string")),
+        };
+        access.authorize(scope).map_err(denied)?;
+        Ok((access.store_name.clone(), scope.to_string()))
     }
 
     pub fn with_catalog(mut self, catalog: ToolCatalog) -> Self {
@@ -602,12 +589,76 @@ impl PlatformDispatcher {
             .await
     }
 
+    async fn select_memory_backend(&self, bound: bool, required: bool) -> Result<bool, DispatchError> {
+        if !bound && required {
+            return Err(DispatchError::PolicyDenied { tool: "foundry.memory".into(), policy_kind: "KarsMemory".into(), reason: "required memory binding is unavailable; no backend fallback permitted".into() });
+        }
+        let foundry = bound || self.memory_foundry_configured;
+        let selected = self.memory_backend.get_or_init(|| async { foundry }).await;
+        if *selected != foundry {
+            return Err(DispatchError::PolicyDenied { tool: "foundry.memory".into(), policy_kind: "KarsMemory".into(), reason: "memory backend configuration changed; restart with reviewed configuration, no implicit migration permitted".into() });
+        }
+        Ok(foundry)
+    }
+
     async fn memory(&self, args: &Value) -> Result<ToolCallOutput, DispatchError> {
+        let binding = match &self.memory_binding {
+            Some(handle) => Some(handle.read().await),
+            None => None,
+        };
+        let bound = match binding.as_deref() {
+            Some(Ok(Some(_))) => true,
+            Some(Err(reason)) => return Err(DispatchError::PolicyDenied {
+                tool: "foundry.memory".into(), policy_kind: "KarsMemory".into(), reason: reason.clone(),
+            }),
+            _ => false,
+        };
+        let foundry = self.select_memory_backend(bound,
+            std::env::var("MEMORY_BINDING_REQUIRED").as_deref() == Ok("true")).await?;
+        if !foundry {
+            // Hold the binding snapshot while accessing the built-in store so a
+            // concurrent required-binding reload cannot broaden this request.
+            let denied = |reason: String| DispatchError::PolicyDenied {
+                tool: "foundry.memory".into(), policy_kind: "KarsMemory".into(), reason,
+            };
+            let governance = self.memory_governance.as_ref()
+                .ok_or_else(|| denied("built-in memory governance is unavailable".into()))?;
+            let operation = match args["operation"].as_str() {
+                Some("search") => "search_memories",
+                Some("update") => "update_memories",
+                Some("delete_scope") => "delete_scope",
+                _ => return Err(DispatchError::InvalidArguments { tool: "foundry.memory".into(), reason: "invalid memory operation".into() }),
+            };
+            let decision = governance.evaluate(&self.sandbox_name, &format!("foundry:memory:{operation}"), None);
+            if decision["allowed"] != true {
+                return Err(denied(decision["reason"].as_str().unwrap_or("Memory denied by governance").into()));
+            }
+            let value = crate::builtin_memory_client::call(args).await
+                .map_err(|error| denied(format!("built-in memory: {error}")))?;
+            return Ok(ToolCallOutput {
+                content: vec![ToolContent::text(value.to_string())],
+                ..Default::default()
+            });
+        }
+        drop(binding);
+        let mut output = self.foundry_memory(args).await?;
+        for content in &mut output.content {
+            if let ToolContent::Text { text, .. } = content
+                && let Ok(Value::Object(mut value)) = serde_json::from_str::<Value>(text) {
+                value.insert("backend".into(), json!("foundry"));
+                *text = Value::Object(value).to_string();
+            }
+        }
+        Ok(output)
+    }
+
+    async fn foundry_memory(&self, args: &Value) -> Result<ToolCallOutput, DispatchError> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
         let op = self.require_str(args, "operation", "foundry.memory")?;
-        let scope = self.effective_scope(args).await;
+        let (store_id, scope) = self.memory_target(args).await?;
         // `text` is the memory/query content; accept the `query` alias
         // for search. Update requires non-empty text; search and
-        // delete_scope do not (empty search = list everything in scope).
+        // delete_scope do not (empty search = static recall within scope).
         let text = args
             .get("text")
             .or_else(|| args.get("query"))
@@ -622,14 +673,16 @@ impl PlatformDispatcher {
             .unwrap_or(10);
 
         let (suffix, body) = match op {
-            "search" => (
-                ":search_memories",
-                json!({
+            "search" => {
+                let mut body = json!({
                     "scope": scope,
-                    "items": [memory_item(&text)],
                     "options": { "max_memories": max_memories },
-                }),
-            ),
+                });
+                if !text.is_empty() {
+                    body["items"] = json!([memory_item(&text)]);
+                }
+                (":search_memories", body)
+            }
             "update" => {
                 if text.is_empty() {
                     return Err(DispatchError::InvalidArguments {
@@ -637,11 +690,20 @@ impl PlatformDispatcher {
                         reason: "operation=update requires a non-empty 'text'".into(),
                     });
                 }
+                let role = args.get("role").and_then(Value::as_str).unwrap_or("user");
+                if !matches!(role, "user" | "assistant") {
+                    return Err(DispatchError::InvalidArguments {
+                        tool: "foundry.memory".into(),
+                        reason: "role must be 'user' or 'assistant'".into(),
+                    });
+                }
+                let mut item = memory_item(&text);
+                item["role"] = json!(role);
                 (
                     ":update_memories",
                     json!({
                         "scope": scope,
-                        "items": [memory_item(&text)],
+                        "items": [item],
                         "update_delay": 0,
                     }),
                 )
@@ -656,17 +718,20 @@ impl PlatformDispatcher {
                 });
             }
         };
-        let store_id = self.effective_memory_store_id().await;
         let path = format!("/memory_stores/{store_id}{suffix}?api-version={MEMORY_API_VERSION}");
         let (status, output) = self
             .post_json_with_status("foundry.memory", &path, &body)
             .await;
 
+        if let Some(error) = memory_policy_denial(&output) {
+            return Err(error);
+        }
+
         // Slice 3c.1 — router-side ensure-on-404. When the Foundry
         // upstream returns 404 ("store does not exist"), attempt to
-        // auto-provision the store via POST `/memory_stores` (the
-        // same body shape the runtime `ensureMemoryStore` uses) and
-        // retry the original call exactly once.
+        // auto-provision the store via POST `/memory_stores` with
+        // independently configured memory models, then retry the
+        // original call exactly once.
         //
         // Retry succeeds → return the retry envelope; the original
         // 404 is forgotten and no `MemoryStoreMissing` lands on the
@@ -684,13 +749,25 @@ impl PlatformDispatcher {
                     let (retry_status, retry_output) = self
                         .post_json_with_status("foundry.memory", &path, &body)
                         .await;
+                    if let Some(error) = memory_policy_denial(&retry_output) {
+                        return Err(error);
+                    }
                     if !matches!(retry_status, Some(404)) {
-                        return Ok(retry_output);
+                        return Ok(if op == "update" {
+                            self.observe_memory_update(&store_id, retry_output, deadline)
+                                .await
+                        } else {
+                            retry_output
+                        });
                     }
                     // Defensive: provisioning claimed success but the
                     // store still 404s. Fall through to record
                     // MemoryStoreMissing so the operator notices.
                 }
+                EnsureOutcome::PolicyDenied => return Err(DispatchError::PolicyDenied {
+                    tool: "foundry.memory".into(), policy_kind: "KarsMemory".into(),
+                    reason: "memory scope changed before store provisioning".into(),
+                }),
                 EnsureOutcome::AuthFailed(s) => {
                     if let Some(registry) = self.policy_status.as_ref() {
                         let source_path = registry
@@ -776,15 +853,137 @@ impl PlatformDispatcher {
             );
             registry.record_error(PolicyKind::Memory, &source_path, &msg);
         }
-        Ok(output)
+        Ok(if op == "update" {
+            self.observe_memory_update(&store_id, output, deadline)
+                .await
+        } else {
+            output
+        })
+    }
+
+    async fn observe_memory_update(
+        &self,
+        store_id: &str,
+        mut output: ToolCallOutput,
+        deadline: tokio::time::Instant,
+    ) -> ToolCallOutput {
+        let mut update_id = None;
+        loop {
+            if output.is_error {
+                if let Some(id) = update_id {
+                    output.content.push(ToolContent::text(format!(
+                        "Memory update {id} was accepted, but completion could not be verified; do not resubmit."
+                    )));
+                }
+                return output;
+            }
+            let mut body = match output.content.first() {
+                Some(ToolContent::Text { text, .. }) => serde_json::from_str::<Value>(text).ok(),
+                _ => None,
+            }
+            .filter(Value::is_object);
+            let Some(body) = body.as_mut() else {
+                let message = match update_id.as_ref() {
+                    Some(id) => format!(
+                        "Invalid Foundry memory update response for accepted update {id}; persistence not confirmed; do not resubmit."
+                    ),
+                    None => {
+                        "Invalid Foundry memory update response; persistence not confirmed".into()
+                    }
+                };
+                return ToolCallOutput {
+                    content: vec![ToolContent::text(message)],
+                    is_error: true,
+                    ..Default::default()
+                };
+            };
+            if update_id.is_none() {
+                update_id = body
+                    .get("update_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+            }
+            if let Some(id) = update_id.as_ref() {
+                body["update_id"] = json!(id);
+            }
+            let status = body.get("status").and_then(Value::as_str).unwrap_or("");
+            match status {
+                "completed" => {
+                    return ToolCallOutput {
+                        content: vec![ToolContent::text(body.to_string())],
+                        ..Default::default()
+                    };
+                }
+                "failed" | "cancelled" => {
+                    return ToolCallOutput {
+                        content: vec![ToolContent::text(body.to_string())],
+                        is_error: true,
+                        ..Default::default()
+                    };
+                }
+                "queued" | "in_progress" => {}
+                "" if update_id.is_some() => body["status"] = json!("queued"),
+                _ => {
+                    return ToolCallOutput {
+                        content: vec![ToolContent::text(format!(
+                            "Invalid Foundry memory update status: {body}"
+                        ))],
+                        is_error: true,
+                        ..Default::default()
+                    };
+                }
+            }
+            let Some(id) = update_id.as_ref().filter(|id| {
+                !id.is_empty()
+                    && id.len() <= 128
+                    && id
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
+            }) else {
+                return ToolCallOutput {
+                    content: vec![ToolContent::text(format!(
+                        "Invalid Foundry memory update identifier: {body}"
+                    ))],
+                    is_error: true,
+                    ..Default::default()
+                };
+            };
+            let pending = ToolCallOutput {
+                content: vec![ToolContent::text(body.to_string())],
+                ..Default::default()
+            };
+            if tokio::time::Instant::now() >= deadline {
+                return pending;
+            }
+            let path =
+                format!("/memory_stores/{store_id}/updates/{id}?api-version={MEMORY_API_VERSION}");
+            output = match tokio::time::timeout_at(deadline, self.get("foundry.memory", &path))
+                .await
+            {
+                Ok(Ok(result)) => result,
+                Ok(Err(error)) => {
+                    return ToolCallOutput {
+                        content: vec![ToolContent::text(format!(
+                            "Memory update {id}: {error}; completion not verified; do not resubmit."
+                        ))],
+                        is_error: true,
+                        ..Default::default()
+                    };
+                }
+                Err(_) => return pending,
+            };
+            // Inspect the final response even if the read-only polling budget expires.
+            let _ =
+                tokio::time::timeout_at(deadline, tokio::time::sleep(Duration::from_millis(500)))
+                    .await;
+        }
     }
 
     /// Attempt to auto-provision a Foundry Memory Store named
-    /// `store_id`. Mirrors the body shape the openclaw runtime
-    /// uses in `ensureMemoryStore` (runtimes/openclaw/dist/core/
-    /// agt-tools/foundry.js): kind `default`, chat_model from
-    /// `OPENCLAW_MODEL` env (default `gpt-4.1`), embedding_model
-    /// `text-embedding-3-small`, full options block enabled.
+    /// `store_id`. Memory models are configured independently of agent
+    /// inference via `FOUNDRY_MEMORY_CHAT_MODEL` (default `gpt-4.1`) and
+    /// `FOUNDRY_MEMORY_EMBEDDING_MODEL` (default `text-embedding-3-small`).
+    /// Existing stores and their model definitions are never replaced.
     ///
     /// Returns:
     /// - `Ready` on any 2xx **or** 409 ("conflict — already exists").
@@ -797,14 +996,13 @@ impl PlatformDispatcher {
     ///   and 5xx. The caller records the original 404 as
     ///   `MemoryStoreMissing` so the operator gets a signal.
     async fn ensure_memory_store(&self, store_id: &str) -> EnsureOutcome {
-        let chat_model = std::env::var("OPENCLAW_MODEL").unwrap_or_else(|_| "gpt-4.1".to_string());
         let body = json!({
             "name": store_id,
             "description": "kars agent persistent memory",
             "definition": {
                 "kind": "default",
-                "chat_model": chat_model,
-                "embedding_model": "text-embedding-3-small",
+                "chat_model": self.memory_chat_model,
+                "embedding_model": self.memory_embedding_model,
                 "options": {
                     "user_profile_enabled": true,
                     "user_profile_details": "Store user preferences, decisions, and project context",
@@ -812,13 +1010,16 @@ impl PlatformDispatcher {
                 },
             },
         });
-        let (status, _envelope) = self
+        let (status, envelope) = self
             .post_json_with_status(
                 "foundry.memory.ensure",
                 &format!("/memory_stores?api-version={MEMORY_API_VERSION}"),
                 &body,
             )
             .await;
+        if memory_policy_denial(&envelope).is_some() {
+            return EnsureOutcome::PolicyDenied;
+        }
         match status {
             Some(s) if (200..300).contains(&s) || s == 409 => {
                 tracing::info!(
@@ -1100,6 +1301,11 @@ impl PlatformDispatcher {
             Ok(r) => {
                 let status = r.status();
                 let code = status.as_u16();
+                // The self-router emits these headers locally; its Foundry proxy
+                // never forwards upstream policy headers.
+                let memory_denied = code == 403
+                    && r.headers().get("x-kars-decision").is_some_and(|v| v == "Blocked")
+                    && r.headers().get("x-kars-decision-by").is_some_and(|v| v == "KarsMemory");
                 let text = r.text().await.unwrap_or_default();
                 if status.is_success() {
                     (
@@ -1118,6 +1324,9 @@ impl PlatformDispatcher {
                                 "{tool} upstream returned HTTP {code}: {text}"
                             ))],
                             is_error: true,
+                            extensions: if memory_denied {
+                                serde_json::Map::from_iter([("karsMemoryPolicyDenied".into(), Value::Bool(true))])
+                            } else { Default::default() },
                             ..Default::default()
                         },
                     )
@@ -1173,6 +1382,10 @@ impl AsyncToolDispatcher for PlatformDispatcher {
         self.dispatch(name, arguments).await
     }
 }
+
+#[cfg(test)]
+#[path = "platform_memory_tests.rs"]
+mod memory_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1380,7 +1593,10 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/memory_stores/memstore-test:update_memories"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"updated": 1})))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"update_id": "u-1", "status": "completed"})),
+            )
             .mount(&server)
             .await;
         let d = dispatcher_for(&server);
@@ -1451,21 +1667,22 @@ mod tests {
             .mount(&server)
             .await;
         let d = dispatcher_for(&server);
+        let (_, scope) = d.memory_target(&json!({})).await.unwrap();
         let out = AsyncToolDispatcher::invoke(
             &d,
             "foundry.memory",
-            &json!({"operation": "delete_scope", "scope": "session_abc"}),
+            &json!({"operation": "delete_scope", "scope": scope}),
         )
         .await
         .unwrap();
         assert!(!out.is_error);
         let req = &server.received_requests().await.unwrap()[0];
         let body: Value = serde_json::from_slice(&req.body).unwrap();
-        assert_eq!(body, json!({"scope": "session_abc"}));
+        assert_eq!(body, json!({"scope": scope}));
     }
 
     #[tokio::test]
-    async fn memory_binding_scope_overrides_and_colon_is_sanitized() {
+    async fn memory_binding_invalid_scope_does_not_normalize_or_reach_provider() {
         use crate::memory_binding_loader::{LoadedMemoryBinding, empty_handle};
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -1476,35 +1693,72 @@ mod tests {
         let handle = empty_handle();
         {
             let mut g = handle.write().await;
-            *g = Some(LoadedMemoryBinding {
+            *g = Ok(Some(LoadedMemoryBinding {
                 digest: "sha256:deadbeef".into(),
                 source_path: "/etc/kars/memory/binding.json".into(),
                 store_name: "memstore-test".into(),
-                // legacy colon scope from a CRD — must be coerced to a
-                // valid partition key before it reaches the upstream.
                 scope: "agent:legacy".into(),
+                shared_scopes: vec![],
                 raw: json!({}),
-            });
+            }));
         }
         let d = PlatformDispatcher::with_base_url(server.uri())
             .with_memory_store_id("memstore-test")
             .with_memory_binding(handle);
-        AsyncToolDispatcher::invoke(&d, "foundry.memory", &json!({"operation": "search"}))
-            .await
-            .unwrap();
-        let req = &server.received_requests().await.unwrap()[0];
-        let body: Value = serde_json::from_slice(&req.body).unwrap();
-        assert_eq!(body["scope"], json!("agent_legacy"));
+        assert!(matches!(AsyncToolDispatcher::invoke(&d, "foundry.memory", &json!({"operation": "search"}))
+            .await.unwrap_err(), DispatchError::ExecutionFailed { .. }));
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 
-    #[test]
-    fn sanitize_scope_maps_out_of_charset_to_underscore() {
-        assert_eq!(sanitize_scope("agent:foo"), "agent_foo");
-        assert_eq!(
-            sanitize_scope("session_1-a.b@c/d+e%f"),
-            "session_1-a.b@c/d+e%f"
-        );
-        assert_eq!(sanitize_scope("a b:c"), "a_b_c");
+    #[tokio::test]
+    async fn memory_scope_denials_never_reach_provider() {
+        let server = MockServer::start().await;
+        let d = dispatcher_for(&server);
+        for op in ["search", "update", "delete_scope"] {
+            for scope in [json!("other-sandbox"), json!("tenant:other-tenant"), json!("system"), json!("*"), json!("../other"), json!(null), json!(42), json!("")] {
+                let err = AsyncToolDispatcher::invoke(&d, "foundry.memory", &json!({"operation":op,"text":"test","scope":scope})).await.unwrap_err();
+                assert!(matches!(err, DispatchError::PolicyDenied { ref policy_kind, .. } if policy_kind == "KarsMemory"));
+            }
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn memory_explicit_shared_grant_works_and_revocation_denies_without_provider_io() {
+        use crate::memory_binding_loader::{LoadedMemoryBinding, empty_handle};
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"status":"completed"}))).mount(&server).await;
+        let handle = empty_handle();
+        *handle.write().await = Ok(Some(LoadedMemoryBinding {
+            digest:"test".into(), source_path:"binding.json".into(), store_name:"bound".into(), scope:"private".into(), shared_scopes:vec!["team".into()], raw:json!({}),
+        }));
+        let d = dispatcher_for(&server).with_memory_binding(handle.clone());
+        for op in ["search", "update", "delete_scope"] {
+            let out = AsyncToolDispatcher::invoke(&d, "foundry.memory", &json!({"operation":op,"text":"test","scope":"team"})).await.unwrap();
+            assert!(!out.is_error);
+        }
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 3);
+        for request in requests {
+            assert_eq!(serde_json::from_slice::<Value>(&request.body).unwrap()["scope"], "team");
+            assert!(request.url.path().starts_with("/memory_stores/bound:"));
+        }
+        handle.write().await.as_mut().unwrap().as_mut().unwrap().shared_scopes.clear();
+        assert!(matches!(AsyncToolDispatcher::invoke(&d, "foundry.memory", &json!({"operation":"search","scope":"team"})).await.unwrap_err(), DispatchError::PolicyDenied { .. }));
+        assert_eq!(server.received_requests().await.unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn memory_local_policy_denial_does_not_report_provider_auth_failure() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).respond_with(ResponseTemplate::new(403)
+            .insert_header("x-kars-decision", "Blocked").insert_header("x-kars-decision-by", "KarsMemory")
+            .set_body_string("memory scope is no longer authorized")).mount(&server).await;
+        let registry = Arc::new(PolicyStatusRegistry::new());
+        let d = dispatcher_for(&server).with_policy_status(registry.clone());
+        assert!(matches!(AsyncToolDispatcher::invoke(&d, "foundry.memory", &json!({"operation":"search"})).await.unwrap_err(), DispatchError::PolicyDenied { .. }));
+        assert!(registry.get(PolicyKind::Memory).is_none());
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -1535,13 +1789,14 @@ mod tests {
         let handle = empty_handle();
         {
             let mut g = handle.write().await;
-            *g = Some(LoadedMemoryBinding {
+            *g = Ok(Some(LoadedMemoryBinding {
                 digest: "sha256:deadbeef".into(),
                 source_path: "/etc/kars/memory/binding.json".into(),
                 store_name: "from-crd".into(),
-                scope: "agent:test".into(),
+                scope: "agent_test".into(),
+                shared_scopes: vec![],
                 raw: json!({"storeName": "from-crd"}),
-            });
+            }));
         }
         let d = PlatformDispatcher::with_base_url(server.uri())
             .with_memory_store_id("from-env")
@@ -1563,45 +1818,37 @@ mod tests {
         );
     }
 
-    /// Slice 3b.3: when the binding handle resolves to a binding
-    /// whose `store_name` is empty (or whitespace), we fall back to
-    /// the env-fed id. Avoids tripping on a malformed compiled
-    /// binding.
     #[tokio::test]
-    async fn memory_empty_binding_store_name_falls_back_to_env() {
+    async fn memory_empty_binding_store_name_never_falls_back_to_env() {
         use crate::memory_binding_loader::{LoadedMemoryBinding, empty_handle};
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/memory_stores/from-env:update_memories"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"updated": 1})))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"update_id": "u-1", "status": "completed"})),
+            )
             .mount(&server)
             .await;
         let handle = empty_handle();
         {
             let mut g = handle.write().await;
-            *g = Some(LoadedMemoryBinding {
+            *g = Ok(Some(LoadedMemoryBinding {
                 digest: "sha256:deadbeef".into(),
                 source_path: "/etc/kars/memory/binding.json".into(),
                 store_name: "   ".into(),
-                scope: "agent:test".into(),
+                scope: "agent_test".into(),
+                shared_scopes: vec![],
                 raw: json!({}),
-            });
+            }));
         }
         let d = PlatformDispatcher::with_base_url(server.uri())
             .with_memory_store_id("from-env")
             .with_memory_binding(handle);
-        AsyncToolDispatcher::invoke(
-            &d,
-            "foundry.memory",
-            &json!({"operation": "update", "text": "remember"}),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            server.received_requests().await.unwrap().len(),
-            1,
-            "empty store_name in binding must fall back to env"
-        );
+        assert!(matches!(AsyncToolDispatcher::invoke(
+            &d, "foundry.memory", &json!({"operation": "update", "text": "remember"}),
+        ).await.unwrap_err(), DispatchError::ExecutionFailed { .. }));
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 
     /// Slice 3b.3: when no binding handle is attached at all, the
@@ -2142,7 +2389,7 @@ mod tests {
         AsyncToolDispatcher::invoke(
             &d,
             "foundry.memory",
-            &json!({"operation": "delete_scope", "scope": "session_x"}),
+            &json!({"operation": "delete_scope"}),
         )
         .await
         .unwrap();
@@ -2306,7 +2553,8 @@ mod tests {
                 if n == 0 {
                     ResponseTemplate::new(404).set_body_string("not found")
                 } else {
-                    ResponseTemplate::new(200).set_body_string(r#"{"ok":true}"#)
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({"update_id": "u-1", "status": "completed"}))
                 }
             })
             .mount(&server)
@@ -2336,6 +2584,7 @@ mod tests {
             .and_then(|e| e.last_error)
             .is_none();
         assert!(no_err, "successful retry must not record an error");
+        assert_eq!(SEARCH_CALLS.load(Ordering::SeqCst), 2);
     }
 
     /// Provision POST hit 403 (RBAC against the upstream control

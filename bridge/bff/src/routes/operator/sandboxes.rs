@@ -13,9 +13,7 @@ use std::collections::HashMap;
 use crate::error::AppResult;
 use crate::state::AppState;
 
-use super::{
-    created_of, has_task_owner, label, name_of, ns_of, require_cluster, s, spec, status, upstream,
-};
+use super::{created_of, label, name_of, ns_of, require_cluster, s, spec, status, upstream};
 
 // ─── Sandbox fleet ───────────────────────────────────────────────────────────
 
@@ -36,25 +34,17 @@ pub struct SandboxDto {
     pub inference_policy: Option<String>,
     /// Whether AGT governance is enabled (fails closed on an empty policy set).
     pub governed: bool,
-    /// Owning standing team (label), if any — the "who owns this" registry column.
+    /// Standing Team label, direct or inherited through UID-bound Task ownership.
     pub team: Option<String>,
     /// Parent sandbox name when this is a spawned sub-agent (label-derived).
     pub parent: Option<String>,
     pub message: Option<String>,
     pub created: Option<String>,
-    /// For a Running sandbox: whether its run has produced ANY real activity
-    /// (model rounds / tool calls). `Some(false)` = the pod is Running but idle
-    /// — e.g. a chat-gateway harness waiting for input, or a hung run. Surfaced
-    /// so a green "Running" never masks a stalled agent (audit f23). `None` when
-    /// the sandbox isn't Running (the signal doesn't apply).
+    /// Assignment-scoped activity, when available. Inventory alone cannot
+    /// establish work or idleness; `None` includes unavailable observations.
     pub working: Option<bool>,
-    /// Whether this sandbox is CURRENTLY executing a task (Running AND no
-    /// terminal mission-output yet) — the same "live" test the Workspace's
-    /// Active-agents page uses. Distinct from `working` above: a sandbox can
-    /// have `working: true` (it did real work) and still be `executing: false`
-    /// (it already delivered and is simply lingering before teardown/
-    /// retention) — the exact case that made "Sandboxes: 2 running" and
-    /// "Active agents: 0 working" look contradictory when they're both true.
+    /// Current execution when established by assignment-scoped evidence.
+    /// Running pods and name-only output records do not establish this.
     pub executing: Option<bool>,
     pub cpu_millicores: Option<f64>,
     pub memory_bytes: Option<u64>,
@@ -227,6 +217,47 @@ fn describe_metrics_error(error: &kube::Error) -> String {
     }.into()
 }
 
+fn task_team(
+    sandbox: &DynamicObject,
+    tasks: &HashMap<(String, String), &DynamicObject>,
+) -> Option<String> {
+    let namespace = sandbox
+        .metadata
+        .namespace
+        .as_deref()
+        .filter(|ns| !ns.is_empty())?;
+    let mut current = sandbox;
+    let mut visited = std::collections::HashSet::new();
+    loop {
+        if current.metadata.deletion_timestamp.is_some() {
+            return None;
+        }
+        let owners = current.metadata.owner_references.as_deref()?;
+        let [owner] = owners else {
+            return None;
+        };
+        if owner.controller != Some(true)
+            || owner.api_version != "kars.azure.com/v1alpha1"
+            || owner.kind != "KarsTask"
+            || owner.uid.is_empty()
+            || !visited.insert(owner.uid.clone())
+        {
+            return None;
+        }
+        let task = *tasks.get(&(namespace.to_string(), owner.name.clone()))?;
+        if task.metadata.uid.as_deref() != Some(owner.uid.as_str())
+            || task.metadata.namespace.as_deref() != Some(namespace)
+            || task.metadata.deletion_timestamp.is_some()
+        {
+            return None;
+        }
+        if let Some(team) = label(task, "kars.azure.com/team").filter(|team| !team.is_empty()) {
+            return Some(team);
+        }
+        current = task;
+    }
+}
+
 fn inherit_sandbox_context(sandboxes: &mut [SandboxDto]) {
     let by_name: HashMap<(String, String), usize> = sandboxes
         .iter()
@@ -268,10 +299,12 @@ fn inherit_sandbox_context(sandboxes: &mut [SandboxDto]) {
     for (sandbox, (team, executing)) in sandboxes.iter_mut().zip(resolved) {
         sandbox.team = team;
         if sandbox.parent.is_some() {
-            let observed_working =
-                sandbox.phase.as_deref() == Some("Running") && sandbox.working == Some(true);
-            sandbox.executing =
-                executing.map(|parent_executing| parent_executing && observed_working);
+            sandbox.executing = match (executing, sandbox.phase.as_deref(), sandbox.working) {
+                (Some(false), _, _) => Some(false),
+                (Some(true), Some("Running"), observed) => observed,
+                (Some(true), _, _) => Some(false),
+                (None, _, _) => None,
+            };
         }
     }
 }
@@ -306,14 +339,10 @@ pub async fn list_sandboxes(State(state): State<AppState>) -> AppResult<Json<Vec
         .await
         .map_err(upstream)?;
     let mut dtos: Vec<SandboxDto> = items.iter().map(to_sandbox).collect();
-    let task_teams: HashMap<(String, String), String> = cluster
-        .list_kind_all("KarsTask")
-        .await
-        .map_err(upstream)?
-        .into_iter()
-        .filter_map(|task| {
-            label(&task, "kars.azure.com/team").map(|team| ((ns_of(&task), name_of(&task)), team))
-        })
+    let tasks = cluster.list_kind_all("KarsTask").await.map_err(upstream)?;
+    let tasks_by_name: HashMap<_, _> = tasks
+        .iter()
+        .map(|task| ((ns_of(task), name_of(task)), task))
         .collect();
     let pod_metrics = match cluster.list_metrics_all("PodMetrics", "pods").await {
         Ok(metrics) => metrics,
@@ -331,10 +360,8 @@ pub async fn list_sandboxes(State(state): State<AppState>) -> AppResult<Json<Vec
     // hung (a chat-gateway harness waiting for input, or a stalled loop) — the
     // operator must be able to tell that apart from a green "Running".
     for (o, d) in items.iter().zip(dtos.iter_mut()) {
-        if d.team.is_none()
-            && let Some(task_name) = label(o, "kars.azure.com/karstask")
-        {
-            d.team = task_teams.get(&(d.namespace.clone(), task_name)).cloned();
+        if d.team.is_none() {
+            d.team = task_team(o, &tasks_by_name);
         }
         if let Some(runtime_namespace) = d.runtime_namespace.as_deref() {
             let (cpu, memory) = sum_usage(
@@ -352,30 +379,10 @@ pub async fn list_sandboxes(State(state): State<AppState>) -> AppResult<Json<Vec
             d.memory_bytes = memory;
         }
         if d.phase.as_deref() == Some("Running") {
-            let persisted_activity = cluster
-                .read_mission_trace(&d.name)
-                .await
-                .and_then(|raw| serde_json::from_str::<Vec<serde_json::Value>>(&raw).ok())
-                .map(|v| !v.is_empty())
-                .unwrap_or(false);
-            let has_activity =
-                persisted_activity || !cluster.sandbox_live_trace(&d.name).await.is_empty();
-            d.working = Some(has_activity);
-            // "Executing right now" — the same test the Workspace's Active
-            // agents page uses (live iff Running AND no terminal mission-output
-            // yet). A sandbox that already delivered still shows `working: true`
-            // (it DID real work) but `executing: false` (nothing left to do,
-            // just lingering before teardown/retention) — this is what makes
-            // "Sandboxes: N running" and "Active agents: 0 working" both
-            // correct at once instead of reading as a contradiction. Only
-            // applies to a task-owned sandbox — a standing sandbox with no
-            // KarsTask (e.g. the Bridge's own orchestrator) never gets a
-            // mission-output ConfigMap, so it would otherwise look permanently
-            // "not yet delivered" and inflate this count.
-            if has_task_owner(o) {
-                let delivered = cluster.read_mission_output(&d.name).await.is_some();
-                d.executing = Some(!delivered);
-            }
+            // Inventory has no assignment-scoped activity read. Unavailable is
+            // not idle; detailed observations belong to the authorized run view.
+            d.working = None;
+            d.executing = None;
         }
     }
     inherit_sandbox_context(&mut dtos);
@@ -538,8 +545,104 @@ pub async fn capacity(State(state): State<AppState>) -> AppResult<Json<CapacityD
 mod tests {
     use super::{
         SandboxDto, cpu_millicores, describe_metrics_error, inherit_sandbox_context, memory_bytes,
-        metric_usage, sum_usage,
+        metric_usage, sum_usage, task_team,
     };
+
+    fn task_chain() -> Vec<kube::core::DynamicObject> {
+        ["sandbox", "phase", "role", "root"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| {
+                let mut object: kube::core::DynamicObject = serde_json::from_value(serde_json::json!({
+                    "apiVersion":"kars.azure.com/v1alpha1",
+                    "kind": if index == 0 { "KarsSandbox" } else { "KarsTask" },
+                    "metadata":{"name":name,"namespace":"work","uid":format!("uid-{name}")}
+                })).unwrap();
+                if let Some(parent) = ["phase", "role", "root"].get(index) {
+                    object.metadata.owner_references = Some(serde_json::from_value(serde_json::json!([{
+                        "apiVersion":"kars.azure.com/v1alpha1","kind":"KarsTask",
+                        "name":parent,"uid":format!("uid-{parent}"),"controller":true,"blockOwnerDeletion":true
+                    }])).unwrap());
+                } else {
+                    object.metadata.labels = Some(std::collections::BTreeMap::from([
+                        ("kars.azure.com/team".into(), "maintenance".into()),
+                    ]));
+                }
+                object
+            })
+            .collect()
+    }
+
+    fn chain_team(objects: &[kube::core::DynamicObject]) -> Option<String> {
+        let tasks = objects[1..]
+            .iter()
+            .map(|task| ((super::ns_of(task), super::name_of(task)), task))
+            .collect();
+        task_team(&objects[0], &tasks)
+    }
+
+    #[test]
+    fn reviewed_task_team_resolves_phase_role_root_and_direct_task() {
+        let objects = task_chain();
+        assert_eq!(chain_team(&objects).as_deref(), Some("maintenance"));
+        let direct = vec![objects[2].clone(), objects[3].clone()];
+        assert_eq!(chain_team(&direct).as_deref(), Some("maintenance"));
+    }
+
+    #[test]
+    fn reviewed_task_team_rejects_stale_cross_namespace_and_missing_ancestors() {
+        for index in 1..4 {
+            let mut objects = task_chain();
+            objects[index].metadata.uid = Some("replacement".into());
+            assert_eq!(chain_team(&objects), None);
+            let mut objects = task_chain();
+            objects[index].metadata.namespace = Some("another-tenant".into());
+            assert_eq!(chain_team(&objects), None);
+            let mut objects = task_chain();
+            objects.remove(index);
+            assert_eq!(chain_team(&objects), None);
+        }
+    }
+
+    #[test]
+    fn reviewed_task_team_rejects_ambiguous_invalid_and_label_only_ownership() {
+        for index in 0..3 {
+            for mutation in 0..6 {
+                let mut objects = task_chain();
+                let owners = objects[index].metadata.owner_references.as_mut().unwrap();
+                match mutation {
+                    0 => owners[0].uid.clear(),
+                    1 => owners[0].controller = Some(false),
+                    2 => owners[0].api_version = "untrusted.example/v1".into(),
+                    3 => owners[0].kind = "KarsTeam".into(),
+                    4 => owners.push(owners[0].clone()),
+                    _ => owners.clear(),
+                }
+                assert_eq!(chain_team(&objects), None, "{index}/{mutation}");
+            }
+        }
+        let mut objects = task_chain();
+        objects[0].metadata.owner_references = None;
+        objects[0].metadata.labels = Some(std::collections::BTreeMap::from([(
+            "kars.azure.com/karstask".into(),
+            "root".into(),
+        )]));
+        assert_eq!(chain_team(&objects), None);
+    }
+
+    #[test]
+    fn reviewed_task_team_rejects_deletion_and_cycles() {
+        for index in 0..4 {
+            let mut objects = task_chain();
+            objects[index].metadata.deletion_timestamp =
+                Some(serde_json::from_value(serde_json::json!("2026-11-02T00:00:00Z")).unwrap());
+            assert_eq!(chain_team(&objects), None);
+        }
+        let mut objects = task_chain();
+        objects[3].metadata.labels = None;
+        objects[3].metadata.owner_references = objects[0].metadata.owner_references.clone();
+        assert_eq!(chain_team(&objects), None);
+    }
 
     #[test]
     fn resource_quantities_reject_invalid_values_without_inventing_zero() {
@@ -638,6 +741,19 @@ mod tests {
             assert_eq!(sandbox.executing, Some(true));
             assert_eq!(sandbox.working, Some(true));
         }
+    }
+
+    #[test]
+    fn unavailable_child_activity_stays_unknown() {
+        let mut sandboxes = vec![
+            sandbox("lead", None, Some("maintenance"), Some(true)),
+            sandbox("worker", Some("lead"), None, None),
+        ];
+        sandboxes[1].working = None;
+        inherit_sandbox_context(&mut sandboxes);
+        assert_eq!(sandboxes[1].team.as_deref(), Some("maintenance"));
+        assert_eq!(sandboxes[1].executing, None);
+        assert_eq!(sandboxes[1].working, None);
     }
 
     #[test]

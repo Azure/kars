@@ -51,7 +51,14 @@ pub(crate) fn qualification_requirements(
         capabilities.insert("memory".into());
     }
     let max_parallel = if let Some(plan) = bp.execution_plan.as_ref() {
-        capabilities.insert("delegation".into());
+        capabilities.insert(
+            if plan.roles.is_empty() {
+                "single-agent"
+            } else {
+                "delegation"
+            }
+            .into(),
+        );
         if !plan.deliverables.is_empty() {
             capabilities.insert("artifacts".into());
         }
@@ -78,6 +85,7 @@ pub(super) async fn check_models(
     bp: &crate::routes::tasks::BlueprintDto,
     budget_tokens: Option<i64>,
     workload: Option<&str>,
+    qualification_run: bool,
     checks: &mut Vec<Check>,
 ) {
     // 4. Model is one the cluster serves. Use the exact same provider-aware
@@ -144,9 +152,15 @@ pub(super) async fn check_models(
                         budget_tokens,
                     );
                     let qualified = qualification.as_ref().copied().unwrap_or(false);
-                    let validation_note = crate::routes::options::route_validation_note()
-                        .ok()
-                        .flatten();
+                    let validation_note = if qualification_run {
+                        Some(if workload.is_some_and(|value| value.eq_ignore_ascii_case("team")) {
+                            crate::routes::teams::qualification::contract::NOTE
+                        } else { crate::routes::qualification_runs::NOTE })
+                    } else {
+                        crate::routes::options::route_validation_note()
+                            .ok()
+                            .flatten()
+                    };
                     checks.push(Check {
                         id: "route_qualification".into(),
                         label: if qualified {
@@ -202,10 +216,15 @@ pub(super) async fn check_models(
                                     option,
                                 )
                                 .and_then(|qualified| {
-                                    crate::routes::options::mcp_server_admitted_for_route(
-                                        runtime,
-                                        &model.provider,
-                                        &model.deployment,
+                                    crate::routes::qualification_runs::admit_resource(
+                                        crate::routes::options::mcp_server_admitted_for_route(
+                                            runtime,
+                                            &model.provider,
+                                            &model.deployment,
+                                            option,
+                                        ),
+                                        qualification_run,
+                                        "McpServer",
                                         option,
                                     )
                                     .map(|admitted| (qualified, admitted, option))
@@ -270,25 +289,26 @@ pub(super) async fn check_models(
                         });
                     }
                     if let Some(memory) = bp.memory.as_deref().filter(|memory| !memory.is_empty()) {
-                        let qualification = find_resource(&options.memories, memory)
-                            .map(|option| {
-                                crate::routes::options::memory_binding_qualified_for_route(
-                                    runtime,
-                                    &model.provider,
-                                    &model.deployment,
-                                    option,
-                                )
-                                .and_then(|qualified| {
-                                    crate::routes::options::memory_binding_admitted_for_route(
+                        let qualification =
+                            find_resource(&options.memories, memory)
+                                .map(|option| {
+                                    crate::routes::options::memory_binding_qualified_for_route(
                                         runtime,
                                         &model.provider,
                                         &model.deployment,
                                         option,
                                     )
+                                    .and_then(|qualified| {
+                                        crate::routes::qualification_runs::admit_resource(
+                                        crate::routes::options::memory_binding_admitted_for_route(
+                                            runtime, &model.provider, &model.deployment, option,
+                                        ),
+                                        qualification_run, "KarsMemory", option,
+                                    )
                                     .map(|admitted| (qualified, admitted, option))
+                                    })
                                 })
-                            })
-                            .transpose();
+                                .transpose();
                         checks.push(match qualification {
                             Ok(Some((true, _, option))) => Check {
                                 id: "memory_qualification".into(),
@@ -349,25 +369,26 @@ pub(super) async fn check_models(
                         });
                     }
                     for skill in &bp.skills {
-                        let qualification = find_resource(&options.skills, skill)
-                            .map(|option| {
-                                crate::routes::options::skill_version_qualified_for_route(
-                                    runtime,
-                                    &model.provider,
-                                    &model.deployment,
-                                    option,
-                                )
-                                .and_then(|qualified| {
-                                    crate::routes::options::skill_version_admitted_for_route(
+                        let qualification =
+                            find_resource(&options.skills, skill)
+                                .map(|option| {
+                                    crate::routes::options::skill_version_qualified_for_route(
                                         runtime,
                                         &model.provider,
                                         &model.deployment,
                                         option,
                                     )
+                                    .and_then(|qualified| {
+                                        crate::routes::qualification_runs::admit_resource(
+                                        crate::routes::options::skill_version_admitted_for_route(
+                                            runtime, &model.provider, &model.deployment, option,
+                                        ),
+                                        qualification_run, "KarsSkill", option,
+                                    )
                                     .map(|admitted| (qualified, admitted, option))
+                                    })
                                 })
-                            })
-                            .transpose();
+                                .transpose();
                         checks.push(match qualification {
                             Ok(Some((true, _, option))) => Check {
                                 id: format!("skill_qualification:{skill}"),
@@ -457,9 +478,15 @@ pub(super) async fn check_models(
                     );
                     let route_qualified =
                         known && route_qualification.as_ref().copied().unwrap_or(false);
-                    let validation_note = crate::routes::options::route_validation_note()
-                        .ok()
-                        .flatten();
+                    let validation_note = if qualification_run {
+                        Some(if workload.is_some_and(|value| value.eq_ignore_ascii_case("team")) {
+                            crate::routes::teams::qualification::contract::NOTE
+                        } else { crate::routes::qualification_runs::NOTE })
+                    } else {
+                        crate::routes::options::route_validation_note()
+                            .ok()
+                            .flatten()
+                    };
                     let mcp_qualified = bp.mcp_servers.iter().all(|server| {
                         options
                             .mcp_servers

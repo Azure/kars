@@ -234,6 +234,17 @@ async fn passive_artifact_previews_keep_inline_viewing_without_mime_sniffing_or_
 }
 
 #[tokio::test]
+async fn csv_download_preserves_utf8_quotes_and_crlf_with_its_media_type() {
+    let bytes = "vendor,notes,cost\r\n\"Example, EU\",\"Verified ✓\",1200\r\n".as_bytes();
+    let (state, _) = fixture("comparison.csv", bytes, false, false);
+    let response = fetch(state, "comparison.csv", "owner", Method::GET).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "text/csv; charset=utf-8");
+    assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(to_bytes(response.into_body(), 65536).await.unwrap().as_ref(), bytes);
+}
+
+#[tokio::test]
 async fn artifact_head_has_the_same_protection_and_filename_is_header_safe() {
     let name = "report\"\r\n.svg";
     let (state, _) = fixture(name, b"<svg/>", false, false);

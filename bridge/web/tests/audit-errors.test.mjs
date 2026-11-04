@@ -19,8 +19,9 @@ class BffError extends Error {
   }
 }
 
-function load(path, imports) {
+function load(path, imports, globals = {}) {
   const context = {
+    ...globals,
     exports: {},
     require(name) {
       assert.ok(Object.hasOwn(imports, name), `unexpected dependency: ${name}`);
@@ -172,3 +173,122 @@ const recordedAudit = (integrity) => ({
     assert.match(html, /Claims pass/);
     assert.doesNotMatch(html, /Verified|Cryptographic checks passed/);
   });
+
+  test("receipt summary dates agree across server/browser locales and timezones", () => {
+    const render = (locale, timeZone) => {
+      class EnvironmentDate extends Date {
+        toLocaleDateString(locales, options) {
+          return super.toLocaleDateString(locales ?? locale, { timeZone, ...options });
+        }
+      }
+      const { AuditReceiptRow: Row } = load("../src/app/console/audit/audit-receipt-row.tsx", {
+        "react": React,
+        "react/jsx-runtime": require("react/jsx-runtime"),
+        "@/components/compliance-pack": { CompliancePackView: empty },
+      }, { Date: EnvironmentDate });
+      return renderToStaticMarkup(React.createElement(Row, {
+        ns: "test", task: "run", summaryTask: "run", summarySeq: 1,
+        summaryVerdict: "partial", summaryCreated: "2026-10-13T00:30:00Z",
+      }));
+    };
+    const server = render("en-US", "UTC");
+    for (const [locale, zone] of [["en-GB", "Europe/London"], ["de-DE", "America/Los_Angeles"], ["ja-JP", "Asia/Tokyo"]]) {
+      assert.equal(render(locale, zone), server);
+    }
+    assert.match(server, /13 Oct UTC/);
+    assert.match(server, /dateTime="2026-10-13T00:30:00Z"/i);
+    assert.match(server, /title="2026-10-13T00:30:00Z"/);
+  });
+
+  test("missing receipt dates remain absent rather than inventing a date", () => {
+    for (const summaryCreated of [undefined, null, ""]) {
+      const html = renderToStaticMarkup(React.createElement(AuditReceiptRow, {
+        ns: "test", task: "run", summaryTask: "run", summarySeq: 1,
+        summaryVerdict: "partial", summaryCreated,
+      }));
+      assert.doesNotMatch(html, /<time|Invalid Date| UTC/);
+    }
+  });
+
+  test("expanded evidence distinguishes formatted JSON from the original signed bytes", () => {
+    const receipt = {
+      namespace: "test", task: "run", claims: coreClasses.map((c) => claim(c)),
+      scheme: "dsse-ed25519", key_id: "published-key", inclusion_seq: 0,
+    };
+    const result = {
+      verified: true,
+      checks: [],
+      evidence: { signed_statement: { predicate: { message: "retained content" } } },
+    };
+    const states = [true, receipt, null, null, false, false, null, false, result, null];
+    let stateIndex = 0;
+    const { AuditReceiptRow: ExpandedRow } = load("../src/app/console/audit/audit-receipt-row.tsx", {
+      "react": { ...React, useState: () => [states[stateIndex++], () => {}] },
+      "react/jsx-runtime": require("react/jsx-runtime"),
+      "@/components/compliance-pack": { CompliancePackView: empty },
+    });
+    const html = renderToStaticMarkup(React.createElement(ExpandedRow, {
+      ns: "test", task: "run", summaryTask: "run", summarySeq: 0, summaryVerdict: "verified",
+    }));
+    assert.equal(stateIndex, states.length);
+    assert.match(html, /Signed statement \(decoded, formatted JSON\)/);
+    assert.match(html, /preserve the JSON content, not the original signed bytes/);
+    assert.match(html, /checks the retained DSSE payload and signature/);
+    assert.match(html, /retained content/);
+    assert.match(html, /Download JSON/);
+    assert.match(html, /Cryptographic checks passed/);
+    assert.match(html, /this does not prove control enforcement/);
+    assert.doesNotMatch(html, /the exact bytes the signature covers/);
+  });
+
+    for (const status of [404, 403, 503, "network", "invalid-json"]) {
+      test(`compliance ${status} stays visible and can retry without invalidating receipt verification`, async () => {
+        const receipt = {
+          namespace: "test", task: "run", claims: coreClasses.map((c) => claim(c)),
+          scheme: "dsse-ed25519", key_id: "published-key", inclusion_seq: 0,
+        };
+        const states = [false, null, null, null, false, false, null, false, null, null];
+        const requests = [];
+        let stateIndex = 0, retry = false;
+        const { AuditReceiptRow: Row } = load("../src/app/console/audit/audit-receipt-row.tsx", {
+          "react": { ...React, useState: () => {
+            const index = stateIndex++;
+            return [states[index], (value) => { states[index] = value; }];
+          } },
+          "react/jsx-runtime": require("react/jsx-runtime"),
+          "@/components/compliance-pack": { CompliancePackView: () => React.createElement("p", null, "Compliance pack loaded") },
+        }, {
+          fetch: async (url) => {
+            requests.push(url);
+            if (url.endsWith("/receipt")) return { ok: true, status: 200, json: async () => receipt };
+            assert.match(url, /\/compliance$/);
+            if (retry) return { ok: true, status: 200, json: async () => ({}) };
+            if (status === "network") throw new Error("private transport detail");
+            if (status === "invalid-json") return { ok: true, status: 200, json: async () => { throw new Error("private body"); } };
+            return { ok: false, status };
+          },
+        });
+        const props = { ns: "test", task: "run", summaryTask: "run", summarySeq: 0, summaryVerdict: "verified" };
+        const render = () => { stateIndex = 0; return Row(props); };
+        const buttons = (node) => {
+          if (!node || typeof node !== "object") return [];
+          if (Array.isArray(node)) return node.flatMap(buttons);
+          return [...(node.type === "button" ? [node] : []), ...buttons(node.props?.children)];
+        };
+        await buttons(render())[0].props.onClick();
+        const tree = render();
+        const html = renderToStaticMarkup(tree);
+        assert.match(html, /role="alert"/);
+        assert.match(html, status === 404 ? /No compliance mapping is available/ : /Compliance mapping couldn&#x27;t be loaded/);
+        assert.match(html, /Verify now/);
+        assert.doesNotMatch(html, /private transport detail|private body|Compliance pack loaded/);
+        retry = true;
+        await buttons(tree).find(button => button.props.children === "Retry compliance mapping").props.onClick();
+        const recovered = renderToStaticMarkup(render());
+        assert.doesNotMatch(recovered, /role="alert"|Retry compliance mapping/);
+        assert.match(recovered, /Compliance pack loaded/);
+        assert.match(recovered, /Verify now/);
+        assert.equal(requests.filter(url => url.endsWith("/receipt")).length, 1);
+        assert.equal(requests.filter(url => url.endsWith("/compliance")).length, 2);
+      });
+    }

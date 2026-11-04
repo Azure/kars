@@ -23,6 +23,20 @@ pub(crate) enum Error {
     Upstream,
     #[error("GitHub response exceeds the service limit")]
     Limit,
+    #[error("GitHub authentication {stage}: {reason} (HTTP {status:?})")]
+    Authentication {
+        stage: &'static str,
+        reason: &'static str,
+        status: Option<u16>,
+    },
+}
+
+fn authentication_error(stage: &'static str, reason: &'static str, status: Option<u16>) -> Error {
+    Error::Authentication {
+        stage,
+        reason,
+        status,
+    }
 }
 
 pub(crate) fn client() -> Result<reqwest::Client, Error> {
@@ -139,6 +153,11 @@ impl GitHubApp {
         self.write
     }
 
+    #[cfg(test)]
+    pub(crate) fn api_for_test(&self) -> &str {
+        &self.api
+    }
+
     fn jwt(&self, now: i64) -> Result<String, Error> {
         jsonwebtoken::encode(
             &Header::new(Algorithm::RS256),
@@ -163,13 +182,33 @@ impl GitHubApp {
 
     async fn json<T: serde::de::DeserializeOwned>(
         &self,
+        stage: &'static str,
         request: reqwest::RequestBuilder,
     ) -> Result<T, Error> {
-        let response = request.send().await.map_err(|_| Error::Upstream)?;
+        let response = request.send().await.map_err(|error| {
+            let reason = if error.is_timeout() {
+                "request_timeout"
+            } else if error.is_connect() {
+                "connection_failed"
+            } else {
+                "request_failed"
+            };
+            authentication_error(stage, reason, None)
+        })?;
+        let status = Some(response.status().as_u16());
         if !response.status().is_success() {
-            return Err(Error::Upstream);
+            return Err(authentication_error(stage, "http_rejected", status));
         }
-        serde_json::from_slice(&bounded(response, 256 * 1024).await?).map_err(|_| Error::Upstream)
+        let body = bounded(response, 256 * 1024).await.map_err(|error| {
+            let reason = if matches!(error, Error::Limit) {
+                "response_too_large"
+            } else {
+                "response_read_failed"
+            };
+            authentication_error(stage, reason, status)
+        })?;
+        serde_json::from_slice(&body)
+            .map_err(|_| authentication_error(stage, "invalid_response", status))
     }
 
     pub(crate) async fn token(&self, repo: &str) -> Result<String, Error> {
@@ -184,7 +223,9 @@ impl GitHubApp {
             return Ok(cached.token.clone());
         }
         cache.remove(repo);
-        let jwt = self.jwt(now)?;
+        let jwt = self
+            .jwt(now)
+            .map_err(|_| authentication_error("jwt", "signing_failed", None))?;
         #[derive(Deserialize)]
         struct Installation {
             id: u64,
@@ -192,17 +233,30 @@ impl GitHubApp {
             suspended_at: Option<String>,
         }
         let installation: Installation = self
-            .json(self.request(
-                reqwest::Method::GET,
-                &format!("/repos/{repo}/installation"),
-                &jwt,
-            ))
+            .json(
+                "installation_lookup",
+                self.request(
+                    reqwest::Method::GET,
+                    &format!("/repos/{repo}/installation"),
+                    &jwt,
+                ),
+            )
             .await?;
-        if installation.id != self.installation
-            || installation.app_id.to_string() != self.app_id
-            || installation.suspended_at.is_some()
-        {
-            return Err(Error::Scope);
+        let installation_failure = if installation.id != self.installation {
+            Some("installation_mismatch")
+        } else if installation.app_id.to_string() != self.app_id {
+            Some("app_mismatch")
+        } else if installation.suspended_at.is_some() {
+            Some("installation_suspended")
+        } else {
+            None
+        };
+        if let Some(reason) = installation_failure {
+            return Err(authentication_error(
+                "installation_validation",
+                reason,
+                None,
+            ));
         }
         let permission = if self.write { "write" } else { "read" };
         let permissions = BTreeMap::from([
@@ -227,6 +281,7 @@ impl GitHubApp {
         }
         let minted: Token = self
             .json(
+                "token_mint",
                 self.request(
                     reqwest::Method::POST,
                     &format!("/app/installations/{}/access_tokens", self.installation),
@@ -240,18 +295,31 @@ impl GitHubApp {
             .await?;
         // GitHub must attest the FULL owner/repo, not just a same-named repo in
         // another installation. Reject omitted/broader permission provenance.
-        if minted.repositories.len() != 1
+        // Tokens are opaque, including GitHub's stateless JWT format. Validate
+        // only bounded RFC 6750 bearer transport syntax, not token internals.
+        let bearer = minted.token.trim_end_matches('=');
+        let token_failure = if minted.repositories.len() != 1
             || repository(&minted.repositories[0].full_name).as_deref() != Some(repo)
-            || minted.permissions != permissions
-            || minted.expires_at.timestamp() <= now + 60
-            || minted.expires_at.timestamp() > now + 3660
-            || !(16..=4096).contains(&minted.token.len())
-            || !minted
-                .token
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
         {
-            return Err(Error::Scope);
+            Some("repository_mismatch")
+        } else if minted.permissions != permissions {
+            Some("permissions_mismatch")
+        } else if minted.expires_at.timestamp() <= now + 60
+            || minted.expires_at.timestamp() > now + 3660
+        {
+            Some("expiry_invalid")
+        } else if !(16..=4096).contains(&minted.token.len())
+            || bearer.is_empty()
+            || !bearer
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"_-.~+/".contains(&byte))
+        {
+            Some("token_format_invalid")
+        } else {
+            None
+        };
+        if let Some(reason) = token_failure {
+            return Err(authentication_error("token_validation", reason, None));
         }
         let token = minted.token;
         cache.insert(

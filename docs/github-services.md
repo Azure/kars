@@ -55,12 +55,30 @@ missing returned
 permissions and verifies both the repository's installation/App identity and the
 token's full owner/repository provenance before caching it.
 
-Previously enrolled installations must approve the additional **Checks: read**
-and **Commit statuses: read** permissions. Both are required by the exposed
-check-run and combined-status reads, including when writes are enabled. An
+Previously enrolled installations must approve every required permission, including
+**Actions: read**, **Checks: read**, **Commit statuses: read**, and **Issues: read/write**
+when the binding enables writes. Earlier Console setup instructions omitted Actions
+and Issues. A write-enabled binding requests the write token profile even for a
+read-only task; missing any required permission can therefore block all of its
+GitHub requests. Successful App credential verification and repository discovery
+alone do not verify the router's token permission profile. An
 installation that lacks a required grant fails token acquisition honestly; the
 router never retries with fewer permissions or falls back to another credential.
 Changing App permissions alone does not repair an older router's token profile.
+
+An authentication failure returns the same generic 502 to the agent. Router logs
+identify the failing stage (`jwt`, `installation_lookup`, `installation_validation`,
+`token_mint`, or `token_validation`), a fixed reason, and an HTTP status when available.
+They never include credentials, upstream bodies, repository names, or request URLs.
+Use that stage to distinguish connection/HTTP failures from rejected identity,
+permission, repository, expiry, or token-format provenance; do not assume a 502 means
+missing installation permissions.
+
+Installation tokens are opaque: GitHub's stateless `ghs_APPID_JWT` format includes
+periods and variable-length content. The router does not decode or validate that
+JWT. It retains its 16–4096-byte transport bound and RFC 6750 bearer syntax checks
+(including rejection of whitespace/control characters), alongside the unchanged
+installation, repository, exact permission, and expiry checks on GitHub's response.
 
 Update the single `config.json` key atomically to rotate identity, key,
 installation, permissions or scope. The next request observing the projected
@@ -72,10 +90,44 @@ installation/token controls as well. An already-dispatched mutation may finish.
 Recreated Sandbox/namespace/task identities require explicit operator enrollment;
 credentials are not inherited or automatically provisioned for spawned workers.
 
+## Bridge repository readiness
+
+Before creating a Mission or Team with selected repositories, run **Check readiness**.
+It checks both your connected repository list and the workspace administrator's current
+approval. Connecting GitHub does not automatically approve repositories for a workspace.
+If approval fails, open **Configuration → GitHub** to check the connected repositories;
+if they are connected, ask your workspace administrator to approve the selected
+repositories and the required read-only or pull-request permission, then check again.
+Typed Missions derive that permission from the reviewed `github-pr` capability;
+Teams retain their existing pull-request permission requirement.
+
+Protected repository access cannot be combined with direct GitHub entries in the
+package's **Network** settings or Team role settings. Readiness reports those entries
+(including wildcard matches); remove the reported entries, keep the repositories
+selected, and check again. Nothing is silently removed. This does not remove protected
+GitHub access or require you to add a token.
+
+Changing the repository selection invalidates the previous check. Review and submission
+use the same selection, including after returning to composition. Creation still checks
+live authority again. A saved Mission's readiness check uses its stored binding and
+current approval; a replaced connection or approval may require a new draft. Readiness
+is not proof of a successful GitHub operation or completed customer acceptance.
+
 ## Agent-facing contract
 
 Requests are accepted only from a loopback peer in the same pod. No caller
 credential, cookie, proxy header, or redirect authorization is forwarded.
+Successful REST responses are validated as bounded JSON and GitHub's
+`temp_clone_token` field is removed from every object, including repositories
+nested in pull requests or arrays, before either native runtime or the REST
+adapter receives it. Other metadata is preserved; malformed JSON fails closed.
+Git smart-HTTP bytes and Actions log handling remain separate and unchanged.
+
+Native `http_fetch` results include `observed_at`, an RFC 3339 UTC timestamp from
+the router clock after reading the bounded response body. Both runtimes preserve
+this field. It is the router's observation time, not GitHub's `Date` header, a
+commit timestamp, or proof that sequential reads are atomic. For truncated
+responses it records when the bounded read stopped, not complete receipt.
 
 | Endpoint | Behavior |
 | --- | --- |
@@ -90,8 +142,46 @@ credential, cookie, proxy header, or redirect authorization is forwarded.
 For example, an agent can clone using
 `git clone http://127.0.0.1:8443/git/OWNER/REPO.git` or call the REST prefix with
 an ordinary HTTP client. No `gh auth login`, credential helper, token response,
-entrypoint rewrite, or changes to existing CLI flags are required. Normal HTTPS
-GitHub URLs are **not silently rewritten**.
+entrypoint rewrite, or changes to existing CLI flags are required. Native reviewed
+execution does not need (and must not enable) local URLs or shell access: both
+Hermes and OpenClaw use `POST /egress/fetch` with a canonical
+`https://api.github.com/repos/OWNER/REPO/…` GET. When configured, the router
+dispatches that request through the same keyless GitHub service, sharing its
+repository policy, token cache, concurrency limit and socket-derived same-pod
+check. Only GET without a body or caller credentials is accepted on this path;
+optional `Accept` and `User-Agent` string headers are accepted but discarded in
+favor of the service's fixed GitHub media type and router user agent. Other caller
+headers, including credentials, remain rejected before token acquisition.
+Noncanonical origins, encoded/dot paths, unsupported queries and repositories
+outside the binding fail closed. Ordinary native network/file permissions remain
+read-only with respect to GitHub. Publication requires the explicit native
+`github-pr` capability described below.
+
+The fetch endpoint retains its authentication, scoped egress dispatch claim and
+telemetry, and returns the usual `status`, `headers`, `body`, `truncated`
+observation (including log-tail truncation). GitHub fetch has a 30-second total
+deadline. Invalid configuration or removal after a configuration was observed
+(including the projection at router startup) never falls back to unauthenticated
+GitHub fetch. Governed bindings use a required projection; missing initial
+configuration prevents the sandbox from starting. A router that has never had
+GitHub configuration retains ordinary public fetch behavior; other public HTTPS
+hosts remain ordinary egress, with no GitHub credential injection. General HTTPS
+traffic and Git clone URLs are not rewritten.
+
+For Team native GET acceptance, use the member's reviewed `githubBinding`, not
+raw `api.github.com:443` or `github.com:443` egress entries. The controller rejects
+those opaque permissions with a keyless binding. The live identity-specific
+projection authorizes only repository-enforced REST/Git service requests;
+strict-mode public fetch and opaque proxy permissions are not enlarged. Threat
+intelligence denials and the inference-budget model/catalog fence still apply.
+A missing role `githubBinding` inherits the Team blueprint binding; controller
+task execution propagates it to the member sandbox and provisions the private
+identity-specific projection. A Team connection marked Ready alone does not
+prove that a member's projection is ready. Tell native roles to use canonical
+`https://api.github.com/repos/OWNER/REPO/…` GETs, not the GitHub website or an MCP
+catalog lookup. Job-log redirects separately require the exact signed download
+host to pass ordinary egress policy; explicit role blueprints do not inherit
+the Team's egress list.
 
 Supported REST reads cover repository metadata, branches/tags, commits/checks,
 issues/comments, pull requests/files/commits/reviews, and Actions
@@ -111,6 +201,82 @@ App from bypassing protected/default branches and workflow-file restrictions.
 If those controls cannot be established, leave `write` false. This service does
 not implement independent review, branch ownership, workflow scheduling, or
 automated publication/merge policy.
+
+## Reviewed native PR publication
+
+Both native runtimes expose the same bounded transaction engine: OpenClaw
+`kars_mission_github_pr` and Hermes `github_pr`. A reviewed native member phase,
+or a single-agent Mission's native synthesis, must explicitly grant `github-pr`.
+A write-enabled GitHub binding, `network`, or filesystem access alone never
+creates that authority. Decomposed synthesis cannot publish; the authorized
+member retains the actual observed PR URL/commit for file-only synthesis. The
+normal reviewed plan, unique model invocation, router tool policy, same-pod
+service checks and outcome receipt all remain required. Existing installed route
+qualification must cover this capability; the adapter is not qualification evidence.
+
+1. `inspect` requires `operation`, canonical `repository` (`owner/repo`),
+   and repository-relative `path`. Omit the create-only fields (`expected_base`,
+   `content`, `title`, `body`) or set them to `null` when a provider requires every
+   schema property. Empty strings and other non-null create values are rejected
+   during inspection. It reads the default branch and returns `expected_base`,
+   the existing UTF-8 content, or `exists=false` for a new file.
+2. `create` additionally requires that exact `expected_base`, full replacement
+   `content`, `title`, and `body`. A changed base or unchanged content fails before
+   publication. Bridge retains producer and usage evidence for the explicitly
+   reviewed native `github-pr` capability, including runs with failed tool calls;
+   a valid producer record alone does not establish successful PR publication.
+   Only one regular text file changes; existing modes and all other
+   tree entries are preserved. File contents are limited to 128 KiB, titles to
+   256 UTF-8 bytes and bodies to 64 KiB.
+3. The adapter uses fixed Git argv (never shell), a private bare object repository,
+   and the existing fixed loopback keyless `/git/OWNER/REPO.git` transport. It
+   never checks out or executes repository content. Hooks, credential helpers,
+   inherited Git configuration/proxies, remote protocols other than fixed HTTP,
+   submodule recursion, signing and attributes processing are disabled. Paths
+   beginning with `.git` in any segment (including `.github`, `.gitmodules` and
+   `.gitattributes`), traversal, symlinks, gitlinks, caller branches/refspecs and
+   arbitrary configuration are rejected. New-file parent replacement is rejected.
+4. A generated `kars/reviewed/<random-id>` branch is published with Git's atomic
+   empty-expected-old lease. This can **only create an absent ref**, not overwrite
+   an existing ref—even an unprotected ref. Default-branch writes, force updates,
+   merges and deletions are unavailable. Server branch/ruleset restrictions still
+   apply; there is no bypass request. The adapter POSTs the same-repository PR
+   through `/gh-api`, and verifies the actual 201 response, URL, branch, commit,
+   and base/head repositories before reporting success. Local exports are not PRs.
+
+A private, fsynced, create-exclusive publication receipt under
+`/sandbox/.kars-github/<assignment-identity-hash>/` is claimed **before** push.
+Ordinary native file tools cannot access this directory. It prevents a second
+publication for that repository/assignment, even with a new model call ID or
+runtime helper instance. Every post-dispatch error is conservatively ambiguous:
+retain its branch/commit/stage, inspect upstream state through approved read-only
+flows, and reconcile manually; never automatically retry or claim rollback.
+A push may have succeeded even if the PR request or response failed. Runtime
+outcome receipt failures likewise halt execution rather than replaying. The
+publication receipt survives object-workspace cleanup and cancellation; abrupt
+host/pod destruction may lose local receipts, so absence is not proof of no effect.
+The runtime reports harness-observed tool evidence, not a new router dispatch
+attestation or fabricated success URL.
+
+The Git subprocess has fixed operation deadlines, output/pack-file/process
+resource bounds, and an isolated process group terminated on cancellation.
+Linux helpers and their Git children bind their lifetime to the parent identity
+captured before spawn, including a legitimate namespace PID 1; reparenting still
+fails closed.
+These are host safety limits,
+not inference/tool-spending allowances. Normal completion removes object
+workspaces while retaining publication receipts; after abrupt process loss,
+operators may remove abandoned object directories but must preserve receipts.
+
+The shared engine is maintained in the Hermes package and copied, dereferenced,
+into OpenClaw's built distribution; both runtime images must package it alongside
+Git and Python. Update plan/CRD schemas and composer alongside runtime packaging.
+No router/token implementation is replaced by this adapter.
+
+**The generic router write prerequisite above is not waived.** This narrower
+native adapter independently prevents workflow edits and existing/default-ref
+updates, but it does not turn the general Git smart-HTTP endpoint into branch-
+scoped authorization, nor establish protection settings for other consumers.
 
 ## Egress, bounds, errors, and logs
 

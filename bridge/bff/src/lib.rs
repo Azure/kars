@@ -11,6 +11,14 @@
 pub mod auth;
 pub mod config;
 pub mod error;
+#[path = "../../../shared/sre_privacy.rs"]
+#[allow(dead_code)]
+mod sre_privacy;
+#[path = "../../../shared/sre_report.rs"]
+#[allow(dead_code)]
+mod sre_report;
+#[path = "../../../eval-corpus/src/builtin_names.rs"]
+pub(crate) mod eval_builtin_names;
 #[path = "../../../shared/eval_names.rs"]
 pub(crate) mod eval_names;
 #[path = "../../../shared/inference_budget/mod.rs"]
@@ -19,6 +27,8 @@ pub mod inference_budget_contract;
 #[path = "../../../shared/inference_budget/dispatch.rs"]
 mod inference_budget_dispatch;
 pub mod kars;
+#[path = "../../../shared/mission_record.rs"]
+pub(crate) mod mission_record;
 mod providers;
 pub mod routes;
 #[path = "../../../shared/skill_package.rs"]

@@ -10,11 +10,10 @@
 //!
 //! ### Status → [`Decision`] mapping
 //!
-//! Until the router gains explicit `X-Azureclaw-Decision*` headers
-//! (deferred to a later slice — see `slice-6-claw-eval-conformance.md
-//! §6 "Router delta: none mandatory"`), the runner infers the
-//! decision from the HTTP status code and reads `reason` opportunistically
-//! from response headers + body:
+//! The runner reads the router's explicit `x-kars-decision*` headers and
+//! otherwise infers the decision from the HTTP status. A provider HTTP 400
+//! counts as an inference denial only with explicit Blocked/InferencePolicy
+//! attribution and a nonempty router reason; generic bad requests remain errors:
 //!
 //! | Status | [`Decision`]      |
 //! |--------|-------------------|
@@ -26,11 +25,11 @@
 //! | 5xx | inconclusive upstream failure |
 //! | other | inconclusive protocol failure |
 //!
-//! The scenario kind unambiguously determines [`PolicyKindRef`] for
-//! denials in the v1 starter corpora (every starter case is single-
-//! kind by construction; verified by the `byPolicyKind` matcher in
-//! [`crate::scenarios`]). If the router later surfaces
-//! `X-Azureclaw-Decision-By`, the transport will prefer that header.
+//! Inference HTTP responses retain their legacy scenario-kind fallback. Memory
+//! REST and MCP responses require explicit policy attribution: a generic HTTP
+//! 403 is an inconclusive access failure, not proof that the requested policy ran.
+//! MemoryRead uses the governed REST route; ToolCall MCP requests still have to
+//! satisfy the router's socket and protocol boundaries.
 
 use crate::outcome::ReplayError;
 use crate::pod_proxy::PodProxy;
@@ -124,6 +123,7 @@ pub struct Transport {
     base: String,
     forward_proxy_addr: Option<String>,
     pod_proxy: Option<PodProxy>,
+    memory_store: Option<String>,
     timeout: Duration,
 }
 
@@ -147,6 +147,7 @@ impl Transport {
             base,
             forward_proxy_addr: None,
             pod_proxy: None,
+            memory_store: None,
             timeout,
         })
     }
@@ -161,6 +162,31 @@ impl Transport {
     pub(crate) fn with_pod_proxy(mut self, proxy: PodProxy) -> Self {
         self.pod_proxy = Some(proxy);
         self
+    }
+
+    pub fn with_memory_store(mut self, store: impl Into<String>) -> Self {
+        self.memory_store = Some(store.into());
+        self
+    }
+
+    /// Validate at replay time so only MemoryRead requires a bound store.
+    pub fn memory_store(&self) -> anyhow::Result<&str> {
+        let store = self
+            .memory_store
+            .as_deref()
+            .ok_or(ReplayError::Protocol)
+            .context("MemoryRead requires --memory-store")?;
+        let alphanumeric = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+        let valid = (1..=63).contains(&store.len())
+            && store.bytes().all(|b| alphanumeric(b) || b == b'-')
+            && store.as_bytes().first().copied().is_some_and(alphanumeric)
+            && store.as_bytes().last().copied().is_some_and(alphanumeric);
+        if !valid {
+            return Err(ReplayError::Protocol).context(
+                "MemoryRead --memory-store must be a lowercase DNS label of 1–63 characters",
+            );
+        }
+        Ok(store)
     }
 
     pub async fn egress_connect(
@@ -208,27 +234,75 @@ pub async fn response_to_decision(
     response: Response,
     scenario_default_kind: PolicyKindRef,
 ) -> Result<ActualParts, ReplayError> {
+    http_response_to_decision(response, Some(scenario_default_kind)).await
+}
+
+/// Governed memory REST responses never infer a policy kind from the scenario.
+/// A generic 403 is an access failure, not evidence of memory enforcement.
+pub async fn memory_response_to_decision(response: Response) -> Result<ActualParts, ReplayError> {
+    http_response_to_decision(response, None).await
+}
+
+async fn http_response_to_decision(
+    response: Response,
+    scenario_default_kind: Option<PolicyKindRef>,
+) -> Result<ActualParts, ReplayError> {
     let status = response.status();
     let headers = response.headers().clone();
 
-    let status_decision = decision_from_status(status)?;
+    let status_decision = if status == StatusCode::BAD_REQUEST
+        && scenario_default_kind == Some(PolicyKindRef::InferencePolicy)
+    {
+        Decision::Blocked
+    } else {
+        decision_from_status(status)?
+    };
     let (header_decision, header_by_kind) = decision_headers(&headers)?;
-
     let header_reason = reason_header(&headers)?;
+    if status == StatusCode::BAD_REQUEST
+        && (header_decision != Some(Decision::Blocked)
+            || header_by_kind != Some(PolicyKindRef::InferencePolicy)
+            || !header_reason
+                .as_ref()
+                .is_some_and(|reason| !reason.trim().is_empty()))
+    {
+        return Err(ReplayError::Protocol);
+    }
+    if scenario_default_kind.is_none() {
+        if status == StatusCode::FORBIDDEN
+            && (header_decision != Some(Decision::Blocked) || header_by_kind.is_none())
+        {
+            return Err(ReplayError::Authentication);
+        }
+        if header_decision.is_some_and(|decision| decision != status_decision) {
+            return Err(ReplayError::Protocol);
+        }
+    }
 
     let body = response_body(response).await?;
+    let parsed = serde_json::from_str::<Value>(&body).ok();
     if status.is_success() && status != StatusCode::NO_CONTENT {
-        let value = serde_json::from_str::<Value>(&body).map_err(|_| ReplayError::Protocol)?;
+        let value = parsed.as_ref().ok_or(ReplayError::Protocol)?;
         if !value.is_object() || value.get("error").is_some() {
             return Err(ReplayError::Protocol);
         }
+    }
+    if status.is_success()
+        && scenario_default_kind == Some(PolicyKindRef::InferencePolicy)
+        && let Some(value) = parsed.as_ref()
+    {
+        tracing::info!(
+            http_status = status.as_u16(),
+            observation = ?crate::inference_diagnostics::summarize(value),
+            "Inference safety observation; counts do not change the HTTP verdict"
+        );
     }
 
     let decision = header_decision.unwrap_or(status_decision);
     let by_policy_kind = header_by_kind.or(if decision == Decision::Allowed {
         None
     } else {
-        Some(scenario_default_kind)
+        scenario_default_kind
     });
 
     let reason = header_reason.or_else(|| reason_from_body(&body));
@@ -251,13 +325,11 @@ pub async fn response_to_decision(
 /// - A valid, correctly correlated successful result means `Allowed`.
 /// - Malformed content is rejected using the router's shared typed decoder.
 ///
-/// Non-2xx HTTP statuses fall through to [`decision_from_status`] —
-/// the router's transport layer rejected the request before pipeline
-/// dispatch (e.g. 413 body-size, 406 Accept, 401 OAuth).
-pub async fn mcp_response_to_decision(
-    response: Response,
-    scenario_default_kind: PolicyKindRef,
-) -> Result<ActualParts, ReplayError> {
+/// A 403 requires explicit `Blocked` and policy-kind headers; otherwise it
+/// is an inconclusive authentication/access failure, including local-only
+/// socket refusals. No MCP policy kind is inferred from the scenario.
+/// Other non-2xx statuses use [`decision_from_status`].
+pub async fn mcp_response_to_decision(response: Response) -> Result<ActualParts, ReplayError> {
     let status = response.status();
     let headers = response.headers().clone();
 
@@ -266,6 +338,14 @@ pub async fn mcp_response_to_decision(
     let header_reason = reason_header(&headers)?;
 
     let body = response_body(response).await?;
+
+    // An HTTP access denial can occur before MCP dispatch (for example the
+    // same-router socket boundary). It is not evidence of a tool/memory policy.
+    if status == StatusCode::FORBIDDEN
+        && (header_decision != Some(Decision::Blocked) || header_by_kind.is_none())
+    {
+        return Err(ReplayError::Authentication);
+    }
 
     let (body_decision, body_reason) = if status.is_success() {
         interpret_mcp_envelope(&body).ok_or(ReplayError::Protocol)?
@@ -277,11 +357,7 @@ pub async fn mcp_response_to_decision(
     };
 
     let decision = header_decision.unwrap_or(body_decision);
-    let by_policy_kind = header_by_kind.or(if decision == Decision::Allowed {
-        None
-    } else {
-        Some(scenario_default_kind)
-    });
+    let by_policy_kind = header_by_kind;
     let reason = header_reason.or(body_reason);
 
     Ok(ActualParts {
@@ -362,6 +438,11 @@ async fn observe_connect(
             let decision = decision_from_status(
                 StatusCode::from_u16(status).map_err(|_| ReplayError::Protocol)?,
             )?;
+            // Finite-mode tunnel refusal precedes the allowlist. Do not attribute
+            // that boundary decision to an EgressAllowlist that was never checked.
+            let governed_tunnel_refusal = status == 403
+                && reason_phrase
+                    == "Forbidden — Opaque tunnels are unsupported for governed inference; use mediated router APIs";
             let reason = if decision == Decision::Allowed {
                 None
             } else {
@@ -369,7 +450,7 @@ async fn observe_connect(
             };
             Ok(ActualParts {
                 decision,
-                by_policy_kind: if decision == Decision::Allowed {
+                by_policy_kind: if decision == Decision::Allowed || governed_tunnel_refusal {
                     None
                 } else {
                     Some(PolicyKindRef::EgressAllowlist)
@@ -504,7 +585,7 @@ fn decision_from_status(s: StatusCode) -> Result<Decision, ReplayError> {
 fn parse_decision_header(s: &str) -> Option<Decision> {
     match s {
         "Allowed" => Some(Decision::Allowed),
-        "Blocked" => Some(Decision::Blocked),
+        "Blocked" | "blocked" => Some(Decision::Blocked),
         "RateLimited" => Some(Decision::RateLimited),
         "BudgetExceeded" => Some(Decision::BudgetExceeded),
         _ => None,

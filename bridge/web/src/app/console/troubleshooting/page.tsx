@@ -8,8 +8,11 @@
 import { PageHeader, Section, Stat } from "@/components/ui";
 import { WiringBadge } from "@/components/wiring-badge";
 import { Icon } from "@/components/icon";
-import { authWired, operatorIdentity } from "@/lib/config";
-import { BffError, getSystem, getDiagnostics } from "@/lib/bff";
+import { ConsoleLoadError } from "@/components/console-load-error";
+import { LiveRefresh } from "@/components/live-refresh";
+import { authWired, operatorIdentity, headlampUrl, headlampSsoEnabled } from "@/lib/config";
+import { headlampLink } from "@/lib/headlamp";
+import { getSystem, getDiagnostics } from "@/lib/bff";
 import type { WiringStatus, Diagnostics } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -19,39 +22,39 @@ function connectorTone(status: WiringStatus): string {
 }
 
 const LEAD =
-  "Real problems first — what's failing right now and how to fix it — then the honest end-to-end wiring map. Every status here is read from the live cluster, nothing implied to work that doesn't.";
+  "Review cluster signals that need attention, then inspect the installed pipeline. These checks do not prove that an agent can finish your task; use its run activity and delivered results to verify that.";
 
 export default async function SystemPage() {
   let system;
   try {
     system = await getSystem();
   } catch (err) {
-    const code = err instanceof BffError ? err.code : "unknown";
     return (
       <div className="space-y-6">
+        <LiveRefresh active intervalMs={8000} />
         <PageHeader eyebrow="Operator Console" title="Troubleshooting" lead={LEAD} />
-        <div className="kb-card p-8 text-center text-sm text-foreground-muted">
-          {code === "cluster_unavailable"
-            ? "Not connected to a cluster — system status is unavailable."
-            : `Could not load system status (${code}).`}
-        </div>
+        <ConsoleLoadError inline title="System status" error={err}
+          detail="Cluster wiring could not be verified. This is not evidence that the cluster is healthy. Retrying automatically." />
       </div>
     );
   }
 
   let diagnostics: Diagnostics | null = null;
+  let diagnosticsError: unknown;
   try {
     diagnostics = await getDiagnostics();
-  } catch {
-    diagnostics = null;
+  } catch (err) {
+    diagnosticsError = err;
   }
 
   const liveCount = system.pipeline.filter((s) => s.status === "live").length;
   const crdsInstalled = system.crds.filter((c) => c.installed).length;
   const critical = diagnostics?.issues.filter((i) => i.severity === "critical").length ?? 0;
+  const headlamp = headlampUrl();
 
   return (
     <div className="space-y-6">
+      <LiveRefresh active intervalMs={8000} />
       <PageHeader eyebrow="Operator Console" title="Troubleshooting" lead={LEAD} />
 
       {!authWired() && (
@@ -71,7 +74,7 @@ export default async function SystemPage() {
       )}
 
       {/* Active issues — the real diagnostics: what's broken, and the fix. */}
-      {diagnostics && (
+      {diagnostics ? (
         <Section
           title="Active issues"
           subtitle={
@@ -89,6 +92,12 @@ export default async function SystemPage() {
             <ul className="space-y-2">
               {diagnostics.issues.map((issue, i) => {
                 const crit = issue.severity === "critical";
+                const sandbox = issue.kind === "SandboxDegraded" || issue.kind === "RunFailed";
+                const subject = issue.subject.split(" · ")[0];
+                const pod = /^[a-z0-9-]+\/[a-z0-9-]+$/.test(subject) ? subject : null;
+                const inspectUrl = sandbox
+                  ? `/console/fleet?q=${encodeURIComponent(subject.split("/").pop() ?? "")}`
+                  : headlamp && pod ? headlampLink(headlamp, `/pods/${pod}`, headlampSsoEnabled()) : null;
                 return (
                   <li
                     key={`${issue.subject}-${issue.kind}-${i}`}
@@ -112,12 +121,15 @@ export default async function SystemPage() {
                       <span className="font-medium">Fix:</span> {issue.remedy}
                     </p>
                     <div className="mt-2 flex flex-wrap gap-3 text-[11px]">
-                      <a
-                        href={`/console/fleet?q=${encodeURIComponent(issue.subject.split("/").pop() ?? "")}`}
-                        className="font-medium text-signal hover:underline"
-                      >
-                        Inspect sandbox in fleet →
-                      </a>
+                      {inspectUrl ? (
+                        <a href={inspectUrl} target={sandbox ? undefined : "_blank"}
+                          rel={sandbox ? undefined : "noreferrer"}
+                          className="font-medium text-signal hover:underline">
+                          {sandbox ? "Inspect sandbox in fleet →" : "Inspect pod in Kubernetes dashboard ↗"}
+                        </a>
+                      ) : (
+                        <span>Ask your Kars administrator to inspect this pod and its container logs using the name above.</span>
+                      )}
                     </div>
                   </li>
                 );
@@ -125,10 +137,13 @@ export default async function SystemPage() {
             </ul>
           )}
         </Section>
+      ) : (
+        <ConsoleLoadError inline title="Active issues" error={diagnosticsError}
+          detail="Diagnostics could not be verified. This does not mean no issues exist; the wiring map below is separate evidence. Retrying automatically." />
       )}
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-        <Stat label="Pipeline stages live" value={`${liveCount}/${system.pipeline.length}`} accent={liveCount === system.pipeline.length} />
+        <Stat label="Stages reporting wired" value={`${liveCount}/${system.pipeline.length}`} />
         <Stat label="CRDs installed" value={`${crdsInstalled}/${system.crds.length}`} />
         <div className="rounded-xl border border-border bg-surface p-4">
           <p className="inline-flex items-center gap-2 text-sm font-semibold">
@@ -141,7 +156,7 @@ export default async function SystemPage() {
 
       <Section
         title="Pipeline wiring"
-        subtitle={`${liveCount} of ${system.pipeline.length} stages are live end-to-end. The rest are named here so nothing is hidden.`}
+        subtitle={`${liveCount} of ${system.pipeline.length} stages report wiring or inventory evidence. “Live” below is a wiring label, not a successful end-to-end test. Ready pods, installed resources and retained record counts do not establish successful model calls, tool use or completed work.`}
       >
         <ol className="space-y-0">
           {system.pipeline.map((stage, i) => (

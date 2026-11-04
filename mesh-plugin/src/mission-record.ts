@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 import { isDeepStrictEqual } from "node:util";
+import { nativeMissionLimits } from "./mission-phase.js";
 import { missionAttemptName, missionContentDigest, type MissionAttempt, type MissionCandidate, type StoredMissionAttempt } from "./mission-dispatcher.js";
 import { missionContract, missionEvidenceAdvances, parseMissionMessage, sameMissionContract, sameMissionTarget, type MissionReply } from "./mission-protocol.js";
 import { singleControllerOwner, type MissionMetadata } from "./mission-workload.js";
@@ -15,19 +16,36 @@ export const missionRecordOwner = (candidate: Pick<MissionCandidate, "taskName" 
 export const missionRecordOwned = (metadata: MissionMetadata, candidate: Pick<MissionCandidate, "taskName" | "taskUid">): boolean =>
   !metadata.deletionTimestamp && singleControllerOwner(metadata, "kars.azure.com/v1alpha1", "KarsTask", candidate.taskName, candidate.taskUid);
 
+export function packMissionAttempt(attempt: MissionAttempt): string {
+  if (attempt.candidate.inputArtifacts === undefined) return JSON.stringify(attempt);
+  if (!isDeepStrictEqual(attempt.candidate.inputArtifacts, attempt.assignment.inputArtifacts)) {
+    throw new Error("Mission candidate inputs differ from assignment");
+  }
+  // Keep one complete input bundle; readers restore the logical candidate before validation.
+  return JSON.stringify({ ...attempt, candidate: { ...attempt.candidate, inputArtifacts: undefined }, inputArtifactsFromAssignment: true });
+}
+
 export function unpackMissionAttempt(cm: MissionConfigMap, candidate: MissionRecordIdentity): StoredMissionAttempt {
   if (!missionRecordOwned(cm.metadata, candidate) || !cm.metadata.resourceVersion || cm.metadata.namespace !== candidate.namespace
     || cm.metadata.name !== missionAttemptName(candidate)) throw new Error("Mission attempt ownership or revision mismatch");
   if (!cm.data?.["attempt.json"] || Buffer.byteLength(cm.data["attempt.json"]) > 900 * 1024) throw new Error("Mission attempt exceeds storage bounds");
-  const attempt = JSON.parse(cm.data["attempt.json"]) as MissionAttempt;
+  const attempt = JSON.parse(cm.data["attempt.json"]) as MissionAttempt & { inputArtifactsFromAssignment?: unknown };
+  if (attempt && Object.hasOwn(attempt, "inputArtifactsFromAssignment")) {
+    if (attempt.inputArtifactsFromAssignment !== true || !attempt.candidate || typeof attempt.candidate !== "object"
+      || Array.isArray(attempt.candidate) || Object.hasOwn(attempt.candidate, "inputArtifacts")
+      || !Array.isArray(attempt.assignment?.inputArtifacts)) throw new Error("Malformed mission input storage reference");
+    attempt.candidate.inputArtifacts = attempt.assignment.inputArtifacts;
+    delete attempt.inputArtifactsFromAssignment;
+  }
   if (!attempt || attempt.version !== 1 || attempt.candidate?.taskUid !== candidate.taskUid || attempt.candidate?.runNonce !== candidate.runNonce
     || attempt.candidate?.taskName !== candidate.taskName || attempt.candidate?.namespace !== candidate.namespace
     || (attempt.candidate.runtime !== undefined && attempt.candidate.runtime !== "OpenClaw" && attempt.candidate.runtime !== "Hermes")
     || parseMissionMessage(attempt.assignment)?.type !== "mission:assign"
     || !sameMissionTarget(attempt.candidate, attempt.assignment)
-    || !sameMissionContract(missionContract(attempt.candidate.reviewedPhase, attempt.candidate.inputArtifacts, attempt.candidate.requiredOutputs), attempt.assignment)
+    || !sameMissionContract(missionContract(attempt.candidate.reviewedPhase, attempt.candidate.inputArtifacts, attempt.candidate.requiredOutputs, attempt.candidate.peerContext), attempt.assignment)
     || attempt.contentDigest !== missionContentDigest(attempt.candidate.content)
-    || attempt.assignment.content !== attempt.candidate.content || !Array.isArray(attempt.events) || attempt.events.length > 128
+    || attempt.assignment.content !== attempt.candidate.content || !Array.isArray(attempt.events)
+    || attempt.events.length > (nativeMissionLimits(attempt.candidate.reviewedPhase)?.events ?? 128)
     || !["dispatching", "accepted", "running", "succeeded", "failed", "rejected", "uncertain"].includes(attempt.phase)
     || typeof attempt.candidate.agentName !== "string" || !attempt.candidate.agentName.trim() || Buffer.byteLength(attempt.candidate.agentName) > 512
     || typeof attempt.ownerSession !== "string" || !attempt.ownerSession || attempt.ownerSession.length > 253
@@ -91,12 +109,15 @@ export function missionResultMaps(attempt: MissionAttempt, role: "canonical" | "
       [`${prefix}mission-run-nonce`]: candidate.runNonce },
   });
   const success = reply.status === "succeeded";
-  const artifacts: Record<string, string> = success ? { "response.md": reply.output!, ...reply.artifacts } : {};
+  const artifacts: Record<string, string> = success ? { "response.md": reply.output!, ...reply.artifacts }
+    : reply.status === "failed" ? { ...reply.artifacts,
+      ...(reply.routerObservations !== undefined ? { "kars-router-observations.json": reply.routerObservations } : {}) } : {};
   const data: Record<string, string> = {
     taskName: candidate.taskName, taskUid: candidate.taskUid, assignmentNonce: candidate.runNonce,
     assignmentId: assignment.assignmentId, agentName: candidate.agentName, agentDid: candidate.agentDid,
     dispatcherDid: candidate.dispatcherDid, sandboxUid: candidate.sandboxUid, podUid: candidate.podUid,
-    runtimeBootId: assignment.bootId, status: success ? "ok" : reply.status, output: success ? reply.output! : "",
+    runtimeBootId: assignment.bootId, status: success ? "ok" : reply.status,
+    output: success || reply.status === "failed" ? reply.output ?? "" : "",
     error: reply.error ?? "", startedAt: attempt.startedAt, finishedAt: attempt.updatedAt,
     model: reply.evidence?.model ?? "",
     ...(reply.evidence?.usage ? { totalTokens: String(reply.evidence.usage.totalTokens) } : {}),

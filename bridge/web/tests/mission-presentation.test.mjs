@@ -71,6 +71,380 @@ const { ReadinessPanel } = load("app/workspace/missions/[name]/readiness-panel.t
 const { MissionMap } = load("app/workspace/missions/[name]/mission-map.tsx");
 const { MissionsList } = load("app/workspace/missions/missions-list.tsx");
 
+const { missionOriginalBudget, missionPresentation, missionSummaryStatus, missionShutdownPending } = load("lib/mission-presentation.ts");
+
+test("permanent halt preserves review but never advertises revision, retry or relaunch", () => {
+  for (const initial of [null, { status: "approved" }, { redrive_pending: true, retryable_revision_nonce: "retry" }]) {
+    const html = render(ReviewPanel, { task: "halted", assignmentNonce: "retained", kind: "docs",
+      initial, eligible: true, launched: false, halted: true });
+    assert.match(html, /permanently halted/);
+    assert.match(html, /href="\/workspace\/new"/);
+    assert.doesNotMatch(html, /Request changes|Retry failed revision|Launch the revision|launch it from Overview|changes now/);
+    if (!initial) assert.match(html, /<button(?![^>]*disabled="")[^>]*>Approve deliverable<\/button>/);
+  }
+  for (const requesting of [false, true]) {
+    const { ReviewPanel: OpenReview } = load("app/workspace/missions/[name]/review-panel.tsx", {
+      useState: value => [typeof value === "boolean" ? requesting : value, forbiddenMutation],
+    });
+    for (const initial of [null, { status: "approved" }]) {
+      const html = render(OpenReview, { task: "halted", assignmentNonce: "retained", kind: "docs",
+        initial, eligible: true, launched: false, halted: true, sandboxLive: true });
+      assert.doesNotMatch(html, /<textarea|Request changes|Keep it running|agent stays running/);
+      assert.match(html, initial ? /You approved this deliverable/ : /Approve deliverable/);
+    }
+  }
+  const page = readFileSync(resolve(sourceRoot, "app/workspace/missions/[name]/page.tsx"), "utf8");
+  assert.equal((page.match(/halted=\{task\.halted != null\}/g) ?? []).length, 3);
+  assert.match(page, /status !== "blocked" && task\.halted == null/);
+  assert.match(page, /Mission permanently halted/);
+  assert.doesNotMatch(page, /Previous halt|This is retained halt history/);
+  const { HaltButton } = load("app/workspace/missions/[name]/halt-button.tsx", {
+    useState: value => [typeof value === "boolean" ? value === false : value, forbiddenMutation],
+  });
+  const confirmation = render(HaltButton, { ns: "kars-system", task: "running" });
+  assert.match(confirmation, /permanently halts/);
+  assert.match(confirmation, /cannot relaunch/);
+  assert.match(confirmation, /accounting are kept/);
+});
+
+test("Mission read failures keep polling transient conflicts without restarting work", () => {
+  const file = "app/workspace/missions/[name]/page.tsx";
+  const page = ts.createSourceFile(file, readFileSync(resolve(sourceRoot, file), "utf8"),
+    ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let failure;
+  const visit = node => {
+    if (ts.isTryStatement(node) && node.tryBlock.getText(page).includes("await getTask(ns, name)")) failure = node.catchClause;
+    ts.forEachChild(node, visit);
+  };
+  visit(page);
+  assert.ok(failure);
+  class BffError extends Error {
+    constructor(code, status) { super(code); this.code = code; this.status = status; }
+  }
+  const exports = {};
+  runInNewContext(ts.transpileModule(`export function Failure({error}) { try { throw error; } ${failure.getText(page)} }`, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX },
+  }).outputText, {
+    exports, require, BffError,
+    notFound: () => { throw new Error("not-found-boundary"); },
+    PageHeader: () => null,
+    HonestState: load("components/honest-state.tsx").HonestState,
+    LiveRefresh: ({ active }) => React.createElement("span", { "data-refresh": String(active) }),
+    Link: ({ children, ...props }) => React.createElement("a", props, children),
+  });
+  for (const error of [new BffError("conflict", 409), new BffError("unavailable", 503),
+    new BffError("rate_limit", 429), new TypeError("fetch failed")]) {
+    const html = render(exports.Failure, { error });
+    assert.match(html, /data-refresh="true"/);
+    assert.match(html, /checking again automatically/);
+    assert.match(html, /does not restart|no work will be restarted/);
+    assert.equal(html.includes("Mission details are updating"), error.status === 409);
+    assert.match(html, /href="\/workspace\/missions"/);
+  }
+  for (const status of [400, 401, 403]) {
+    const html = render(exports.Failure, { error: new BffError("denied", status) });
+    assert.match(html, /data-refresh="false"/);
+    assert.doesNotMatch(html, /checking again automatically/);
+  }
+  assert.throws(() => render(exports.Failure, { error: new BffError("not_found", 404) }), /not-found-boundary/);
+});
+
+test("Mission grant display distinguishes historical limits from effective funding", () => {
+  assert.equal(missionOriginalBudget({ scope: "GovernedInference", tokens: 1200000, usd_micros: null }), "1,200,000 tokens");
+  assert.equal(missionOriginalBudget({ scope: "GovernedInference", tokens: null, usd_micros: 5000 }), "5,000 micro-USD");
+  assert.equal(missionOriginalBudget({ scope: "GovernedInference", tokens: 1200000, usd_micros: 5000 }), "1,200,000 tokens · 5,000 micro-USD");
+  assert.equal(missionOriginalBudget({ tokens: 200000, usd_micros: null }), "200,000 tokens (unscoped)");
+  for (const budget of [null, { tokens: null, usd_micros: null }]) {
+    assert.equal(missionOriginalBudget(budget), "No explicit grant");
+    assert.doesNotMatch(missionOriginalBudget(budget), /No cap|Unlimited|non-expiring/);
+  }
+  const page = readFileSync(resolve(sourceRoot, "app/workspace/missions/[name]/page.tsx"), "utf8");
+  assert.match(page, /label="Original inference grant"\s+value=\{missionOriginalBudget\(budget\)\}/);
+  assert.match(page, /not the effective account ceiling/);
+  assert.match(page, /unbounded allowances/);
+});
+test("draft Missions expose independent promotion before first launch without granting authority", () => {
+  const page = readFileSync(resolve(sourceRoot, "app/workspace/missions/[name]/page.tsx"), "utf8");
+  assert.match(page, /^\s*<PromoteMission ns=\{ns\} name=\{name\} currentTier=\{task\.envelope\.tier\} halted=\{task\.halted != null\} \/>\s*$/m);
+  assert.doesNotMatch(page, /task\.launched && <PromoteMission/);
+  const { PromoteMission } = load("app/workspace/missions/[name]/promote-mission.tsx", {
+    useActionState: () => [{ error: null, ok: null }, forbiddenMutation, false],
+  }, { "./run-actions": { promoteMissionAction: forbiddenMutation } });
+  const html = render(PromoteMission, { ns: "kars-system", name: "fresh-draft", currentTier: 3 });
+  assert.match(html, /Request promotion/);
+  assert.match(html, /before the first launch/);
+  assert.match(html, /existing runs retain their authority/);
+  assert.match(html, /value="4" selected=""/);
+  assert.equal(render(PromoteMission, { ns: "kars-system", name: "full-tier", currentTier: 5 }), "");
+  assert.equal(render(PromoteMission, { ns: "kars-system", name: "halted", currentTier: 2, halted: true }), "");
+});
+const { missionBeat } = load("components/journey-rail.tsx");
+const phaseResult = (nonce = "child-run") => ({
+  assignment_nonce: nonce, status: "ok", reviewable: true, output: "Retained research", blocked: null,
+  run_evidence: { task_uid: "child-uid", run_nonce: nonce, status: "succeeded" },
+});
+const reviewedPhase = (state, result = null) => ({
+  role: "research", phase: "research", task_name: "child", task_uid: "child-uid",
+  run_nonce: "child-run", state, result,
+});
+const reviewedMission = (phases, overrides = {}) => ({
+  phase: "Ready", execution_phase: "Launching", launched: true, current_run_nonce: "root-run",
+  result: null, assignment: null, activity: [], agent_identity: null, sandbox: null,
+  reviewed_execution: { run_nonce: "root-run", issue: null, phases }, ...overrides,
+});
+
+const summaryMission = (states, overrides = {}) => ({
+  name: "mission", parent: null, namespace: "kars-system", team: null, tier: 1,
+  objective: "Review the research", display_name: null, created_at: null,
+  phase: "Ready", execution_phase: "Launching", launched: true,
+  current_run_nonce: "root-run", delivered: false, failed: false, blocked: false,
+  reviewed_progress: { run_nonce: "root-run", states, issue: null }, ...overrides,
+});
+
+test("deliverable markdown resolves captured sandbox documents without permitting unsafe schemes", () => {
+  const { DeliverableBody, DeliverableView } = load("components/deliverable-view.tsx");
+  const artifactContext = { namespace: "kars-system", task: "intent-mission", runNonce: "run-current", artifacts: [
+    { name: "brief.md", source_path: "/sandbox/brief.md" },
+    { name: "checklist.md", source_path: "/sandbox/checklist.md" },
+  ] };
+  const output = "[Decision brief](sandbox:/sandbox/brief.md)\n\n## Documents\n\n[Checklist](sandbox:/sandbox/checklist.md)\n\n[Source](https://kube.rs/)\n\n[Unknown](sandbox:/sandbox/absent.md)\n\n[Unsafe](javascript:alert%281%29)";
+  for (const component of [DeliverableBody, DeliverableView]) {
+    const html = render(component, { output, artifactContext });
+    for (const name of ["brief.md", "checklist.md"]) {
+      assert.ok(html.includes(`href="/api/namespaces/kars-system/tasks/intent-mission/artifact/${name}?run_nonce=run-current" download="${name}"`), html);
+    }
+    assert.match(html, /href="https:\/\/kube.rs\/" target="_blank"/);
+    assert.match(html, /<span title="Link unavailable">Unknown<\/span>/);
+    assert.match(html, /<span title="Link unavailable">Unsafe<\/span>/);
+    assert.doesNotMatch(html, /href=""|href="sandbox:|href="javascript:/);
+    const unbound = render(component, { output });
+    assert.doesNotMatch(unbound, /href="\/api\/|download=/);
+  }
+});
+
+test("shared Mission and Team deliverable rendering downloads captured native exports", () => {
+  const { DeliverableBody, DeliverableView } = load("components/deliverable-view.tsx");
+  const artifactContext = { namespace: "kars-system", task: "mission", runNonce: "current",
+    artifacts: [{ name: "approval-check.md", source_path: null }] };
+  const output = "[Approval check](exports/approval-check.md)\n\n[Missing](exports/missing.md)";
+  for (const component of [DeliverableBody, DeliverableView]) {
+    const html = render(component, { output, artifactContext });
+    assert.match(html, /href="\/api\/namespaces\/kars-system\/tasks\/mission\/artifact\/approval-check.md\?run_nonce=current" download="approval-check.md"/);
+    assert.match(html, /<span title="Link unavailable">Missing<\/span>/);
+    const unbound = render(component, { output });
+    assert.doesNotMatch(unbound, /download=|href="(?:\.\/)?exports\//);
+    assert.match(unbound, /<span title="Link unavailable">Approval check<\/span>/);
+  }
+});
+
+test("Mission result and artifact panels supply only the selected revision's captured links", () => {
+  const { ResultPanel, ArtifactsPanel } = load("app/workspace/missions/[name]/mission-detail-panels.tsx");
+  const output = "[Decision brief](sandbox:/sandbox/brief.md)";
+  const artifacts = [{ name: "brief.md", source_path: "/sandbox/brief.md", content: output, size_bytes: 100 }];
+  const task = { namespace: "kars-system", name: "mission", current_run_nonce: "current", artifacts };
+  const result = { assignment_nonce: "current", output, status: "ok" };
+  assert.match(render(ResultPanel, { result, task }), /download="brief.md"/);
+  assert.doesNotMatch(render(ResultPanel, { result: { ...result, assignment_nonce: "old" }, task }), /download=/);
+  const preview = render(ArtifactsPanel, { ns: task.namespace, task: task.name, runNonce: "current", artifacts,
+    pullRequests: [], activity: [], egress: [], tokens: null });
+  assert.match(preview, /download="brief.md"[^>]*>Decision brief/);
+});
+
+test("compact summary and detail share active, gap, failure, held and terminal precedence", () => {
+  for (const [states, overrides, expected] of [
+    [["completed", "active"], {}, "running"],
+    [["completed", "pending"], {}, "waiting"],
+    [["completed", "unavailable"], {}, "waiting"],
+    [["completed"], {}, "waiting"],
+    [["pending"], {}, "deploying"],
+    [["unavailable"], {}, "deploying"],
+    [["active", "failed"], {}, "failed"],
+    [["active", "uncertain"], {}, "blocked"],
+    [["active"], { execution_phase: "Degraded" }, "blocked"],
+    [["active"], { phase: "Degraded" }, "blocked"],
+    [["active"], { execution_phase: "Stopping" }, "stopping"],
+    [["active"], { launched: false }, "stopping"],
+    [["active"], { launched: false, execution_phase: "Idle" }, "stopped"],
+    [["active"], { current_run_nonce: "rerun" }, "deploying"],
+    [["active"], { current_run_nonce: null }, "deploying"],
+    [["completed"], { execution_phase: "Running" }, "running"],
+  ]) {
+    const summary = summaryMission(states, overrides);
+    const detail = reviewedMission(states.map(state => reviewedPhase(state,
+      state === "completed" ? phaseResult() : null)), overrides);
+    assert.equal(missionSummaryStatus(summary), expected, JSON.stringify([states, overrides]));
+    assert.equal(missionPresentation(detail).status, expected);
+  }
+  for (const [outcome, expected] of [
+    [{ delivered: true }, "done"], [{ failed: true }, "failed"], [{ blocked: true }, "blocked"],
+  ]) assert.equal(missionSummaryStatus(summaryMission(["active"], outcome)), expected);
+  const unknown = summaryMission([], {
+    reviewed_progress: { run_nonce: "root-run", states: ["active", "failed"], issue: "Read budget exhausted" },
+  });
+  assert.equal(missionSummaryStatus(unknown), "unavailable");
+  assert.equal(missionSummaryStatus({ ...unknown, delivered: true }), "done");
+  assert.equal(missionSummaryStatus({ ...unknown, failed: true }), "failed");
+  assert.equal(missionSummaryStatus({ ...unknown, launched: false }), "stopping");
+  assert.equal(missionSummaryStatus({ ...unknown, launched: false, execution_phase: "Idle" }), "stopped");
+  assert.equal(missionSummaryStatus({ ...unknown, current_run_nonce: "new-run" }), "deploying");
+});
+
+test("Mission list badges, filter counts and selected rows use compact evidence consistently", () => {
+  const tasks = [
+    summaryMission(["active"], { name: "active-run" }),
+    summaryMission(["completed", "pending"], { name: "gap-run" }),
+    summaryMission(["active"], { name: "stopping-run", execution_phase: "Stopping" }),
+    summaryMission(["active"], { name: "stopped-run", launched: false, execution_phase: "Idle" }),
+    summaryMission([], { name: "draft-run", launched: false, current_run_nonce: null, execution_phase: "Idle" }),
+    summaryMission([], { name: "unknown-run", reviewed_progress: { run_nonce: "root-run", states: [], issue: "Changed" } }),
+    summaryMission(["failed"], { name: "failed-run" }),
+    summaryMission(["active", "uncertain"], { name: "held-run" }),
+    summaryMission(["completed"], { name: "done-run", delivered: true }),
+  ];
+  const html = render(MissionsList, { tasks });
+  for (const label of ["Running", "Awaiting next phase", "Stopping", "Stopped", "Draft", "Execution evidence unavailable", "Run failed", "Blocked", "Delivered"]) {
+    assert.ok(html.includes(label), label);
+  }
+  assert.doesNotMatch(html, />Deploying</);
+  for (const [filter, label, names] of [
+    ["active", "Active", ["active-run", "gap-run", "stopping-run"]],
+    ["stopped", "Stopped", ["stopped-run"]],
+    ["drafts", "Drafts", ["draft-run"]],
+    ["attention", "Evidence unavailable", ["unknown-run"]],
+    ["failed", "Failed", ["failed-run", "held-run"]],
+    ["delivered", "Delivered", ["done-run"]],
+  ]) {
+    assert.ok(html.includes(`${label} ${names.length}</button>`), label);
+    const state = ["", filter, "newest"];
+    const { MissionsList: FilteredList } = load("app/workspace/missions/missions-list.tsx", {
+      useState: () => [state.shift(), forbiddenMutation],
+    });
+    const filtered = render(FilteredList, { tasks });
+    const links = [...filtered.matchAll(/href="\/workspace\/missions\/([^"]+)"/g)].map(match => match[1]);
+    assert.deepEqual(links.sort(), names.sort(), filter);
+  }
+});
+
+test("workspace home uses list evidence without per-card detail loading", async () => {
+  const tasks = [summaryMission(["active"]), summaryMission(["completed"], { name: "between-phases" })];
+  const { default: WorkspaceHome } = load("app/workspace/page.tsx", null, {
+    "@/components/intent-entry": { IntentEntry: () => null },
+    "@/components/how-it-works": { HowItWorksSteps: () => null },
+    "@/lib/config": { defaultNamespace: () => "kars-system" },
+    "@/lib/bff": {
+      listTasks: async () => tasks, listApprovals: async () => [], listTeams: async () => [],
+      getDigests: async () => [], getArtifacts: async () => ({ missions: [] }),
+      getTask: forbiddenMutation, getTeam: forbiddenMutation,
+    },
+  });
+  const html = renderToStaticMarkup(await WorkspaceHome());
+  assert.match(html, /Running/);
+  assert.match(html, /Awaiting next phase/);
+  assert.doesNotMatch(html, />Deploying<|>Draft</);
+});
+
+test("native reviewed work drives shared status and journey without changing principal readiness", () => {
+  const task = reviewedMission([reviewedPhase("completed", phaseResult()), reviewedPhase("active")]);
+  const state = missionPresentation(task);
+  assert.equal(state.status, "running");
+  assert.equal(state.realDelivery, false);
+  assert.equal(task.execution_phase, "Launching");
+  assert.equal(missionBeat({ launched: true, executionPhase: task.execution_phase,
+    executionStarted: state.executionStarted, hasResult: state.realDelivery }), "run");
+  const { NextStep } = load("app/workspace/missions/[name]/mission-detail-panels.tsx");
+  assert.match(render(NextStep, { status: state.status }), />Running</);
+  assert.doesNotMatch(render(NextStep, { status: state.status }), /coming online|Deploying/);
+  assert.match(render(DeployTimeline, { task }), /Execution observed/);
+});
+
+test("between phases and before principal handoff are waiting, never deploying or delivered", () => {
+  for (const rest of [[reviewedPhase("pending")], [reviewedPhase("unavailable")], []]) {
+    const task = reviewedMission([reviewedPhase("completed", phaseResult()), ...rest]);
+    const state = missionPresentation(task);
+    assert.equal(state.status, "waiting");
+    assert.equal(state.realDelivery, false);
+    assert.equal(missionBeat({ launched: true, executionPhase: "Launching",
+      executionStarted: state.executionStarted, hasResult: false }), "run");
+    assert.match(render(DeployTimeline, { task }), /Awaiting next phase/);
+  }
+});
+
+test("unstarted, stale and unbound reviewed evidence cannot assert execution", () => {
+  for (const task of [
+    reviewedMission([reviewedPhase("pending")]),
+    reviewedMission([reviewedPhase("unavailable")]),
+    reviewedMission([reviewedPhase("completed", phaseResult("stale"))]),
+    reviewedMission([reviewedPhase("completed", { ...phaseResult(), run_evidence: { task_uid: "other", run_nonce: "child-run" } })]),
+    reviewedMission([reviewedPhase("active")], { current_run_nonce: "new-root" }),
+    reviewedMission([reviewedPhase("active")], { current_run_nonce: null }),
+  ]) {
+    const state = missionPresentation(task);
+    assert.equal(state.status, "deploying");
+    assert.equal(state.executionStarted, false);
+  }
+});
+
+test("inconsistent reviewed snapshots do not rewind known workflow to coming online", () => {
+  const task = reviewedMission([], {
+    reviewed_execution: { run_nonce: "root-run", phases: [], issue: "Reservations changed while reading" },
+  });
+  assert.equal(missionPresentation(task).status, "unavailable");
+  assert.match(render(DeployTimeline, { task }), /Execution evidence unavailable/);
+  assert.equal(missionPresentation({ ...task, current_run_nonce: "new-root" }).status, "deploying");
+});
+
+test("failed, held, stopped and terminal root evidence outrank active reviewed work", () => {
+  const active = reviewedPhase("active");
+  const rootResult = { ...phaseResult("root-run"), run_evidence: null };
+  for (const [task, expected] of [
+    [reviewedMission([active, reviewedPhase("failed")]), "failed"],
+    [reviewedMission([active, reviewedPhase("uncertain")]), "blocked"],
+    [reviewedMission([active, reviewedPhase("held")]), "blocked"],
+    [reviewedMission([active], { execution_phase: "Degraded", execution_detail: "Held by controller" }), "blocked"],
+    [reviewedMission([active], { result: { ...rootResult, blocked: { detail: "Budget held" }, reviewable: false } }), "blocked"],
+    [reviewedMission([active], { result: { ...rootResult, status: "error", reviewable: false } }), "failed"],
+    [reviewedMission([active], { assignment: { task_id: "root-run", state: "Failed", completed_at: "now" } }), "failed"],
+    [reviewedMission([active], { result: rootResult }), "done"],
+    [reviewedMission([active], { execution_phase: "Stopping" }), "stopping"],
+    [reviewedMission([active], { launched: false, execution_phase: "Idle" }), "stopped"],
+  ]) {
+    const state = missionPresentation(task);
+    assert.equal(state.status, expected);
+    if (expected === "blocked") assert.ok(state.blockReason);
+  }
+  assert.equal(missionPresentation(reviewedMission([active]), true).status, "needs_you");
+  assert.equal(missionPresentation(reviewedMission([active], {
+    result: { ...rootResult, assignment_nonce: "old", status: "error" },
+  })).status, "running");
+});
+
+test("shutdown polling remains independent of retained failure and delivery status", () => {
+  const rootResult = { ...phaseResult("root-run"), run_evidence: null };
+  for (const [outcome, expected] of [
+    [{}, "stopping"],
+    [{ result: rootResult }, "done"],
+    [{ result: { ...rootResult, status: "error", reviewable: false } }, "failed"],
+    [{ result: { ...rootResult, blocked: { detail: "Retained failure" }, reviewable: false } }, "blocked"],
+  ]) {
+    const task = reviewedMission([], { ...outcome, launched: false, execution_phase: "Running", sandbox: "old-sandbox" });
+    assert.equal(missionPresentation(task).status, expected);
+    assert.equal(missionPresentation(task).shutdownPending, true);
+    assert.equal(missionPresentation({ ...task, execution_phase: "Idle" }).shutdownPending, true);
+    assert.equal(missionPresentation({ ...task, execution_phase: "Idle", sandbox: null }).shutdownPending, false);
+  }
+  const page = readFileSync(resolve(sourceRoot, "app/workspace/missions/[name]/page.tsx"), "utf8");
+  assert.match(page, /const refreshActive =[\s\S]*?\|\| shutdownPending;/);
+});
+
+test("qualification next-step guidance preserves output approval without promising a revision", () => {
+  const { NextStep } = load("app/workspace/missions/[name]/mission-detail-panels.tsx");
+  const qualification = render(NextStep, { status: "done", qualificationRun: true });
+  assert.match(qualification, /Eligible output can still be approved/);
+  assert.match(qualification, /new explicitly reviewed qualification Mission/);
+  assert.doesNotMatch(qualification, /request a distinct revision/);
+  assert.match(render(NextStep, { status: "done" }), /request a distinct revision/);
+});
+
 test("model selection distinguishes saved settings from the observed default", () => {
   const setDefault = () => {};
   const { ModelCatalogue } = load("app/console/configuration/model-catalogue.tsx", {
@@ -157,6 +531,41 @@ test("Mission map uses bound reported results without confusing them with a comp
   assert.match(stale, /Usage not recorded/);
 });
 
+test("global Deliverables includes Team run outcomes without exposing internal role phases", async () => {
+  const run = {
+    task: "priv-c55ed63c036757a5-run-retained", evidence_key: "run-digest", current: true,
+    parent: "private-metadata-team-principal", team: "private-metadata-team", archived: false,
+    display_name: "Standing Team report", objective: "Inspect repository metadata",
+    model: "model", finished_at: "2026-10-31T08:56:27Z", status: "ok",
+    review_status: "none", review_revision: 0, summary: "Report", excerpt: "Report",
+    pull_requests: [], deliverable_did: null,
+    files: [{ name: "repository-metadata-report.md", size_bytes: 100, has_content: true }],
+  };
+  const phase = { ...run, task: "role-phase", parent: run.task,
+    display_name: "Internal Team phase", evidence_key: "phase-digest" };
+  const unrelated = { ...run, parent: "another-team-principal", display_name: "Unrelated child" };
+  const failed = { ...run, status: "error", display_name: "Failed Team run" };
+  const archived = { ...run, task: "archived-run", evidence_key: "archive-digest", parent: null,
+    archived: true, current: false, display_name: "Archived Team report" };
+  const { default: Page } = load("app/workspace/artifacts/page.tsx", null, {
+    "@/lib/bff": {
+      getArtifacts: async () => ({ missions: [run, phase, unrelated, failed, archived] }),
+      BffError: class extends Error {},
+    },
+  });
+  for (const query of [{}, { q: "repository-metadata-report.md" }, { q: "private-metadata-team" }]) {
+    const html = renderToStaticMarkup(await Page({ searchParams: Promise.resolve(query) }));
+    assert.match(html, /Standing Team report/);
+    assert.match(html, /Archived Team report/);
+    assert.doesNotMatch(html, /Internal Team phase|Unrelated child|Failed Team run/);
+    assert.match(html, /repository-metadata-report.md/);
+  }
+  const all = renderToStaticMarkup(await Page({ searchParams: Promise.resolve({ view: "all" }) }));
+  assert.match(all, /Internal Team phase/);
+  assert.match(all, /Unrelated child/);
+  assert.match(all, /Failed Team run/);
+});
+
 test("global Deliverables links committed current revisions and searches actual filenames", async () => {
   const current = {
     task: "mission", evidence_key: "canonical-digest", current: true, parent: null,
@@ -235,6 +644,49 @@ test("terminal deployment presentation uses only the current revision outcome", 
   assert.doesNotMatch(failed, /Provisioning completed/);
 });
 
+test("reviewed Mission repository access is read-only unless github-pr is reviewed", () => {
+  const { RepoAccess, missionGithubWriteEnabled } = load("components/repo-access.tsx", null, {
+    "@/lib/config": { defaultNamespace: () => "kars-system" },
+  });
+  assert.equal(missionGithubWriteEnabled(), true);
+  assert.equal(missionGithubWriteEnabled(null), true);
+  for (const partial of [{}, { roles: [null, {}] }, { synthesis: { capabilities: "github-pr" } },
+    { roles: [{ phases: [null, {}, { capabilities: "github-pr" }] }] }]) {
+    assert.equal(missionGithubWriteEnabled(partial), false);
+  }
+  const plan = { roles: [{ phases: [{ capabilities: ["network", "filesystem-write"] }] }],
+    synthesis: { capabilities: ["filesystem-read", "filesystem-write"] } };
+  assert.equal(missionGithubWriteEnabled(plan), false);
+  plan.roles[0].phases[0].capabilities.push("github-pr");
+  assert.equal(missionGithubWriteEnabled(plan), true);
+  plan.roles = [];
+  assert.equal(missionGithubWriteEnabled(plan), false);
+  plan.synthesis.capabilities.push("github-pr");
+  assert.equal(missionGithubWriteEnabled(plan), true);
+  const readOnly = render(RepoAccess, { readOnly: true, initialSelected: ["owner/demo"] });
+  assert.match(readOnly, /Read-only repository access/);
+  assert.match(readOnly, /GitHub writes are denied/);
+  assert.match(readOnly, /name="git_write_repos" value="owner\/demo"/);
+  assert.doesNotMatch(readOnly, /Let this work open pull requests/);
+  assert.match(render(RepoAccess, {}), /Let this work open pull requests/);
+  assert.match(render(RepoAccess, { plan }), /Pull request access/);
+  plan.synthesis.capabilities = ["network"];
+  assert.match(render(RepoAccess, { plan, initialSelected: ["owner/demo"] }), /Read-only repository access/);
+  assert.match(render(RepoAccess, { plan, initialSelected: ["owner/demo"] }), /name="git_write_repos" value="owner\/demo"/);
+  for (const [file, prop] of [
+    ["app/workspace/teams/new/team-composer.tsx", /plan=\{executionPlan\}/],
+    ["app/workspace/teams/[name]/team-edit.tsx", /plan=\{parsedExecutionPlan \?\? executionPlan\}/],
+  ]) {
+    const source = readFileSync(resolve(sourceRoot, file), "utf8");
+    assert.match(source.match(/<RepoAccess[\s\S]*?\/>/)?.[0] ?? "", prop);
+  }
+  const review = readFileSync(resolve(sourceRoot, "app/workspace/new/intake-flow/review.tsx"), "utf8");
+  const repositoryAccess = review.match(/<RepoAccess[\s\S]*?\/>/)?.[0] ?? "";
+  assert.match(repositoryAccess, /readOnly=\{!missionGithubWriteEnabled\(blueprint\.execution_plan\)\}/);
+  assert.match(repositoryAccess, /selected=\{selectedRepos\}/);
+  assert.match(repositoryAccess, /onSelectionChange=\{changeSelectedRepos\}/);
+});
+
 test("connected access distinguishes governed MCP from direct external destinations", () => {
   const file = "app/workspace/missions/[name]/page.tsx";
   const page = ts.createSourceFile(file, readFileSync(resolve(sourceRoot, file), "utf8"),
@@ -243,7 +695,7 @@ test("connected access distinguishes governed MCP from direct external destinati
   const visit = node => {
     if (ts.isJsxSelfClosingElement(node) && node.tagName.getText(page) === "EnvelopeFact") {
       const attrs = node.attributes.properties;
-      if (attrs.some(a => a.name?.getText(page) === "label" && a.initializer?.text === "Connected access")) {
+      if (attrs.some(a => a.name?.getText(page) === "label" && a.initializer?.text === "Baseline connected access")) {
         value = attrs.find(a => a.name?.getText(page) === "value")?.initializer?.expression;
       }
     }
@@ -450,7 +902,7 @@ test("Team pages distinguish read failures from absent records and never conceal
     modules[file.includes("/runs/") ? "../../../read-error" : "../read-error"] = errorUI;
     modules["@/lib/config"] = { defaultNamespace: () => "tenant" };
     modules["@/lib/session"] = { currentPrincipal: async () => null };
-    modules["next/link"] = { default: ({ href, children }) => React.createElement("a", { href }, children) };
+    modules["@/components/navigation-link"] = { default: ({ href, children }) => React.createElement("a", { href }, children) };
     modules["next/navigation"] = { notFound: () => { throw new Error("ACTUAL_NOT_FOUND"); } };
     const bff = {
       BffError, getTeam: async () => team, getTask: async () => ({}),
@@ -513,6 +965,107 @@ test("Team latest-run lookup preserves authoritative chronology instead of sorti
   }
 });
 
+async function renderTeamRunState(taskOverrides = {}, teamOverrides = {}, runPage = false) {
+  const file = runPage ? "app/workspace/teams/[name]/runs/[run]/page.tsx"
+    : "app/workspace/teams/[name]/page.tsx";
+  const imports = ts.createSourceFile(file, readFileSync(resolve(sourceRoot, file), "utf8"),
+    ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX).statements.filter(ts.isImportDeclaration);
+  const modules = Object.fromEntries(imports.map(i => [i.moduleSpecifier.text,
+    Object.fromEntries((i.importClause?.namedBindings?.elements ?? []).map(n => [n.name.text, () => null]))]));
+  const team = {
+    name: "eng", paused: false, phase: "Active", health: "Healthy", tier: 3,
+    generated_tasks: ["run"], last_generated_task: "run", generated_task_count: 1,
+    roster: [], tasks: [], recent_outcomes: [], mcp_servers: [], egress: [],
+    learned_egress: [], channels: [], git_write_repos: [], lifecycle_mode: "ephemeral",
+    commons_entry_count: 0, runs_succeeded: 0, ...teamOverrides,
+  };
+  const task = {
+    name: "run", team: "eng", launched: true, execution_phase: "Running",
+    current_run_nonce: "current", assignment: null, result: null, artifacts: [],
+    activity: [], assignment_events: [], sub_agents: [], collaboration_events: [],
+    role_plan: { selected_roles: [], skipped_roles: [] }, ...taskOverrides,
+  };
+  modules["@/lib/bff"] = {
+    getTeam: async () => team, getTask: async () => task, listTaskApprovals: async () => [],
+    getTeamCommons: async () => ({ count: 0, entries: [] }), getTeamLedger: async () => [],
+    getOptions: async () => null, getEngineeringSource: async () => null,
+    getGithubConnection: async () => null, getTeamChannels: async () => null,
+  };
+  modules["@/lib/config"] = { defaultNamespace: () => "work", authWired: () => false, operatorIdentity: () => "operator" };
+  modules["@/lib/session"] = { currentPrincipal: async () => ({ name: "operator", roles: ["operator"] }) };
+  modules["@/lib/types"] = { TIER_LABELS: {} };
+  for (const name of ["format", "team-run-evidence", "mission-run-evidence", "router-activity"]) {
+    modules[`@/lib/${name}`] = load(`lib/${name}.ts`);
+  }
+  modules["@/components/navigation-link"] = { default: ({ href, children }) => React.createElement("a", { href }, children) };
+  modules["@/components/live-refresh"] = {
+    LivePulse: ({ label }) => React.createElement("span", null, label),
+    LiveRefresh: ({ active }) => React.createElement("span", { "data-refresh": String(active) }),
+  };
+  modules["./team-detail-panels"] = load("app/workspace/teams/[name]/team-detail-panels.tsx", null, {
+    "@/components/navigation-link": modules["@/components/navigation-link"],
+  });
+  modules["./watching-status"] = load("app/workspace/teams/[name]/watching-status.tsx");
+  modules["./run-control"] = load("app/workspace/teams/[name]/run-control.tsx", null, {
+    "./run-actions": { runTeamNow: forbiddenMutation },
+  });
+  modules["./halt-button"] = load("app/workspace/teams/[name]/runs/[run]/halt-button.tsx");
+  const Page = load(file, null, modules).default;
+  return renderToStaticMarkup(await Page({
+    params: Promise.resolve({ name: "eng", run: "run" }), searchParams: Promise.resolve({ tab: "overview" }),
+  }));
+}
+
+const failedRun = {
+  assignment_nonce: "current", status: "failed", reviewable: false, output: "Export was not produced",
+};
+const failedPhase = {
+  run_nonce: "current", issue: null, phases: [{
+    role: "integrator", phase: "handoff", task_uid: "child-uid", run_nonce: "child-nonce",
+    state: "failed", result: {
+      ...failedRun, assignment_nonce: "child-nonce",
+      run_evidence: { task_uid: "child-uid", run_nonce: "child-nonce", status: "failed" },
+    },
+  }],
+};
+
+test("Team overview does not resurrect terminal results or failed reviewed phases as launching", async () => {
+  for (const state of [
+    { result: failedRun },
+    { result: failedRun, assignment: { task_id: "current", state: "Running", completed_at: null } },
+    { result: { ...failedRun, status: "ok", reviewable: true, output: "Completed" } },
+    { reviewed_execution: failedPhase },
+  ]) {
+    const html = await renderTeamRunState(state);
+    assert.doesNotMatch(html, /Run in progress|Working —|Current assignment in progress|data-refresh="true"/);
+    assert.match(html, />Run now<\/button>/);
+  }
+});
+
+test("Team overview retains real launch progress and ignores previous-run terminal evidence", async () => {
+  for (const state of [
+    {}, { result: { ...failedRun, assignment_nonce: "previous" } },
+    { reviewed_execution: { ...failedPhase, run_nonce: "previous" } },
+    { reviewed_execution: { ...failedPhase, phases: [{ ...failedPhase.phases[0], task_uid: "replacement" }] } },
+  ]) {
+    assert.match(await renderTeamRunState(state), /Run in progress|Working —/);
+  }
+  const paused = await renderTeamRunState({}, { paused: true });
+  assert.match(paused, /Scheduling paused — current run is finishing/);
+  assert.match(paused, /data-refresh="true"/);
+  assert.doesNotMatch(paused, />Run now<\/button>/);
+});
+
+test("failed Team runs retain emergency cleanup while launched, including paused Teams", async () => {
+  for (const paused of [false, true]) {
+    const html = await renderTeamRunState({ result: failedRun }, { paused }, true);
+    assert.match(html, /Emergency stop/);
+    assert.match(html, /Export was not produced/);
+    assert.doesNotMatch(html, /data-refresh="true"/);
+    assert.doesNotMatch(await renderTeamRunState({ result: failedRun, launched: false }, { paused }, true), /Emergency stop/);
+  }
+});
+
 test("Run now clears an observed request and keeps polling an unobserved request", () => {
   let index = 0;
   const { RunNowControl } = load("app/workspace/teams/[name]/run-control.tsx", {
@@ -530,7 +1083,7 @@ test("Run now clears an observed request and keeps polling an unobserved request
   assert.match(finished, />Run now<\/button>/);
   assert.doesNotMatch(finished, /Run requested|data-refresh="true"/);
   assert.match(state({ runKey: "new-run", inFlight: true }), /Run in progress/);
-  assert.match(state({ runKey: "previous-run", paused: true }), /Hibernating/);
+  assert.match(state({ runKey: "previous-run", paused: true }), /Scheduling paused/);
 });
 
 test("A resumed Team cannot be presented as paused while controller status converges", () => {
@@ -733,7 +1286,7 @@ test("Team server actions preserve review choice, displayed run binding and API 
   await actions.reviewTeamTask("team a", "item a", "request_changes", binding, "  Improve it  ");
   assert.equal(calls.at(-1).path, "/api/namespaces/tenant%20a/teams/team%20a/tasks/item%20a/review");
   assert.deepEqual(JSON.parse(calls.at(-1).init.body), {
-    decision: "request_changes", feedback: "Improve it", assignment_nonce: "displayed-nonce", run_uid: "displayed-uid",
+    decision: "request_changes", feedback: "  Improve it  ", assignment_nonce: "displayed-nonce", run_uid: "displayed-uid",
   });
   response = { ok: false, status: 409, json: async () => ({ error: { message: "Revision changed" } }) };
   const count = refreshed.length;
@@ -816,6 +1369,48 @@ test("missing trace retains genuine assignment and timestamped approval records"
   assert.doesNotMatch(html, /Complete execution lifetime|Launch the execution/);
 });
 
+test("graph evidence references do not turn metadata into verified cryptographic proofs", () => {
+  const { EvidenceReferences } = load("components/agent-graph/inspectors.tsx");
+  const html = render(EvidenceReferences, {
+    envelopeDigest: "sha256:recorded-digest",
+    identity: { did: "did:mesh:reported-identity", reputation_score: 0 },
+    nonPrincipalCount: 4,
+    receipt: { scheme: "DSSE", key_id: "reported-key", inclusion_seq: 0, signatures: [] },
+  });
+  assert.match(html, /Run evidence references/);
+  assert.match(html, /4 available · 0 unavailable/);
+  assert.match(html, /4 non-principal graph entries/);
+  assert.match(html, /planned phases and observed producers/);
+  assert.match(html, /does not establish sandbox creation or authority checks/);
+  assert.match(html, /Receipt presence is not signature verification/);
+  assert.match(html, /reputation 0/);
+  assert.match(html, /inclusion log #0/);
+  assert.doesNotMatch(html, /\d+ verified|specialists spawned|strict subset|Trust envelope signed|>ok</);
+});
+
+test("missing evidence does not label a current run archived or claim controls were enforced", () => {
+  const { EvidenceReferences } = load("components/agent-graph/inspectors.tsx");
+  const html = render(EvidenceReferences, {
+    envelopeDigest: null, identity: null, nonPrincipalCount: 0, receipt: null,
+  });
+  assert.match(html, /0 available · 4 unavailable/);
+  assert.match(html, /No trust envelope digest is available for this run/);
+  assert.match(html, /Delivery may still be in progress/);
+  assert.doesNotMatch(html, /archived run|predates|control was enforced|\d+ verified/);
+});
+
+test("graph does not turn absent detailed activity into zero execution", () => {
+  const { AgentGraph } = load("components/agent-graph.tsx");
+  const html = render(AgentGraph, base);
+  assert.match(html, /Detailed trace unavailable/);
+  assert.match(html, /Not recorded/);
+  assert.match(html, /Missing action records do not mean zero execution/);
+  assert.doesNotMatch(html, />0 records</);
+  for (const label of ["Retained rounds", "Tool calls", "Failures"]) {
+    assert.match(html, new RegExp(`${label}</[^>]+><[^>]+>Not recorded<`));
+  }
+});
+
 test("partial round records retain graph and timeline without claiming no work", () => {
   const html = render(ExecutionExplorer, { ...base, activity: [round] });
   assert.match(html, /Drill-down/);
@@ -824,6 +1419,24 @@ test("partial round records retain graph and timeline without claiming no work",
   const { AgentGraph } = load("components/agent-graph.tsx");
   assert.match(render(AgentGraph, base), /No tool actions are retained here/);
   assert.doesNotMatch(html, /Detailed trace unavailable|Launch the execution|completed without retained tool actions/);
+});
+
+test("recorded timeline wraps long tool names and stacks timestamps on narrow screens", () => {
+  const name = `kars_mission_python_execute_${"x".repeat(200)}`;
+  const payload = "retained-evidence-".repeat(500);
+  const html = render(ExecutionLifetime, { ...base, activity: [{
+    kind: "tool", round: 0, seq: 2, ts: round.ts, name,
+    args_preview: "Run retained application tests", result_preview: payload, ok: false,
+  }] });
+  assert.ok(html.includes(name));
+  assert.ok(html.includes(payload));
+  assert.match(html, /grid-cols-\[0\.5rem_minmax\(0,1fr\)_auto\]/);
+  assert.match(html, /sm:grid-cols-\[0\.5rem_8rem_minmax\(0,1fr\)_auto\]/);
+  assert.match(html, /col-start-2 row-start-2 min-w-0 sm:col-start-3 sm:row-start-1/);
+  assert.match(html, /\[overflow-wrap:anywhere\]/);
+  assert.match(html, /w-64 max-w-full/);
+  assert.doesNotMatch(html, /<details[^>]*\bopen(?:=|\s|>)/);
+  assert.match(html, /bg-danger/);
 });
 
 test("timeline distinguishes unavailable records from an unmatched search", () => {
@@ -1029,6 +1642,64 @@ const routerProps = { binding, ns: "kars-system", name: "briefing" };
 const panelWithObservations = observations => ({ ...routerProps, binding: { ...binding, observations } });
 const sharedObservations = JSON.parse(readFileSync(new URL("../../../inference-router/tests/fixtures/router-observations-v1.json", import.meta.url), "utf8"));
 
+test("startup signals use current router evidence without claiming readiness or delivery", () => {
+  const task = reviewedMission([], { current_run_nonce: producer.run_nonce, execution_phase: "Running" });
+  const live = { ...producer, attempt_uid: "attempt", progress_sequence: 1, observations: observed };
+  const html = render(DeployTimeline, { task, liveActivity: live });
+  assert.match(html, /Execution observed/);
+  assert.match(html, /Timestamped activity is recorded for this revision/);
+  assert.doesNotMatch(html, /Waiting for the first revision-bound|<h2[^>]*>Delivered</);
+  for (const liveActivity of [null, { ...live, run_nonce: "old" }, { ...live, assignment_id: "" },
+    { ...live, observations: { ...observed, trace: { ...observed.trace, events: [] } } },
+    { ...live, observations: { ...observed, state: "unavailable", reason: "Disconnected" } }]) {
+    assert.match(render(DeployTimeline, { task, liveActivity }), /Waiting for the first revision-bound/);
+  }
+  const stopping = render(DeployTimeline, { task: { ...task, launched: false }, liveActivity: live });
+  assert.match(stopping, /<h2[^>]*>Stopping</);
+  assert.doesNotMatch(stopping, /Timestamped activity is recorded/);
+  const stopped = render(DeployTimeline, { task: { ...task, launched: false, execution_phase: "Idle" }, liveActivity: live });
+  assert.match(stopped, /<h2[^>]*>Stopped</);
+  assert.doesNotMatch(stopped, /Timestamped activity is recorded/);
+});
+
+test("startup timeline shares the explorer stream and Overview uses the same pinned hook", () => {
+  const task = reviewedMission([], { namespace: "kars-system", name: "mission", current_run_nonce: producer.run_nonce,
+    execution_phase: "Running" });
+  let calls = 0;
+  let live = { ...producer, attempt_uid: "attempt", progress_sequence: 1, observations: observed };
+  const modules = { "@/components/use-live-trace": { useLiveTrace: () => {
+    calls++;
+    return { events: [], routerActivity: live, phaseActivity: {} };
+  } } };
+  const { ExecutionExplorer: Explorer } = load("components/execution-explorer.tsx", null, modules);
+  const { LiveDeployTimeline: Overview } = load("app/workspace/missions/[name]/deploy-timeline.tsx", null, modules);
+  for (const component of [Explorer, Overview]) {
+    const props = component === Explorer ? { ...base, running: true, runNonce: producer.run_nonce, startupTask: task }
+      : { task, observing: true };
+    calls = 0;
+    assert.match(render(component, props), /Execution observed/);
+    assert.equal(calls, 1, "Startup must not open a second stream inside the explorer");
+    live = null;
+    assert.match(render(component, props), /Waiting for the first revision-bound/);
+    live = { ...producer, attempt_uid: "attempt", progress_sequence: 1, observations: observed };
+  }
+});
+
+test("startup signals include bound live reviewed work but reject stale root or worker bindings", () => {
+  const { reviewedPhaseKey } = load("lib/router-activity.ts");
+  const phase = reviewedPhase("active");
+  const task = reviewedMission([phase]);
+  const live = { ...producer, task_uid: phase.task_uid, run_nonce: phase.run_nonce,
+    attempt_uid: "attempt", progress_sequence: 1, observations: observed };
+  const phaseActivity = { [reviewedPhaseKey(phase)]: live };
+  assert.match(render(DeployTimeline, { task, phaseActivity }), /retained for 1 reviewed phase/);
+  for (const props of [
+    { task: { ...task, current_run_nonce: "new-root" }, phaseActivity },
+    { task, phaseActivity: { [reviewedPhaseKey(phase)]: { ...live, task_uid: "other-worker" } } },
+    { task, phaseActivity: {} },
+  ]) assert.doesNotMatch(render(DeployTimeline, props), /retained for 1 reviewed phase/);
+});
+
 test("ordinary Mission activity passes only current reviewed phases into the shared explorer", () => {
   const file = "app/workspace/missions/[name]/page.tsx";
   const page = ts.createSourceFile(file, readFileSync(resolve(sourceRoot, file), "utf8"),
@@ -1068,6 +1739,47 @@ test("ordinary Mission activity passes only current reviewed phases into the sha
   }
 });
 
+test("failed reviewed phase graph focus opens retained rounds and tools without claiming success", () => {
+  const { reviewedPhases } = load("lib/team-run-evidence.ts");
+  const { buildAgentExecutions } = load("components/agent-graph/execution.ts");
+  const { exactActionQuery } = load("components/agent-graph/activity.ts");
+  const phase = { role: "reviewer", phase: "check", state: "failed",
+    task_name: "failed-reviewer", task_uid: "phase-uid", run_nonce: "phase-run",
+    result: { assignment_nonce: "phase-run", reviewable: false, status: "failed",
+      source: "durable_agent", output: "Retained failed output", error: "Required exports missing",
+      run_evidence: { ...producer, agent_name: "reviewer", task_uid: "phase-uid", run_nonce: "phase-run", status: "failed" } },
+    router_activity: sharedObservations };
+  const task = { current_run_nonce: base.runNonce, result: null,
+    reviewed_execution: { run_nonce: base.runNonce, issue: null, phases: [phase] } };
+  const phases = reviewedPhases(task);
+  const agents = buildAgentExecutions({ ...base, running: false, events: [], subAgents: [], phases });
+  assert.equal(agents[0].actions.length, 0, "principal synthesis has no records");
+  const reviewer = agents[1];
+  assert.equal(reviewer.actions.length, sharedObservations.trace.events.length);
+  for (const query of [reviewer.traceQuery, exactActionQuery(reviewer, reviewer.actions[2])]) {
+    const states = ["tools", { nonce: base.runNonce, query }];
+    const { ExecutionExplorer: SelectedExplorer } = load("components/execution-explorer.tsx", {
+      useState: () => [states.shift(), forbiddenMutation],
+    });
+    const html = render(SelectedExplorer, { ...base, running: false, activity: [], phases });
+    assert.match(html, /Focused from graph:/);
+    assert.match(html, /reviewer \/ check/);
+    assert.match(html, /Harness reported: fetch/);
+    assert.match(html, /Reported outcome: Failure/);
+    assert.match(html, /failed-reviewer\/artifact\/kars-router-observations.json\?run_nonce=phase-run/);
+    assert.doesNotMatch(html, /No retained router observations match this selection|Reported outcome: Success/);
+  }
+  const unavailable = { ...phase, router_activity: { ...sharedObservations,
+    state: "unavailable", reason: "Observations expired", trace: undefined } };
+  const states = ["tools", { nonce: base.runNonce, query: "" }];
+  const { ExecutionExplorer: UnavailableExplorer } = load("components/execution-explorer.tsx", {
+    useState: () => [states.shift(), forbiddenMutation],
+  });
+  const html = render(UnavailableExplorer, { ...base, running: false, activity: [], phases: [unavailable] });
+  assert.match(html, /Observations expired/);
+  assert.doesNotMatch(html, /Harness reported: fetch|Reported outcome: Success/);
+});
+
 test("deployment timeline recognizes bound reviewed-phase work before principal dispatch", () => {
   const phase = { role: "reviewer", phase: "check", state: "completed",
     task_name: "phase-task", task_uid: "phase-uid", run_nonce: "phase-run",
@@ -1079,7 +1791,7 @@ test("deployment timeline recognizes bound reviewed-phase work before principal 
     current_run_nonce: base.runNonce, result: null, assignment: null, activity: [],
     reviewed_execution: { run_nonce: base.runNonce, phases: [phase], issue: null } };
   const html = render(DeployTimeline, { task });
-  assert.match(html, /Execution observed/);
+  assert.match(html, /Awaiting next phase/);
   assert.match(html, /retained for 1 reviewed phase/);
   assert.match(html, /principal sandbox can start after their handoffs/);
   assert.match(html, /does not establish principal readiness/);
@@ -1098,7 +1810,9 @@ test("deployment timeline recognizes bound reviewed-phase work before principal 
         trace: { ...sharedObservations.trace, events: [] } } }] } },
   ]) {
     const unavailable = render(DeployTimeline, { task: changed });
-    assert.match(unavailable, /Starting execution/);
+    const expectedStatus = missionPresentation(changed).status;
+    assert.match(unavailable, expectedStatus === "waiting" ? /Awaiting next phase/
+      : expectedStatus === "unavailable" ? /Execution evidence unavailable/ : /Starting execution/);
     assert.doesNotMatch(unavailable, /Execution observed|retained for 1 reviewed phase/);
   }
 });
@@ -1144,7 +1858,7 @@ test("default timeline unfolds cumulative router records without duplicating leg
     assert.match(html, /06:47:40.000 UTC/);
     assert.match(html, /06:47:42.000 UTC/);
     assert.doesNotMatch(html, /06:47:43|3,682 tokens|Model round 1|href=/);
-    assert.ok(html.indexOf("Accepted this revision") < html.indexOf("Release denied"));
+    assert.ok(html.indexOf("Release denied") < html.indexOf("Accepted this revision"));
     assert.ok(html.indexOf("Release denied") < html.indexOf("Sequence 1"));
   }
   assert.doesNotMatch(timelines[0], /Harness reported|Sequence 3|round 2/);
@@ -1154,7 +1868,7 @@ test("default timeline unfolds cumulative router records without duplicating leg
   assert.doesNotMatch(timelines[1], /round 0|round 3/);
 });
 
-test("router-only timeline preserves source order, unavailable timestamps and nullable outcomes", () => {
+test("router-only timeline presents descending sequence without changing unavailable timestamps or nullable outcomes", () => {
   for (const ok of [false, null, true]) {
     const observations = structuredClone(sharedObservations);
     observations.trace.events[2].ok = ok;
@@ -1163,8 +1877,8 @@ test("router-only timeline preserves source order, unavailable timestamps and nu
     assert.doesNotMatch(html, / UTC|0 tokens|Model round 0/);
     assert.match(html, /tokens: unavailable/);
     assert.match(html, /no ordering between producers is inferred/);
-    assert.ok(html.indexOf("Sequence 2") < html.indexOf("Sequence 3"));
-    assert.ok(html.indexOf("Sequence 3") < html.indexOf("Sequence 4"));
+    assert.ok(html.indexOf("Sequence 4") < html.indexOf("Sequence 3"));
+    assert.ok(html.indexOf("Sequence 3") < html.indexOf("Sequence 2"));
     assert.ok(html.includes(`outcome ${ok === null ? "unavailable" : ok ? "success" : "failure"}`));
     assert.match(html, /Retained revision observations/);
     assert.match(html, /Source: model-proposed/);
@@ -1230,8 +1944,9 @@ test("router tools nest under the proposing round while preserving the reporting
   assert.match(tools, /Harness reported: fetch/);
   assert.match(tools, /Reported in router round 2 · Reported outcome: Failure/);
   assert.doesNotMatch(tools, /Router round [0-9]|Provider:/);
+  assert.ok(html.indexOf("Router round 2") < html.indexOf("Router round 1"));
   assert.ok(html.indexOf("Router round 1") < html.indexOf("Tools proposed in router round 1"));
-  assert.ok(html.indexOf("Tools proposed in router round 1") < html.indexOf("Router round 2"));
+  assert.ok(tools.indexOf("Harness reported: fetch") < tools.indexOf("Model proposed: fetch"));
   assert.doesNotMatch(html, /Tools proposed in router round 2/);
   assert.equal((html.match(/<details /g) ?? []).length, 4);
 });
@@ -1272,8 +1987,9 @@ test("raw graph labels identify observations, not principal authority or execute
   assert.match(html, /Harness reported: fetch/);
   assert.match(html, />model-proposed</);
   assert.match(html, />harness-reported</);
-  assert.match(html, /Available timestamps identify router observations/);
-  assert.doesNotMatch(html, /timestamps and destinations are not recorded/);
+  assert.match(html, /Timestamps and source labels describe the available evidence/);
+  assert.match(html, /destination nodes are not proof of complete traffic coverage/);
+  assert.doesNotMatch(html, /destinations are not recorded/);
   assert.doesNotMatch(html, />core<|>\s*root\s*<|>recorded action</);
   const legacy = render(ExecutionExplorer, { ...base, activity: [round] });
   assert.match(legacy, />core</);
@@ -1292,6 +2008,36 @@ const rawAgent = observations => buildAgentExecutions({
   routerActivity: { ...binding, observations },
 });
 
+test("recorded producer runtime is independent of model and current roster in graph and inspector", () => {
+  for (const runtime of ["OpenClaw", "Hermes"]) {
+    const observations = structuredClone(sharedObservations);
+    for (const event of observations.trace.events) if (event.kind === "round") event.model = "gpt-6-astra";
+    const routerActivity = { ...binding, producer: { ...producer, runtime }, observations };
+    const [agent] = buildAgentExecutions({ ...base, agentRuntime: "Unrelated runtime", agentModel: "Unrelated model",
+      events: [], subAgents: [], routerActivity });
+    assert.equal(agent.runtime, runtime);
+    assert.equal(agent.model, "gpt-6-astra");
+    assert.ok(agent.identitySearchText.includes(runtime.toLowerCase()));
+    assert.ok(agent.searchText.includes(runtime.toLowerCase()));
+    assert.equal(routerProducerKey(routerActivity.producer), routerProducerKey(producer));
+    const html = render(ExecutionExplorer, { ...base, routerActivity });
+    assert.ok(html.includes(`title="Runtime: ${runtime}"`));
+    assert.match(html, /title="Model: gpt-6-astra"/);
+    assert.ok(html.includes(`runtime ${runtime}, model gpt-6-astra`));
+    const inspector = render(SelectionInspector, { selection: { kind: "agent", agent } });
+    assert.match(inspector, />Runtime</);
+    assert.ok(inspector.includes(runtime));
+    assert.match(inspector, /gpt-6-astra/);
+  }
+});
+
+test("legacy producers keep runtime unknown rather than inheriting the current runtime", () => {
+  const html = render(ExecutionExplorer, { ...base, agentRuntime: "Unrelated runtime",
+    routerActivity: { ...binding, observations: sharedObservations } });
+  assert.match(html, /Runtime unknown/);
+  assert.doesNotMatch(html, /Runtime: Unrelated runtime/);
+});
+
 test("raw graph retains exact producer, positive rounds and nullable evidence without inheriting current roster", () => {
   const agents = rawAgent(sharedObservations);
   assert.equal(agents.length, 1);
@@ -1308,7 +2054,7 @@ test("raw graph retains exact producer, positive rounds and nullable evidence wi
   assert.deepEqual(Array.from(agent.actions, actionRound), [1, 1, 1, 2]);
   assert.ok(agent.actions.every(action => action.ts === null));
   const proposal = render(SelectionInspector, { selection: { kind: "action", agent, action: agent.actions[1] } });
-  for (const text of ["Proposal only", "Duration unavailable", "Timestamp unavailable", "Router round 1", "Raw arguments excluded from telemetry"])
+  for (const text of ["Proposal only", "Duration unavailable", "Timestamp unavailable", "Router round 1", "Arguments were not recorded for this call"])
     assert.ok(proposal.includes(text), text);
   assert.doesNotMatch(proposal, /Succeeded|Success reported|Updated a file/);
   const result = render(SelectionInspector, { selection: { kind: "action", agent, action: agent.actions[2] } });
@@ -1381,6 +2127,78 @@ test("raw drill-down selects exact producer observation IDs and rejects malforme
   assert.match(grouped, /Router round 1/);
   assert.match(grouped, /Model proposed: fetch/);
   assert.doesNotMatch(grouped, /Harness reported: fetch|Router round 2/);
+});
+
+test("destination and folded-destination clicks select exact worker observations, not unrelated hosts or producers", () => {
+  const { matchesRouterFocus, routerObservationKey } = load("lib/router-activity.ts");
+  const { exactDestinationsQuery } = load("components/agent-graph/activity.ts");
+  const { AgentGraph: InteractiveGraph } = load("components/agent-graph.tsx", {
+    useState: initial => [typeof initial === "function" ? initial() : initial, () => {}],
+    useMemo: calculate => calculate(), useEffect: () => {},
+  });
+  for (const runtime of ["OpenClaw", "Hermes"]) {
+    const observations = structuredClone(sharedObservations);
+    const proposal = observations.trace.events.find(event => event.kind === "tool_proposed");
+    const destinations = ["www.cisecurity.org:443", "www.cisecurity.org:8443", "other.example:443", "third.example:443", "fourth.example:443"];
+    const operations = destinations.map((destination, index) => ({
+      kind: "router_operation", source: "router", seq: 5 + index, scope_id: proposal.scope_id,
+      round: proposal.round, call_id: proposal.call_id, name: proposal.name,
+      operation: "http_fetch", flag: "response", allowed: null, http_status: 200, complete: true,
+      destination_host: destination.split(":")[0], destination_port: Number(destination.split(":")[1]), ms: 1,
+    }));
+    observations.trace.events.push(...operations);
+    const worker = { ...producer, task_uid: "phase-uid", run_nonce: "phase-run", pod_uid: "worker-pod", runtime };
+    const workerBinding = { producer: worker, observations, provisional: false };
+    const phase = { role: "researcher", phase: "research", state: "completed",
+      task_name: "reviewed-phase", task_uid: worker.task_uid, run_nonce: worker.run_nonce,
+      result: { assignment_nonce: worker.run_nonce, reviewable: true, status: "ok", source: "durable_agent",
+        run_evidence: { ...worker, status: "succeeded" } }, router_activity: observations };
+    let focused;
+    const props = { ...base, events: [], subAgents: [], phases: [phase], onInspect: query => { focused = query; } };
+    const buttons = [];
+    const visit = node => {
+      if (!node || typeof node !== "object") return;
+      if (Array.isArray(node)) return node.forEach(visit);
+      if (node.type === "button") buttons.push(node);
+      visit(node.props?.children);
+    };
+    visit(InteractiveGraph(props));
+    for (const [label, expected] of [["www.cisecurity.org:443", [operations[0]]], ["+3 destinations", operations.slice(2)]]) {
+      const button = buttons.find(node => node.props["aria-label"] === `Inspect ${label} for researcher / research`);
+      assert.ok(button, label);
+      button.props.onClick();
+      const ids = JSON.parse(new URLSearchParams(focused.slice("observations:".length)).get("ids"));
+      assert.deepEqual(ids, expected.map(event => routerObservationKey(worker, event)));
+      assert.equal(matchesRouterFocus(workerBinding, focused), true);
+      assert.equal(matchesRouterFocus({ ...workerBinding, producer }, focused), false);
+      const panel = render(RouterActivityPanel, { binding: workerBinding, focusQuery: focused });
+      assert.doesNotMatch(panel, /No selected records|Model proposed:|Harness reported:/);
+      for (const event of operations) assert.equal(panel.includes(`Destination: ${event.destination_host}:${event.destination_port}.`), expected.includes(event));
+      const { ExecutionExplorer: FocusedExplorer } = load("components/execution-explorer.tsx", {
+        useState: value => typeof value === "string" ? ["tools", () => {}] : [{ nonce: base.runNonce, query: focused }, () => {}],
+      });
+      assert.doesNotMatch(render(FocusedExplorer, props), /No router observations match this selection/);
+    }
+    const agent = buildAgentExecutions({ ...props, name: "briefing" }).find(item => item.role === "researcher");
+    assert.ok(agent);
+    const absent = exactDestinationsQuery(agent, ["missing.example:443"]);
+    assert.equal(matchesRouterFocus(workerBinding, absent), false);
+    assert.match(render(RouterActivityPanel, { binding: workerBinding, focusQuery: absent }), /No selected records remain available/);
+  }
+});
+
+test("legacy destination focus retains exact action selection without inventing router observations", () => {
+  const { exactDestinationsQuery } = load("components/agent-graph/activity.ts");
+  const events = ["https://source.example/page", "https://unrelated.example/page"].map((url, seq) => ({
+    kind: "tool", name: "fetch", round: 0, ts: "2026-11-01T13:00:00Z", ok: true, ms: 1,
+    args_preview: url, result_preview: "Referenced page", seq,
+  }));
+  const [agent] = buildAgentExecutions({ ...base, events, subAgents: [] });
+  const query = exactDestinationsQuery(agent, ["source.example"]);
+  assert.ok(query.startsWith("actions:"));
+  const params = new URLSearchParams(query.slice("actions:".length));
+  assert.equal(params.get("seqs"), "0");
+  assert.equal(agent.actions[0].destinations[0], "source.example");
 });
 
 test("producer drill-down follows cumulative observations while exact actions remain pinned", () => {
@@ -1509,44 +2327,219 @@ test("artifact list separates downloadable system evidence from output files and
   assert.doesNotMatch(render(ArtifactsPanel, { ...props, artifacts: [props.artifacts[1]] }), /<details[^>]*open=/);
 });
 
-test("retained halt history cannot hide the halt control or mislabel a resumed or delivered Mission", () => {
+test("halt remains available for blocked execution without mislabeling retained history", () => {
   const file = "app/workspace/missions/[name]/page.tsx";
   const page = ts.createSourceFile(file, readFileSync(resolve(sourceRoot, file), "utf8"),
     ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  let control, banner;
+  let control, banner, gate, refresh;
   const visit = node => {
+    if (ts.isVariableDeclaration(node) && node.name.getText(page) === "canHalt") gate = node.getText(page);
+    if (ts.isVariableDeclaration(node) && node.name.getText(page) === "refreshActive") refresh = node.getText(page);
     if (ts.isJsxExpression(node) && node.expression) {
       const text = node.expression.getText(page);
       if (text.includes("<HaltButton ")) control = node;
-      if (text.startsWith("task.halted &&")) banner = node;
+      if (text.startsWith("task.halted != null &&")) banner = node;
     }
     ts.forEachChild(node, visit);
   };
   visit(page);
-  assert.ok(control && banner);
+  assert.ok(control && banner && gate && refresh);
   const exports = {};
   const code = `export function Header({task, live, realDelivery}) {
     const ns = "kars-system", name = "mission";
+    const ${gate};
     return <>${control.getText(page)}${banner.getText(page)}</>;
+  }
+  export function Refresh({task, live = false, observing = false, admissionPending = false, status}) {
+    const shutdownPending = missionShutdownPending(task);
+    const ${gate};
+    const ${refresh};
+    return refreshActive;
   }`;
   runInNewContext(ts.transpileModule(code, { compilerOptions: {
     module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX,
   } }).outputText, {
-    exports, require, HaltButton: () => React.createElement("button", null, "Halt agent"),
+    exports, require, missionShutdownPending, HaltButton: () => React.createElement("button", null, "Halt agent"),
+    Link: ({ children, ...props }) => React.createElement("a", props, children),
   });
   for (const launched of [true, false]) {
     for (const realDelivery of [true, false]) {
       const live = launched && !realDelivery;
-      const html = render(exports.Header, { task: { launched, halted: "Prior interruption." }, live, realDelivery });
-      assert.equal(html.includes("Halt agent"), live);
+      const html = render(exports.Header, { task: { launched, sandbox: null, halted: "Prior interruption." }, live, realDelivery });
+      assert.equal(html.includes("Halt agent"), launched);
       assert.match(html, /Prior interruption\./);
-      assert.match(html, launched || realDelivery ? /Previous halt/ : /Mission halted/);
-      assert.match(html, /current execution status is shown above/);
+      assert.match(html, /Mission permanently halted/);
+      assert.match(html, /cannot relaunch or request revisions/);
+      assert.match(html, /href="\/workspace\/new"/);
+      assert.match(html, /does not by itself verify runtime teardown/);
     }
   }
-  const fresh = render(exports.Header, { task: { launched: true, halted: null }, live: true, realDelivery: false });
+  for (const [launched, sandbox] of [[true, null], [true, "active-phase"], [false, "stopping-phase"]]) {
+    const blocked = render(exports.Header, { task: { launched, sandbox, halted: null }, live: false, realDelivery: false });
+    assert.match(blocked, /Halt agent/, "blocked or stopping execution remains stoppable even without live status");
+  }
+  const fresh = render(exports.Header, { task: { launched: true, sandbox: null, halted: null }, live: true, realDelivery: false });
   assert.match(fresh, /Halt agent/);
-  assert.doesNotMatch(fresh, /Previous halt|Mission halted/);
+  assert.doesNotMatch(fresh, /Mission permanently halted/);
+  assert.match(render(exports.Header, { task: { launched: false, halted: "" }, live: false, realDelivery: false }), /Mission permanently halted/);
+  assert.equal(exports.Refresh({ task: { launched: true, sandbox: null }, status: "blocked" }), true);
+  assert.equal(exports.Refresh({ task: { launched: true, sandbox: null }, status: "done" }), false);
+  assert.equal(exports.Refresh({ task: { launched: true, sandbox: null }, observing: true, status: "done" }), true);
+  assert.equal(exports.Refresh({ task: { launched: false, sandbox: null }, status: "draft" }), false);
+  assert.equal(exports.Refresh({ task: { launched: false, sandbox: null, execution_phase: "Stopping" }, status: "blocked" }), true);
+});
+
+test("shared live overview grows with worker evidence while the principal stays unattributed", () => {
+  const { buildAgentExecutions, buildExecutionOverview } = load("components/agent-graph/execution.ts");
+  const { SelectionInspector, ExecutionOverview } = load("components/agent-graph/inspectors.tsx");
+  const { reviewedPhaseKey, matchesRouterFocus } = load("lib/router-activity.ts");
+  const { displayedPhaseRouterActivity } = load("lib/team-run-evidence.ts");
+  const { exactActionQuery } = load("components/agent-graph/activity.ts");
+  const phase = { role: "researcher", phase: "research", state: "active", result: null,
+    task_name: "worker-task", task_uid: "worker-uid", run_nonce: "worker-run" };
+  let phaseActivity = {};
+  const { ExecutionExplorer: StreamedExplorer } = load("components/execution-explorer.tsx", null, {
+    "@/components/use-live-trace": { useLiveTrace: () => ({ events: [], routerActivity: null, phaseActivity }) },
+  });
+  const props = { ...base, running: true, phases: [phase] };
+  const empty = render(StreamedExplorer, props);
+  assert.match(empty, /Execution overview/);
+  assert.match(empty, /Records from 0 of 2/);
+  assert.match(empty, /Retained rounds<\/dt><dd[^>]*>Not recorded/);
+  for (const runtime of ["OpenClaw", "Hermes"]) {
+    for (const count of [2, 3, 4]) {
+      const observations = structuredClone(sharedObservations);
+      observations.trace.events = observations.trace.events.slice(0, count).map((event, index) => ({
+        ...event, observed_at: `2026-10-21T20:00:0${index}Z`,
+      }));
+      const live = { ...producer, task_uid: phase.task_uid, run_nonce: phase.run_nonce,
+        agent_name: "worker", runtime, attempt_uid: "attempt", progress_sequence: count, observations };
+      phaseActivity = { [reviewedPhaseKey(phase)]: live };
+      const html = render(StreamedExplorer, props);
+      assert.match(html, /Records from 1 of 2/);
+      assert.match(html, /Worker activity is not attributed to the principal/);
+      assert.match(html, /researcher \/ research.*Inspect record/);
+      assert.match(html, new RegExp(`Latest timestamped activity</dt><dd[^>]*>.*20:00:0${count - 1}`));
+      const agents = buildAgentExecutions({ ...base, running: true, events: [], subAgents: [],
+        phases: [{ ...phase, live_router_activity: live }] });
+      const overview = buildExecutionOverview(agents);
+      assert.equal(agents[0].actions.length, 0);
+      assert.equal(agents[0].lastActivity, null);
+      assert.equal(overview.rounds, count === 4 ? 2 : 1);
+      assert.equal(overview.toolCalls, count >= 3 ? 1 : 0);
+      assert.equal(overview.failures, count >= 3 ? 1 : 0);
+      assert.equal(overview.latest.agent.id, agents[1].id);
+      assert.equal(overview.latest.action.seq, count);
+      const principal = render(SelectionInspector, { selection: { kind: "agent", agent: agents[0] } });
+      assert.match(principal, /Retained rounds<\/dt><dd[^>]*>Not recorded/);
+      assert.match(principal, /Detailed trace unavailable/);
+      let focused;
+      const tree = ExecutionOverview({ agents, onInspect: query => { focused = query; } });
+      const buttons = [];
+      const visit = node => {
+        if (!node || typeof node !== "object") return;
+        if (Array.isArray(node)) return node.forEach(visit);
+        if (node.type === "button") buttons.push(node);
+        visit(node.props?.children);
+      };
+      visit(tree);
+      buttons[0].props.onClick();
+      assert.equal(focused, exactActionQuery(overview.latest.agent, overview.latest.action));
+      assert.equal(matchesRouterFocus(displayedPhaseRouterActivity({ ...phase, live_router_activity: live }), focused), true);
+      assert.equal(matchesRouterFocus(binding, focused), false, "principal does not receive worker focus");
+      buttons[1].props.onClick();
+      assert.equal(focused, agents[1].traceQuery);
+    }
+  }
+  phaseActivity = {};
+  assert.match(render(StreamedExplorer, props), /Records from 0 of 2/, "disconnect hides provisional counts");
+  phaseActivity = { [reviewedPhaseKey(phase)]: { ...producer, observations: sharedObservations } };
+  assert.match(render(StreamedExplorer, props), /Records from 0 of 2/, "mismatched child custody cannot populate counts");
+});
+
+test("overview keeps missing timestamps and trace gaps honest and counts only bound producer records", () => {
+  const { buildAgentExecutions, buildExecutionOverview } = load("components/agent-graph/execution.ts");
+  const { ExecutionOverview } = load("components/agent-graph/inspectors.tsx");
+  const agents = buildAgentExecutions({ ...base, events: [], subAgents: [], routerActivity: { ...binding, observations: sharedObservations } });
+  const summary = buildExecutionOverview(agents);
+  assert.equal(summary.latest, null);
+  assert.equal(summary.untimestamped, true);
+  const html = render(ExecutionOverview, { agents });
+  assert.match(html, /Timestamp unavailable; inspect each producer below/);
+  assert.match(html, /no newest action across producers can be established/);
+  assert.match(html, /Latest producer record: Router response/);
+  const empty = buildAgentExecutions({ ...base, events: [], subAgents: [],
+    routerActivity: { ...binding, observations: { state: "unavailable", reason: "Disconnected" } } });
+  assert.equal(buildExecutionOverview(empty).rounds, null);
+  assert.equal(buildExecutionOverview(empty).toolCalls, null);
+  assert.equal(buildExecutionOverview(empty).failures, null);
+  const snapshot = JSON.stringify(agents);
+  buildExecutionOverview(agents);
+  assert.equal(JSON.stringify(agents), snapshot, "canonical actions remain ascending");
+});
+
+test("newest timeline uses actual timestamp, producer-local descending ties and unknown timestamps last", () => {
+  const { newestLifetimeEvents } = load("components/execution-lifetime.tsx");
+  const row = (id, at, producer, seq) => ({ id, at, producer, seq, kind: "tool", title: id, summary: id, detail: null, ok: null });
+  const rows = [
+    row("old", "2026-10-21T20:00:00Z", "a", 1),
+    row("tie-low", "2026-10-21T20:00:01Z", "a", 2),
+    row("tie-high", "2026-10-21T22:00:01+02:00", "a", 3),
+    row("other", "2026-10-21T20:00:01Z", "b", 999),
+    row("unknown-low", null, "a", 5), row("unknown-high", null, "a", 6),
+    row("malformed", "not-a-time", "b", 1),
+  ];
+  const snapshot = JSON.stringify(rows);
+  const expected = ["tie-high", "tie-low", "other", "old", "unknown-high", "unknown-low", "malformed"];
+  assert.equal(JSON.stringify(newestLifetimeEvents(rows).map(row => row.id)), JSON.stringify(expected));
+  assert.equal(JSON.stringify(newestLifetimeEvents([...rows].reverse()).map(row => row.id)), JSON.stringify(expected));
+  assert.equal(JSON.stringify(rows), snapshot);
+  const observations = structuredClone(sharedObservations);
+  observations.trace.events.forEach(event => { event.observed_at = "2026-10-21T20:00:01Z"; });
+  observations.trace.events[0].observed_at = "2026-10-21T20:00:00Z";
+  const html = render(ExecutionLifetime, { ...base, routerActivity: { ...binding, observations } });
+  assert.ok(html.indexOf("Router response · round 2") < html.indexOf("Harness reported: fetch"));
+  assert.ok(html.indexOf("Harness reported: fetch") < html.indexOf("Model proposed: fetch"));
+  assert.ok(html.indexOf("Model proposed: fetch") < html.indexOf("Router response · round 1"));
+});
+
+test("legacy Activity presents newest groups and tools first without mixing producer round counters", () => {
+  const { ActivityStream, newestActivityEvents } = load("components/activity-stream.tsx");
+  const tool = (name, second, seq, instance, rawRound = 0) => ({ kind: "tool", name,
+    ts: `2026-10-21T20:00:0${second}Z`, seq, round: rawRound, runNonce: base.runNonce,
+    agent: instance, agentInstance: instance, agentRole: "subagent", ms: 1, args_preview: "", result_preview: "", ok: true });
+  const events = [
+    { ...round, ts: "2026-10-21T20:00:00Z", agentInstance: "a" },
+    tool("a-first", 1, 2, "a"), tool("a-second", 2, 3, "a"),
+    { ...round, ts: "2026-10-21T20:00:03Z", agentInstance: "b" },
+    tool("b-first", 4, 2, "b"), tool("b-second", 4, 3, "b"),
+    tool("in-flight", 5, 1, "c", 20),
+  ];
+  const snapshot = JSON.stringify(events);
+  const html = render(ActivityStream, { ...base, events });
+  assert.ok(html.indexOf("in-flight") < html.indexOf("b-second"));
+  assert.ok(html.indexOf("b-second") < html.indexOf("b-first"));
+  assert.ok(html.indexOf("b-first") < html.indexOf("a-second"));
+  assert.ok(html.indexOf("a-second") < html.indexOf("a-first"));
+  assert.ok(html.indexOf("Model round 3") < html.indexOf("Model round 2"));
+  assert.ok(html.indexOf("Model round 2") < html.indexOf("Model round 1"));
+  const filtered = render(ActivityStream, { ...base, events, focusQuery: "agent-instance:b" });
+  assert.match(filtered, /b-second/);
+  assert.doesNotMatch(filtered, /a-first|a-second|in-flight/);
+  const unknown = tool("unknown", 6, 99, "a"); unknown.ts = "bad-date";
+  assert.equal(newestActivityEvents([...events, unknown]).at(-1).name, "unknown");
+  assert.equal(JSON.stringify(events), snapshot);
+});
+
+test("folded inspector reverses only presentation while exact action queries keep canonical order", () => {
+  const { SelectionInspector } = load("components/agent-graph/inspectors.tsx");
+  const { buildAgentExecutions } = load("components/agent-graph/execution.ts");
+  const { exactActionsQuery } = load("components/agent-graph/activity.ts");
+  const [agent] = buildAgentExecutions({ ...base, events: [], subAgents: [], routerActivity: { ...binding, observations: sharedObservations } });
+  const before = exactActionsQuery(agent, agent.actions);
+  const html = render(SelectionInspector, { selection: { kind: "folded-actions", agent, actions: agent.actions } });
+  assert.ok(html.indexOf("Router response · round 2") < html.indexOf("Harness reported: fetch"));
+  assert.equal(exactActionsQuery(agent, agent.actions), before);
 });
 
 test("Team run files distinguish absent attribution from recorded and inferred role ownership", () => {
