@@ -230,7 +230,7 @@ jobs:
 
       - name: Build + push (PRIVATE)
         id: push
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v6
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v6
         with:
           context: .
           file: ${{ matrix.image.dockerfile }}
@@ -522,7 +522,7 @@ jobs:
           cat ./release-artefacts/release-manifest.json
 
       - name: Create or update PRIVATE GitHub Release
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ env.VERSION }}
           name: ${{ env.VERSION }} (Internal Preview)
