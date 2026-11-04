@@ -649,7 +649,7 @@ jobs:
 
       - name: Build controller image (distroless COPY)
         if: steps.paths.outputs.run == 'true'
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v6
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v6
         with:
           context: .
           file: controller/Dockerfile
@@ -659,7 +659,7 @@ jobs:
 
       - name: Build inference-router image (distroless COPY)
         if: steps.paths.outputs.run == 'true'
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v6
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v6
         with:
           context: .
           file: inference-router/Dockerfile
