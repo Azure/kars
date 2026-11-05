@@ -9,7 +9,18 @@ on:
   pull_request:
     branches: [main, dev, kars-bridge, 'public/pr*']
   workflow_call:      # allow reuse from release.yml
-  workflow_dispatch:  # manual trigger
+    inputs:
+      benchmark_base_sha:
+        description: Established ancestor commit for manually triggered benchmark comparisons
+        type: string
+        required: false
+        default: ''
+  workflow_dispatch:
+    inputs:
+      benchmark_base_sha:
+        description: Full ancestor commit SHA to compare against (must differ from candidate)
+        type: string
+        required: true
 
 permissions:
   contents: read
@@ -966,32 +977,108 @@ jobs:
     name: Bench Regression (criterion)
     needs: [changes, build-rust]
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
-    # Phase 2 S16. Compiles + runs criterion benches and fails if median
-    # exceeds the value in `<crate>/benches/baselines.json` by more than 25%.
-    # Runs on every PR (cheap to compile) but only enforces regression on
-    # PRs that touch controller or router source paths — see paths filter
-    # in the workflow trigger when expanding to a separate workflow file.
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    # Compare both revisions on this runner, not against historical machine timings.
+    # Normalize the bench profile explicitly; release package overrides otherwise
+    # leak into benches and made the old measurements incomparable.
+    env:
+      RUSTUP_TOOLCHAIN: '1.99.1'
+      RUSTFLAGS: ''
+      CARGO_ENCODED_RUSTFLAGS: ''
+      RUSTC_WRAPPER: ''
+      CARGO_PROFILE_BENCH_OPT_LEVEL: '3'
+      CARGO_PROFILE_BENCH_LTO: thin
+      CARGO_PROFILE_BENCH_CODEGEN_UNITS: '1'
+      CARGO_PROFILE_BENCH_DEBUG: '0'
+      CARGO_PROFILE_BENCH_DEBUG_ASSERTIONS: 'false'
+      CARGO_PROFILE_BENCH_OVERFLOW_CHECKS: 'false'
+      CARGO_PROFILE_BENCH_INCREMENTAL: 'false'
+      CARGO_PROFILE_BENCH_STRIP: symbols
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Test benchmark gate
+        run: python3 -m unittest ci.test_bench_regression
+      - name: Resolve trusted event baseline
+        id: baseline
+        env:
+          BENCHMARK_BASE_SHA: ${{ inputs.benchmark_base_sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p bench-evidence
+          python3 ci/bench_regression.py --resolve-base | tee bench-evidence/base-output.txt >> "$GITHUB_OUTPUT"
+          git rev-parse HEAD > bench-evidence/candidate.sha
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.baseline.outputs.base_sha }}
+          path: .bench-baseline
+          persist-credentials: false
+      - name: Verify comparable Criterion harnesses
+        env:
+          BENCH_BASE_SHA: ${{ steps.baseline.outputs.base_sha }}
+        run: python3 ci/bench_regression.py --check-harness .bench-baseline "$BENCH_BASE_SHA"
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: '1.99.1'
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: rust-glibc-release
           save-if: false
-      - name: Build benches (compile-only on every PR)
-        # Scope to the two benches we actually execute. `--workspace` would
-        # compile every bench target in every crate; we only run two.
+      - name: Measure baseline and candidate
+        id: measure
+        shell: bash
         run: |
-          cargo bench --no-run --bench reconciler_bench --package kars-controller
-          cargo bench --no-run --bench proxy_bench --package kars-inference-router
-      - name: Run controller bench + compare to baseline
+          set -euo pipefail
+          export CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target"
+          rustc --version --verbose > bench-evidence/compiler.txt
+          cargo --version > bench-evidence/cargo.txt
+          lscpu > bench-evidence/cpu.txt
+          env | sort | grep '^CARGO_PROFILE_BENCH_' > bench-evidence/profile.txt
+          echo 'profile.bench.package.kars-controller.codegen-units=16' >> bench-evidence/profile.txt
+          for revision in baseline candidate; do
+            source="$GITHUB_WORKSPACE"
+            if [[ "$revision" == baseline ]]; then source="$GITHUB_WORKSPACE/.bench-baseline"; fi
+            for component in controller router; do
+              package=kars-controller
+              bench=reconciler_bench
+              crate=controller
+              if [[ "$component" == router ]]; then
+                package=kars-inference-router
+                bench=proxy_bench
+                crate=inference-router
+              fi
+              cp "$source/$crate/benches/baselines.json" "bench-evidence/$revision-$component-policy.json"
+              (cd "$source" && cargo bench --locked --package "$package" --bench "$bench" \
+                --config 'profile.bench.package.kars-controller.codegen-units=16' \
+                -- --save-baseline "$revision" --output-format bencher) 2>&1 \
+                | tee "bench-evidence/$revision-$component.txt"
+            done
+          done
+      - name: Compare controller on the same runner
+        if: ${{ !cancelled() && steps.measure.outcome == 'success' }}
+        shell: bash
         run: |
-          cargo bench --bench reconciler_bench -- --save-baseline pr --output-format bencher \
-            | tee bench-controller.txt
-          python3 ci/bench_regression.py controller/benches/baselines.json bench-controller.txt
-      - name: Run router bench + compare to baseline
+          set -euo pipefail
+          python3 ci/bench_regression.py bench-evidence/baseline-controller-policy.json \
+            bench-evidence/baseline-controller.txt bench-evidence/candidate-controller.txt \
+            2>&1 | tee bench-evidence/comparison-controller.txt
+      - name: Compare router on the same runner
+        if: ${{ !cancelled() && steps.measure.outcome == 'success' }}
+        shell: bash
         run: |
-          cargo bench --bench proxy_bench -- --save-baseline pr --output-format bencher \
-            | tee bench-router.txt
-          python3 ci/bench_regression.py inference-router/benches/baselines.json bench-router.txt
+          set -euo pipefail
+          python3 ci/bench_regression.py bench-evidence/baseline-router-policy.json \
+            bench-evidence/baseline-router.txt bench-evidence/candidate-router.txt \
+            2>&1 | tee bench-evidence/comparison-router.txt
+      - name: Retain benchmark evidence, including failures
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: bench-comparison-${{ github.run_id }}-${{ github.run_attempt }}
+          path: bench-evidence/
+          if-no-files-found: warn
+          retention-days: 7

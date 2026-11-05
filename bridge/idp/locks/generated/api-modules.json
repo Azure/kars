@@ -260,12 +260,14 @@
 }
 {
 	"Path": "golang.org/x/crypto",
-	"Version": "v0.58.0",
-	"Time": "2026-10-09T16:24:17Z",
+	"Version": "v0.58.1-0.20261009181718-2f1f834330b2",
+	"Time": "2026-10-09T18:17:18Z",
 	"Indirect": true,
-	"Dir": "/work/mod/golang.org/x/crypto@v0.58.0",
-	"GoMod": "/work/mod/cache/download/golang.org/x/crypto/@v/v0.58.0.mod",
-	"GoVersion": "1.26.0"
+	"Dir": "/work/mod/golang.org/x/crypto@v0.58.1-0.20261009181718-2f1f834330b2",
+	"GoMod": "/work/mod/cache/download/golang.org/x/crypto/@v/v0.58.1-0.20261009181718-2f1f834330b2.mod",
+	"GoVersion": "1.26.0",
+	"Sum": "h1:zGDaB+/Mus2mScKvZ23k+W9NAUbP56sNM9SptgvWI5A=",
+	"GoModSum": "h1:Xh+kl5A+M0gMiWDytH2Hhr5Z7WbNCpv/eB/EFgfSk+w="
 }
 {
 	"Path": "golang.org/x/mod",

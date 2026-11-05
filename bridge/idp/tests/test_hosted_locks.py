@@ -55,10 +55,9 @@ class HostedLockContracts(unittest.TestCase):
         check_modules(ROOT)
 
     def test_verify_real_existing_fixture_and_reject_tampering_or_failed_attempt(self):
-        # Exercise the full validator with real reviewed resolver bytes, not a fabricated
-        # fixed-version inventory. Actual fixed-version generation remains hosted work.
+        # Exercise the full validator with the promoted hosted resolver bytes,
+        # without substituting a version or fabricating a fixed-version inventory.
         with tempfile.TemporaryDirectory(prefix=".hosted-contract-", dir=ROOT) as directory, \
-                mock.patch.object(hosted, "FIXED_CRYPTO", "golang.org/x/crypto@v0.58.0"), \
                 mock.patch.dict(os.environ, IDENTITY):
             context, evidence = Path(directory) / "context", Path(directory) / "evidence"
             hosted.prepare(context, evidence)
@@ -88,12 +87,15 @@ class HostedLockContracts(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "source/version input drift"):
                 hosted.verify(evidence)
 
-    def test_current_old_graph_cannot_satisfy_fixed_candidate(self):
+    def test_stale_crypto_request_cannot_satisfy_fixed_candidate(self):
         with tempfile.TemporaryDirectory(prefix=".hosted-contract-", dir=ROOT) as directory, \
                 mock.patch.dict(os.environ, IDENTITY):
             context, evidence = Path(directory) / "context", Path(directory) / "evidence"
             hosted.prepare(context, evidence)
             shutil.copytree(ROOT / "locks/generated", evidence / "resolved")
+            requests = evidence / "resolved/requests.txt"
+            requests.write_bytes(requests.read_bytes().replace(
+                hosted.FIXED_CRYPTO.encode(), b"golang.org/x/crypto@v0.58.0"))
             with self.assertRaisesRegex(ValueError, "resolver input drift: requests.txt"):
                 hosted.verify(evidence, seal=True)
             self.assertFalse((evidence / "verified.json").exists())

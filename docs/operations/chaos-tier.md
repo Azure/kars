@@ -25,7 +25,7 @@ test inventory and the precise invariant ↔ test map.
 | Trigger | Job | What runs |
 |---|---|---|
 | PR / push to `dev` / `main` | `Chaos Tier` (CI) | `cargo test --package kars-chaos-tests --features chaos --tests --no-fail-fast` |
-| PR / push to `dev` / `main` | `Bench Regression` (CI) | criterion benches; fail if median > baseline + 25 % |
+| PR / push to `dev` / `main` | `Bench Regression` (CI) | Criterion benches; fail if candidate > same-run baseline + 25 % |
 | Nightly (04:00 UTC) | `perf-nightly.yml` | k6 smoke against the router (50 VUs / 30 s) |
 | Default `cargo test --all` | (none) | Chaos tests are feature-gated; do not run |
 
@@ -58,20 +58,42 @@ The full table lives in `tests/chaos/README.md`. Highlights:
 
 | Surface | Bench | Baseline | Regression gate |
 |---|---|---|---|
-| Controller decision step | `controller/benches/reconciler_bench.rs` | `controller/benches/baselines.json` | median + 25 % |
-| Router proxy hot path | `inference-router/benches/proxy_bench.rs` | `inference-router/benches/baselines.json` | median + 25 %, p99 ≤ 5 ms |
+| Synthetic controller decision | `controller/benches/reconciler_bench.rs` | trusted event base, measured in the same job | candidate ≤ baseline + 25 % |
+| Synthetic router proxy work | `inference-router/benches/proxy_bench.rs` | trusted event base, measured in the same job | candidate ≤ baseline + 25 % |
 | End-to-end router smoke | `tests/k6/router_smoke.js` | inline (`p95 < 100 ms`, `err < 0.1 %`) | nightly only |
 
-CI calls `ci/bench_regression.py <baselines.json> <bencher.txt>` after
-each criterion run. Refresh baselines via:
+`Bench Regression` measures both revisions sequentially on one Ubuntu 24.04
+runner, with Rust 1.99.1 and an explicit identical bench profile (thin LTO,
+opt-level 3, controller codegen-units 16, default codegen-units 1). Production
+release profiles are not changed. Both lockfiles are enforced with `--locked`;
+Criterion declarations and locked versions/checksums must match. A harness
+migration fails closed rather than comparing different measurement tools.
+
+For PRs the baseline is the event's base SHA, and the candidate is the checked-out
+merge SHA. For pushes the baseline is `before` and the candidate is `after`.
+Manual CI and legacy Release dispatches require `benchmark_base_sha`, an explicit
+full ancestor commit SHA. Reusable callers forward that input on manual runs;
+they otherwise retain the originating PR/push event identity. Missing/all-zero
+bases, wrong repositories, unavailable commits, self-comparisons and non-ancestor
+bases (including divergent force pushes) fail closed. There is no fallback to
+`HEAD~1`, a branch name, or a historical timing snapshot.
+
+CI calls:
 
 ```bash
-cargo bench --bench reconciler_bench -- --save-baseline dev
-cargo bench --bench proxy_bench      -- --save-baseline dev
+python3 ci/bench_regression.py <base-policy.json> <base-bencher.txt> <candidate-bencher.txt>
 ```
 
-…then copy the `time:` median from the criterion report into the
-corresponding `baselines.json`. Document the refresh in `CHANGELOG.md`.
+The base commit's `benches/baselines.json` supplies the required benchmark names
+and unchanged 25% threshold. Its historical timing values remain untouched and
+are **not** rewritten or used as cross-machine ceilings. Missing, duplicate,
+extra or nonpositive measurements fail closed. Compilation and pipeline failures
+also fail the job. Both comparison steps run after successful measurements even
+when one reports a regression. The `bench-comparison-<run>-<attempt>` artifact
+retains logs, policies, SHAs, compiler/profile and CPU details, including failures.
+
+These are synthetic microbenchmarks, not production reconciler latency or router
+p99 measurements, and do not establish customer acceptance.
 
 ## Adding a new chaos case
 

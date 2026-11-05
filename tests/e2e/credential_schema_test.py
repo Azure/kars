@@ -15,7 +15,7 @@ import credential_schema as schema
 
 PRIVATE = "DO-NOT-LOG-CREDENTIALS-OR-PRIVATE-API-BODIES"
 TOKEN = "abc123abc123"
-NAMESPACE = "kars-cel-" + TOKEN
+NAMESPACE = "kars-system"
 
 
 def documents():
@@ -165,6 +165,16 @@ class CredentialSchemaTests(unittest.TestCase):
             with self.subTest(mutate=mutate), self.assertRaises(schema.Failure):
                 schema.select_shipped(json.dumps({"kind": "List", "items": values}))
 
+    def test_existing_core_namespace_is_refused_without_adoption_or_deletion(self):
+        shipped = schema.select_shipped(json.dumps({"kind": "List", "items": documents()}))
+        with patch.object(schema, "render", return_value=shipped), \
+             patch.object(schema, "request", return_value=(409, {"kind": "Status"})) as request, \
+             contextlib.redirect_stdout(io.StringIO()), self.assertRaises(schema.Failure):
+            schema.exercise(Path("."), 12345, "v1.31.0", TOKEN)
+        request.assert_called_once()
+        self.assertEqual(request.call_args.args[1:3], ("POST", "/api/v1/namespaces"))
+        self.assertEqual(request.call_args.args[3]["metadata"]["name"], "kars-system")
+
     def test_render_converts_actual_templates_with_strict_pinned_context(self):
         seen = []
         def command(stage, args, **kwargs):
@@ -172,8 +182,10 @@ class CredentialSchemaTests(unittest.TestCase):
             return "rendered chart" if stage == "credential-render" else json.dumps(
                 {"kind": "List", "items": documents()})
         with patch.object(schema, "command", side_effect=command):
-            schema.render(Path("."), NAMESPACE, "v1.31.0")
+            schema.render(Path("."), "v1.31.0")
         self.assertEqual(seen[0][1].count("--show-only"), 3)
+        self.assertEqual(seen[0][1][:3], ["helm", "template", "kars"])
+        self.assertEqual(seen[0][1][seen[0][1].index("--namespace") + 1], "kars-system")
         for template in schema.TEMPLATES:
             self.assertIn("templates/" + template, seen[0][1])
         self.assertIn("--validate=strict", seen[1][1])
@@ -254,11 +266,14 @@ class CredentialSchemaTests(unittest.TestCase):
                 if body["kind"] == "Pod":
                     self.assertEqual(body["spec"]["schedulerName"], "kars-e2e-admission-never-schedule")
                     self.assertFalse(body["spec"]["automountServiceAccountToken"])
+        created = {path + "/" + body["metadata"]["name"]
+                   for method, path, body in api.calls if method == "POST"}
+        self.assertIn("/api/v1/namespaces/kars-system", created)
         for method, path, body in api.calls:
             if method == "DELETE":
                 self.assertTrue(body["preconditions"]["uid"].startswith("native-uid-"))
                 self.assertNotIn("karssreregistrations", path)
-                self.assertNotIn("namespaces/kars-system", path)
+                self.assertIn(path, created)
 
     def test_cleanup_never_deletes_replaced_or_unowned_resources(self):
         owned = schema.Owned(1)
@@ -270,6 +285,30 @@ class CredentialSchemaTests(unittest.TestCase):
         with patch.object(schema, "request", return_value=(409, {"message": PRIVATE})):
             with self.assertRaises(schema.Failure):
                 schema.Owned(1).create("/fixture", {"kind": "Namespace", "metadata": {"name": "owned"}})
+
+    def test_failed_child_cleanup_preserves_namespaces_and_crds(self):
+        namespace = "/api/v1/namespaces/" + NAMESPACE
+        child = namespace + "/serviceaccounts/kars-controller"
+        resources = [(namespace, "namespace-uid"), (schema.CRDS + "/example.test", "crd-uid"),
+                     (child, "original")]
+        for failure in ("replacement", "read-error", "delete-conflict", "transport-error"):
+            for ordered in (resources, list(reversed(resources))):
+                with self.subTest(failure=failure, reversed=ordered != resources):
+                    owned = schema.Owned(1)
+                    owned.resources = ordered
+                    def respond(_port, method, path, _body=None):
+                        self.assertEqual(path, child)
+                        if failure == "transport-error":
+                            raise OSError("unavailable")
+                        if method == "DELETE":
+                            return 409, {}
+                        return (503, {}) if failure == "read-error" else (
+                            200, {"metadata": {"uid": "replacement" if failure == "replacement" else "original"}})
+                    with patch.object(schema, "request", side_effect=respond) as request:
+                        with self.assertRaises(schema.Failure):
+                            owned.cleanup()
+                    self.assertTrue(request.called)
+                    self.assertTrue(all(call.args[2] == child for call in request.call_args_list))
 
     def test_wait_is_bounded_and_never_treats_arbitrary_denial_as_success(self):
         with patch.object(schema.time, "monotonic", side_effect=[0, 0, 41]), \

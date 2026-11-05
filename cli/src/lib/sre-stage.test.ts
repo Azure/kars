@@ -13,7 +13,7 @@ import { stageAuthority } from "./sre-stage.js";
 import type { ApiObject, Execute } from "./sre-authority.js";
 import { crd, schemaFixture } from "./schema-stage.test-support.js";
 import { normalizedCrd, schemaDigest, schemaOwnerFields, SCHEMA_DIGEST } from "./schema-documents.js";
-import { canonicalMigrationSchemas, migrationFixture } from "./sre-migration.test-support.js";
+import { canonicalMigrationSchemas, currentCoreSchemas, migrationFixture } from "./sre-migration.test-support.js";
 
 const action = canonicalMigrationSchemas().after.find(object => object.metadata.name === ACTION_CRD)!;
 const durableAction = parse(readFileSync(new URL("../../../deploy/helm/kars/templates/crd-karssreaction.yaml", import.meta.url), "utf8"));
@@ -22,7 +22,7 @@ const policy = { apiVersion: "admissionregistration.k8s.io/v1", kind: "Validatin
   metadata: { name: "kars-sre-test" }, spec: { failurePolicy: "Fail" } };
 const params = (object: any) => object.spec.versions[0].schema.openAPIV3Schema.properties.spec.properties.action.properties.params;
 
-function fixture(helm = false) {
+function fixture(helm = false, targets?: ReturnType<typeof currentCoreSchemas>) {
   const existing = structuredClone(action);
   existing.metadata.uid = "action-uid";
   existing.metadata.resourceVersion = "17";
@@ -37,7 +37,7 @@ function fixture(helm = false) {
   params(existing).additionalProperties = true;
   if (helm) existing.metadata.annotations[SCHEMA_DIGEST] = schemaDigest(normalizedCrd(existing));
   const schemas = helm ? migrationFixture() : schemaFixture([action, registration, policy]);
-  const documents = helm ? [...("after" in schemas ? schemas.after : []), policy] : [action, registration, policy];
+  const documents = helm ? [...(targets ?? ("after" in schemas ? schemas.after : [])), policy] : [action, registration, policy];
   schemas.objects.set(ACTION_CRD, existing);
   const controller = { metadata: { name: "kars-controller", namespace: "kars-system", uid: "controller-uid", resourceVersion: "2" },
     spec: { replicas: 0, template: { spec: { serviceAccountName: "kars-controller", containers: [{ name: "controller", image: "old:latest" }] } } } };
@@ -84,6 +84,18 @@ function fixture(helm = false) {
 }
 
 describe("existing action API prerequisite compatibility", () => {
+  it.each([false, true])("stages the real complete beta chart from BASE365 (dry run: %s)", async dry => {
+    const targets = currentCoreSchemas();
+    const f = fixture(true, targets);
+    const uid = f.existing.metadata.uid;
+    const before = structuredClone(f.existing.spec);
+    await f.run(dry);
+    expect(f.existing.metadata.uid).toBe(uid);
+    expect(normalizedCrd(f.existing)).toEqual(dry ? normalizedCrd({ ...f.existing, spec: before })
+      : normalizedCrd(targets.find(object => object.metadata.name === ACTION_CRD)!));
+    expect(f.execute.mock.calls.some(([, args]) => args[0] === "patch")).toBe(false);
+  });
+
   it.each([false, true])("preserves the installed SRE chart-default route during staging (dry run: %s)", async dry => {
     const f = fixture(true);
     const execute: Execute = (file, args, options) => file === "helm" && args[0] === "get" && args[1] === "values"

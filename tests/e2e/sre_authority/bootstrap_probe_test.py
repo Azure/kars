@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from sre_authority.bootstrap_diagnostics import api_result, collect, control_plane_status, exception_summary, failure_facts, firewall_summary, object_status, policy_status, probe_command_result, public_stack_facts, router_log_summary, router_readiness_facts
-from sre_authority.bootstrap_probe import builtin_documents, converted_objects, exercise, preserved_json_candidate, safe_controller
+from sre_authority.bootstrap_probe import PATHS, builtin_documents, converted_objects, exercise, preserved_json_candidate, safe_controller
 
 POLICIES = {"kars-sre-private-mounts": {"spec": {"validations": [
     {"message": "Private SRE material requires authority"}]}}}
@@ -236,10 +236,18 @@ COMMIT
     def test_chart_selection_never_executes_other_workloads_or_loads_secret_data(self):
         rendered = "---\nkind: Secret\nmetadata:\n  name: private\nstringData:\n  token: do-not-publish\n"
         rendered += "---\nkind: Job\nmetadata:\n  name: execute\n---\nkind: ValidatingAdmissionPolicy\nmetadata:\n  name: public\n"
+        rendered += "---\nkind: Namespace\nmetadata:\n  name: kars-monitoring\n"
         result = builtin_documents(rendered)
+        self.assertIn("kind: Namespace", result)
         self.assertNotIn("do-not-publish", result)
         self.assertNotIn("kind: Job", result)
         self.assertIn("kind: ValidatingAdmissionPolicy", result)
+
+    def test_chart_namespaces_precede_namespaced_prerequisites(self):
+        order = list(PATHS)
+        for kind in ("ServiceAccount", "Role", "RoleBinding", "Deployment"):
+            self.assertLess(order.index("Namespace"), order.index(kind))
+        self.assertEqual(PATHS["Namespace"], "/api/v1/namespaces")
 
     def test_kubectl_multiple_json_objects_and_list_are_both_parsed(self):
         first = {"kind": "ServiceAccount", "metadata": {"name": "kars-controller"}}

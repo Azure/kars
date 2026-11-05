@@ -123,7 +123,7 @@ github.com/dexidp/dex go.opentelemetry.io/otel/trace@v1.45.0
 github.com/dexidp/dex go.uber.org/multierr@v1.11.0
 github.com/dexidp/dex go.uber.org/zap@v1.27.1
 github.com/dexidp/dex go.yaml.in/yaml/v3@v3.0.5
-github.com/dexidp/dex golang.org/x/crypto@v0.58.0
+github.com/dexidp/dex golang.org/x/crypto@v0.58.1-0.20261009181718-2f1f834330b2
 github.com/dexidp/dex golang.org/x/exp@v0.0.0-20240823005443-9b4947da3948
 github.com/dexidp/dex golang.org/x/mod@v0.41.0
 github.com/dexidp/dex golang.org/x/net@v0.62.0
@@ -296,6 +296,7 @@ github.com/coreos/go-systemd/v22@v22.7.0 golang.org/x/sys@v0.1.0
 github.com/coreos/go-systemd/v22@v22.7.0 go@1.23
 github.com/dexidp/dex/api/v2@v2.4.0 google.golang.org/grpc@v1.84.0
 github.com/dexidp/dex/api/v2@v2.4.0 google.golang.org/protobuf@v1.36.12
+github.com/dexidp/dex/api/v2@v2.4.0 golang.org/x/crypto@v0.58.1-0.20261009181718-2f1f834330b2
 github.com/dexidp/dex/api/v2@v2.4.0 golang.org/x/net@v0.62.0
 github.com/dexidp/dex/api/v2@v2.4.0 golang.org/x/sys@v0.49.0
 github.com/dexidp/dex/api/v2@v2.4.0 golang.org/x/text@v0.43.0
@@ -796,11 +797,11 @@ go.uber.org/zap@v1.27.1 gopkg.in/yaml.v3@v3.0.1
 go.uber.org/zap@v1.27.1 github.com/davecgh/go-spew@v1.1.1
 go.uber.org/zap@v1.27.1 github.com/kr/text@v0.2.0
 go.uber.org/zap@v1.27.1 github.com/pmezard/go-difflib@v1.0.0
-golang.org/x/crypto@v0.58.0 golang.org/x/net@v0.60.0
-golang.org/x/crypto@v0.58.0 golang.org/x/sys@v0.49.0
-golang.org/x/crypto@v0.58.0 golang.org/x/term@v0.47.0
-golang.org/x/crypto@v0.58.0 golang.org/x/text@v0.43.0
-golang.org/x/crypto@v0.58.0 go@1.26.0
+golang.org/x/crypto@v0.58.1-0.20261009181718-2f1f834330b2 golang.org/x/net@v0.60.0
+golang.org/x/crypto@v0.58.1-0.20261009181718-2f1f834330b2 golang.org/x/sys@v0.49.0
+golang.org/x/crypto@v0.58.1-0.20261009181718-2f1f834330b2 golang.org/x/term@v0.47.0
+golang.org/x/crypto@v0.58.1-0.20261009181718-2f1f834330b2 golang.org/x/text@v0.43.0
+golang.org/x/crypto@v0.58.1-0.20261009181718-2f1f834330b2 go@1.26.0
 golang.org/x/exp@v0.0.0-20240823005443-9b4947da3948 github.com/google/go-cmp@v0.6.0
 golang.org/x/exp@v0.0.0-20240823005443-9b4947da3948 golang.org/x/mod@v0.20.0
 golang.org/x/exp@v0.0.0-20240823005443-9b4947da3948 golang.org/x/tools@v0.24.0

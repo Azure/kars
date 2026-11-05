@@ -206,7 +206,12 @@ only after the complete 18-existing/21-target CRD inventory matches pinned
 before/after spec fingerprints and the exact Helm release/namespace owner.
 The finite target catalog includes the incoming `b5ad6791` evaluator-protocol-v2
 report-reference, report-UID and evidence-digest fields. The summary distinguishes
-`core-470` (pre-composition) from `evaluator-v2`; it does not guess missing fields.
+`core-470` (pre-composition), `evaluator-v2`, and `beta-v1`; it does not guess missing fields.
+The beta profile pins the **complete** 21-name/normalized-spec-digest map from
+`c8ca974d` as `e41c50132221b72f8abfe539acbb187f3b6c3534750c70204313105e10eec692`.
+Individual modern schemas, mixed historical/beta inventories and future chart
+changes do not qualify. Helm staging uses this full-schema/data qualification;
+non-Helm template staging retains the narrower action-params compatibility check.
 
 The controller must already be paused at zero replicas, with no remaining
 controller-ServiceAccount Pods. Staging does not silently stop a live controller.
@@ -239,6 +244,15 @@ authority:
 | MCP managed mode and mutual-exclusion CEL | No pre-existing managed-mode fields or new workload/readiness evidence |
 | Sandbox source-or-bundle reference pattern and private bindings | Existing references remain exact v1 `kars-credential-source-*` references; no newly introduced binding/budget/observation fields |
 | Evaluator v2 optional status fields | No pre-existing report-reference/UID/digest evidence is grandfathered |
+| Beta approval/requester, durable action execution, task/team plan, skill and observation fields | All post-baseline fields must be absent, recursively, including roster members and status evidence |
+| Beta AuthConfig controller credential-mode default | An existing controller object would acquire a new default and is rejected; an explicit data migration is required |
+| Beta memory partition rules | No existing sharedScopes; existing scope cannot contain `.` or `..` path segments |
+
+The unchanged-object server preview uses the **installed old schema**, not the
+target schema. It is therefore not proof of target validation by itself. The
+closed beta profile separately rejects new defaults on existing objects and
+newly forbidden memory scope segments before any schema write. It neither
+silently changes identity mode nor rewrites stored memory partitions.
 
 No custom-resource spec/status is migrated or rewritten. Canonical data hashes,
 UIDs and resourceVersions are rechecked before writes and after publication;
@@ -260,8 +274,10 @@ data remain unsupported rather than being adopted.
 The native BASE365 fixture calls the actual public CLI preview and apply for
 negative late ownership/schema cases, verifies zero earlier action conversion, and measures
 Task/Team/MCP/Eval/action data plus UIDs/RVs across the real positive stage.
-Local transport and pure fixture tests are not that native proof; the composed
-target still needs the hosted run.
+Its action assertion requires the exact current rendered schema and unchanged
+CRD identity, not just the historical params-only schema. Local transport and
+pure fixture tests are not that native proof; the composed beta target still
+needs the hosted run.
 
 ### Rendering and target identity
 
@@ -282,8 +298,9 @@ the authoritative server render instead. Server guard failures still stop before
 writes; fresh-install bootstrap and successful missing-dependency bootstrap plans
 retain their existing checks.
 
-The historical SRE schema acceptance fixture predates bundled monitoring. Its
-prerequisite phase renders the current cold chart to select monitoring CRDs and
+Both historical SRE acceptance paths (schema-only Helm preview and the full
+migration journey) predate bundled monitoring. Before invoking authority staging,
+their shared prerequisite phase renders the current cold chart to select monitoring CRDs and
 uses the same guarded dependency planner to create only absent definitions and
 wait for publication. It does **not** install that cold chart or apply its Core
 resources. Only then does it render the unchanged historical authority-stage

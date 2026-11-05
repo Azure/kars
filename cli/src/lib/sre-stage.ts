@@ -71,8 +71,6 @@ async function stageAuthorityChecked(
   }).filter((obj):obj is ApiObject=>!!obj);
   const actions=documents.filter(obj=>obj.kind==="CustomResourceDefinition"&&obj.metadata.name===ACTION_CRD);
   if(actions.length!==1)throw new Error("Exactly one compatible action CRD is required before staging authority policies");
-  mark("action-schema-review");
-  const stageAction=await planActionCrd(execute,actions[0],namespace,release,helm);
   if(helm) {
     mark("helm-compatibility");
     const wait=await sreHelmStageWait(execute);
@@ -116,6 +114,10 @@ async function stageAuthorityChecked(
     }
     return;
   }
+  // Helm reviewed the entire schema/data migration above. Template staging has
+  // only the narrower params-repair permit, not a durable-schema migration.
+  mark("action-schema-review");
+  const stageAction=await planActionCrd(execute,actions[0],namespace,release,false);
   mark("template-ownership-review");
   if(controller.metadata.annotations?.["meta.helm.sh/release-name"]) {
     throw new Error("Controller reports Helm ownership that was not found; no template-mode adoption is allowed");

@@ -35,6 +35,7 @@ def failure_site(error):
 
 
 PATHS = {
+    "Namespace": "/api/v1/namespaces",
     "CustomResourceDefinition": "/apis/apiextensions.k8s.io/v1/customresourcedefinitions",
     "ServiceAccount": "/api/v1/namespaces/{namespace}/serviceaccounts",
     "ClusterRole": "/apis/rbac.authorization.k8s.io/v1/clusterroles",

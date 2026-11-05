@@ -66,6 +66,27 @@ class ControllerFailureDiagnosticsTests(unittest.TestCase):
         self.assertFalse(value["available"])
         self.assertNotIn("pods", value)
 
+    def test_stack_overflow_is_fixed_classification_not_a_thread_or_message(self):
+        raw = "\n".join([f"thread '{PRIVATE}' has overflowed its stack",
+                          "fatal runtime error: stack overflow, aborting"] * 100)
+        value = project(raw, set())
+        self.assertEqual(value["fatalRuntimeFailures"], ["stack-overflow"])
+        self.assertEqual(value["panicLocations"], [])
+        self.assertNotIn(PRIVATE, json.dumps(value))
+
+    def test_embedded_or_extended_fatal_text_is_not_runtime_evidence(self):
+        raw = "\n".join([
+            "fatal runtime error: stack overflow, aborting " + PRIVATE,
+            PRIVATE + " fatal runtime error: stack overflow, aborting",
+            f"thread '{PRIVATE}' has overflowed its stack {PRIVATE}",
+            json.dumps({"message": "fatal runtime error: stack overflow, aborting"}),
+            "Segmentation fault " + PRIVATE,
+        ])
+        value = project(raw, set())
+        self.assertEqual(value["fatalRuntimeFailures"], [])
+        self.assertNotIn(PRIVATE, json.dumps(value))
+        self.assertEqual(project("fatal runtime error: stack overflow, aborting\n" + "ignored\n" * 512, set())["fatalRuntimeFailures"], [])
+
     def test_log_projection_never_retains_errors_threads_or_unchecked_paths(self):
         source = "controller/src/main.rs"
         raw = "\n".join([

@@ -546,7 +546,7 @@ class CanonicalSeedProbeTests(unittest.TestCase):
             self.assertTrue(all(call.args[0] == "GET" for call in h.api.call_args_list))
 
     def test_monitoring_dependency_bootstrap_uses_production_guards_and_exact_upgrade_values(self):
-        from sre_authority.legacy_crd_probe import prepare_monitoring_dependencies
+        from sre_authority.monitoring_dependencies import prepare_monitoring_dependencies
         args = ["upgrade", "kars", "/reviewed/source/deploy/helm/kars",
                 "--reset-then-reuse-values", "--set", "sre.authorityStage=true"]
         h = Mock(root=Path("/reviewed/source"))
@@ -573,6 +573,33 @@ class CanonicalSeedProbeTests(unittest.TestCase):
             h.run.return_value = json.dumps({"monitoringSchemas": count, "published": published})
             with self.subTest(count=count, published=published), self.assertRaises(AssertionError):
                 prepare_monitoring_dependencies(h, args)
+
+    def test_historical_monitoring_target_preserves_installed_inference_selection(self):
+        from sre_authority.monitoring_dependencies import historical_stage_args
+        h = Mock(root=Path("/reviewed/source"))
+        selection = {"enabled": True, "provider": "provider,with=syntax", "model": "model\"name"}
+        h.run.return_value = json.dumps({"sre": selection})
+        args = historical_stage_args(h)
+        self.assertIn("--reset-then-reuse-values", args)
+        self.assertIn("sre.authorityStage=true", args)
+        self.assertIn("sre.provider=" + json.dumps(selection["provider"]), args)
+        self.assertIn("sre.model=" + json.dumps(selection["model"]), args)
+        self.assertEqual(h.run.call_args.args[0], [
+            "helm", "--kube-context", "kind-kars-e2e", "get", "values", "kars",
+            "--namespace", "kars-system", "--all", "-o", "json"])
+        for values in ({}, {"enabled": False}, {**selection, "model": ""}, {**selection, "provider": 2}):
+            h.run.return_value = json.dumps({"sre": values})
+            with self.subTest(values=values), self.assertRaises(AssertionError):
+                historical_stage_args(h)
+
+    def test_full_historical_journey_prepares_dependency_apis_before_read_only_stage(self):
+        source = Path(__file__).with_name("fixtures.py").read_text()
+        prepare = source.split("def prepare_legacy(h):", 1)[1].split("def seed_control_consumer(h):", 1)[0]
+        prerequisite = prepare.index("prepare_monitoring_dependencies(h, historical_stage_args(h))")
+        self.assertLess(prepare.index("create_registration_crd(h, obj)"), prerequisite)
+        self.assertLess(prerequisite, prepare.index('h.cli("authority", "stage",'))
+        self.assertNotIn("monitoring.enabled=false", prepare)
+        self.assertNotIn("--validate=false", prepare)
 
     def test_early_existing_legacy_probe_uses_shared_bodies_before_current_schema_or_helm_stage(self):
         source = Path(__file__).with_name("legacy_crd_probe.py").read_text()

@@ -7,7 +7,16 @@ Both source-stage recipes explicitly install GNU `patch` before fetching and
 applying the hash-verified upstream patches. This is a build-only dependency;
 the shipping AL3 distroless runtime contains no package manager or patch utility.
 
-**Current prepublication repair:** genuine Go 1.27.3 resolver output now selects
+**Current prepublication repair:** GitHub run **42008205108**, attempt **1**,
+resolved the fixed crypto graph on Go 1.27.3 Linux AMD64. Its verified artifact
+has been promoted unchanged into `locks/generated/` together with
+`locks/requests.txt`: both root and nested API inventories select
+`golang.org/x/crypto v0.58.1-0.20261009181718-2f1f834330b2`. All other module
+selections and all four upstream snapshots are unchanged. This is lock
+resolution and source promotion only, **not** image, runtime, race, scanner or
+installed acceptance. Fresh hosted qualification of this graph remains required.
+
+**Previous prepublication graph (crypto v0.58.0):** genuine Go 1.27.3 resolver output selected
 `golang.org/x/net` 0.62.0 in both root and nested API graphs, including its required
 `x/crypto` 0.58.0 and `x/text` 0.43.0 dependency floors. The first executed resolver
 rejected the old 0.57.0 crypto request; its failure is retained. The regenerated
@@ -18,7 +27,7 @@ network dependencies even when artifact checksums are internally consistent.
 The updated graph passed native Linux ARM64 compilation, memory/SQLite refresh
 deadlock regressions, session/authflow/SAML and external-probe race tests, and the
 maintained upstream root/API/NTLM race-suite commands with compiler networking
-disabled. The current ARM64 image
+disabled. That graph's ARM64 image
 `sha256:d3c81488c6217e16adff93acb326bc5fd5b26439d6e324f1dd5584ca3a256b4f`
 passed the maintained AL3 base inventory/trust, native linkage, memory/SQLite OIDC,
 refresh rotation and SQLite restart/signing-continuity checks. Trivy 0.70.0, with
@@ -67,7 +76,7 @@ Linux AMD64 and ARM64 builds may consume the same locked module graph, but both
 the recorded resolver and actual compiler must use the pinned Go version.
 The build preserves resolver provenance in `locks/toolchain.txt` and records
 the actual compiler and target in `build-info.txt`. The current generated
-artifact records Linux ARM64; final-image runtime qualification remains separate.
+artifact records Linux AMD64; final-image runtime qualification remains separate.
 For the previous v2.45.1 graph, ARM64 regeneration matched its AMD64 artifact
 except for the compiler record and checksum. The successful historical hosted
 attempt on September 16, 2026 compiled Dex with CGO,
@@ -271,12 +280,14 @@ is introduced.
 
 [GO-2026-5932](https://vuln.go.dev/ID/GO-2026-5932.json) concerns
 `golang.org/x/crypto/openpgp` and its subpackages, not every package in
-`golang.org/x/crypto`. The current reviewed graph selects **v0.58.0**, which
-still receives the module-level annotation. The exact reviewed maintenance
-candidate is **v0.58.1-0.20261009181718-2f1f834330b2** (fixed version metadata
-verified through proxy.golang.org). It is not yet the committed resolved graph.
-The GitHub-hosted procedure below must return a real resolver artifact before
-review and promotion. There is no module suppression, exclusion or waiver.
+`golang.org/x/crypto`. The previous reviewed graph selected **v0.58.0**, which
+still receives the module-level annotation. The maintained resolved graph now
+selects **v0.58.1-0.20261009181718-2f1f834330b2** in both root and nested API
+inventories, promoted from the successful GitHub-hosted artifact described below.
+The public Go proxy reports origin commit
+`2f1f834330b2d36ab3db8bfb33aaa1ac16794588`. This dependency promotion does not
+establish scanner clearance for a rebuilt image. There is no module suppression,
+exclusion or waiver.
 
 Each build now retains the actual
 `go list -deps -json=ImportPath,Module ./cmd/dex` result as
@@ -473,7 +484,53 @@ with its original file from the pinned upstream tarball.
 
 ## Hosted lock generation
 
-### GitHub-hosted crypto fix candidate (prepared, not yet resolved)
+### GitHub-hosted crypto fix (resolved and promoted; image qualification pending)
+
+Run [42008205108](https://github.com/Azure/kars/actions/runs/42008205108), attempt
+**1**, succeeded on November 5, 2026 for repository `Azure/kars`, event
+`pull_request`, source **c8ca974de50b49a4f9d67b4626e31d2a14520b2a**.
+`SOURCE_SHA` is that exact PR head; the recorded `GITHUB_SHA`
+`278b093b1bd6a7a217b2ecc17faab43726487ecf` is its GitHub merge commit, not a
+substitute source revision. Both identities and the successful resolver job
+were checked against GitHub before promotion.
+
+Artifact **13405272452**, `dex-lock-candidate-42008205108-1`, has transport digest
+`sha256:83136087134c61dff988eb053fd57474c99f18a40c340c85527f356003ebd7bc`.
+The downloaded ZIP and all retained evidence bytes matched GitHub. The maintained
+importer previously produced a separate review directory; exact current
+source/workflow input hashes were rechecked before promotion. The reviewed
+`SHA256SUMS` digest is
+`c2b82c2afdbeaa6f4fc3f3b4489a763133d929fc58cdcf44b699c25bd288bc16`.
+Both inventories (226 root modules, 47 API modules), manifests, Go checksums,
+graph edges and dependency patch hunks were reviewed: only the selected crypto
+version changed. The nested API explicitly retains its indirect crypto pin;
+`x/net`'s older transitive minimum remains visible in the graph. Resolver
+provenance records Go 1.27.3 Linux AMD64. All four upstream snapshots are
+byte-identical to the previous maintained locks.
+
+The generated files and request were promoted as one coherent pair, without
+rewriting inventories, checksums, provenance or retained failed evidence. The
+historical artifact is bound to its **pre-promotion** source inputs: subsequent
+documentation/test/lock changes intentionally make re-import against the new
+checkout fail closed. Do not rewrite its provenance to bypass that check.
+Fresh hosted image builds, compatibility/upstream/NTLM race suites, runtime
+package/license/base/trust/linkage inventories, memory/SQLite OIDC and restart
+checks, unsuppressed fresh-database scanning and installed customer acceptance
+remain required; this resolver workflow did not run those gates.
+
+Post-promotion local validation passed: **62 Python contracts discovered, 51
+passed, 11 verified-upstream-source cases skipped** (no Go, containers, dependency
+installation or source download):
+
+```sh
+env -u KARS_DEX_PATCH_NETWORK -u KARS_DEX_PATCH_SOURCE TMPDIR="$PWD/bridge/idp" PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s bridge/idp/tests -p 'test_*.py'
+```
+
+`check_modules` also passed against the promoted pair, and every generated file
+matched the retained reviewed artifact byte-for-byte. `git diff --check --
+bridge/idp` reports space-before-tab diagnostics inside the generated unified
+`dependencies.patch` (context markers preceding Go indentation). Those artifact
+bytes are intentionally preserved, not reformatted to silence a whitespace check.
 
 `.github/workflows/bridge-idp-locks.yml` runs on path-scoped PR events for
 `bridge/idp/**` or that workflow. Publishing these files to the current PR
@@ -488,12 +545,12 @@ Heavy builds/resolution stay on GitHub, not the developer machine.
 
 `scripts/hosted-locks.py prepare` first verifies the current reviewed locks,
 copies an isolated candidate context under `artifacts/dex-lock-candidate/`, and
-changes **only that copy's** crypto request to
+sets **only that copy's** crypto request to
 `golang.org/x/crypto@v0.58.1-0.20261009181718-2f1f834330b2`. This is a source-reviewed
 literal, not a workflow input or shell-interpolated version. The existing resolver
 now reads the same quoted crypto request for the root and nested API modules.
-The committed `locks/requests.txt` and `locks/generated/` remain coherent and
-unchanged until a subsequent artifact review. Normal runtime builds remain
+The maintained `locks/requests.txt` and `locks/generated/` remain coherent and
+unchanged by preparation; they now contain the explicitly promoted artifact above. Normal runtime builds remain
 read-only consumers of the committed locks; the OpenPGP inventory rejection
 remains mandatory.
 
@@ -507,8 +564,8 @@ the same exact crypto request through `go get` **after nested API tidy**, before
 download, verification and inventory export. No later tidy removes the policy
 pin. The coordinated root/API version checks are unchanged. A shell-orchestration
 regression models the observed tidy fallback and verifies re-pinning and failure
-propagation without invoking Go; only a fresh hosted attempt can establish real
-resolver and subsequent runtime qualification success.
+propagation without invoking Go. Run **42008205108** subsequently established
+real resolver success in both graphs; runtime qualification remains separate.
 
 The evidence includes `provenance.json` with exact source/workflow SHA-256 inputs,
 source/event SHAs, repository, run ID and attempt; `resolver.log`; the unmodified

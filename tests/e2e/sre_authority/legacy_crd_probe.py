@@ -10,10 +10,11 @@ import time
 import types
 
 from sre_authority.bootstrap_probe import converted_objects
-from sre_authority.common import CONTEXT, Harness, SYSTEM, require
+from sre_authority.common import Harness, SYSTEM, require
 from sre_authority.canonical_seed import dry_run_seed_data
 from sre_authority.task_schema_preview import exercise_task_restore_preview, require_task_payload_helper
 from sre_authority.fixtures import LEGACY_COMMIT, install_historical_chart
+from sre_authority.monitoring_dependencies import historical_stage_args, prepare_monitoring_dependencies
 from sre_authority.registration_schema import (
     CRD_NAME, CRD_PATH, create_registration_crd, kind_proxy, request, write_report,
 )
@@ -44,39 +45,6 @@ def preview_registration_identity(h, obj):
             "Server CREATE preview persisted a CRD unexpectedly")
     require("uid" not in obj["metadata"] and "resourceVersion" not in obj["metadata"],
             "An ephemeral preview identity entered the real CREATE request")
-
-
-def prepare_monitoring_dependencies(h, helm_args):
-    # The historical chart predates monitoring. Plan its static dependency schemas
-    # from the current cold chart, before the authority-stage target needs live
-    # SRE lookups and Helm's server resource mapping. Only dependency CRDs write.
-    bootstrap = ["install", "kars", str(h.root / "deploy/helm/kars"),
-                 "--kube-context", CONTEXT, "--namespace", SYSTEM]
-    script = """
-import { createRequire } from 'node:module';
-import { readFileSync } from 'node:fs';
-import { pathToFileURL } from 'node:url';
-const require = createRequire(process.cwd() + '/cli/package.json');
-const { execa } = await import(require.resolve('execa'));
-const library = name => import(pathToFileURL(process.cwd() + '/cli/dist/lib/' + name + '.js').href);
-const { renderCoreSchemaChart } = await library('core-helm-schemas');
-const { isMonitoringCrd, monitoringSchemaFingerprint, planMonitoringSchemas } = await library('monitoring-schemas');
-const invocation = JSON.parse(readFileSync(0, 'utf8'));
-const { run, documents } = await renderCoreSchemaChart(execa, invocation.bootstrap);
-const apply = await planMonitoringSchemas(run, documents);
-await apply();
-const target = await renderCoreSchemaChart(execa, invocation.upgrade);
-if (monitoringSchemaFingerprint(await target.serverRender()) !== monitoringSchemaFingerprint(documents)) {
-  throw new Error('Monitoring dependency changed after its schema plan');
-}
-console.log(JSON.stringify({ monitoringSchemas: documents.filter(isMonitoringCrd).length, published: true }));
-"""
-    result = json.loads(h.run(["node", "--input-type=module", "-e", script],
-                              data=json.dumps({"bootstrap": bootstrap, "upgrade": helm_args}), timeout=120))
-    require(result.get("published") is True and type(result.get("monitoringSchemas")) is int
-            and result["monitoringSchemas"] > 0,
-            "Historical upgrade must publish its enabled monitoring dependency schemas")
-    return result["monitoringSchemas"]
 
 
 def exercise(root):
@@ -111,16 +79,7 @@ def exercise(root):
         create_registration_crd(h, obj)
         h.k("wait", "--for=condition=Established", "crd/karssreregistrations.kars.azure.com",
             "--timeout=60s", timeout=70)
-        saved = json.loads(h.run(["helm", "--kube-context", CONTEXT, "get", "values", "kars",
-                                  "--namespace", SYSTEM, "--all", "-o", "json"]))
-        sre = saved.get("sre", {})
-        require(sre.get("enabled") is True
-                and all(isinstance(sre.get(key), str) and sre[key] for key in ("provider", "model")),
-                "Historical SRE must retain its installed provider/model selection")
-        upgrade = ["upgrade", "kars", str(root / "deploy/helm/kars"), "--kube-context", CONTEXT,
-                   "--namespace", SYSTEM, "--reset-then-reuse-values", "--set", "sre.authorityStage=true",
-                   "--set-json", "sre.provider=" + json.dumps(sre["provider"]),
-                   "--set-json", "sre.model=" + json.dumps(sre["model"])]
+        upgrade = historical_stage_args(h)
         monitoring_schemas = prepare_monitoring_dependencies(h, upgrade)
         h.run(["helm", *upgrade, "--dry-run=server"], timeout=90)
         write_report(root, "legacy-helm-readiness.json", {

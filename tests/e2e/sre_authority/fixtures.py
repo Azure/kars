@@ -13,6 +13,7 @@ from .common import (
 )
 from .credential_paths import seed_privacy_gaps
 from .legacy_crds import preflight_legacy_crds
+from .monitoring_dependencies import historical_stage_args, prepare_monitoring_dependencies
 from .registration_schema import create_registration_crd
 from .canonical_migration import assert_data_unchanged, deny_late_conflicts, finish_data_proof, seed_data
 
@@ -162,7 +163,13 @@ def prepare_legacy(h):
     action_params = action_spec["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]["properties"]["action"]["properties"]["params"]
     require(action_params.pop("additionalProperties", None) is True,
             "Historical native action CRD does not exercise the boolean params prerequisite")
-    action_params["x-kubernetes-preserve-unknown-fields"] = True
+    rendered_action = h.run(["helm", "template", "kars", str(h.root / "deploy/helm/kars"),
+                             "--namespace", SYSTEM, "--show-only", "templates/crd-karssreaction.yaml"])
+    desired_action = json.loads(h.run(["node", "-e", converter], data=rendered_action, timeout=20))
+    # Keep the API-normalized identity/version envelope, but require the exact
+    # current schema reviewed by the complete closed migration permit.
+    action_spec["versions"][0]["schema"] = desired_action["spec"]["versions"][0]["schema"]
+    prepare_monitoring_dependencies(h, historical_stage_args(h))
     h.cli("authority", "stage", "--controller-image", "kars-controller:e2e",
           "--router-image", "kars-inference-router:e2e", "--dry-run", timeout=150)
     after = h.get("clusterrolebinding", "kars-sre-reader")
@@ -174,9 +181,9 @@ def prepare_legacy(h):
     action_after = h.get("crd", "karssreactions.kars.azure.com")
     require(action_after["metadata"]["uid"] == action_before["metadata"]["uid"]
             and action_after["spec"] == action_spec,
-            "Native action API staging replaced its identity or changed fields outside the params repair")
+            "Native action API staging replaced its identity or differs from the exact reviewed current schema")
     finish_data_proof(h, migration_data)
-    h.passed("Actual CLI stages the historical action CRD params repair in place before dependent policies")
+    h.passed("Actual CLI migrates the historical action CRD to the exact current schema in place before dependent policies")
     h.save()
     h.passed("Legacy source/grants/consumer seeded using real UIDs before new policies; immutable old chart only, no old binary execution")
     h.passed("Actual authority stage preview/apply retains legacy grants without private issuance")

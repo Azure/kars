@@ -25,8 +25,12 @@ LEADER_ERRORS = {
 def project(raw, sources):
     require(isinstance(raw, str) and len(raw.encode()) <= 131072, UNAVAILABLE)
     result = {"coverage": "bounded-process-log-tail", "errorRecords": 0,
-              "panicLocations": [], "leaderFailures": []}
+              "panicLocations": [], "leaderFailures": [], "fatalRuntimeFailures": []}
     for line in raw.splitlines()[-512:]:
+        # Rust's fatal runtime path is not a panic. Keep only fixed signatures,
+        # never the thread name or arbitrary text adjacent to a runtime error.
+        if re.fullmatch(r"thread '.+' has overflowed its stack", line) or line == "fatal runtime error: stack overflow, aborting":
+            result["fatalRuntimeFailures"].append("stack-overflow")
         # Only a checked-in source coordinate is retained, never the thread or panic message.
         panic = re.fullmatch(r"thread '.+' panicked at (controller/src/[a-zA-Z0-9_/.-]+\.rs):([1-9][0-9]{0,5}):[1-9][0-9]{0,4}:", line)
         if panic and panic[1] in sources:
@@ -44,6 +48,7 @@ def project(raw, sources):
                 result["errorRecords"] += 1
     result["panicLocations"] = result["panicLocations"][-8:]
     result["leaderFailures"] = result["leaderFailures"][-8:]
+    result["fatalRuntimeFailures"] = sorted(set(result["fatalRuntimeFailures"]))
     return result
 
 

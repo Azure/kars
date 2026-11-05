@@ -9,7 +9,9 @@ import copy
 import io
 import json
 from pathlib import Path
+import shutil
 import signal
+import subprocess
 import unittest
 from unittest.mock import patch
 
@@ -199,15 +201,35 @@ class CredentialPolicySchemaTests(unittest.TestCase):
             with self.subTest(mutate=mutate), self.assertRaises(schema.Failure):
                 schema.select_shipped(json.dumps({"kind": "List", "items": objects}))
 
+    @unittest.skipUnless(shutil.which("helm"), "Helm is required for cold chart rendering")
+    def test_real_cold_chart_render_preserves_core_preflight(self):
+        root = Path(__file__).resolve().parents[2]
+
+        def run(stage, args, **kwargs):
+            if stage.endswith("-render"):
+                result = subprocess.run(args, cwd=root, capture_output=True, text=True,
+                                        check=True, timeout=30)
+                self.assertIn("kind: ValidatingAdmissionPolicy", result.stdout)
+                return result.stdout
+            self.assertEqual(args[0], "kubectl")
+            self.assertIn("kind: ValidatingAdmissionPolicy", kwargs["data"])
+            return json.dumps({"kind": "List", "items": documents()})
+
+        with patch.object(schema, "command", side_effect=run):
+            schema.render(root, "v1.31.0")
+        with patch.object(shared, "command", side_effect=run), patch.object(shared, "select_shipped"):
+            shared.render(root, "v1.31.0")
+
     def test_render_uses_only_shipped_templates_strict_conversion_and_exact_context(self):
         def run(stage, _args, **_kwargs):
             return "rendered public chart" if stage.endswith("-render") else json.dumps(
                 {"kind": "List", "items": documents()})
         with patch.object(schema, "command", side_effect=run) as command:
-            schema.render(Path("."), NAMESPACE, "v1.31.0")
+            schema.render(Path("."), "v1.31.0")
         helm, kubectl = command.call_args_list
         self.assertEqual(helm.args[1].count("--show-only"), 6)
-        self.assertEqual(helm.args[1][0], "helm")
+        self.assertEqual(helm.args[1][:3], ["helm", "template", "kars"])
+        self.assertEqual(helm.args[1][helm.args[1].index("--namespace") + 1], "kars-system")
         self.assertIn("--kube-version", helm.args[1])
         for template in schema.TEMPLATES:
             self.assertIn("templates/" + template, helm.args[1])

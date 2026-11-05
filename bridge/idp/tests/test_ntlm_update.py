@@ -17,10 +17,10 @@ NTLM_REQUEST = "github.com/Azure/go-ntlmssp@v0.1.1"
 
 
 class NTLMSecurityUpdateContracts(unittest.TestCase):
-    def test_ntlm_fix_and_released_crypto_keep_pinned_compiler(self):
+    def test_ntlm_fix_and_reviewed_crypto_keep_pinned_compiler(self):
         requested = (ROOT / "locks/requests.txt").read_text().splitlines()
         self.assertEqual(requested.count(NTLM_REQUEST), 1)
-        self.assertIn("golang.org/x/crypto@v0.58.0", requested)
+        self.assertIn("golang.org/x/crypto@v0.58.1-0.20261009181718-2f1f834330b2", requested)
         self.assertIn("golang.org/x/net@v0.62.0", requested)
         self.assertIn("golang.org/x/text@v0.43.0", requested)
         self.assertIn("GO_VERSION=go1.27.3", (ROOT / "locks/inputs.lock").read_text())

@@ -8,6 +8,9 @@
 export const BASE365 = "8b206065608593667a40665b3f48225ef9ce278d";
 export const MIGRATION = "kars.azure.com/sre-base365-schema/v1";
 export const EVALUATOR_V2 = "f9a25ecca9292f85d0604b7eab09166cb4dfd6c5443f8175bac2664ee50e93a2";
+// Exact complete name -> normalized-spec-digest map from c8ca974d's beta chart.
+// No individual modern target, mixed inventory or future chart is authorized.
+export const BETA_V1_SCHEMA_SET = "e41c50132221b72f8abfe539acbb187f3b6c3534750c70204313105e10eec692";
 
 export const CANONICAL_SCHEMAS: Readonly<Record<string, { before?: string; after: readonly string[] }>> = {
   "a2aagents.kars.azure.com": { before: "8ab113b8135124c3659acac960ba46a25b060b7f527a2e216fab38327e9608aa", after: ["8ab113b8135124c3659acac960ba46a25b060b7f527a2e216fab38327e9608aa"] },
