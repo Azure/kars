@@ -46,6 +46,33 @@ def preview_registration_identity(h, obj):
             "An ephemeral preview identity entered the real CREATE request")
 
 
+def prepare_monitoring_dependencies(h, helm_args):
+    # Reuse the installer's separate dependency lifecycle, not the Kars CRD migration.
+    script = """
+import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+const require = createRequire(process.cwd() + '/cli/package.json');
+const { execa } = await import(require.resolve('execa'));
+const library = name => import(pathToFileURL(process.cwd() + '/cli/dist/lib/' + name + '.js').href);
+const { renderCoreSchemaChart } = await library('core-helm-schemas');
+const { isMonitoringCrd, monitoringSchemaFingerprint, planMonitoringSchemas } = await library('monitoring-schemas');
+const { run, documents, serverRender } = await renderCoreSchemaChart(execa, JSON.parse(readFileSync(0, 'utf8')));
+const apply = await planMonitoringSchemas(run, documents);
+await apply();
+if (monitoringSchemaFingerprint(await serverRender()) !== monitoringSchemaFingerprint(documents)) {
+  throw new Error('Monitoring dependency changed after its schema plan');
+}
+console.log(JSON.stringify({ monitoringSchemas: documents.filter(isMonitoringCrd).length, published: true }));
+"""
+    result = json.loads(h.run(["node", "--input-type=module", "-e", script],
+                              data=json.dumps(helm_args), timeout=120))
+    require(result.get("published") is True and type(result.get("monitoringSchemas")) is int
+            and result["monitoringSchemas"] > 0,
+            "Historical upgrade must publish its enabled monitoring dependency schemas")
+    return result["monitoringSchemas"]
+
+
 def exercise(root):
     h = Harness.__new__(Harness)
     h.root, h.work = root, root / ".e2e-legacy-helm"
@@ -84,18 +111,21 @@ def exercise(root):
         require(sre.get("enabled") is True
                 and all(isinstance(sre.get(key), str) and sre[key] for key in ("provider", "model")),
                 "Historical SRE must retain its installed provider/model selection")
-        h.run(["helm", "--kube-context", CONTEXT, "upgrade", "kars", str(root / "deploy/helm/kars"),
-               "--namespace", SYSTEM, "--reset-then-reuse-values", "--set", "sre.authorityStage=true",
-               "--set-json", "sre.provider=" + json.dumps(sre["provider"]),
-               "--set-json", "sre.model=" + json.dumps(sre["model"]),
-               "--dry-run=server"], timeout=90)
+        upgrade = ["upgrade", "kars", str(root / "deploy/helm/kars"), "--kube-context", CONTEXT,
+                   "--namespace", SYSTEM, "--reset-then-reuse-values", "--set", "sre.authorityStage=true",
+                   "--set-json", "sre.provider=" + json.dumps(sre["provider"]),
+                   "--set-json", "sre.model=" + json.dumps(sre["model"])]
+        monitoring_schemas = prepare_monitoring_dependencies(h, upgrade)
+        h.run(["helm", *upgrade, "--dry-run=server"], timeout=90)
         write_report(root, "legacy-helm-readiness.json", {
             "apiServer": version, "legacyCommit": LEGACY_COMMIT,
             "historicalInstallAndPostInstallHook": "passed", "currentAuthorityServerDryRun": "passed",
             "historicalSeedStrictServerDryRuns": 5, "historicalSeedPersistence": "unchanged",
             "historicalNestedParamsRejection": "passed",
             "newCrdPreviewWithoutPersistedRevision": "passed",
-            "controllerReplicas": 0, "legacyCRDs": 18, "crdCreation": "native-Helm-only"})
+            "controllerReplicas": 0, "legacyCRDs": 18, "crdCreation": "native-Helm-only",
+            "monitoringDependencySchemas": monitoring_schemas,
+            "monitoringDependencyPreparation": "production-guarded-create-and-discovery"})
 
 
 if __name__ == "__main__":

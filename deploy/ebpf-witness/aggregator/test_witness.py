@@ -430,10 +430,15 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("COPY --from=toolchain /usr/local/go /usr/local/go", dockerfile)
         self.assertNotRegex(dockerfile.split("FROM ${PYTHON_BUILD_BASE}", 1)[0], r"(?m)^RUN ")
         self.assertIn("RUN python3 /build/build-runtime.py /build", dockerfile)
+        trust_install = "RUN tdnf install -y ca-certificates && tdnf clean all"
+        self.assertIn(trust_install, dockerfile)
+        self.assertLess(dockerfile.index(trust_install), dockerfile.index("RUN python3 /build/build-runtime.py /build"))
         self.assertIn("ADD --checksum=sha256:934060feae4ecab32644704c4e272e06b7c0da5a4f67429ba04b0113751946e4", dockerfile)
         runtime = dockerfile.split("FROM ${PYTHON_BASE}\n", 1)[1]
         self.assertNotRegex(runtime, r"(?m)^RUN ")
         self.assertIn("COPY --from=client /build/runtime-root/ /", runtime)
+        self.assertIn("COPY --from=client /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem /etc/ssl/certs/ca-certificates.crt", runtime)
+        self.assertIn("SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt", runtime)
         self.assertNotIn("--chmod=", runtime)
         self.assertIn("USER 10001:10001", runtime)
         self.assertIn('ENTRYPOINT ["/usr/bin/python3", "/opt/witness/witness.py"]', runtime)

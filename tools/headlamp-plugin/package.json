@@ -19,7 +19,14 @@
     "vite": "6.4.5"
   },
   "overrides": {
-    "glob@^10.0.0": "14.0.2",
+    "@joshwooding/vite-plugin-react-docgen-typescript": {
+      "glob": "14.0.2"
+    },
+    "quick-temp": {
+      "rimraf": {
+        "glob": "14.0.2"
+      }
+    },
     "minimatch@^10.0.0 || ^11.0.0": "11.0.1",
     "@storybook/builder-webpack5": {
       "webpack-dev-middleware": "7.4.6"

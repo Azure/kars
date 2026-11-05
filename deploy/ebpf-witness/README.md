@@ -98,8 +98,11 @@ they are not executed by Bridge.** The maintained recipe uses separate
 digest-pinned Azure Linux 3 Python 3.12 build and distroless runtime bases,
 matching Kars's AgentMesh packaging. The Go 1.27.2 SDK is copied from the official
 toolchain image, but compilation and upstream CLI/OCI/API-helper tests execute in the AL3
-builder. No Debian runtime files, shell or package manager enter the final
-image. The builder prepares a runtime tree with searchable directories,
+builder. The builder installs Azure Linux's `ca-certificates` package for verified
+Go module downloads; its public CA bundle is also copied into the distroless
+runtime and selected through `SSL_CERT_FILE` for Python and Go TLS clients.
+TLS and Go module checksum verification remain enabled. No Debian runtime files,
+shell or package manager enter the final image. The builder prepares a runtime tree with searchable directories,
 read-only source/provenance and both static executables; the final stage
 copies that tree without a runtime shell or permission-changing command.
 A runtime-base refresh must retain the static executable and source/provenance

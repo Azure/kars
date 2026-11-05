@@ -12,6 +12,7 @@ ARG SOURCE_REVISION
 ARG TARGETARCH
 ENV TARGETARCH=${TARGETARCH}
 ENV PATH=/usr/local/go/bin:${PATH}
+RUN tdnf install -y ca-certificates && tdnf clean all
 COPY --from=toolchain /usr/local/go /usr/local/go
 WORKDIR /build
 ADD --checksum=sha256:934060feae4ecab32644704c4e272e06b7c0da5a4f67429ba04b0113751946e4 https://codeload.github.com/inspektor-gadget/inspektor-gadget/tar.gz/7a314380ff61534ea70df9fb086505f958b2dff9 /build/source.tar.gz
@@ -28,6 +29,8 @@ LABEL org.opencontainers.image.source="https://github.com/Azure/kars" \
       org.opencontainers.image.licenses="MIT AND Apache-2.0" \
       io.kars.witness.ig-version="v0.53.2"
 COPY --from=client /build/runtime-root/ /
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 HOME=/tmp
+COPY --from=client /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem /etc/ssl/certs/ca-certificates.crt
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 HOME=/tmp \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 USER 10001:10001
 ENTRYPOINT ["/usr/bin/python3", "/opt/witness/witness.py"]

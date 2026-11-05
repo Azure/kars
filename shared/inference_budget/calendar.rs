@@ -158,6 +158,7 @@ pub struct Ledger {
 }
 
 impl Ledger {
+    #[cfg(test)]
     pub fn check_reader(&self, writer: &str) -> Result<(), BudgetError> {
         self.check_reader_with_policy(writer, Policy::Enforce)
     }
@@ -364,10 +365,12 @@ impl Ledger {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn commit(&mut self, command: &Commit, day: u32, month: u32) -> Result<(), BudgetError> {
         self.commit_authorized(command, day, month, false)
     }
 
+    #[cfg(test)]
     pub fn commit_authorized(
         &mut self,
         command: &Commit,

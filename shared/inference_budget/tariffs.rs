@@ -300,22 +300,6 @@ impl From<Quote> for AttemptQuote {
 }
 
 impl AttemptQuote {
-    pub fn record_only(
-        provider_id: &str,
-        endpoint: &str,
-        model: &str,
-        operation: Operation,
-    ) -> Self {
-        Self::RecordOnly {
-            record_only: RecordingRoute {
-                provider_id: provider_id.into(),
-                endpoint: endpoint.into(),
-                model: model.into(),
-                operation,
-            },
-        }
-    }
-
     pub fn is_record_only(&self) -> bool {
         matches!(self, Self::RecordOnly { .. })
     }

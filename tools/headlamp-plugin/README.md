@@ -100,6 +100,12 @@ major lines have no published fix for the corresponding advisory:
 | TypeScript ESLint | minimatch 10 → 11.0.1 (`GHSA-g3hv-75wg-m249`) | Retains the named `minimatch` function with `dot`; legacy callable minimatch 3 stays separate. Glob 14 owns its compatible minimatch 11 implementation rather than overriding glob 10's internals. |
 | Storybook webpack builder | webpack-dev-middleware 6 → 7.4.6 (`GHSA-g84c-rxfj-3j2c`) | Retains the webpack 5 middleware and callback lifecycle. Version 7 requires Node ≥18.12 and memfs 4; Node 22 satisfies this. The published 7.4.6 release includes the containment fix. |
 
+Scope the glob overrides to React docgen and `quick-temp → rimraf` explicitly.
+With a broad `glob@^10` override, npm 10.9.9 restores glob 10 under quick-temp
+and rejects this lockfile, while npm 11 accepts it. Validate manifest-only copies
+with the hosted npm version using `npm ci --dry-run --ignore-scripts --no-audit`
+before publishing; do not generate the lock from an existing `node_modules` tree.
+
 `src/dependency-contracts.test.ts` covers those consumer APIs, a real in-memory
 webpack middleware lifecycle, and rejection of the non-slash-terminated
 `publicPath` traversal. Run the clean install, complete tests, production build,

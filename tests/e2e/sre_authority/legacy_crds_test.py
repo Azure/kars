@@ -545,6 +545,24 @@ class CanonicalSeedProbeTests(unittest.TestCase):
                 dry_run_seed_data(h)
             self.assertTrue(all(call.args[0] == "GET" for call in h.api.call_args_list))
 
+    def test_monitoring_dependency_bootstrap_uses_production_guards_and_exact_upgrade_values(self):
+        from sre_authority.legacy_crd_probe import prepare_monitoring_dependencies
+        args = ["upgrade", "kars", "chart", "--reset-then-reuse-values", "--set", "sre.authorityStage=true"]
+        h = Mock()
+        h.run.return_value = json.dumps({"monitoringSchemas": 10, "published": True})
+        self.assertEqual(prepare_monitoring_dependencies(h, args), 10)
+        command = h.run.call_args.args[0]
+        self.assertEqual(command[:3], ["node", "--input-type=module", "-e"])
+        self.assertEqual(json.loads(h.run.call_args.kwargs["data"]), args)
+        self.assertIn("renderCoreSchemaChart(execa", command[3])
+        self.assertIn("planMonitoringSchemas(run, documents)", command[3])
+        self.assertIn("monitoringSchemaFingerprint(await serverRender())", command[3])
+        self.assertNotIn("planCoreHelmSchemas", command[3])
+        for count, published in ((0, True), (True, True), ("10", True), (10, False)):
+            h.run.return_value = json.dumps({"monitoringSchemas": count, "published": published})
+            with self.subTest(count=count, published=published), self.assertRaises(AssertionError):
+                prepare_monitoring_dependencies(h, args)
+
     def test_early_existing_legacy_probe_uses_shared_bodies_before_current_schema_or_helm_stage(self):
         source = Path(__file__).with_name("legacy_crd_probe.py").read_text()
         self.assertIn("from sre_authority.canonical_seed import dry_run_seed_data", source)
@@ -554,6 +572,9 @@ class CanonicalSeedProbeTests(unittest.TestCase):
         self.assertLess(source.index("dry_run_seed_data(h)"), source.index('"--dry-run=server"'))
         self.assertIn('"historicalSeedStrictServerDryRuns": 5', source)
         self.assertIn('"historicalNestedParamsRejection": "passed"', source)
+        self.assertLess(source.index("monitoring_schemas = prepare_monitoring_dependencies(h, upgrade)"),
+                        source.index('h.run(["helm", *upgrade, "--dry-run=server"]'))
+        self.assertNotIn("monitoring.enabled=false", source)
         self.assertNotIn("--validate=false", source)
 
 

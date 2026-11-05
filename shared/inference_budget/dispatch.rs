@@ -6,10 +6,28 @@
 
 use crate::inference_budget_contract::{
     catalog::{Catalog, endpoint_host},
-    tariffs::{AttemptQuote, ModelContract, Operation, OutputField, Quote},
+    tariffs::{AttemptQuote, ModelContract, Operation, OutputField, Quote, RecordingRoute},
     types::*,
 };
 use serde_json::Value;
+
+impl AttemptQuote {
+    pub fn record_only(
+        provider_id: &str,
+        endpoint: &str,
+        model: &str,
+        operation: Operation,
+    ) -> Self {
+        Self::RecordOnly {
+            record_only: RecordingRoute {
+                provider_id: provider_id.into(),
+                endpoint: endpoint.into(),
+                model: model.into(),
+                operation,
+            },
+        }
+    }
+}
 
 impl OutputField {
     fn key(self) -> &'static str {
