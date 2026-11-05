@@ -9,7 +9,7 @@ import types
 import unittest
 
 from credential_diagnostics import (
-    CATEGORIES, NAMESPACE_CONDITIONS, PREFIX, condition_category, namespace_retirement, runtime_scope,
+    CATEGORIES, NAMESPACE_CONDITIONS, PREFIX, condition_category, metrics_discovery, namespace_retirement, runtime_scope,
 )
 from native_api import Failure
 
@@ -104,9 +104,44 @@ class NamespaceRetirementDiagnosticsTests(unittest.TestCase):
             paths.append(path)
             return {"items": objects}
         result = namespace_retirement(types.SimpleNamespace(admin=types.SimpleNamespace(get=get)))
-        self.assertEqual(paths, ["/api/v1/namespaces"])
+        expected = ["/api/v1/namespaces"]
+        if result["available"]:
+            expected.append("/apis/apiregistration.k8s.io/v1/apiservices/v1beta1.metrics.k8s.io")
+        self.assertEqual(paths, expected)
         self.assertNotIn(PRIVATE, json.dumps(result))
         return result
+
+    def test_discovery_dependency_is_closed_and_does_not_emit_api_messages(self):
+        item = self.fixture()
+        item["status"]["conditions"][0].update({"type": "NamespaceDeletionDiscoveryFailure", "status": "True",
+            "message": "metrics.k8s.io/v1beta1: " + PRIVATE})
+        def get(path):
+            if path == "/api/v1/namespaces":
+                return {"items": [item]}
+            return {"spec": {"group": "metrics.k8s.io"}, "status": {"conditions": [
+                {"type": "Available", "status": "False", "reason": "MissingEndpoints", "message": PRIVATE}]}}
+        result = namespace_retirement(types.SimpleNamespace(admin=types.SimpleNamespace(get=get)))
+        self.assertTrue(result["namespaces"][0]["metricsDiscoveryMentioned"])
+        self.assertEqual(result["metricsApi"], {"available": True, "registered": True,
+                                              "status": "False", "reason": "MissingEndpoints"})
+        self.assertNotIn(PRIVATE, json.dumps(result))
+        def failing_metrics(path):
+            if path == "/api/v1/namespaces":
+                return {"items": [item]}
+            raise Failure(PRIVATE)
+        result = namespace_retirement(types.SimpleNamespace(admin=types.SimpleNamespace(get=failing_metrics)))
+        self.assertTrue(result["available"])
+        self.assertFalse(result["metricsApi"]["available"])
+        self.assertNotIn(PRIVATE, json.dumps(result))
+
+    def test_metrics_api_unknown_fields_and_failure_bodies_are_redacted(self):
+        for payload in ({"status": {"conditions": [{"type": "Available", "status": PRIVATE, "reason": PRIVATE}]}},
+                        {"status": {"conditions": PRIVATE}}, {"status": {"conditions": [{"type": "Available", "reason": {}}]}}):
+            result = metrics_discovery(types.SimpleNamespace(admin=types.SimpleNamespace(get=lambda _path: payload)))
+            self.assertNotIn(PRIVATE, json.dumps(result))
+            if result["available"]:
+                self.assertEqual(result["status"], "OtherOrAbsent")
+                self.assertEqual(result["reason"], "OtherOrAbsent")
 
     def test_orphaned_runtime_retains_lifecycle_without_sandbox_or_private_values(self):
         result = self.collect([self.fixture()])

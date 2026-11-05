@@ -56,7 +56,7 @@ def pod_facts(pod):
 def collect_stage_workloads(h):
     # These built-ins participate in Helm's waiter but are outside kars-sre.
     # Run before the disposable cluster is torn down; never include logs/messages.
-    for namespace in ("kars-system", "headlamp"):
+    for namespace in ("kars-system", "monitoring", "headlamp"):
         try:
             pods = json.loads(h.k("get", "pods", "-n", namespace, "-o", "json", timeout=10))["items"]
             print("SRE-STAGE-WORKLOADS", json.dumps({"namespace": namespace,

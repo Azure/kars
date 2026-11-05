@@ -184,6 +184,29 @@ make images               # builds controller + inference-router images
 make push                 # pushes to configured ACR
 ```
 
+### Kind CI image prerequisites
+
+`make test-e2e` keeps the chart's Headlamp, metrics-server and monitoring add-ons
+enabled. CI prepares their nine AL3 images from the same candidate: it reuses the
+Headlamp image only after qualification succeeds, then builds the remaining
+images using `cli/src/lib/image-targets.ts`. Same-run artifacts include image IDs
+and the source revision; mismatched or missing images fail before Kind loading.
+Nothing is published to a registry by these preparation steps.
+
+Only the disposable `kars-e2e` fixture uses `Never` pull policies, carried from
+historical Helm installation through authority staging and the final upgrade.
+Production image references, `Always` policies and migration deadlines are
+unchanged. Without `KARS_E2E_PREBUILT_ADDONS=1`, the harness builds these add-ons
+locally; prefer hosted CI for these heavy builds. A built CLI and Helm are needed
+for the lightweight preparation/rendering regressions:
+
+```bash
+node --test tests/e2e/addon-images.test.mjs tests/e2e/addon-chart.test.mjs
+```
+
+This infrastructure fixture still uses its existing sandbox stand-in; passing it
+does not qualify shipping runtimes or complete the released beta user journeys.
+
 ### Local end-to-end loop
 
 ```bash

@@ -59,6 +59,22 @@ def namespace_finalizers(values):
             "otherCount": sum(value not in NAMESPACE_FINALIZERS for value in values)}
 
 
+def metrics_discovery(setup):
+    """The chart's aggregated API can block otherwise empty Namespace retirement."""
+    try:
+        api = setup.admin.get("/apis/apiregistration.k8s.io/v1/apiservices/v1beta1.metrics.k8s.io")
+        conditions = (api.get("status") or {}).get("conditions") or []
+        available = [item for item in conditions if item.get("type") == "Available"]
+        condition = available[0] if len(available) == 1 else {}
+        reasons = {"Passed", "Local", "ServiceNotFound", "ServiceAccessError", "ServicePortError",
+                   "EndpointsNotFound", "EndpointsAccessError", "MissingEndpoints", "FailedDiscoveryCheck"}
+        return {"available": True, "registered": api.get("spec", {}).get("group") == "metrics.k8s.io",
+                "status": condition.get("status") if condition.get("status") in ("True", "False", "Unknown") else "OtherOrAbsent",
+                "reason": condition.get("reason") if condition.get("reason") in reasons else "OtherOrAbsent"}
+    except Exception:
+        return {"available": False, "category": "api-unavailable"}
+
+
 def namespace_retirement(setup):
     """Failure-only lifecycle facts, including orphaned native runtime namespaces."""
     try:
@@ -96,9 +112,12 @@ def namespace_retirement(setup):
                         condition.get("type"), set()) else "OtherOrAbsent",
                 } for condition in conditions[:16]],
                 "conditionsTruncated": len(conditions) > 16,
+                "metricsDiscoveryMentioned": any(c.get("type") == "NamespaceDeletionDiscoveryFailure"
+                    and c.get("status") == "True" and isinstance(c.get("message"), str)
+                    and "metrics.k8s.io/v1beta1" in c["message"] for c in conditions[:16]),
             })
         return {"available": True, "diagnosticOnly": True, "namespaces": namespaces,
-                "truncated": len(selected) > 64}
+                "metricsApi": metrics_discovery(setup), "truncated": len(selected) > 64}
     except (KeyError, TypeError, AttributeError):
         return {"available": False, "diagnosticOnly": True, "category": "malformed-metadata"}
     except Exception:

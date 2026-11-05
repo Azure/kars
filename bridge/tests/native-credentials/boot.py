@@ -40,6 +40,11 @@ def install_core(setup):
             "nodeSelector": {"kubernetes.io/hostname": "bridge-native-worker"},
         },
         "inferenceRouter": {"image": loaded_image("kars-native-router")},
+        "metricsServer": {
+            "enabled": True,
+            "image": {"repository": "docker.io/library/kars-native-metrics-server",
+                      "tag": "latest", "pullPolicy": "Never"},
+        },
         # Kind has no Azure Workload Identity mutating webhook.
         "azure": {"workloadIdentity": {"enabled": False}},
         "observationPrivacyRpc": {"enabled": True},

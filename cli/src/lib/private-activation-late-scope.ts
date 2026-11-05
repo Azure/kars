@@ -9,6 +9,7 @@ import {
 } from "./private-activation.js";
 import { replicaIntent } from "./private-activation-retirement.js";
 import { controlTlsMaterial, type ControlTlsMaterial } from "./private-activation-control-tls.js";
+import { controlMemoryMaterial, ControlMemoryPending, type ControlMemoryMaterial } from "./private-activation-control-memory.js";
 import { PrivateCommandFailure, scopedCommandFailure, type PrivateCommandPhase } from "./private-activation-command-diagnostics.js";
 
 const HISTORY = "kars.azure.com/private-root-retirement";
@@ -29,12 +30,20 @@ interface Runtime {
   task?: { object: ReviewedObject; spec: string; generation: number; authorization: string };
 }
 interface RuntimeSnapshot { runtime: Runtime; sandbox: Json; task?: Json }
-interface Material { object: ReviewedObject; key: string; tls?: ControlTlsMaterial }
-function sameKeys(left: Material, right: Material): boolean {
-  return left.key === right.key && canonical(left.tls ?? null) === canonical(right.tls ?? null);
+interface Material { object: ReviewedObject; key: string; tls?: ControlTlsMaterial; memory?: ControlMemoryMaterial }
+function materialVersion(value: Material): string {
+  return value.memory?.version ?? `${value.object.uid}:${value.object.resourceVersion}`;
 }
-function rotatedTls(left: Material, right: Material): boolean {
-  return left.tls ? !!right.tls && left.tls.key !== right.tls.key : !right.tls;
+function sameKeys(left: Material, right: Material): boolean {
+  return left.key === right.key && canonical(left.tls ?? null) === canonical(right.tls ?? null)
+    && canonical(left.memory ?? null) === canonical(right.memory ?? null);
+}
+function rotatedAuthority(left: Material, right: Material): boolean {
+  const tls = left.tls ? !!right.tls && left.tls.key !== right.tls.key : !right.tls;
+  const memory = left.memory ? !!right.memory && left.memory.binding === right.memory.binding
+    && left.memory.anchor !== right.memory.anchor && left.memory.epoch !== right.memory.epoch
+    && left.memory.key !== right.memory.key : !right.memory;
+  return tls && memory;
 }
 interface Receipt {
   version: 4;
@@ -149,8 +158,15 @@ function receipt(namespace: unknown): Receipt | undefined {
       if (!runtime.task || canonical(Object.keys(record(material.tls)).sort()) !== canonical(["configuration", "key"])) throw new Error(failure);
       hash(material.tls.configuration); hash(material.tls.key);
     }
+    if (material.memory !== undefined) {
+      if (canonical(Object.keys(record(material.memory)).sort()) !== canonical(["anchor", "binding", "configuration", "epoch", "key", "version"])) throw new Error(failure);
+      for (const key of ["configuration", "key", "epoch", "binding"] as const) hash(material.memory[key]);
+      text(material.memory.anchor);
+      if (typeof material.memory.version !== "string" || !material.memory.version.startsWith(`${material.object.uid}:control-v1:`)
+        || !/^[^:]+:control-v1:[a-f0-9]{64}$/.test(material.memory.version)) throw new Error(failure);
+    }
   }
-  if (result.qualified && !rotatedTls(result.baseline, result.qualified.material)) throw new Error(failure);
+  if (result.qualified && !rotatedAuthority(result.baseline, result.qualified.material)) throw new Error(failure);
   if (encoded(result) !== raw) throw new Error(failure);
   return result;
 }
@@ -287,9 +303,12 @@ async function material(execute: Execute, scope: NamespaceReview, runtime: Runti
   const object = ownedMaterial(secret, scope, runtime);
   const data = record(secret.data);
   const token = typeof data["control-token"] === "string" ? Buffer.from(data["control-token"], "base64") : Buffer.alloc(0);
-  const volume = items(at(template(deployment), "spec", "volumes")).find(v => at(v, "secret", "secretName") === ADMIN);
+  const volumes = items(at(template(deployment), "spec", "volumes"));
+  const volume = volumes.find(v => at(v, "name") === "governed-services-control");
   const tls = items(at(volume, "secret", "items")).some(item => at(item, "key") === "config.json");
-  if (secret.type !== "Opaque" || canonical(Object.keys(data).sort()) !== canonical(tls ? ["config.json", "control-token"] : ["control-token"])
+  const memory = volumes.some(v => at(v, "name") === "builtin-memory" && at(v, "secret", "secretName") === ADMIN);
+  const keys = ["control-token", ...(tls ? ["config.json"] : []), ...(memory ? ["builtin-memory.json"] : [])].sort();
+  if (secret.type !== "Opaque" || canonical(Object.keys(data).sort()) !== canonical(keys)
     || (tls && !runtime.task) || token.length !== 64 || token.toString("base64") !== data["control-token"]
     || !/^[a-zA-Z0-9]{64}$/.test(token.toString("utf8"))) {
     throw new Error("Customized or missing late private credential keys require explicit operator recovery");
@@ -301,16 +320,25 @@ async function material(execute: Execute, scope: NamespaceReview, runtime: Runti
     task_authorization: runtime.task.authorization, task_generation: runtime.task.generation,
   } : undefined;
   return { object, key: digest(token.toString("base64")),
-    ...(tls ? { tls: controlTlsMaterial(data["config.json"], deployment, expectedIdentity) } : {}) };
+    ...(tls ? { tls: controlTlsMaterial(data["config.json"], deployment, expectedIdentity) } : {}),
+    ...(memory ? { memory: await controlMemoryMaterial(execute, data["builtin-memory.json"], token, data, object.uid, runtime) } : {}) };
 }
 
 function supportedTemplate(deployment: unknown, scope: NamespaceReview, activation: PrivateActivation, runtime: Runtime): void {
   const current = structuredClone(record(deployment));
   const pod = record(template(current).spec);
   let admin = false;
+  let memory = false;
   const removed = new Set<string>();
   pod.volumes = items(pod.volumes ?? []).filter(volume => {
     if (at(volume, "secret", "secretName") === ADMIN) {
+      if (at(volume, "name") === "builtin-memory") {
+        if (memory || at(volume, "secret", "optional") === true
+          || canonical(at(volume, "secret", "items")) !== canonical([{ key: "builtin-memory.json", path: "builtin-memory.json" }])) throw new Error(failure);
+        memory = true;
+        removed.add("builtin-memory");
+        return false;
+      }
       const tokenItems = [{ key: "control-token", path: "control-token" }];
       const selected = canonical(at(volume, "secret", "items"));
       if ((selected !== canonical(tokenItems) && (!runtime.task
@@ -331,9 +359,10 @@ function supportedTemplate(deployment: unknown, scope: NamespaceReview, activati
   });
   for (const container of [...items(pod.containers ?? []), ...items(pod.initContainers ?? []), ...items(pod.ephemeralContainers ?? [])]) {
     const c = record(container);
-    for (const mount of items(c.volumeMounts ?? []).filter(m => at(m, "name") === "governed-services-control")) {
+    for (const mount of items(c.volumeMounts ?? []).filter(m => ["governed-services-control", "builtin-memory"].includes(String(at(m, "name"))))) {
+      const name = at(mount, "name");
       if (c.name !== "inference-router" || canonical(mount) !== canonical({
-        name: "governed-services-control", mountPath: "/etc/kars/services", readOnly: true,
+        name, mountPath: name === "builtin-memory" ? "/etc/kars/builtin-memory" : "/etc/kars/services", readOnly: true,
       })) throw new Error("Customized admin credential mount requires explicit recovery");
     }
     c.volumeMounts = items(c.volumeMounts ?? []).filter(mount => !removed.has(String(at(mount, "name"))));
@@ -402,7 +431,10 @@ async function current(
   const secret = await materialInventory(execute, scope, runtime);
   if (state && secret.uid !== state.baseline.object.uid) throw new Error(failure);
   if (state?.qualified && canonical(secret) !== canonical(state.qualified.material.object)) throw new Error(failure);
-  if (!state && at(template(deployment), "metadata", "annotations", VERSION) !== `${secret.uid}:${secret.resourceVersion}`) {
+  const mountedMemory = items(at(template(deployment), "spec", "volumes")).some(v => at(v, "name") === "builtin-memory");
+  const marker = at(template(deployment), "metadata", "annotations", VERSION);
+  if (!state && (mountedMemory ? typeof marker !== "string" || !marker.startsWith(`${secret.uid}:control-v1:`)
+    || !/^[^:]+:control-v1:[a-f0-9]{64}$/.test(marker) : marker !== `${secret.uid}:${secret.resourceVersion}`)) {
     throw new Error("Reviewed runtime has not consumed its current controller-owned admin credential version");
   }
   // During controller rotation only the exact token-version annotation and
@@ -413,7 +445,7 @@ async function current(
   if (state && state.phase !== "Pausing" && state.phase !== "Qualified" && state.phase !== "Restoring" && pods.length) throw new Error(failure);
   if (state && ["Qualified", "Restoring"].includes(state.phase) && pods.some(pod =>
     state.captured.includes(reviewed(pod, true).uid) || at(pod, "metadata", "annotations", `${P}epoch`) !== state.epoch
-    || at(pod, "metadata", "annotations", VERSION) !== `${state.qualified!.material.object.uid}:${state.qualified!.material.object.resourceVersion}`)) throw new Error(failure);
+    || at(pod, "metadata", "annotations", VERSION) !== materialVersion(state.qualified!.material))) throw new Error(failure);
   return { runtime, snapshot, deployment, pods, namespace };
 }
 
@@ -485,6 +517,7 @@ export async function stageLateScope(
   };
   if (!state) {
     const baseline = await material(execute, scope, live.runtime, live.deployment);
+    if (at(template(live.deployment), "metadata", "annotations", VERSION) !== materialVersion(baseline)) throw new Error(failure);
     await save({ version: 4, root, binding: binding(scope), attempt: randomBytes(32).toString("hex"), phase: "Pausing",
       runtime: live.runtime, deployment: reviewed(live.deployment), structure: structure(live.deployment),
       replicas: replicaIntent(live.deployment), captured: live.pods.map(p => reviewed(p, true).uid).sort(), baseline },
@@ -557,15 +590,21 @@ export async function stageLateScope(
   if (state.phase === "Rotating") {
     for (;;) {
       live = await current(execute, activation, scope, root, state);
-      const fresh = await material(execute, scope, live.runtime, live.deployment);
+      let fresh: Material;
+      try { fresh = await material(execute, scope, live.runtime, live.deployment); }
+      catch (error) {
+        if (!(error instanceof ControlMemoryPending) || Date.now() >= deadline) throw error;
+        await new Promise(resolve => setTimeout(resolve, 500));
+        continue;
+      }
       const metadata = await secretMetadata(execute, scope, ADMIN);
-      const version = `${fresh.object.uid}:${fresh.object.resourceVersion}`;
+      const version = materialVersion(fresh);
       if (fresh.object.uid !== state.baseline.object.uid) throw new Error(failure);
       if (at(metadata, "metadata", "annotations", `${P}epoch`) === state.epoch
         && at(metadata, "metadata", "annotations", "kars.azure.com/services-credential-retired") === undefined
         && at(template(live.deployment), "metadata", "annotations", `${P}epoch`) === state.epoch
         && at(template(live.deployment), "metadata", "annotations", VERSION) === version) {
-        if (fresh.key === state.baseline.key || !rotatedTls(state.baseline, fresh)
+        if (fresh.key === state.baseline.key || !rotatedAuthority(state.baseline, fresh)
           || fresh.object.resourceVersion === state.baseline.object.resourceVersion) {
           throw new Error("Late private authentication key was not rotated; epoch/version stamps alone cannot qualify");
         }

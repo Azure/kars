@@ -40,6 +40,17 @@ finalizer behavior. Existing controller process capture retains checked-in panic
 source coordinates and fixed stack-overflow signatures, not compiled stack
 frames; a stack-overflow abort without a panic location still requires hosted
 investigation and is not localized by enabling ordinary panic backtraces.
+Namespace capture also records whether its discovery-failure message mentions
+`metrics.k8s.io/v1beta1`, and the fixed metrics APIService's closed availability
+status/reason. It never emits the message, service endpoints or API error body.
+An empty Namespace with discovery failure does not prove which API is unavailable
+until this dependency evidence is observed; no finalizers or TLS checks are bypassed.
+The Native runtime lane builds the maintained Azure Linux 3 metrics-server recipe
+from its exact Core checkout and loads it into all Kind nodes before bootstrap.
+Only the Native fixture selects that local image with `pullPolicy: Never`; the
+Metrics API remains enabled with the chart's serving and kubelet TLS validation.
+Bootstrap currently waits for the controller, not Metrics API readiness: loading
+an image is not proof of working discovery or successful Namespace retirement.
 
 ## Identity and operator authentication
 
@@ -98,8 +109,17 @@ Task-bound `control-token` plus `config.json` TLS transport, as well as existing
 token-only runtimes. Before retiring Pods it validates the exact Task identity,
 certificate chain, hostname, expiry and matching private key. Qualification
 requires both the token and TLS key to rotate under the same Secret UID; receipts
-retain only material hashes, never tokens or PEMs. Other credential purposes
-retain their existing version semantics.
+retain only material hashes, never tokens or PEMs. The exact router-only
+`builtin-memory.json` mount is supported for direct Task/Sandbox memory ownership,
+using the maintained `control-v1` content version. Apply validates memory scope,
+CA/expiry, protected account ownership and the live bound Secret UID; qualification
+requires a different anchor UID, epoch and token while retaining the memory binding.
+JWT claims are checked for consistency, not independently authenticated: issuance
+remains the controller/Kubernetes path. Preview reads no Secret values, receipts
+retain hashes/anchor identity only, and exact receipt resource-version checks remain
+fail-closed on later renewal. Shared reviewed-root/Team memory and customized
+mounts still require their owner-specific retirement rather than automatic adoption.
+Other credential purposes retain their existing version semantics.
 The controller does not report its credential transition complete while old
 version or mismatched verified-epoch Pods remain, including terminating Pods. Loss of the checked privacy
 proof quarantines the owned credential and scales only a proven owned consumer

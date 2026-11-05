@@ -80,7 +80,7 @@ class StageDiagnosticsTests(unittest.TestCase):
             return json.dumps({"items": []})
         with patch("builtins.print") as printed:
             collect_stage_workloads(types.SimpleNamespace(k=query))
-        self.assertEqual([call[0][3] for call in calls], ["kars-system", "headlamp"])
+        self.assertEqual([call[0][3] for call in calls], ["kars-system", "monitoring", "headlamp"])
         self.assertTrue(all(call[1] == {"timeout": 10} for call in calls))
         self.assertNotIn("PRIVATE", str(printed.call_args_list))
         self.assertTrue(json.loads(printed.call_args.args[1])["unavailable"])

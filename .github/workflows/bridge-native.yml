@@ -158,6 +158,8 @@ jobs:
             --file .native/core/controller/Dockerfile --tag kars-native-controller:latest .native/core
           docker build --build-arg TARGETARCH=amd64 \
             --file .native/core/inference-router/Dockerfile --tag kars-native-router:latest .native/core
+          docker build --file .native/core/sandbox-images/metrics-server/Dockerfile \
+            --tag kars-native-metrics-server:latest .native/core
           docker build --file .native/core/tests/e2e/Dockerfile.sandbox-stub \
             --tag kars-native-runtime-base:latest .native/core/tests/e2e
           docker build --file tests/native-credentials/Dockerfile.runtime \
@@ -188,7 +190,8 @@ jobs:
           kubectl rollout status daemonset/cilium -n kube-system --timeout=180s
           kubectl wait --for=condition=Ready nodes --all --timeout=180s
           kind load docker-image --name bridge-native kars-native-controller:latest \
-            kars-native-router:latest kars-native-runtime:latest kars-native-bff:latest kars-native-probe:latest
+            kars-native-router:latest kars-native-runtime:latest kars-native-bff:latest kars-native-probe:latest \
+            kars-native-metrics-server:latest
       - name: Exercise normal BFF entrypoints and native controller authority
         timeout-minutes: 35
         run: python3 tests/native-credentials/run.py

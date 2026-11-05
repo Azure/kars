@@ -14,6 +14,9 @@
 *.sln.docstates
 *.env
 .budget-kind-*/
+.e2e-addon-images.json
+.e2e-addon-images.tar
+.e2e-addon-values.json
 **/.budget-client-test-*/
 
 # User-specific files (MonoDevelop/Xamarin Studio)

@@ -10,7 +10,7 @@
 use axum::Json;
 use axum::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
+use axum::extract::{OriginalUri, Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -319,6 +319,7 @@ async fn relay_websocket_bridge(
 async fn agt_registry_proxy(
     State(state): State<AppState>,
     Path(path): Path<String>,
+    OriginalUri(uri): OriginalUri,
     query: axum::extract::RawQuery,
     headers: HeaderMap,
     method: axum::http::Method,
@@ -327,23 +328,49 @@ async fn agt_registry_proxy(
     let registry_url = std::env::var("AGT_REGISTRY_URL")
         .unwrap_or_else(|_| "http://agentmesh-registry.agentmesh.svc.cluster.local:8080".into());
 
-    // Allowlist valid AGT registry API paths — prevent path traversal.
-    // Paths arrive as the wildcard after /agt/registry/, e.g. "v1/agents".
+    // Axum has decoded the wildcard. Reject URL syntax and ambiguous segment
+    // boundaries before either identity enforcement or upstream dispatch. Check
+    // encoded slashes in the original path, where they are still distinguishable
+    // from the literal separators used by both SDKs. Encoded DID colons are valid.
+    let registry_path: Vec<_> = path.split('/').collect();
     let valid_prefixes = ["health", "v1/"];
-    let path_valid =
-        valid_prefixes.iter().any(|prefix| path.starts_with(prefix)) && !path.contains("..");
+    let path_valid = valid_prefixes.iter().any(|prefix| path.starts_with(prefix))
+        && !path.contains("..")
+        && !path.contains(['#', '?', '\\', '%'])
+        && !path.chars().any(|c| c.is_control() || c.is_whitespace())
+        && registry_path
+            .iter()
+            .all(|segment| !segment.is_empty() && *segment != ".")
+        && !uri
+            .path()
+            .as_bytes()
+            .windows(3)
+            .any(|escape| escape.eq_ignore_ascii_case(b"%2f"));
     if !path_valid {
         return errors::flat(StatusCode::BAD_REQUEST, "Invalid registry path").into_response();
     }
 
-    // AGT SDK sends fully-qualified "v1/agents", "v1/discover" etc.; forward
-    // verbatim because AGT registry exposes /v1/agents, NOT /v1/v1/agents.
-    let mut url = format!("{}/{}", registry_url.trim_end_matches('/'), path);
-    // Forward query parameters (critical for search/lookup)
-    if let Some(qs) = query.0 {
-        url.push('?');
-        url.push_str(&qs);
+    let mut url = match reqwest::Url::parse(registry_url.trim_end_matches('/')) {
+        Ok(url) if matches!(url.scheme(), "http" | "https") => url,
+        _ => {
+            return errors::flat(StatusCode::BAD_GATEWAY, "Invalid registry URL").into_response();
+        }
+    };
+    // Use the same validated segments for endpoint authorization and dispatch;
+    // never parse the decoded wildcard as URL syntax. Preserve configured base
+    // paths and the raw query (including repeated/escaped discovery parameters).
+    match url.path_segments_mut() {
+        Ok(mut segments) => {
+            segments
+                .pop_if_empty()
+                .extend(registry_path.iter().copied());
+        }
+        Err(_) => {
+            return errors::flat(StatusCode::BAD_GATEWAY, "Invalid registry URL").into_response();
+        }
     }
+    url.set_query(query.0.as_deref());
+    url.set_fragment(None);
 
     // ── Identity-claim enforcement ──────────────────────────────────────
     // Trust in kars's mesh is keyed by sandbox display_name (which is
@@ -355,7 +382,7 @@ async fn agt_registry_proxy(
     // mutation through this router is gated to identities matching the
     // local SANDBOX_NAME. Self-asserted display_name + capability claims
     // from a compromised sandbox cannot impersonate a peer.
-    if method == axum::http::Method::POST && path == "v1/agents" {
+    if method == axum::http::Method::POST && registry_path == ["v1", "agents"] {
         if let Err((status, msg)) = enforce_identity_claim(&path, &body) {
             tracing::warn!(
                 path = %path,
@@ -381,10 +408,8 @@ async fn agt_registry_proxy(
     const RETRY_STATUSES: &[u16] = &[408, 429, 502, 503, 504];
     const POST_RETRY_PATHS: &[&str] = &["v1/agents", "v1/sessions"];
     let is_idempotent = method == axum::http::Method::GET || method == axum::http::Method::HEAD;
-    let post_retry = method == axum::http::Method::POST
-        && POST_RETRY_PATHS
-            .iter()
-            .any(|p| path == *p || path.starts_with(&format!("{}?", p)));
+    let post_retry =
+        method == axum::http::Method::POST && POST_RETRY_PATHS.contains(&path.as_str());
     let retry_allowed = is_idempotent || post_retry;
     let max_attempts: u32 = if retry_allowed { 3 } else { 1 };
     let total_budget = std::time::Duration::from_millis(2000);
@@ -397,7 +422,7 @@ async fn agt_registry_proxy(
     for attempt in 1..=max_attempts {
         let mut req = state.client.request(
             reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET),
-            &url,
+            url.clone(),
         );
         if let Some(ct) = headers.get("content-type") {
             req = req.header("content-type", ct);

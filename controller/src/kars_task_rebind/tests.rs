@@ -45,6 +45,7 @@ struct State {
     create_deployment_on_post: bool,
     strategy_conflict: bool,
     hold_after_strategy: bool,
+    drift_sandbox_on_deployment_read: bool,
 }
 
 fn merge(value: &mut Value, patch: &Value) {
@@ -167,6 +168,12 @@ async fn fixture() -> (
         let mut s=captured.lock().unwrap();let path=r.url.path();let body:Value=r.body_json().unwrap_or(Value::Null);
         s.calls.push((r.method.to_string(),path.into(),body.clone()));
         if r.method=="GET" {
+            if path==DEPLOYMENT && s.drift_sandbox_on_deployment_read {
+                s.drift_sandbox_on_deployment_read=false;
+                let sandbox=s.objects.get_mut(SANDBOX).unwrap();
+                let version=sandbox["metadata"]["resourceVersion"].as_str().unwrap().parse::<u64>().unwrap()+1;
+                sandbox["metadata"]["resourceVersion"]=version.to_string().into();
+            }
             if path=="/api/v1/namespaces/kars-run/pods" {return ResponseTemplate::new(200).set_body_json(json!({
                 "apiVersion":"v1","kind":"PodList","metadata":{},"items":s.pods}));}
             if let Some(value)=s.objects.get(path){return ResponseTemplate::new(200).set_body_json(value);}
@@ -405,6 +412,66 @@ async fn full_task_credential_rebind() {
             serde_json::from_value(s.objects[DEPLOYMENT].clone()).unwrap(),
         )
     };
+    // Exercise the independently watched Sandbox path on the same default worker:
+    // TaskConsumer bundle lookup, projection anchor, stale-RV cleanup, then retry.
+    let projection = "/api/v1/namespaces/kars-run/secrets/run-credential-projection";
+    eprintln!("native-rebind-regression: resumed-projection");
+    crate::reconciler::credential_sources::reconcile(
+        &ctx.client,
+        &sandbox,
+        Some(&namespace),
+        "openclaw-sandbox:latest",
+    )
+    .await
+    .unwrap();
+    assert!(
+        state.lock().unwrap().objects[projection]["data"]
+            .get("SLACK_BOT_TOKEN")
+            .is_some()
+    );
+    state.lock().unwrap().drift_sandbox_on_deployment_read = true;
+    eprintln!("native-rebind-regression: projection-rv-drift-cleanup");
+    let error = crate::reconciler::credential_sources::reconcile(
+        &ctx.client,
+        &sandbox,
+        Some(&namespace),
+        "openclaw-sandbox:latest",
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        crate::reconciler::credential_sources::Error::Invalid("Sandbox identity/reference changed")
+    ));
+    {
+        let s = state.lock().unwrap();
+        assert_eq!(s.objects[DEPLOYMENT]["spec"]["replicas"], 0);
+        assert!(
+            s.objects[projection]["data"]
+                .as_object()
+                .is_none_or(|data| data.is_empty())
+        );
+    }
+    let sandbox: crate::crd::KarsSandbox =
+        serde_json::from_value(state.lock().unwrap().objects[SANDBOX].clone()).unwrap();
+    eprintln!("native-rebind-regression: projection-retry");
+    crate::reconciler::credential_sources::reconcile(
+        &ctx.client,
+        &sandbox,
+        Some(&namespace),
+        "openclaw-sandbox:latest",
+    )
+    .await
+    .unwrap();
+    {
+        let s = state.lock().unwrap();
+        let data = s.objects[projection]["data"].as_object().unwrap();
+        assert_eq!(data.len(), 1);
+        assert!(data.contains_key("SLACK_BOT_TOKEN"));
+        assert_eq!(s.objects[SANDBOX]["metadata"]["uid"], "sandbox-uid");
+        assert_eq!(s.objects[RUNTIME]["metadata"]["uid"], "runtime-uid");
+    }
+    eprintln!("native-rebind-regression: projection-complete");
     deployment.spec.as_mut().unwrap().replicas = Some(1);
     let identity =
         crate::reconciler::governed_services::identity_read_only(&ctx.client, &sandbox, &namespace)

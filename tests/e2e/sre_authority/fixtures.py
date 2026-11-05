@@ -82,6 +82,7 @@ def install_historical_chart(h):
     h.run(["helm", "install", "kars", str(destination / "deploy/helm/kars"),
            "--kube-context", CONTEXT, "--namespace", SYSTEM, "--create-namespace",
            wait_arg, "--timeout", "120s",
+           "--values", str(h.root / ".e2e-addon-values.json"),
            "--set", "controller.replicas=0", "--set", "controller.image.repository=kars-controller",
            "--set", "controller.image.tag=e2e", "--set", "controller.image.pullPolicy=Never",
            "--set", "inferenceRouter.image.repository=kars-inference-router",

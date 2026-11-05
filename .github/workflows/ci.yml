@@ -460,6 +460,17 @@ jobs:
             fi
           done
           exit "$failed"
+      - name: Export qualified Headlamp image for same-run Kind
+        working-directory: .
+        run: docker save --output "$RUNNER_TEMP/headlamp-image.tar" kars-headlamp:latest
+      - name: Retain qualified Headlamp image for same-run Kind
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: kind-headlamp-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/headlamp-image.tar
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
       - name: Retain Headlamp qualification evidence including failures
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
@@ -873,9 +884,55 @@ jobs:
       # The fault-injection tests live exclusively in `tests/chaos/`.
       - run: cargo test --package kars-chaos-tests --features chaos --tests --no-fail-fast
 
+  kind-addon-images:
+    name: AL3 add-on images for Kind
+    needs: [changes, headlamp-plugin-build]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+      - name: Build locked CLI image catalog
+        working-directory: cli
+        run: npm ci && npm run build
+      - name: Install Helm for pinned chart contracts
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+      - name: Test candidate image preparation and actual chart contracts
+        run: node --test tests/e2e/addon-images.test.mjs tests/e2e/addon-chart.test.mjs
+      - name: Download qualified same-run Headlamp image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: kind-headlamp-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/kind-headlamp
+      - name: Import qualified Headlamp image
+        run: docker load --input "$RUNNER_TEMP/kind-headlamp/headlamp-image.tar"
+      - name: Build enabled add-ons using maintained AL3 recipes
+        env:
+          KARS_E2E_PREBUILT_HEADLAMP: '1'
+        run: |
+          set -euo pipefail
+          node tests/e2e/addon-images.mjs build
+          node tests/e2e/addon-images.mjs export
+      - name: Retain same-source Kind images and identity receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: kind-addons-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            .e2e-addon-images.tar
+            .e2e-addon-images.json
+          include-hidden-files: true
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+
   e2e-kind:
     name: E2E (Kind)
-    needs: [changes, build-rust]
+    needs: [changes, build-rust, kind-addon-images]
     # Phase 3 S4: closes the audit gap "make test-e2e is not in CI".
     # Runs on every push to dev/main, manual dispatch, and PRs that
     # touch the runtime surface area (controller, router, helm chart,
@@ -1012,6 +1069,15 @@ jobs:
           load: true
           # No cargo cache needed — the Dockerfile is a 5-line COPY now.
 
+      - name: Download same-source enabled add-on images
+        if: steps.paths.outputs.run == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: kind-addons-${{ github.sha }}-${{ github.run_attempt }}
+      - name: Import add-on images for fresh Kind
+        if: steps.paths.outputs.run == 'true'
+        run: docker load --input .e2e-addon-images.tar
+
       - name: Run e2e
         if: steps.paths.outputs.run == 'true'
         env:
@@ -1028,6 +1094,7 @@ jobs:
           # tell the harness to skip its in-process `docker build` and
           # just `kind load` the existing tags.
           KARS_E2E_SKIP_IMAGE_BUILD: "1"
+          KARS_E2E_PREBUILT_ADDONS: "1"
         run: |
           set -euo pipefail
           make test-e2e
