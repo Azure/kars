@@ -109,21 +109,23 @@ pub(crate) async fn request_owned_team_run(
     let ns = owner.namespace.as_str();
     let name = owner.name.as_str();
     let api: Api<KarsTeam> = cluster.teams(ns);
-    let work = super::read_tasks(cluster, team).await?;
-    super::backlog::validate_revision_plan(team, &work)?;
-    crate::kars::execution_plans::validate(&team, true).map_err(AppError::BadRequest)?;
+    crate::kars::execution_plans::validate(team, true).map_err(AppError::BadRequest)?;
     let patch = run_request_patch(team)?;
     if team.spec.paused {
         return Err(AppError::BadRequest(
             "team is paused — resume it before running".into(),
         ));
     }
-    crate::routes::validate::require_team_budget_contracts(cluster, team).await?;
     if team.annotations().contains_key("kars.azure.com/run-now") {
         return Err(AppError::BadRequest(
             "a run request is already pending for this team".into(),
         ));
     }
+    // Reject invalid authority before reading work; queue-specific checks still
+    // run before task discovery or recording a fenced request.
+    crate::routes::validate::require_team_budget_contracts(cluster, team).await?;
+    let work = super::read_tasks(cluster, team).await?;
+    super::backlog::validate_revision_plan(team, &work)?;
     if work.iter().any(|item| !super::work::finished(item))
         && super::work::next_pending(&work).is_none()
     {

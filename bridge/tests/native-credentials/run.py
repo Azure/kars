@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from api_gate import CORE_REVISION
 from api_outcome_diagnostics import collect as api_outcome_diagnostics
 from boot import bridge_connection, install_bridge, install_core
+from controller_failure_diagnostics import collect as controller_failure_diagnostics
 from credential_cases import CredentialCases
 from credential_diagnostics import condition_category, runtime_scope
 from lifecycle_cases import LifecycleCases
@@ -25,7 +26,7 @@ from template_diagnostics import collect as template_diagnostics
 
 
 def diagnostics(setup):
-    result = {}
+    result = {"controllerProcess": controller_failure_diagnostics(setup)}
     for label, path in [
         ("pods", "/api/v1/pods"),
         ("grants", "/apis/kars.azure.com/v1alpha1/karscredentialgrants"),

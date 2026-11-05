@@ -286,6 +286,14 @@ are never written to this evidence. Collection cannot qualify any assertion.
 TLS negatives, 9447/9448 paths, CNI peer denial, and credential rotation remain
 required unchanged.
 
+Failure metadata also includes diagnostic-only `controllerProcess` evidence:
+UID-linked controller Pod restart counts, current/previous termination states,
+and bounded current/previous process-log projections. Only checked-in Rust panic
+source coordinates, fixed leader-failure categories, and numeric error counts
+survive log parsing; log bodies and arbitrary error values are discarded. A
+changed actor snapshot discards the projection. Missing logs do not hide an
+otherwise verified termination state. These facts cannot qualify acceptance.
+
 `routerRollout` separately captures an unready router's bounded container state,
 restart count, previous exit reason/code/signal, fixed startup-log markers and
 classified kubelet probe events. It checks the target namespace/Deployment and

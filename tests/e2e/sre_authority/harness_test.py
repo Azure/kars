@@ -90,6 +90,20 @@ class HarnessTests(unittest.TestCase):
             "SRE-STAGE-FAILURE action-schema-review\nSRE-STAGE-FAILURE helm-server-dry-run"),
             "sre-stage:ambiguous")
 
+    def test_discovery_failure_retains_only_known_api_types_not_resource_names(self):
+        from sre_authority.common import command_error_category
+        private = "DO-NOT-EMIT-PRIVATE-DATA"
+        error = f'resource mapping not found for name: "{private}": no matches for kind "ServiceMonitor" in version "monitoring.coreos.com/v1"'
+        self.assertEqual(command_error_category(error), "api-discovery:ServiceMonitor@monitoring.coreos.com/v1")
+        self.assertEqual(command_error_category(error + "\n" + error), command_error_category(error))
+        self.assertNotIn(private, command_error_category(error))
+        for kind, version in ((private, "monitoring.coreos.com/v1"), ("ServiceMonitor", private),
+                              ("Deployment", "kars.azure.com/v1alpha1")):
+            self.assertEqual(command_error_category(f'no matches for kind "{kind}" in version "{version}"'),
+                             "api-discovery:unclassified-type")
+        self.assertEqual(command_error_category('no matches for kind "KarsBudgetAccount" in version "kars.azure.com/v1alpha1"'),
+                         "api-discovery:KarsBudgetAccount@kars.azure.com/v1alpha1")
+
     def test_hermes_runtime_assertion_verifies_exact_pin_and_runtime_without_blanket_standin_acceptance(self):
         helper = Path(__file__).resolve().parents[1] / "sre-authority.sh"
         cases = [

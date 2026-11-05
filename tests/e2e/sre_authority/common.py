@@ -86,6 +86,18 @@ def command_error_category(stderr):
         return status.group(1)
     if re.search(r'The CustomResourceDefinition "[^"\r\n]+" is invalid:', stderr):
         return "Invalid"
+    missing = re.findall(r'no matches for kind "([^"\r\n]+)" in version "([^"\r\n]+)"', stderr)
+    if missing:
+        from .schema_preparation_diagnostics import KINDS
+        allowed = {(kind, "kars.azure.com/v1alpha1") for kind in KINDS if kind != "Deployment"}
+        allowed.update((kind, "monitoring.coreos.com/" + version) for kind, version in (
+            ("AlertmanagerConfig", "v1alpha1"), ("AlertmanagerConfig", "v1beta1"),
+            ("Alertmanager", "v1"), ("PodMonitor", "v1"), ("Probe", "v1"),
+            ("PrometheusAgent", "v1alpha1"), ("Prometheus", "v1"), ("PrometheusRule", "v1"),
+            ("ScrapeConfig", "v1alpha1"), ("ServiceMonitor", "v1"), ("ThanosRuler", "v1")))
+        if any(item not in allowed for item in missing):
+            return "api-discovery:unclassified-type"
+        return "api-discovery:" + ",".join(kind + "@" + version for kind, version in sorted(set(missing)))
     text = stderr.lower()
     for needle, category in (("error validating", "schema-validation"),
                              ("unknown flag", "cli-argument"),

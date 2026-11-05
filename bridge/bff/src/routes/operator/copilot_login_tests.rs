@@ -93,6 +93,13 @@ async fn handle(
             Json(api.secret.clone()).into_response()
         }
         SECRET => Json(api.secret.clone()).into_response(),
+        "/apis/kars.azure.com/v1alpha1/inferencepolicies" => {
+            assert_eq!(method, Method::GET);
+            Json(json!({
+                "apiVersion":"kars.azure.com/v1alpha1", "kind":"InferencePolicyList",
+                "metadata":{}, "items":[]
+            })).into_response()
+        }
         _ => api_failure(404),
     }
 }
@@ -151,10 +158,10 @@ async fn fixture() -> Fixture {
         .unwrap();
     });
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    let client = kube::Client::try_from(kube::Config::new(
+    let config = Cluster::transport_config(kube::Config::new(
         format!("http://{address}").parse().unwrap(),
-    ))
-    .unwrap();
+    ));
+    let client = kube::Client::try_from(config).unwrap();
     let oauth = OAuth {
         client: CopilotClient::loopback(address),
     };
@@ -440,13 +447,31 @@ async fn copilot_explicit_save_binds_historical_connections_and_removal_retires_
                 base64::engine::general_purpose::STANDARD.encode("gpt-5-mini,gpt-4.1"),
             );
         }
+        f.api.lock().unwrap().calls.clear();
         let Json(removed) =
             delete_additional_provider(State(state), axum::extract::Path("github-copilot".into()))
                 .await
                 .unwrap();
         assert_eq!(removed, json!({"removed":true,"tag":"github-copilot"}));
+        let api = f.api.lock().unwrap();
+        let policy_read = api
+            .calls
+            .iter()
+            .position(|(method, path)| {
+                *method == Method::GET && path == "/apis/kars.azure.com/v1alpha1/inferencepolicies"
+            })
+            .unwrap();
+        let mutation = api
+            .calls
+            .iter()
+            .position(|(method, path)| *method == Method::PATCH && path == SECRET)
+            .unwrap();
+        assert!(
+            policy_read < mutation,
+            "provider consumers must be checked before removal"
+        );
         assert_eq!(
-            f.api.lock().unwrap().secret["data"],
+            api.secret["data"],
             json!({"UNRELATED":"cHJlc2VydmVk"})
         );
     }

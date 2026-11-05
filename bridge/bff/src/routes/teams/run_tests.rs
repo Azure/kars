@@ -350,9 +350,10 @@ async fn fixture() -> (crate::kars::cluster::Cluster, Arc<Mutex<Store>>, Server)
         axum::serve(listener, app).await.unwrap()
     }));
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    let client =
-        kube::Client::try_from(kube::Config::new(format!("http://{addr}").parse().unwrap()))
-            .unwrap();
+    let config = crate::kars::cluster::Cluster::transport_config(kube::Config::new(
+        format!("http://{addr}").parse().unwrap(),
+    ));
+    let client = kube::Client::try_from(config).unwrap();
     (
         crate::kars::cluster::Cluster::for_test_client(client),
         state,
@@ -445,6 +446,37 @@ async fn backlog_errors_and_uid_replacement_never_become_an_empty_queue_or_a_new
 }
 
 #[tokio::test]
+async fn zero_native_tool_allowance_rejects_before_backlog_access() {
+    use crate::kars::task::execution_plan;
+    for runtime in ["openclaw", "hermes"] {
+        let (cluster, state, _server) = fixture().await;
+        let mut team = team();
+        team.spec.envelope.delegation_depth = 3;
+        let mut plan = execution_plan::tests::filesystem_plan();
+        plan.roles[0].phases[0].execution_mode = Some("native".into());
+        plan.roles[0].phases[0].max_tool_calls = 0;
+        plan.synthesis.execution_mode = Some("native".into());
+        team.spec.blueprint = Some(crate::kars::task::TaskBlueprint {
+            runtime: Some(runtime.into()),
+            execution_plan: Some(plan),
+            ..Default::default()
+        });
+        state.lock().unwrap().team = json!(team);
+        let error = request_team_run(&cluster, "work", "eng", &principal())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("role writer phase draft is invalid"), "{error}");
+        let snapshot = state.lock().unwrap();
+        assert_eq!(snapshot.team, json!(team));
+        assert!(snapshot.tasks.is_empty());
+        assert_eq!(snapshot.calls.len(), 1);
+        assert_eq!(snapshot.calls[0].0, Method::GET);
+        assert_eq!(snapshot.calls[0].1, TEAM);
+    }
+}
+
+#[tokio::test]
 async fn revision_input_preflight_rejects_before_run_request_or_plan_mutation() {
     use crate::kars::task::execution_plan;
     use crate::routes::teams::{backlog::validate_revision_plan, work};
@@ -455,6 +487,7 @@ async fn revision_input_preflight_rejects_before_run_request_or_plan_mutation() 
         for missing in ["capability", "allowance"] {
             let (cluster, state, _server) = fixture().await;
             let mut team = team();
+            team.spec.envelope.delegation_depth = 3;
             let mut plan = execution_plan::tests::filesystem_plan();
             plan.roles[0].name = "benchmark-research".into();
             plan.roles[0].phases[0].execution_mode = Some("native".into());
@@ -463,7 +496,10 @@ async fn revision_input_preflight_rejects_before_run_request_or_plan_mutation() 
                 plan.roles[0].phases[0].capabilities =
                     vec!["network".into(), "filesystem-write".into()];
             } else {
-                plan.roles[0].phases[0].max_tool_calls = 0;
+                // One legacy tool call admits a fresh handoff, but not reading
+                // the prior revision as well as exporting the new handoff.
+                plan.roles[0].phases[0].execution_mode = None;
+                plan.roles[0].phases[0].max_tool_calls = 1;
             }
             team.spec.blueprint = Some(crate::kars::task::TaskBlueprint {
                 runtime: Some(runtime.into()),
@@ -471,6 +507,7 @@ async fn revision_input_preflight_rejects_before_run_request_or_plan_mutation() 
                 tool_policy: Some("customer-denied-tools".into()),
                 ..Default::default()
             });
+            crate::kars::execution_plans::validate(&team, true).unwrap();
             let mut item: work::TeamTask = serde_json::from_value(json!({
                 "id":"a","title":"Monitoring package","status":"pending","review_required":true
             }))

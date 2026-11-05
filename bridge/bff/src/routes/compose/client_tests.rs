@@ -46,6 +46,7 @@ async fn fixture(response: Value) -> (String, Cluster, Requests, tokio::task::Jo
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let config = kube::Config::new(endpoint.parse().unwrap());
+    let config = Cluster::transport_config(config);
     let cluster = Cluster::for_test_client(kube::Client::try_from(config).unwrap());
     let app = Router::new()
         .fallback(handle)
@@ -339,6 +340,7 @@ async fn native_fixture(
             .parse()
             .unwrap(),
     );
+    let config = Cluster::transport_config(config);
     let cluster = Cluster::for_test_client(kube::Client::try_from(config).unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     (cluster, requests, server)
@@ -540,6 +542,7 @@ async fn funding_fixture(
             .parse()
             .unwrap(),
     );
+    let config = Cluster::transport_config(config);
     let cluster = Cluster::for_test_client(kube::Client::try_from(config).unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     (cluster, requests, server)
@@ -985,6 +988,7 @@ async fn governed_route_fixture(fault: &str) -> (Cluster, Requests, tokio::task:
             .parse()
             .unwrap(),
     );
+    let config = Cluster::transport_config(config);
     let cluster = Cluster::for_test_client(kube::Client::try_from(config).unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     (cluster, requests, server)

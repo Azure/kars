@@ -190,7 +190,7 @@ impl Cluster {
         })
     }
 
-    pub(super) fn transport_config(mut config: kube::Config) -> kube::Config {
+    pub(crate) fn transport_config(mut config: kube::Config) -> kube::Config {
         // kube 4 enables transparent retries even for writes. Keep retries in
         // the existing UID/resourceVersion-fenced operations, not the transport.
         config.default_retry = false;
