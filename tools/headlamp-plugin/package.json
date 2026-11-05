@@ -17,6 +17,7 @@
   },
   "devDependencies": {
     "@kinvolk/headlamp-plugin": "^0.13.0",
+    "fork-ts-checker-webpack-plugin": "file:checker/fork-ts-checker-webpack-plugin-8.0.0-kars.tgz",
     "vite": "6.4.5"
   },
   "overrides": {
@@ -30,6 +31,7 @@
     },
     "minimatch@^10.0.0 || ^11.0.0": "11.0.1",
     "@storybook/builder-webpack5": {
+      "fork-ts-checker-webpack-plugin": "$fork-ts-checker-webpack-plugin",
       "webpack-dev-middleware": "7.4.6"
     },
     "vitest": "4.1.12",

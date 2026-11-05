@@ -16,6 +16,8 @@
 !tools/headlamp-plugin/package.json
 !tools/headlamp-plugin/package-lock.json
 !tools/headlamp-plugin/patch-build-tool.mjs
+!tools/headlamp-plugin/checker
+!tools/headlamp-plugin/checker/fork-ts-checker-webpack-plugin-8.0.0-kars.tgz
 !tools/headlamp-plugin/tsconfig.json
 !tools/headlamp-plugin/src
 !tools/headlamp-plugin/src/**

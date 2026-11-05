@@ -140,6 +140,10 @@ struct Ctx {
 }
 
 async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, ReconcileError> {
+    Box::pin(reconcile_inner(task, ctx)).await
+}
+
+async fn reconcile_inner(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, ReconcileError> {
     let mut task = task;
     let name = task.name_any();
     let ns = task.namespace().unwrap_or_else(|| "default".into());

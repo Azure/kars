@@ -553,8 +553,11 @@ pub(super) fn enforce_identity_claim(path: &str, body: &Bytes) -> Result<(), (St
     let parsed: serde_json::Value = match serde_json::from_slice(body) {
         Ok(v) => v,
         Err(_) => {
-            // Don't leak bytes; let upstream registry reject the bad body.
-            return Ok(());
+            // The registry may accept JSON that exceeds this parser's limits.
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "registry identity claim must be valid JSON within router parsing limits".into(),
+            ));
         }
     };
 
@@ -790,6 +793,10 @@ pub(crate) fn classify_frame_type(raw: &[u8]) -> &'static str {
 }
 
 #[cfg(test)]
+#[path = "mesh_identity_tests.rs"]
+mod identity_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Mutex;
@@ -798,7 +805,7 @@ mod tests {
     // env, which would race under cargo's default parallel test runner.
     static ENV_GUARD: Mutex<()> = Mutex::new(());
 
-    fn with_env<R>(name: &str, value: &str, f: impl FnOnce() -> R) -> R {
+    pub(super) fn with_env<R>(name: &str, value: &str, f: impl FnOnce() -> R) -> R {
         let _lock = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var(name).ok();
         // SAFETY: env mutation gated by ENV_GUARD; tests are the only callers.
@@ -915,11 +922,12 @@ mod tests {
     }
 
     #[test]
-    fn enforce_passes_invalid_json() {
-        // Invalid JSON is forwarded so upstream registry can return its own error.
+    fn enforce_rejects_invalid_json() {
         with_env("SANDBOX_NAME", "viz", || {
             let body = Bytes::from_static(b"not json");
-            assert!(enforce_identity_claim("v1/agents", &body).is_ok());
+            let error = enforce_identity_claim("v1/agents", &body).unwrap_err();
+            assert_eq!(error.0, StatusCode::BAD_REQUEST);
+            assert!(!error.1.contains("not json"));
         });
     }
 

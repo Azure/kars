@@ -378,6 +378,8 @@ jobs:
           node-version: "22"
       - run: npm ci
       - run: npm test
+      - name: Exercise patched checker with real TypeScript workers
+        run: node --test checker/compile.node.mjs
       - run: npm run build
       - name: Headlamp frontend preparation contracts
         run: node --test ../../sandbox-images/headlamp/build-frontend.test.mjs patch-build-tool.test.mjs

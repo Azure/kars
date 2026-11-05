@@ -105,6 +105,10 @@ pub(super) async fn reconcile(task: &KarsTask, ctx: &Ctx) -> Result<(), Reconcil
 }
 
 pub(super) async fn resume(client: &Client, task: &KarsTask) -> Result<(), String> {
+    Box::pin(resume_inner(client, task)).await
+}
+
+async fn resume_inner(client: &Client, task: &KarsTask) -> Result<(), String> {
     use crate::{crd::KarsSandbox, kars_receipt::KarsReceipt};
     if !crate::credential_grants::readiness::selected(task) {
         return Ok(());

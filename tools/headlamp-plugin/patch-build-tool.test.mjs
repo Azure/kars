@@ -8,6 +8,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { patchPluginFixtures } from "./patch-build-tool.mjs";
+import "./checker/checks.node.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const oldSum = `github.com/rabbitmq/amqp091-go v1.3.4 h1:tXuIslN1nhDqs2t6Jrz3BAoqvt4qIZzxvdbdcxWtHYU=
@@ -106,6 +107,7 @@ test("npm installs and the image build use the same maintained patch", () => {
   const manifest = JSON.parse(readFileSync(path.join(here, "package.json"), "utf8"));
   const lock = JSON.parse(readFileSync(path.join(here, "package-lock.json"), "utf8"));
   assert.equal(manifest.scripts.postinstall, "node patch-build-tool.mjs");
+  assert.equal(manifest.scripts.test, "node --test patch-build-tool.test.mjs && vitest run --config vitest.config.mts");
   assert.equal(lock.packages[""].hasInstallScript, true);
   assert.equal(lock.packages["node_modules/@kinvolk/headlamp-plugin"].version, "0.13.1");
   const docker = readFileSync(path.join(here, "../../sandbox-images/headlamp/Dockerfile"), "utf8");

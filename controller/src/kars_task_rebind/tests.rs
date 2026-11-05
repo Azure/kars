@@ -248,10 +248,23 @@ fn current(state: &Arc<Mutex<State>>) -> KarsTask {
     serde_json::from_value(state.lock().unwrap().objects[TASK].clone()).unwrap()
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn credential_rebind_full_task_reconcile_preserves_uids_data_and_regenerates_authority_before_resume()
- {
+{
+    tokio::spawn(full_task_credential_rebind()).await.unwrap();
+}
+
+async fn full_task_credential_rebind() {
     let (_server, ctx, state, team) = fixture().await;
+    let task = current(&state);
+    let future = super::super::reconcile(Arc::new(task.clone()), ctx.clone());
+    let size = std::mem::size_of_val(&future);
+    assert!(size <= 1024, "Task entry future embeds {size} bytes");
+    drop(future);
+    let future = resume(&ctx.client, &task);
+    let size = std::mem::size_of_val(&future);
+    assert!(size <= 1024, "credential resume future embeds {size} bytes");
+    drop(future);
     let api = Api::<KarsTask>::namespaced(ctx.client.clone(), "work");
     let original = current(&state);
     super::super::reconcile_receipt(

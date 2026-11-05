@@ -234,6 +234,153 @@ Headlamp browser behavior, complete native qualification or fresh released Kind
 installation. Heavy builds remain on GitHub. Beta installation acceptance remains
 **0/2**, and genuine human audit signatures remain **0/2**.
 
+## Follow-up: published runner failure and remaining checker dependency
+
+Published `c197c722` passed secret scanning, dependency review, Bridge CI and the
+IdP lock candidate. All three cold API/admission installs passed. Full CodeQL
+analysis completed; the four prior Rust path-injection instances are marked
+fixed. Of 27 new Rust unsafe-deserialization alerts, one identified a real
+fail-open mesh identity boundary, nine participate in a shared chat-ingress
+policy bypass, two have no established independent exploit (including an
+unresolved Responses-provider differential), and 15 have no demonstrated
+exploit at the reported sink. None of these
+dispositions is a suppression or a clean-scan claim. Main CI's Rust and CLI
+jobs passed; Headlamp failed before image building, examples or scans, and
+Kind E2E also failed. Those failures remain retained.
+
+The Headlamp `npm test` command ran all six Node patch tests and 84 component
+tests successfully, then failed because Vitest also collected the Node-only
+patch suite and attempted to bundle `node:test`. The runner repair excludes only
+that file from Vitest while preserving Vitest's default exclusions. The same
+suite remains mandatory through `node --test` before Vitest in `npm test`; its
+manifest contract now asserts both runner commands. No test is removed.
+
+Local `cd tools/headlamp-plugin && npm test` with this repair passed six Node
+and 83 component tests but failed the middleware traversal regression. Installed
+local Vitest4.1.9 and middleware6.1.3 differ from the candidate lock's4.1.12 and
+7.4.6. This is a retained failed overall run, not a full-suite pass. No heavy local
+reinstall was performed; fresh hosted execution with locked dependencies remains
+necessary.
+
+Five of six default-branch Dependabot alert records have fixed candidate
+versions. LOW `GHSA-gcqx-w48m-w2h4` / `CVE-2026-93753` remains in deepmerge4.3.1,
+requested by the Storybook Webpack TypeScript checker. No verified fixed upstream
+checker/tool release was found. The user authorized preparation of a minimal,
+attributable checker-consumer patch that preserves Storybook and TypeScript
+checking. The prepared local checker archive replaces deepmerge with
+`deepmerge-ts@8.0.2`, preserving upstream checker identity, MIT attribution,
+worker code and immutable provenance. The repair's focused tests passed 26/26,
+including constructor/schema, merge compatibility and prototype-poisoning
+regressions; deterministic reproduction and integrity rejection also passed.
+These are not installed compiler or shipping-image acceptance.
+
+The required hosted command `node --test checker/compile.node.mjs` runs after
+clean installation and tests real Webpack/TypeScript workers through valid
+compilation, an expected TS2322 diagnostic, and recovery. Its local prerequisite
+correctly rejected the stale unpatched installation before starting a compiler;
+only syntax and CI wiring have been checked locally. Clean installation,
+compiler execution, full plugin build and all-severity scans remain pending.
+No scanner suppression, identity masking or capability removal is authorized.
+
+## Follow-up: native Team credential rebind stack boundary
+
+Hosted native run `42028650052` passed ten cases, including actual source
+projection/runtime and selected-source revocation/UID fencing. The next case,
+Team rebind continuity, failed awaiting current reattested credentials and
+resumed execution. The controller restarted four times with exit139 and a
+stack-overflow diagnostic. Task generation3 was governance-Ready, but execution
+was Degraded; this does not qualify crash elimination or native acceptance.
+
+The repair retains the existing Task reconciliation and credential-resume
+state machines, placing their async state behind heap boundaries like the
+existing Sandbox and Team entries. The full credential-rebind regression now
+runs on a default Tokio worker stack and checks both entry-future sizes, while
+retaining UID, namespace data, quiescence, attestation and resumed-deployment
+assertions. Rust parsing passed; compilation, regression execution and the
+unchanged hosted native journey remain pending. No credential fence or runtime
+stack limit was relaxed. Released fresh-Kind acceptance remains 0/2.
+
+## Follow-up: mesh identity parsing must fail closed
+
+Rust alert 1073 identifies a HIGH-severity authorization bypass in registry
+registration. `enforce_identity_claim` previously forwarded bodies when Rust
+JSON parsing failed. A signed registration can include a deeply nested ignored
+field that exceeds Rust's recursion budget while the pinned Python registry
+accepts the request and drops that field. Proof of possession of the submitted
+key does not authorize another sandbox's display name or discovery capability.
+This is source tracing plus parser/schema/signature reproduction, not a live
+end-to-end registry attack.
+
+The prepared shared-router repair rejects parse errors with HTTP400 before
+upstream dispatch and without echoing request contents. A regression constructs
+a valid Ed25519 registration proof, adds a cross-name claim and a 140-level
+ignored field, and exercises the actual router. It requires malformed and
+over-depth requests to be rejected, ordinary cross-name claims to remain
+forbidden, and only an allowed registration to reach the test registry. Both
+Hermes and OpenClaw continue using the same registry boundary; no SDK or
+cryptographic protocol is replaced. Rust syntax passed; compiled execution
+remains pending on GitHub.
+
+Follow-up identified a MEDIUM-severity chat-ingress policy bypass. With a
+restrictive exact-model deny followed by `inference:*` allow and no lifetime
+admission binding, an ignored 140-level field makes Rust authorize an empty
+model while forwarding the original body. Supported-provider source evidence
+at Ollama commit `9f3a37fd36bf1c46cc86a47bc5372535f8ee3547` shows its Go binder
+accepts that depth, ignores the extra field, and preserves the submitted model.
+This is not a claim that this provider revision is deployed or live-tested.
+The same ingress bypasses the explicit requested-token cap and denied-tool
+schema filtering; actual unauthorized tool execution is not established.
+
+The prepared repair parses chat JSON before policy/model/token/tool decisions
+and returns HTTP400 on failure. It retains the same parser limits and ordinary
+missing-model behavior. An actual-router regression installs a real restrictive
+AGT profile, disables no production gate, uses the supported absent-lifetime-
+admission state, and requires zero capture-upstream requests for deep JSON,
+malformed bodies, denied models and excessive token requests. Shallow allowed
+requests still forward, and a shallow denied-tool schema is removed. Rust
+syntax passed; compiled execution remains pending on GitHub.
+
+Alerts 1063, 1064, 1067, 1068, 1069, 1072, 1078, 1079 and 1081 participate in
+that shared chat path, not nine separate vulnerabilities. Enabled lifetime
+contract and record-only admission already reject the payload before dispatch;
+calendar-only accounting does not substitute for model authorization. Alert
+1077 has no independently established usage-accounting bypass. Alert1084's
+Responses-provider parser differential remains unresolved: that route rejects
+Ollama, so the chat proof must not be transferred to Azure/OpenAI without
+provider evidence. The other 15 alerts (1061, 1062, 1065, 1066, 1070,
+1071, 1074, 1075, 1076, 1080, 1082, 1083, 1085, 1086 and 1087) target inert JSON
+or string-vector deserialization with no demonstrated deserialization gadget
+or control bypass. No verified upstream scanner-model correction is available.
+
+The unpublished `eb619db6` candidate passed independent 20-path security review
+and focused regressions, but failed copyright coverage and an archive-scanner
+positive control. It was not published. The follow-up adds precise legal
+coverage and the missing first-party README header without modifying upstream
+license bytes; all 39 copyright tests pass. Explicit safe expansion and scanning
+of all 171 checker-package files passed with zero findings and a detected
+archive canary. The original failed control remains retained; archive coverage
+is not inferred from scanning a Git binary patch. Exact successor validation
+and review remain required.
+
+The unpublished `636eb914` successor passed its focused Python, Headlamp and
+CLI checks, copyright coverage and controlled secret scans, but review found
+an undeclared `http` test import and the production crypto gate rejected the
+signed mesh test. The successor uses Axum's existing HTTP re-export and makes
+the exact mesh regression explicitly test-only. The gate permits that one
+reviewed Ed25519 test path only with its module-level `cfg(test)` guard; other
+paths and production signing remain blocked. All seven crypto-gate tests pass,
+including missing-guard and neighboring-path rejection. Rust formatting passes;
+compiled regressions remain pending. Both failed candidates and their receipts
+are retained, not rewritten.
+
+Hosted Kind E2E run `42028649943` also remains failed. Its historical SRE
+migration fixture timed out in `authority stage` apply after the dry run passed.
+The harness bounds each command by the smaller of its command timeout and the
+remaining phase deadline; the log alone does not identify which expired.
+Ready SRE pods do not establish stage completion. No timeout has been enlarged
+and no migration gate has been bypassed; the stage failure still needs repair
+and fresh hosted execution.
+
 ## Verdict
 
 **Not accepted for release.** Required hosted verification and real author plus

@@ -327,6 +327,24 @@ pub(super) async fn chat_completions(
     headers: HeaderMap,
     mut body: Bytes,
 ) -> impl IntoResponse {
+    // Downstream parsers may accept bodies that our policy checks cannot parse.
+    let model = match serde_json::from_slice::<serde_json::Value>(&body) {
+        Ok(request) => request
+            .get("model")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_owned(),
+        Err(_) => {
+            return errors::openai_coded(
+                StatusCode::BAD_REQUEST,
+                "Request must be valid JSON within router parsing limits",
+                "invalid_request_error",
+                "invalid_json",
+            )
+            .into_response();
+        }
+    };
+
     // The sidecar owns one sandbox; request headers cannot select another budget.
     let sandbox_name = state.sandbox_name.as_str();
 
@@ -350,10 +368,6 @@ pub(super) async fn chat_completions(
 
     // AGT policy check via the four-seam PolicyDecisionProvider.
     {
-        let model = serde_json::from_slice::<serde_json::Value>(&body)
-            .ok()
-            .and_then(|v| v.get("model")?.as_str().map(String::from))
-            .unwrap_or_default();
         let action = format!("inference:chat_completions:{model}");
         if let super::inference_policy::InferenceDecision::Deny(reason) =
             super::inference_policy::check(&state, sandbox_name, &action).await
@@ -1589,6 +1603,10 @@ async fn filter_disallowed_tools(
     }
     rewrite_body_dropping_tools(body, &allowed)
 }
+
+#[cfg(test)]
+#[path = "chat_ingress_tests.rs"]
+mod ingress_tests;
 
 #[cfg(test)]
 mod tests {

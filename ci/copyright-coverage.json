@@ -43,6 +43,16 @@
     }
   },
   "files": {
+    "tools/headlamp-plugin/checker/LICENSE": {
+      "category": "legal",
+      "reason": "MIT license for the Kars checker integration; retain legal text rather than prepending a source header. The patched package separately retains the upstream checker license.",
+      "notice": "LICENSE"
+    },
+    "tools/headlamp-plugin/checker/fork-ts-checker-webpack-plugin-8.0.0-kars.tgz": {
+      "category": "third-party",
+      "reason": "Deterministic upstream checker archive with the attributable Kars merge-consumer patch, bound by upstream.json and the npm lock; preserve packaged upstream MIT notices and separate Kars integration ownership.",
+      "notice": "NOTICE"
+    },
     "runtimes/openclaw/src/core/native-github-pr.py": {
       "category": "repository-license",
       "reason": "Reviewed relative alias to the shared first-party Hermes implementation; verify the exact target and its source header without following or rewriting the link.",

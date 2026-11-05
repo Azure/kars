@@ -28,6 +28,7 @@ FROM node:22-bookworm-slim AS plugin
 ARG NPM_CONFIG_REGISTRY=https://registry.npmjs.org
 WORKDIR /build
 COPY tools/headlamp-plugin/package.json tools/headlamp-plugin/package-lock.json tools/headlamp-plugin/patch-build-tool.mjs ./
+COPY tools/headlamp-plugin/checker/fork-ts-checker-webpack-plugin-8.0.0-kars.tgz ./checker/
 RUN npm ci --no-audit --no-fund --registry="${NPM_CONFIG_REGISTRY}"
 COPY tools/headlamp-plugin/tsconfig.json ./
 COPY tools/headlamp-plugin/src ./src

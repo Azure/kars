@@ -263,6 +263,19 @@ install wiring and copies of the actual installed examples. The Docker context
 copies the helper before `npm ci`; no runtime installer is added. Remove this
 patch when a reviewed upstream build-tool release fixes both example modules.
 
+### Plugin Storybook checker: remove the vulnerable merge dependency
+
+Expanded development-dependency coverage exposed `deepmerge@4.3.1`
+(GHSA-gcqx-w48m-w2h4 / CVE-2026-93753, LOW) beneath the plugin's retained Storybook
+Webpack checker. The [attributable checker patch](../../tools/headlamp-plugin/checker/README.md)
+replaces only that checker's options-merge consumer with `deepmerge-ts@8.0.2`,
+removing the actual `deepmerge` dependency while retaining the original checker
+identity, MIT attribution, workers and schema checks. The pinned, reproducible
+local archive is copied before the plugin stage's `npm ci`. This build-only path
+is not copied into the shipping image and remains subject to all-dev/all-severity
+scans. Packaged constructor and merge tests pass locally; clean hosted installation,
+TypeScript/Storybook compilation, fresh scans and browser acceptance remain required.
+
 ### Coverage gap and remaining qualification
 
 The retained plugin report contains **only the two Go targets**, not the npm lock.
