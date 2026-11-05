@@ -17,6 +17,9 @@ test "$(printf '%s\n' "$crypto_request" | wc -l)" -eq 1
     go mod edit -go=1.26.0 -toolchain="$GO_VERSION"
     go get google.golang.org/grpc@v1.84.0 "$crypto_request" golang.org/x/net@v0.62.0
     go mod tidy
+    # The API imports no crypto packages: tidy drops this policy pin, so retain it
+    # after pruning rather than falling back to x/net's older module requirement.
+    go get "$crypto_request"
     go mod download
     go mod verify
     go list -m -json all > /out/api-modules.json

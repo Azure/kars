@@ -497,6 +497,19 @@ unchanged until a subsequent artifact review. Normal runtime builds remain
 read-only consumers of the committed locks; the OpenPGP inventory rejection
 remains mandatory.
 
+Hosted run **41997973603**, attempt **1**, resolved the fixed root crypto version
+but retained **v0.58.0** in the nested API graph. The API imports no crypto
+packages, so its `go mod tidy` removed the explicit candidate requirement and
+exposed the older requirement through `x/net`. Strict sealing correctly failed
+with `nested API unreviewed selection: golang.org/x/crypto`. That artifact remains
+failed evidence, not an importable or promoted graph. The resolver now reapplies
+the same exact crypto request through `go get` **after nested API tidy**, before
+download, verification and inventory export. No later tidy removes the policy
+pin. The coordinated root/API version checks are unchanged. A shell-orchestration
+regression models the observed tidy fallback and verifies re-pinning and failure
+propagation without invoking Go; only a fresh hosted attempt can establish real
+resolver and subsequent runtime qualification success.
+
 The evidence includes `provenance.json` with exact source/workflow SHA-256 inputs,
 source/event SHAs, repository, run ID and attempt; `resolver.log`; the unmodified
 `resolved/` Go output; and, on successful validation, `verified.json` binding the
