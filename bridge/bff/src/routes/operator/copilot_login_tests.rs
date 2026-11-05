@@ -470,10 +470,7 @@ async fn copilot_explicit_save_binds_historical_connections_and_removal_retires_
             policy_read < mutation,
             "provider consumers must be checked before removal"
         );
-        assert_eq!(
-            api.secret["data"],
-            json!({"UNRELATED":"cHJlc2VydmVk"})
-        );
+        assert_eq!(api.secret["data"], json!({"UNRELATED":"cHJlc2VydmVk"}));
     }
 }
 

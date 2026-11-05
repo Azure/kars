@@ -60,7 +60,11 @@ fn fixture(failure: Option<&'static str>, pods: Vec<Value>, present: bool) -> Ap
                     // Candidate discovery uses the same scoped pod read as
                     // health, but only after verifying the standing source.
                     assert!(
-                        request.uri().query().unwrap_or("").contains("labelSelector")
+                        request
+                            .uri()
+                            .query()
+                            .unwrap_or("")
+                            .contains("labelSelector")
                     );
                     "candidates"
                 } else {
@@ -184,7 +188,12 @@ async fn orchestrator_health_resolves_candidates_from_the_verified_source() {
         vec![pod("ready", "2026-10-01T00:00:00Z", "Running", true)],
         true,
     ))
-    .oneshot(Request::builder().uri("/orchestrator").body(Body::empty()).unwrap())
+    .oneshot(
+        Request::builder()
+            .uri("/orchestrator")
+            .body(Body::empty())
+            .unwrap(),
+    )
     .await
     .unwrap();
     assert_eq!(response.status(), StatusCode::OK);

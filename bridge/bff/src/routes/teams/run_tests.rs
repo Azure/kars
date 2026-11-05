@@ -466,7 +466,10 @@ async fn zero_native_tool_allowance_rejects_before_backlog_access() {
             .await
             .unwrap_err()
             .to_string();
-        assert!(error.contains("role writer phase draft is invalid"), "{error}");
+        assert!(
+            error.contains("role writer phase draft is invalid"),
+            "{error}"
+        );
         let snapshot = state.lock().unwrap();
         assert_eq!(snapshot.team, json!(team));
         assert!(snapshot.tasks.is_empty());
