@@ -32,9 +32,14 @@ export async function stageAuthority(
   controllerImage:string,routerImage:string,dryRun:boolean,
 ):Promise<void> {
   let phase: StagePhase = "registrar";
+  const mark = (next: StagePhase) => {
+    phase = next;
+    // A killed Helm child cannot reach catch; retain only fixed progress labels.
+    console.error(`SRE-STAGE-PROGRESS ${phase}`);
+  };
   try {
-    await stageAuthorityChecked(execute,chart,namespace,release,controllerImage,routerImage,dryRun,
-      next => { phase = next; });
+    mark("registrar");
+    await stageAuthorityChecked(execute,chart,namespace,release,controllerImage,routerImage,dryRun,mark);
   } catch (error) {
     // Fixed source stage only: never include argv, API bodies or raw causes.
     console.error(`SRE-STAGE-FAILURE ${phase}`);

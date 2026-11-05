@@ -396,6 +396,30 @@ describe("existing action API prerequisite compatibility", () => {
     expect(params(f.existing).additionalProperties).toBe(true);
   });
 
+  it("emits a fixed progress marker before entering each Helm wait without changing its bounds", async () => {
+    const f = fixture(true);
+    const report = vi.spyOn(console,"error").mockImplementation(()=>{});
+    let applied = false;
+    const execute: Execute = async (file,args,options) => {
+      if(file === "helm" && args[0] === "upgrade") {
+        const dry = args.includes("--dry-run=server");
+        expect(report.mock.calls.at(-1)).toEqual([`SRE-STAGE-PROGRESS ${dry ? "helm-server-dry-run" : "helm-upgrade"}`]);
+        if(!dry) {
+          applied = true;
+          expect(args).toContain("--wait=legacy");
+          expect(args[args.indexOf("--timeout") + 1]).toBe("8m");
+        }
+      }
+      return f.execute(file,args,options);
+    };
+    try {
+      await f.run(false,execute);
+      expect(applied).toBe(true);
+      expect(report.mock.calls[0]).toEqual(["SRE-STAGE-PROGRESS registrar"]);
+      expect(report.mock.calls.every(([message])=>/^SRE-STAGE-PROGRESS [a-z-]+$/.test(String(message)))).toBe(true);
+    } finally { report.mockRestore(); }
+  });
+
   it("identifies an unclassified Helm dry-run failure without changing its error or applying the repair", async () => {
     const f = fixture(true);
     const failure = new Error("opaque disposable transport failure");

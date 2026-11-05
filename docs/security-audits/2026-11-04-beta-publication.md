@@ -58,6 +58,31 @@ closed in production. Adapter-only skips are explicitly not native execution
 proof. Actual usage accounting and prior failed evidence remain intact; no
 production funding policy or release gate is waived.
 
+## Hosted successor correction — 2026-11-05
+
+Published `6efe3a62e8899e791ed26a6fb069a87448ab61ba` failed the hosted Rust job
+at `cargo fmt --all -- --check`, before compilation: the long rebind-test name
+formatted differently on the hosted toolchain. Shortening that test name keeps
+its complete default-worker lifecycle assertions unchanged. Whole-workspace
+formatting now passes locally; Rust compilation and native acceptance remain
+hosted gates, not inferred successes.
+
+The retained prior Kind prepare phase lasted 257.292 seconds, so its 180-second
+stage-command ceiling, not its 650-second phase budget, expired. The subsequent
+workflow artifact contains API connection refusals after cluster teardown.
+Staging now emits fixed phase labels before awaiting operations; the harness
+retains only validated labels on timeout and filtered built-in Pod status in
+`kars-system` and `headlamp` before teardown. It omits raw messages, logs,
+container specifications and command output. These are diagnostics, not proof
+of the underlying stall or a relaxation of Helm's wait/readiness/deadline rules.
+
+Validation: 77 CLI staging/authority tests and 35 harness/diagnostic tests pass,
+including actual child termination and private-output rejection. The first new
+CLI assertion incorrectly expected Helm3 `--wait` from the existing Helm4
+fixture; it was corrected to require `--wait=legacy`, with the original 8-minute
+Helm timeout unchanged. The failed local test receipt is retained. New diagnostic
+regressions are included in the hosted public-schema privacy job.
+
 ## Verification
 
 - `python3 -B -m unittest discover -s ci/tests -p bridge_contracts_test.py`:

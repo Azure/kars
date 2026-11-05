@@ -16,6 +16,7 @@ import ssl
 import subprocess
 import time
 from .schema_preparation_diagnostics import schema_preparation_failure
+from .stage_diagnostics import STAGES, collect_stage_workloads, last_stage
 
 CONTEXT = "kind-kars-e2e"
 SYSTEM = "kars-system"
@@ -70,14 +71,7 @@ def command_error_category(stderr):
         r"unsupported-platform|ci-environment)$", stderr, re.MULTILINE)
     if acquisition:
         return "ci-acquisition:" + (acquisition[0] if len(set(acquisition)) == 1 else "ambiguous")
-    stages = {
-        "registrar", "controller-review", "release-inventory", "prerequisite-chart-render",
-        "action-schema-review", "helm-compatibility", "action-schema-migration",
-        "core-schema-preparation", "helm-server-dry-run", "helm-upgrade",
-        "template-ownership-review", "schema-publication", "template-authority-write",
-        "controller-rollout",
-    }
-    observed = set(re.findall(r"^SRE-STAGE-FAILURE ([a-z-]+)$", stderr, re.MULTILINE)) & stages
+    observed = set(re.findall(r"^SRE-STAGE-FAILURE ([a-z-]+)$", stderr, re.MULTILINE)) & STAGES
     if observed:
         return "sre-stage:" + (next(iter(observed)) if len(observed) == 1 else "ambiguous")
     status = re.search(r"Error from server \((Forbidden|Unauthorized|Invalid|NotFound|"
@@ -265,10 +259,12 @@ class Harness:
         except subprocess.TimeoutExpired:
             os.killpg(process.pid, signal.SIGTERM)
             try:
-                process.communicate(timeout=5)
+                _, stderr = process.communicate(timeout=5)
             except subprocess.TimeoutExpired:
                 os.killpg(process.pid, signal.SIGKILL)
-                process.communicate(timeout=5)
+                _, stderr = process.communicate(timeout=5)
+            print("SRE-TIMEOUT", json.dumps({"limit": "phase" if remaining < timeout else "command",
+                "stage": last_stage(stderr)}), flush=True)
             raise AssertionError(f"Command exceeded its bounded timeout at {command_site()}") from None
         result = subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
         if expected is not None:
@@ -409,6 +405,7 @@ class Harness:
     def diagnostics(self):
         from .bootstrap_diagnostics import failure_facts
         self.deadline = max(self.deadline, time.monotonic() + 90)
+        collect_stage_workloads(self)
         # Status and identities only; never dump Secret bodies or whole Pods.
         for kind, name, namespace in [("karssreregistrations.kars.azure.com", "canonical", None),
                                       ("karssandbox", "sre", SYSTEM), ("deployment", "sre", RUNTIME),

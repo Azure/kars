@@ -249,8 +249,7 @@ fn current(state: &Arc<Mutex<State>>) -> KarsTask {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn credential_rebind_full_task_reconcile_preserves_uids_data_and_regenerates_authority_before_resume()
-{
+async fn credential_rebind_full_reconcile_preserves_authority_before_resume() {
     tokio::spawn(full_task_credential_rebind()).await.unwrap();
 }
 
