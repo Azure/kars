@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 import { filesystemPhase, missionPhaseDigest, validPhaseEvidence, type FilesystemPhase, type TaskPhaseEvidence } from "./mission-phase.js";
-import { MAX_MISSION_INPUT_BYTES, missionInputs, missionInputsDigest, type MissionInput } from "./mission-inputs.js";
+import { missionInputs, missionInputsDigest, type MissionInput } from "./mission-inputs.js";
 
 export const MISSION_PROTOCOL_VERSION = 1;
 export const PHASE_MISSION_PROTOCOL_VERSION = 2;

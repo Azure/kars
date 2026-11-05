@@ -16,6 +16,18 @@ const SENTINEL: &str = "SECRET_SENTINEL_DO_NOT_RETURN";
 fn manifest_code_validation_rejects_paths_queries_whitespace_and_unbounded_values() {
     for code in ["abc123", "a-B_2", &"a".repeat(128)] {
         assert!(validate_manifest_code(code).is_ok());
+        let url = manifest_conversion_url(code).unwrap();
+        assert_eq!(url.scheme(), "https");
+        assert_eq!(url.host_str(), Some("api.github.com"));
+        assert_eq!(url.port_or_known_default(), Some(443));
+        assert!(url.username().is_empty());
+        assert!(url.password().is_none());
+        assert!(url.query().is_none());
+        assert!(url.fragment().is_none());
+        assert_eq!(
+            url.path_segments().unwrap().collect::<Vec<_>>(),
+            ["app-manifests", code, "conversions"]
+        );
     }
     for code in [
         "",
@@ -27,12 +39,19 @@ fn manifest_code_validation_rejects_paths_queries_whitespace_and_unbounded_value
         "a?b=c",
         "a#b",
         "a%2fb",
+        "//other.example",
+        "a\\b",
+        "user@other.example",
         "https://other.example",
         "é",
         &"a".repeat(129),
     ] {
         assert!(matches!(
             validate_manifest_code(code),
+            Err(AppError::BadRequest(_))
+        ));
+        assert!(matches!(
+            manifest_conversion_url(code),
             Err(AppError::BadRequest(_))
         ));
     }

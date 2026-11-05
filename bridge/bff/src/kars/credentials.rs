@@ -32,7 +32,7 @@ const REMOVED_KEYS: &str = "kars.azure.com/credential-removed-keys";
 
 pub(super) enum BindingRetry {
     Never,
-    Lifecycle(Option<kube::api::DynamicObject>),
+    Lifecycle(Option<Box<kube::api::DynamicObject>>),
 }
 
 struct AgentCredentialWrite<'a> {
@@ -765,7 +765,7 @@ impl Cluster {
             BindingRetry::Lifecycle(captured) => (true, captured),
         };
         let mut object = match captured {
-            Some(object) => object,
+            Some(object) => *object,
             None => api
                 .get(&target.name)
                 .await

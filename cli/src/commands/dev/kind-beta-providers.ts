@@ -2,7 +2,8 @@
 // Licensed under the MIT License.
 
 import { createHash, createPrivateKey, randomUUID, X509Certificate } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { readBoundedFileSync } from "../../lib/bounded-file.js";
 import path from "node:path";
 import { assertRetiredRoot, retirementState } from "../../lib/private-activation-retirement.js";
 import { canonical, read, type Execute, type PrivateActivation } from "../../lib/private-activation.js";
@@ -20,12 +21,14 @@ const catalogName = "kars-inference-budget-contracts";
 const serviceName = "kars-inference-budget.kars-system.svc";
 
 function privateDirectory(directory: string): void {
-  if (!existsSync(directory)) mkdirSync(directory, { mode: 0o700 });
+  try { mkdirSync(directory, { mode: 0o700 }); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
   const info = lstatSync(directory);
   if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o077) !== 0
     || (process.getuid && info.uid !== process.getuid())) throw new Error("Provider setup state requires an owned private directory (mode 0700)");
   const ignore = path.join(directory, ".gitignore");
-  if (!existsSync(ignore)) writeFileSync(ignore, "*\n", { flag: "wx", mode: 0o600 });
+  try { writeFileSync(ignore, "*\n", { flag: "wx", mode: 0o600 }); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
 }
 
 function publicKey(certificate: string): string {
@@ -40,11 +43,14 @@ function validateIdentity(identity: BudgetIdentity): void {
     || !leaf.keyUsage?.includes("1.3.6.1.5.5.7.3.1")) throw new Error("Generated Kind budget identity failed certificate validation");
 }
 
-function readRotationRecord(filename: string): RotationRecord {
-  const info = lstatSync(filename);
-  if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || (info.mode & 0o077) !== 0 || info.size > 65536
-    || (process.getuid && info.uid !== process.getuid())) throw new Error("Kind budget rotation state is not a private regular file");
-  const record = JSON.parse(readFileSync(filename, "utf8"));
+function readRotationRecord(filename: string): RotationRecord | undefined {
+  let content: string;
+  try { content = readBoundedFileSync(filename, 65536, "Kind budget rotation state is not a private bounded regular file", true); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  const record = JSON.parse(content);
   if (!record || record.version !== 1 || ["attempt", "binding", "namespaceUid", "secretUid", "baselineKey", "catalogUid", "catalogVersion", "oldCa", "certificate", "privateKey", "ca"]
     .some(key => typeof record[key] !== "string" || !record[key].length)) throw new Error("Kind budget rotation state is malformed");
   validateIdentity(record);
@@ -96,9 +102,8 @@ export async function rotateKindProviderBudget(execute: Execute, activation: Pri
     || catalog.metadata.annotations?.["kars.azure.com/inference-budget-contracts"] !== "v1"
     || typeof catalog.data?.["ca.crt"] !== "string") throw new Error("Kind setup cannot rotate foreign or chart-managed budget identities");
   const filename = path.join(directory, "budget-rotation.json");
-  let record: RotationRecord;
-  if (existsSync(filename)) {
-    record = readRotationRecord(filename);
+  let record = readRotationRecord(filename);
+  if (record) {
     if (record.version !== 1 || record.attempt !== state.attempt || record.binding !== state.binding
       || record.namespaceUid !== activation.root.namespace.uid || record.secretUid !== budget.secret.uid
       || record.baselineKey !== state.baseline.keyDigest || record.catalogUid !== catalog.metadata.uid) {
@@ -165,8 +170,8 @@ export async function completeKindBetaProviderSetup(execute: Execute, directory:
     ca = await rotateKindProviderBudget(execute, activation, directory, () => issueKindBudgetIdentity(directory, local));
   });
   // Also converge a resumed attempt whose root was qualified before Core publication.
-  if (!ca && existsSync(path.join(directory, "budget-rotation.json"))) {
-    const record = readRotationRecord(path.join(directory, "budget-rotation.json"));
+  const record = !ca ? readRotationRecord(path.join(directory, "budget-rotation.json")) : undefined;
+  if (record) {
     const namespace = await read(execute, "namespace", "kars-system") as ObjectMap;
     const state = retirementState(namespace);
     const grant = await read(execute, "karscredentialgrants.kars.azure.com", "workspace", "kars-system") as ObjectMap;

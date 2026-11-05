@@ -20,14 +20,21 @@ def configured(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "127.0.0.1")
     monkeypatch.setenv("KUBERNETES_SERVICE_PORT", "9446")
-    for name in ("TELEGRAM_BOT_TOKEN", "SLACK_BOT_TOKEN", "DISCORD_BOT_TOKEN",
-                 "SRE_WATCHER_NOTIFY_TARGET", "SRE_WATCHER_ENABLED",
-                 "SRE_HEALTH_INTERVAL_SECONDS", "SRE_HEALTH_TIMEOUT_SECONDS"):
+    for name in (
+        "TELEGRAM_BOT_TOKEN",
+        "SLACK_BOT_TOKEN",
+        "DISCORD_BOT_TOKEN",
+        "SRE_WATCHER_NOTIFY_TARGET",
+        "SRE_WATCHER_ENABLED",
+        "SRE_HEALTH_INTERVAL_SECONDS",
+        "SRE_HEALTH_TIMEOUT_SECONDS",
+    ):
         monkeypatch.delenv(name, raising=False)
     (tmp_path / "config.yaml").write_text(
         "model:\n  default: gpt-5.4-mini\n  provider: azure-foundry\n"
         "  base_url: http://127.0.0.1:8443/v1\n"
-        "plugins:\n  enabled: [kars]\n", encoding="utf-8",
+        "plugins:\n  enabled: [kars]\n",
+        encoding="utf-8",
     )
     plugin = tmp_path / "plugins/kars"
     plugin.mkdir(parents=True)
@@ -35,8 +42,11 @@ def configured(monkeypatch, tmp_path):
     kube = MagicMock()
     kube.get.side_effect = lambda path: {"ready": True} if path == "/readyz" else {"items": []}
     kube.post.side_effect = lambda path, json: {
-        "persisted": True, "sweep_id": json["sweep_id"], "digest": "a" * 64,
-        "accepted_at_ms": json["finished_at_ms"], "enforcement_changed": False,
+        "persisted": True,
+        "sweep_id": json["sweep_id"],
+        "digest": "a" * 64,
+        "accepted_at_ms": json["finished_at_ms"],
+        "enforcement_changed": False,
     }
     monkeypatch.setattr(watcher.sre_kube, "client", lambda: kube)
     router = MagicMock()
@@ -47,8 +57,7 @@ def configured(monkeypatch, tmp_path):
 def test_channel_free_start_checks_authority_and_runs_once_before_sleep(configured, monkeypatch):
     home, kube, router = configured
     turns = []
-    monkeypatch.setattr(watcher, "_run_hermes",
-                        lambda h, p, t: turns.append((h, p, t)) or {"turn_status": "finished"})
+    monkeypatch.setattr(watcher, "_run_hermes", lambda h, p, t: turns.append((h, p, t)) or {"turn_status": "finished"})
 
     def sleep(seconds):
         assert seconds == 900
@@ -177,16 +186,29 @@ def test_native_turn_pins_router_tools_and_reaps_process_group(configured, monke
     processes = []
 
     def popen(command, **options):
-        assert command[:10] == ["hermes", "--accept-hooks", "--cli", "--provider",
-                                "azure-foundry", "--model", "gpt-5.4-mini",
-                                "--toolsets", "sre", "-z"]
+        assert command[:10] == [
+            "hermes",
+            "--accept-hooks",
+            "--cli",
+            "--provider",
+            "azure-foundry",
+            "--model",
+            "gpt-5.4-mini",
+            "--toolsets",
+            "sre",
+            "-z",
+        ]
         assert options["env"]["AZURE_FOUNDRY_BASE_URL"] == "http://127.0.0.1:8443/v1"
         assert options["env"]["AZURE_FOUNDRY_API_KEY"] == "router-managed"
         assert options["stdin"] == subprocess.DEVNULL
         assert options["start_new_session"] is True
         assert options["stdout"] == subprocess.PIPE
         assert options["stderr"] == subprocess.STDOUT
-        script = "import time; print('partial diagnosis', flush=True); time.sleep(10)" if timeout else "print('actual subprocess output')"
+        script = (
+            "import time; print('partial diagnosis', flush=True); time.sleep(10)"
+            if timeout
+            else "print('actual subprocess output')"
+        )
         process = original_popen([sys.executable, "-c", script], **options)
         processes.append(process)
         return process
@@ -214,11 +236,8 @@ def test_combined_output_is_bounded_and_overflow_fails(configured, monkeypatch, 
     limit = watcher.MAX_TURN_LOG_BYTES
 
     def popen(_command, **options):
-        script = (
-            "import os,time;"
-            f"os.write(1,b'a'*{limit // 2});"
-            f"os.write(2,b'b'*{limit // 2 + extra_bytes});"
-            + ("time.sleep(10)" if extra_bytes else "")
+        script = f"import os,time;os.write(1,b'a'*{limit // 2});os.write(2,b'b'*{limit // 2 + extra_bytes});" + (
+            "time.sleep(10)" if extra_bytes else ""
         )
         process = original_popen([sys.executable, "-c", script], **options)
         processes.append(process)

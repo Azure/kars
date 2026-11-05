@@ -11,6 +11,8 @@ test("explicitly negated teams do not outweigh a one-off Mission", () => {
     "Create a one-off local Skill verification mission, not a standing Team.",
     "Write a report without a team.",
     "One-off mission, no persistent team.",
+    "One-off mission, no on-demand team.",
+    "Research without a team; write a report.",
   ]) {
     assert.equal(classifyIntent(intent).kind, "mission", intent);
   }

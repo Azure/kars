@@ -254,6 +254,15 @@ fn validate_manifest_code(code: &str) -> AppResult<()> {
     Ok(())
 }
 
+fn manifest_conversion_url(code: &str) -> AppResult<reqwest::Url> {
+    validate_manifest_code(code)?;
+    let mut url = reqwest::Url::parse("https://api.github.com/").map_err(|_| manifest_failure())?;
+    url.path_segments_mut()
+        .map_err(|_| manifest_failure())?
+        .extend(["app-manifests", code, "conversions"]);
+    Ok(url)
+}
+
 fn github_setup_client() -> AppResult<reqwest::Client> {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -339,7 +348,7 @@ pub async fn register_app(
     Json(req): Json<GithubManifestRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
     crate::auth::require_admin(&principal)?;
-    validate_manifest_code(&req.code)?;
+    let conversion_url = manifest_conversion_url(&req.code)?;
     let cluster = require_cluster(&state)?;
     let setup = cluster.github_app_setup().await.map_err(AppError::from)?;
     if !setup.storage_ready {
@@ -354,12 +363,9 @@ pub async fn register_app(
         .store_identity
         .ok_or(AppError::CredentialAuthorityUnavailable)?;
     let client = github_setup_client()?;
-    let body = github_setup_response(client.post(format!(
-        "https://api.github.com/app-manifests/{}/conversions",
-        req.code
-    )))
-    .await
-    .map_err(|_| manifest_failure())?;
+    let body = github_setup_response(client.post(conversion_url))
+        .await
+        .map_err(|_| manifest_failure())?;
     let credentials = parse_manifest_credentials(&body)?;
     verify_and_store_app(
         cluster,

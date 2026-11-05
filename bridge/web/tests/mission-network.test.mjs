@@ -70,10 +70,10 @@ test("missing evidence and observed domains do not establish successful enforcem
   assert.doesNotMatch(failed, /No baseline destinations reported/);
   const partial = render("Strict", { available: false, enforced: ["known.example.com:443"] }, false);
   assert.match(partial, /Network evidence unavailable/);
-  assert.match(partial, /known.example.com:443/);
+  assert.ok(partial.split(/[<>]/).some(text => text === "known.example.com:443"));
   const observed = render("Strict", { available: true, enforced: ["docs.example.com:443"], domains: ["unreviewed.example.com"] }, false);
-  assert.match(observed, /docs.example.com:443/);
-  assert.match(observed, /unreviewed.example.com/);
+  assert.ok(observed.split(/[<>]/).some(text => text === "docs.example.com:443"));
+  assert.ok(observed.split(/[<>]/).some(text => text === "unreviewed.example.com"));
   assert.match(observed, /do not establish whether a connection was allowed or denied/);
   assert.match(source, /if \(!r\.ok\) throw new Error/);
 });

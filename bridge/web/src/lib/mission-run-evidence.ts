@@ -141,7 +141,7 @@ function sandboxArtifactPath(value: string): string | undefined {
   }
   if (path.startsWith("/sandbox/")) path = path.slice(9);
   else if (path.startsWith("./")) path = path.slice(2);
-  if (/[\\\\?#:]/.test(path)
+  if (/[\\?#:]/.test(path)
       || [...path].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)
       || path.split("/").some(part => !part || part === "." || part === "..")) return undefined;
   return path;

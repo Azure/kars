@@ -182,7 +182,7 @@ fn team_qualification_release_waits_for_active_descendants_even_after_root_retir
     team.annotations_mut()
         .insert(contract::CONSUMED.into(), "root-uid".into());
     let child: crate::kars::task::KarsTask = serde_json::from_value(json!({"apiVersion":"kars.azure.com/v1alpha1","kind":"KarsTask","metadata":{"name":"child","namespace":"work","uid":"child-uid","ownerReferences":[{"apiVersion":"kars.azure.com/v1alpha1","kind":"KarsTask","name":"root","uid":"root-uid","controller":true}]},"spec":{"objective":"work","envelope":{"tier":1,"authorityCeiling":1},"execution":{"launch":true}}})).unwrap();
-    assert!(has_active_attempt(&team, &[child.clone()]));
+    assert!(has_active_attempt(&team, std::slice::from_ref(&child)));
     let mut stopped = child.clone();
     stopped.spec.execution.as_mut().unwrap().launch = false;
     assert!(!has_active_attempt(&team, &[stopped]));

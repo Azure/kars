@@ -22,7 +22,7 @@ pub enum TeamBudgetStatusDto {
         effective_usd_micros: Option<String>,
         settled: BudgetAmountsDto,
         reserved: BudgetAmountsDto,
-        uncertain: BudgetAmountsDto,
+        uncertain: Box<BudgetAmountsDto>,
         price_coverage_complete: bool,
     },
 }
@@ -137,7 +137,7 @@ fn project(team: &KarsTeam, now: chrono::DateTime<chrono::Utc>) -> Result<TeamBu
         effective_usd_micros: limits.usd_micros.map(|n| n.to_string()),
         settled: observation.settled.into(),
         reserved: observation.reserved.into(),
-        uncertain: observation.uncertain.into(),
+        uncertain: Box::new(observation.uncertain.into()),
         price_coverage_complete: observation.price_coverage_complete,
     })
 }

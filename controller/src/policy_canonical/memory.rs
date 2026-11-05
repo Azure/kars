@@ -31,6 +31,7 @@
 //! - `retentionDays` (when present) is a non-negative integer
 //! - `deleteOnSandboxDelete` (when present) is a boolean
 //! - `displayName` (when present) is a string
+//!
 //! Partial bundles are rejected: neither a signed binding nor an inline
 //! binding may fall back to a convention-based store or scope. Scope grants
 //! are exact, without normalization, wildcard, or prefix matching.

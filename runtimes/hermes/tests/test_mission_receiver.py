@@ -5,6 +5,7 @@ import asyncio
 import base64
 import copy
 import hmac
+import importlib.util
 import json
 from pathlib import Path
 import socket
@@ -23,20 +24,35 @@ from test_mission_protocol import binding
 
 def measurement(contract, rounds=1, successful=1):
     phase = contract["reviewedPhase"]
-    return dict(model="mission-model", rounds=rounds, usage=dict(promptTokens=10 * rounds,
-                completionTokens=5 * rounds, totalTokens=15 * rounds), phase=dict(name=phase["name"],
-                minToolCalls=phase["minToolCalls"], maxToolCalls=phase["maxToolCalls"],
-                attemptedToolCalls=successful, successfulToolCalls=successful))
+    return dict(
+        model="mission-model",
+        rounds=rounds,
+        usage=dict(promptTokens=10 * rounds, completionTokens=5 * rounds, totalTokens=15 * rounds),
+        phase=dict(
+            name=phase["name"],
+            minToolCalls=phase["minToolCalls"],
+            maxToolCalls=phase["maxToolCalls"],
+            attemptedToolCalls=successful,
+            successfulToolCalls=successful,
+        ),
+    )
 
 
 @pytest.fixture
 def receiver():
     target, contract, admitted, assignment = binding()
     client = SimpleNamespace(send_by_did=AsyncMock())
-    execute = AsyncMock(return_value=dict(kind="result", evidence=measurement(contract), output="Report ready",
-                                         artifacts={"report.md": "Verified café evidence"}))
-    receiver = runtime.MissionReceiver(client, target, contract, admitted, "mission-model",
-                                       execute=execute, permit=AsyncMock(return_value=True))
+    execute = AsyncMock(
+        return_value=dict(
+            kind="result",
+            evidence=measurement(contract),
+            output="Report ready",
+            artifacts={"report.md": "Verified café evidence"},
+        )
+    )
+    receiver = runtime.MissionReceiver(
+        client, target, contract, admitted, "mission-model", execute=execute, permit=AsyncMock(return_value=True)
+    )
     assignment["bootId"] = receiver.boot_id
     client._kars_mission_receiver = receiver
     return receiver, assignment
@@ -60,8 +76,12 @@ async def finish(receiver):
 @pytest.mark.asyncio
 async def test_v5_context_survives_parent_execution_replies_and_replay(receiver):
     r, assignment = receiver
-    peers = dict(rootUid="reviewed-root", stateName="kars-reviewed-" + "a" * 40, slot="r0-p0",
-                 peers=[dict(role="writer", phase="draft", slot="r0-p0", agentName="rp-" + "a" * 20 + "-r0-p0")])
+    peers = dict(
+        rootUid="reviewed-root",
+        stateName="kars-reviewed-" + "a" * 40,
+        slot="r0-p0",
+        peers=[dict(role="writer", phase="draft", slot="r0-p0", agentName="rp-" + "a" * 20 + "-r0-p0")],
+    )
     r.contract = wire.contract({**r.contract, "version": 5, "peerContext": peers})
     assignment.update(r.contract)
     changed = copy.deepcopy(assignment)
@@ -71,7 +91,13 @@ async def test_v5_context_survives_parent_execution_replies_and_replay(receiver)
     del missing["peerContext"]
     await r.receive(message(r, missing))
     r.execute.assert_not_called()
-    probe = {**r.target, **r.contract, "type": "mission:probe", "challenge": "probe-1", "runNonce": assignment["runNonce"]}
+    probe = {
+        **r.target,
+        **r.contract,
+        "type": "mission:probe",
+        "challenge": "probe-1",
+        "runNonce": assignment["runNonce"],
+    }
     await r.receive(message(r, probe))
     assert replies(r)[0]["peerContext"] == peers
     await r.receive(message(r, assignment))
@@ -147,8 +173,14 @@ async def test_late_mission_callback_cannot_succeed_across_auth_epochs(receiver,
 @pytest.mark.asyncio
 async def test_sole_listener_probe_execution_and_terminal_replay(receiver):
     r, assignment = receiver
-    probe = {**r.target, **r.contract, "type": "mission:probe", "challenge": "challenge", "runNonce": "nonce-1",
-             "activityFormat": wire.ACTIVITY}
+    probe = {
+        **r.target,
+        **r.contract,
+        "type": "mission:probe",
+        "challenge": "challenge",
+        "runNonce": "nonce-1",
+        "activityFormat": wire.ACTIVITY,
+    }
     await mesh_worker._handle_message(r.client, message(r, probe))
     ready = replies(r)[-1]
     assert ready["status"] == "ready" and ready["bootId"] == r.boot_id
@@ -180,9 +212,13 @@ def assert_shared_parser_accepts(messages):
         const messages = JSON.parse(readFileSync(0, 'utf8'));
         console.log(JSON.stringify(messages.map(value => parseMissionMessage(value))));
     """
-    parsed = subprocess.run(["node", "--experimental-strip-types", "--input-type=module", "-e", script],
-                            input=wire.encoded(messages).decode("utf-8"),
-                            capture_output=True, text=True, check=True)
+    parsed = subprocess.run(
+        ["node", "--experimental-strip-types", "--input-type=module", "-e", script],
+        input=wire.encoded(messages).decode("utf-8"),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
     assert all(json.loads(parsed.stdout)), "Shared dispatcher must parse every real receiver reply"
 
 
@@ -203,9 +239,17 @@ async def test_running_observations_require_negotiation_and_preserve_replay(rece
     r, assignment = receiver
     if negotiated:
         assignment["activityFormat"] = wire.ACTIVITY
-    content = wire.encoded(dict(version=1, source="runtime-forwarded-router-observations",
-                                coverage="returned-responses-only", responses=1, rounds=[1],
-                                state="unavailable", reason="Recorder expired")).decode()
+    content = wire.encoded(
+        dict(
+            version=1,
+            source="runtime-forwarded-router-observations",
+            coverage="returned-responses-only",
+            responses=1,
+            rounds=[1],
+            state="unavailable",
+            reason="Recorder expired",
+        )
+    ).decode()
     result = r.execute.return_value
 
     async def execute(*args):
@@ -235,9 +279,17 @@ async def test_running_observations_require_negotiation_and_preserve_replay(rece
 async def test_failed_run_retains_validated_activity_without_deliverables(receiver, failure):
     r, assignment = receiver
     assignment["activityFormat"] = wire.ACTIVITY
-    content = wire.encoded(dict(version=1, source="runtime-forwarded-router-observations",
-                                coverage="returned-responses-only", responses=1, rounds=[1],
-                                state="unavailable", reason="Recorder expired")).decode()
+    content = wire.encoded(
+        dict(
+            version=1,
+            source="runtime-forwarded-router-observations",
+            coverage="returned-responses-only",
+            responses=1,
+            rounds=[1],
+            state="unavailable",
+            reason="Recorder expired",
+        )
+    ).decode()
 
     async def execute(*args):
         await args[-1](measurement(r.contract), content)
@@ -266,8 +318,9 @@ async def test_failed_run_retains_validated_activity_without_deliverables(receiv
 @pytest.mark.parametrize("output", ["Exact-host approval is needed.", "🔥" * 4096, None, "", " ", {}, "🔥" * 4097])
 async def test_failed_explanation_is_bounded_and_never_a_deliverable(receiver, output):
     r, assignment = receiver
-    r.execute.return_value = dict(kind="error", error="Required exports missing",
-                                  evidence=measurement(r.contract), output=output)
+    r.execute.return_value = dict(
+        kind="error", error="Required exports missing", evidence=measurement(r.contract), output=output
+    )
     await r.receive(message(r, assignment))
     await finish(r)
     terminal = replies(r)[-1]
@@ -303,8 +356,12 @@ async def test_128_tool_activity_survives_progress_terminal_and_shared_wire(rece
         await args[-1](evidence, content)
         if status == "failed":
             return dict(kind="error", evidence=evidence, error="Terminal tool failed")
-        return dict(kind="result", evidence=evidence, output="Report attached", artifacts={
-            "report.md": "x" * (120 * 1024), wire.OBSERVATION_ARTIFACT: content})
+        return dict(
+            kind="result",
+            evidence=evidence,
+            output="Report attached",
+            artifacts={"report.md": "x" * (120 * 1024), wire.OBSERVATION_ARTIFACT: content},
+        )
 
     r.execute = AsyncMock(side_effect=execute)
     await r.receive(message(r, assignment))
@@ -439,9 +496,17 @@ async def test_bad_progress_does_not_replace_last_valid_evidence(receiver):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status,body", [(200, {"allowed": True}), (200, {"allowed": False}),
-                                       (200, {"allowed": "true"}), (403, {"allowed": True}),
-                                       (503, {}), (200, [True])])
+@pytest.mark.parametrize(
+    "status,body",
+    [
+        (200, {"allowed": True}),
+        (200, {"allowed": False}),
+        (200, {"allowed": "true"}),
+        (403, {"allowed": True}),
+        (503, {}),
+        (200, [True]),
+    ],
+)
 async def test_real_http_admission_boundary(monkeypatch, status, body):
     _, _, _, assignment = binding()
     factory = httpx.AsyncClient
@@ -452,8 +517,9 @@ async def test_real_http_admission_boundary(monkeypatch, status, body):
         assert str(request.url) == "http://127.0.0.1:8443/agt/evaluate"
         return httpx.Response(status, json=body)
 
-    monkeypatch.setattr(runtime.httpx, "AsyncClient", lambda **kwargs: factory(
-        **kwargs, transport=httpx.MockTransport(handler)))
+    monkeypatch.setattr(
+        runtime.httpx, "AsyncClient", lambda **kwargs: factory(**kwargs, transport=httpx.MockTransport(handler))
+    )
     assert await runtime.authorize(assignment) is (status == 200 and body == {"allowed": True})
     assert seen[0]["action"] == "task:execute"
     context = seen[0]["context"]
@@ -464,9 +530,19 @@ async def test_real_http_admission_boundary(monkeypatch, status, body):
 
 @pytest.fixture
 def bootstrap_env(monkeypatch, tmp_path):
+    from kars_runtime_hermes.plugin import mission_native
+
+    version = mission_native.importlib.metadata.version
+    monkeypatch.setattr(
+        mission_native.importlib.metadata,
+        "version",
+        lambda name: "0.21.5" if name == "hermes-agent" else version(name),
+    )
     target, contract, admitted, _ = binding()
-    for key, value in zip(("TASK_NAME", "TASK_UID", "SANDBOX_UID", "POD_UID", "DISPATCHER_DID"),
-                          (target[k] for k in ("taskName", "taskUid", "sandboxUid", "podUid", "dispatcherDid"))):
+    for key, value in zip(
+        ("TASK_NAME", "TASK_UID", "SANDBOX_UID", "POD_UID", "DISPATCHER_DID"),
+        (target[k] for k in ("taskName", "taskUid", "sandboxUid", "podUid", "dispatcherDid")),
+    ):
         monkeypatch.setenv("KARS_MISSION_" + key, value)
     monkeypatch.setenv("KARS_MISSION_IDENTITY_ROOT", "12" * 32)
     monkeypatch.setenv("KARS_MISSION_CONTRACT", wire.encoded(contract).decode())
@@ -481,10 +557,21 @@ def bootstrap_env(monkeypatch, tmp_path):
 
 def test_bootstrap_installs_full_bounded_v5_peer_map(bootstrap_env, monkeypatch):
     _, contract, _, _ = binding()
-    peers = dict(rootUid="root", stateName="kars-reviewed-" + "a" * 40, slot="r0-p0", peers=[
-        dict(role=f"role-{r}-" + "x" * 40, phase=f"phase-{p}-" + "x" * 39,
-             slot=f"r{r}-p{p}", agentName="rp-" + "a" * 20 + f"-r{r}-p{p}")
-        for r in range(8) for p in range(8)])
+    peers = dict(
+        rootUid="root",
+        stateName="kars-reviewed-" + "a" * 40,
+        slot="r0-p0",
+        peers=[
+            dict(
+                role=f"role-{r}-" + "x" * 40,
+                phase=f"phase-{p}-" + "x" * 39,
+                slot=f"r{r}-p{p}",
+                agentName="rp-" + "a" * 20 + f"-r{r}-p{p}",
+            )
+            for r in range(8)
+            for p in range(8)
+        ],
+    )
     expected = wire.contract({**contract, "version": 5, "peerContext": peers})
     raw = wire.encoded(expected).decode()
     assert len(raw.encode()) > 8192
@@ -494,8 +581,11 @@ def test_bootstrap_installs_full_bounded_v5_peer_map(bootstrap_env, monkeypatch)
 
 def test_real_bootstrap_derivation_matches_node_ed25519(bootstrap_env):
     path, target, contract, admitted, model = runtime.bootstrap(bootstrap_env)
-    seed = hmac.digest(bytes.fromhex("12" * 32), wire.encoded([
-        "kars-mission-identity-v1", "runtime", target["sandboxUid"], target["podUid"]]), "sha256")
+    seed = hmac.digest(
+        bytes.fromhex("12" * 32),
+        wire.encoded(["kars-mission-identity-v1", "runtime", target["sandboxUid"], target["podUid"]]),
+        "sha256",
+    )
     script = f"""
         const c = require('node:crypto');
         const prefix = Buffer.from('302e020100300506032b657004220420','hex');
@@ -514,8 +604,15 @@ def test_real_bootstrap_derivation_matches_node_ed25519(bootstrap_env):
             competitor.bind(("127.0.0.1", 19791))
 
 
-@pytest.mark.parametrize("variable,value", [("KARS_MISSION_CONTRACT", ""), ("KARS_MISSION_IDENTITY_ROOT", "bad"),
-                                          ("KARS_MODEL", "model with space"), ("KARS_MISSION_ADMISSION", "{}")])
+@pytest.mark.parametrize(
+    "variable,value",
+    [
+        ("KARS_MISSION_CONTRACT", ""),
+        ("KARS_MISSION_IDENTITY_ROOT", "bad"),
+        ("KARS_MODEL", "model with space"),
+        ("KARS_MISSION_ADMISSION", "{}"),
+    ],
+)
 def test_invalid_bootstrap_never_writes_identity(bootstrap_env, monkeypatch, variable, value):
     monkeypatch.setenv(variable, value)
     with pytest.raises(ValueError):
@@ -602,6 +699,7 @@ async def test_subprocess_start_failure_cleans_only_owned_workspace(tmp_path, mo
     assert sentinel.read_text() == "unrelated"
 
 
+@pytest.mark.skipif(importlib.util.find_spec("run_agent") is None, reason="Requires native pinned Hermes")
 @pytest.mark.asyncio
 async def test_genuine_native_worker_128_tools_retains_progress_and_cleanup(tmp_path, monkeypatch, model_metadata):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -610,7 +708,7 @@ async def test_genuine_native_worker_128_tools_retains_progress_and_cleanup(tmp_
     contract = wire.contract({**contract, "reviewedPhase": phase, "phaseDigest": wire.digest(phase)})
     assignment.update(contract)
     real_spawn = asyncio.create_subprocess_exec
-    bootstrap = '''
+    bootstrap = """
 import json, runpy, sys, httpx
 count = 0
 def provider(req):
@@ -619,7 +717,10 @@ def provider(req):
         return httpx.Response(200, json={'allowed': True})
     assert req.url.path == '/v1/chat/completions'
     count += 1
-    arguments = {'path':'inputs/facts.txt'} if count == 1 else {'path':'exports/report.md','content':f'Verified report revision {count}'}
+    arguments = (
+        {'path':'inputs/facts.txt'} if count == 1
+        else {'path':'exports/report.md','content':f'Verified report revision {count}'}
+    )
     name = 'read_file' if count == 1 else 'write_file'
     calls = [{'id':f'call-{count}','type':'function','function':{'name':name,'arguments':json.dumps(arguments)}}]
     return httpx.Response(200,json={'id':'local','object':'chat.completion','created':1,'model':'mission-model',
@@ -629,7 +730,7 @@ def provider(req):
         'usage':{'prompt_tokens':10,'completion_tokens':5,'total_tokens':15}})
 httpx.HTTPTransport = lambda **kwargs: httpx.MockTransport(provider)
 runpy.run_module(sys.argv[1], run_name='__main__')
-'''
+"""
 
     async def spawn(executable, dash_m, module, **kwargs):
         assert dash_m == "-m" and module == "kars_runtime_hermes.plugin.mission_native"
@@ -647,6 +748,7 @@ runpy.run_module(sys.argv[1], run_name='__main__')
     assert list((tmp_path / "missions").iterdir()) == []
 
 
+@pytest.mark.skipif(importlib.util.find_spec("run_agent") is None, reason="Requires native pinned Hermes")
 @pytest.mark.asyncio
 async def test_genuine_native_worker_clean_process_progress_and_exports(tmp_path, monkeypatch, model_metadata):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -660,7 +762,7 @@ async def test_genuine_native_worker_clean_process_progress_and_exports(tmp_path
     _, contract, _, assignment = binding()
     events = []
     real_spawn = asyncio.create_subprocess_exec
-    bootstrap = '''
+    bootstrap = """
 import json, runpy, sys, httpx
 count = 0
 authorized = []
@@ -692,7 +794,7 @@ def provider(req):
         'usage':{'prompt_tokens':10,'completion_tokens':5,'total_tokens':15}})
 httpx.HTTPTransport = lambda **kwargs: httpx.MockTransport(provider)
 runpy.run_module(sys.argv[1], run_name='__main__')
-'''
+"""
 
     async def spawn(executable, dash_m, module, **kwargs):
         assert dash_m == "-m" and module == "kars_runtime_hermes.plugin.mission_native"
@@ -706,6 +808,7 @@ runpy.run_module(sys.argv[1], run_name='__main__')
         assert env["HOME"] == env["HERMES_HOME"]
         assert env["KARS_AGENT_INSTRUCTIONS"] == "Reviewed charter: preserve café facts."
         import yaml
+
         config = yaml.safe_load((Path(env["HOME"]) / "config.yaml").read_text())
         assert config["model"]["context_length"] == 1_050_000
         assert config["compression"]["enabled"] is False

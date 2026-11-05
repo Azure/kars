@@ -82,13 +82,12 @@ impl Respond for Memory {
             objects.remove(&path);
             return ResponseTemplate::new(200).set_body_json(prior);
         }
-        if let Some(prior) = &prior {
-            if body["metadata"]["resourceVersion"] != prior["metadata"]["resourceVersion"]
+        if let Some(prior) = &prior
+            && (body["metadata"]["resourceVersion"] != prior["metadata"]["resourceVersion"]
                 || (body["metadata"].get("uid").is_some()
-                    && body["metadata"]["uid"] != prior["metadata"]["uid"])
-            {
-                return error(409);
-            }
+                    && body["metadata"]["uid"] != prior["metadata"]["uid"]))
+        {
+            return error(409);
         }
         let mut next = if method == "PATCH" {
             let mut v = prior.clone().unwrap();
@@ -123,11 +122,11 @@ impl Respond for Memory {
                 next["metadata"]["generation"] = 1.into();
             }
         }
-        if let Some(prior) = prior {
-            if next["spec"] != prior["spec"] {
-                next["metadata"]["generation"] =
-                    (prior["metadata"]["generation"].as_i64().unwrap_or(0) + 1).into();
-            }
+        if let Some(prior) = prior
+            && next["spec"] != prior["spec"]
+        {
+            next["metadata"]["generation"] =
+                (prior["metadata"]["generation"].as_i64().unwrap_or(0) + 1).into();
         }
         objects.insert(path, next.clone());
         ResponseTemplate::new(200).set_body_json(next)
@@ -1394,7 +1393,7 @@ fn revision_package_documents() -> Vec<Input> {
 fn revision_manifest_routes_only_matching_current_exports_without_erasing_history() {
     let original = revision_package_root("OpenClaw");
     let documents = revision_package_documents();
-    let roles = revision_roles(&plan(&original).unwrap());
+    let roles = revision_roles(plan(&original).unwrap());
     let historical = documents
         .iter()
         .find(|input| input.name == "revision-unaccepted-r0-p0.md")
@@ -1822,11 +1821,13 @@ async fn completed_team_documents_survive_retirement_and_task_gc_with_full_peer_
         crate::team_commons::record_run(
             &client,
             &team,
-            "run-one",
-            "Clinic decision",
-            "report",
-            "report",
-            &archive.output,
+            crate::team_commons::RunSummary {
+                id: "run-one",
+                title: "Clinic decision",
+                author: "report",
+                source_task: "report",
+                content: &archive.output,
+            },
             Some(&archive),
         )
         .await
@@ -2655,7 +2656,7 @@ async fn complete_exported_files_above_64kib_reach_synthesis_with_custody() {
         .iter()
         .find(|input| input["source"]["artifactName"] == "large.md")
         .unwrap();
-    assert_eq!(document["sha256"], digest(&"x".repeat(65536)));
+    assert_eq!(document["sha256"], digest("x".repeat(65536)));
     assert_eq!(document["source"]["taskUid"], phase.uid().unwrap());
     assert!(document.get("content").is_none());
 }

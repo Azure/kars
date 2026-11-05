@@ -857,11 +857,11 @@ async fn foundry_proxy(
     let memory_request = match super::memory_access::guard(&state, &method, &segments, &body).await
     {
         Ok(request) => request,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     if let Err(response) = super::memory_budget::authorize(&state, memory_request.as_ref()).await {
-        return response;
+        return *response;
     }
 
     // Default-deny fail-closed guard: every Foundry proxy route is
@@ -1075,7 +1075,7 @@ async fn foundry_proxy(
     let memory_authority =
         match super::memory_budget::authorize(&state, memory_request.as_ref()).await {
             Ok(authority) => authority,
-            Err(response) => return response,
+            Err(response) => return *response,
         };
     let memory_observation = match super::memory_budget::Observation::begin(
         &state,
@@ -1086,7 +1086,7 @@ async fn foundry_proxy(
     .await
     {
         Ok(observation) => observation,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let resp = state
         .client

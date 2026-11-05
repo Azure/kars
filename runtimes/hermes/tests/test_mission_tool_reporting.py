@@ -10,9 +10,17 @@ from kars_runtime_hermes.plugin.mission_native import FilesystemTools, Measureme
 from kars_runtime_hermes.plugin.mission_observations import ReturnedRouterResponses
 
 
-@pytest.mark.parametrize("code", ["token_accounting_unavailable", "inference_budget_unavailable",
-                                  "inference_budget_authority", "inference_budget_attempt_state",
-                                  "inference_budget_exhausted", "inference_budget_capacity"])
+@pytest.mark.parametrize(
+    "code",
+    [
+        "token_accounting_unavailable",
+        "inference_budget_unavailable",
+        "inference_budget_authority",
+        "inference_budget_attempt_state",
+        "inference_budget_exhausted",
+        "inference_budget_capacity",
+    ],
+)
 @pytest.mark.parametrize("status", [400, 503])
 @pytest.mark.parametrize("prior", [None, "finish=tool_calls, textChars=0, toolCalls=1, refusal=False"])
 def test_inference_rejection_retains_known_code_without_response_content_or_retry(code, status, prior):
@@ -20,8 +28,9 @@ def test_inference_rejection_retains_known_code_without_response_content_or_retr
 
     def reject(request):
         calls.append(request)
-        return httpx.Response(status, json={"error": {"code": code, "message": "private response",
-                                                  "type": "private type"}})
+        return httpx.Response(
+            status, json={"error": {"code": code, "message": "private response", "type": "private type"}}
+        )
 
     measurements = Measurements("model", None, lambda _: None)
     measurements.last_completion = prior
@@ -38,10 +47,19 @@ def test_inference_rejection_retains_known_code_without_response_content_or_retr
     assert "private" not in measurements.failure
 
 
-@pytest.mark.parametrize("body", [b"private plaintext", b'[]', b'null', b'{"error":"private error"}',
-                                  b'{"error":{"code":"private-code","message":"private"}}',
-                                  b'{"error":{"code":["inference_budget_unavailable"]}}',
-                                  b'{"error":{"code":{"private":"value"}}}', b'\xff'])
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"private plaintext",
+        b"[]",
+        b"null",
+        b'{"error":"private error"}',
+        b'{"error":{"code":"private-code","message":"private"}}',
+        b'{"error":{"code":["inference_budget_unavailable"]}}',
+        b'{"error":{"code":{"private":"value"}}}',
+        b"\xff",
+    ],
+)
 def test_inference_rejection_does_not_echo_unknown_or_malformed_errors(body):
     measurements = Measurements("model", None, lambda _: None)
     boundary = MeasuredTransport(measurements, httpx.MockTransport(lambda _: httpx.Response(503, content=body)), set())
@@ -72,8 +90,10 @@ def test_filesystem_reports_only_correlated_bounded_metadata(tmp_path, input_art
     def handle(request):
         if request.url.path == "/agt/evaluate":
             decision = json.loads(request.content)
-            assert decision == {"action": "tool:kars_mission_" + mode,
-                                "context": {"scope_id": "scope-1", "tool_call_id": "call-1"}}
+            assert decision == {
+                "action": "tool:kars_mission_" + mode,
+                "context": {"scope_id": "scope-1", "tool_call_id": "call-1"},
+            }
             authorized.append(decision)
             return httpx.Response(200, json={"allowed": True})
         assert len(authorized) == 1
@@ -90,8 +110,14 @@ def test_filesystem_reports_only_correlated_bounded_metadata(tmp_path, input_art
     measurements = Measurements("model", None, lambda _: None, reporter(handle))
     tools = FilesystemTools(tmp_path, measurements, Skills(), inputs)
     mode = "write" if operation in ("write", "immutable") else "read"
-    paths = {"read": "inputs/facts.md", "write": "exports/report.md", "bundle": "inputs",
-             "skill": "skills/review/SKILL.md", "missing": "inputs/missing.md", "immutable": "inputs/facts.md"}
+    paths = {
+        "read": "inputs/facts.md",
+        "write": "exports/report.md",
+        "bundle": "inputs",
+        "skill": "skills/review/SKILL.md",
+        "missing": "inputs/missing.md",
+        "immutable": "inputs/facts.md",
+    }
     arguments = {"path": paths[operation], **({"content": content} if mode == "write" else {})}
     tools.start("call-1", "kars_mission_" + mode, arguments)
     result = json.loads(tools.execute(mode, arguments))
@@ -106,12 +132,21 @@ def test_filesystem_reports_only_correlated_bounded_metadata(tmp_path, input_art
         assert report["result_summary"] == {"kind": "failure", "reason": "filesystem_operation_failed"}
     elif operation == "write":
         assert measurements.successful == 1 and report["ok"] is True
-        assert report["result_summary"] == {"kind": "file_write", "bytes": len(content.encode()), "artifact_name": "report.md"}
+        assert report["result_summary"] == {
+            "kind": "file_write",
+            "bytes": len(content.encode()),
+            "artifact_name": "report.md",
+        }
         assert (tmp_path / "exports/report.md").read_bytes() == content.encode()
     else:
         assert measurements.successful == 1 and report["ok"] is True
         size = len(result["content"].encode())
-        assert report["result_summary"] == {"kind": "file_read", "bytes": size, "returned_bytes": size, "truncated": False}
+        assert report["result_summary"] == {
+            "kind": "file_read",
+            "bytes": size,
+            "returned_bytes": size,
+            "truncated": False,
+        }
         if operation != "bundle":
             assert result["content"] == content
         else:
@@ -121,7 +156,9 @@ def test_filesystem_reports_only_correlated_bounded_metadata(tmp_path, input_art
     assert len(requests) == 1
 
 
-@pytest.mark.parametrize("failure", ["status", "timeout", "oversize", "malformed", "unrecorded", "wrong-source", "enforcement"])
+@pytest.mark.parametrize(
+    "failure", ["status", "timeout", "oversize", "malformed", "unrecorded", "wrong-source", "enforcement"]
+)
 def test_reporting_failure_does_not_change_successful_execution(tmp_path, failure):
     (tmp_path / "exports").mkdir()
 
@@ -135,15 +172,21 @@ def test_reporting_failure_does_not_change_successful_execution(tmp_path, failur
         if failure in ("oversize", "malformed"):
             return httpx.Response(200, content=b"x" * (4097 if failure == "oversize" else 1))
         receipt = {"recorded": True, "source": "harness-reported", "enforcement_changed": False}
-        receipt.update({"unrecorded": {"recorded": False}, "wrong-source": {"source": "model-proposed"},
-                        "enforcement": {"enforcement_changed": True}}[failure])
+        receipt.update(
+            {
+                "unrecorded": {"recorded": False},
+                "wrong-source": {"source": "model-proposed"},
+                "enforcement": {"enforcement_changed": True},
+            }[failure]
+        )
         return httpx.Response(200, json=receipt)
 
     measurements = Measurements("model", None, lambda _: None, reporter(handle))
     tools = FilesystemTools(tmp_path, measurements)
     tools.start("call-1", "kars_mission_write", {})
     assert json.loads(tools.execute("write", {"path": "exports/report.md", "content": "Actual export"})) == {
-        "written": "exports/report.md"}
+        "written": "exports/report.md"
+    }
     assert measurements.successful == 1
     assert (tmp_path / "exports/report.md").read_text() == "Actual export"
 
@@ -165,8 +208,9 @@ def test_authorization_failure_prevents_filesystem_access(tmp_path, failure, mod
             return httpx.Response(503)
         if failure in ("oversize", "malformed"):
             return httpx.Response(200, content=b"x" * (65537 if failure == "oversize" else 1))
-        return httpx.Response(200, json={"deny": {"allowed": False}, "missing": {},
-                                         "truthy": {"allowed": "true"}}[failure])
+        return httpx.Response(
+            200, json={"deny": {"allowed": False}, "missing": {}, "truthy": {"allowed": "true"}}[failure]
+        )
 
     measurements = Measurements("model", None, lambda _: None, reporter(handle))
     tools = FilesystemTools(tmp_path, measurements)
@@ -182,8 +226,13 @@ def test_invalid_authorization_correlation_never_contacts_router(correlation):
     observations = reporter(lambda _: pytest.fail("Uncorrelated authorization"))
     if correlation == "changed":
         observations.capture(httpx.Headers({"x-kars-telemetry-scope": "scope-2", "x-kars-telemetry-round": "2"}))
-    assert observations.authorize_tool("bad call" if correlation == "invalid-call" else "call-1",
-                                       "shell" if correlation == "wrong-tool" else "kars_mission_read") is False
+    assert (
+        observations.authorize_tool(
+            "bad call" if correlation == "invalid-call" else "call-1",
+            "shell" if correlation == "wrong-tool" else "kars_mission_read",
+        )
+        is False
+    )
 
 
 @pytest.mark.parametrize("correlation", ["absent", "changed", "invalid-call"])

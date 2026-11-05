@@ -25,18 +25,40 @@ INSPECT = {"operation": "inspect", "repository": REPO, "path": "README.md"}
 def upstream(tmp_path, monkeypatch):
     repository = tmp_path / "remote" / "owner" / "repo.git"
     repository.mkdir(parents=True)
-    env = {"PATH": "/usr/bin:/bin", "HOME": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
-           "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "test@example.invalid",
-           "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "test@example.invalid"}
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_AUTHOR_NAME": "Test",
+        "GIT_AUTHOR_EMAIL": "test@example.invalid",
+        "GIT_COMMITTER_NAME": "Test",
+        "GIT_COMMITTER_EMAIL": "test@example.invalid",
+    }
 
     def git(*args, data=None):
-        return subprocess.run([adapter.GIT, *args], cwd=repository, env=env, input=data,
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True).stdout.decode().strip()
+        return (
+            subprocess.run(
+                [adapter.GIT, *args],
+                cwd=repository,
+                env=env,
+                input=data,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+            .stdout.decode()
+            .strip()
+        )
 
     git("init", "--bare", "--template=", ".")
     git("config", "http.receivepack", "true")
-    files = {"README.md": "Original documentation\n", "keep.txt": "Unchanged\n",
-             ".gitattributes": "* filter=hostile\n", ".github/workflows/keep.yml": "name: unchanged\n"}
+    files = {
+        "README.md": "Original documentation\n",
+        "keep.txt": "Unchanged\n",
+        ".gitattributes": "* filter=hostile\n",
+        ".github/workflows/keep.yml": "name: unchanged\n",
+    }
     for name, text in files.items():
         blob = git("hash-object", "-w", "--stdin", data=text.encode())
         git("update-index", "--add", "--cacheinfo", "100644", blob, name)
@@ -46,9 +68,19 @@ def upstream(tmp_path, monkeypatch):
     initial = git("commit-tree", tree, data=b"Initial fixture\n")
     git("update-ref", "refs/heads/main", initial)
     git("symbolic-ref", "HEAD", "refs/heads/main")
-    state = SimpleNamespace(git=git, initial=initial, repository=repository, calls=[], posts=[],
-                            metadata_status=200, post_status=201, drop=False, invalid=False,
-                            collision=False, collision_sha=None)
+    state = SimpleNamespace(
+        git=git,
+        initial=initial,
+        repository=repository,
+        calls=[],
+        posts=[],
+        metadata_status=200,
+        post_status=201,
+        drop=False,
+        invalid=False,
+        collision=False,
+        collision_sha=None,
+    )
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_):
@@ -76,10 +108,17 @@ def upstream(tmp_path, monkeypatch):
                         self.close_connection = True
                         return
                     status = state.post_status
-                    result = {"number": 17, "state": "open", "html_url": "https://github.com/owner/repo/pull/17",
-                              "head": {"ref": payload["head"], "sha": git("rev-parse", "refs/heads/" + payload["head"]),
-                                       "repo": {"full_name": REPO}},
-                              "base": {"ref": payload["base"], "repo": {"full_name": REPO}}}
+                    result = {
+                        "number": 17,
+                        "state": "open",
+                        "html_url": "https://github.com/owner/repo/pull/17",
+                        "head": {
+                            "ref": payload["head"],
+                            "sha": git("rev-parse", "refs/heads/" + payload["head"]),
+                            "repo": {"full_name": REPO},
+                        },
+                        "base": {"ref": payload["base"], "repo": {"full_name": REPO}},
+                    }
                     if state.invalid:
                         result["head"]["repo"]["full_name"] = "other/repo"
                 raw = json.dumps(result).encode()
@@ -93,12 +132,25 @@ def upstream(tmp_path, monkeypatch):
             if state.collision and parsed.query == "service=git-receive-pack":
                 git("update-ref", "refs/heads/kars/reviewed/" + "a" * 32, initial)
                 state.collision_sha = initial
-            cgi_env = {**env, "GIT_PROJECT_ROOT": str(repository.parent.parent), "GIT_HTTP_EXPORT_ALL": "1",
-                       "REQUEST_METHOD": self.command, "PATH_INFO": parsed.path.removeprefix("/git"),
-                       "QUERY_STRING": parsed.query, "CONTENT_TYPE": self.headers.get("Content-Type", ""),
-                       "CONTENT_LENGTH": str(len(body)), "REMOTE_USER": "fixture"}
-            response = subprocess.run([adapter.GIT, "http-backend"], env=cgi_env, input=body,
-                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True).stdout
+            cgi_env = {
+                **env,
+                "GIT_PROJECT_ROOT": str(repository.parent.parent),
+                "GIT_HTTP_EXPORT_ALL": "1",
+                "REQUEST_METHOD": self.command,
+                "PATH_INFO": parsed.path.removeprefix("/git"),
+                "QUERY_STRING": parsed.query,
+                "CONTENT_TYPE": self.headers.get("Content-Type", ""),
+                "CONTENT_LENGTH": str(len(body)),
+                "REMOTE_USER": "fixture",
+            }
+            response = subprocess.run(
+                [adapter.GIT, "http-backend"],
+                env=cgi_env,
+                input=body,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            ).stdout
             headers, raw = response.split(b"\r\n\r\n", 1)
             entries = [line.decode().split(":", 1) for line in headers.split(b"\r\n")]
             self.send_response(next((int(value.split()[0]) for name, value in entries if name == "Status"), 200))
@@ -137,14 +189,24 @@ def run(root, args):
 
 
 def create_args(upstream, **overrides):
-    return {**INSPECT, "operation": "create", "expected_base": upstream.initial,
-            "content": "Reviewed documentation: café 🌍\n", "title": "Improve documentation", "body": "One reviewed file.", **overrides}
+    return {
+        **INSPECT,
+        "operation": "create",
+        "expected_base": upstream.initial,
+        "content": "Reviewed documentation: café 🌍\n",
+        "title": "Improve documentation",
+        "body": "One reviewed file.",
+        **overrides,
+    }
 
 
 @pytest.mark.parametrize("nullable_fields", [False, True])
 def test_real_keyless_git_inspect_publish_and_replay_receipt(tmp_path, upstream, nullable_fields):
     root = tmp_path / "private"
-    args = {**INSPECT, **({key: None for key in ("expected_base", "content", "title", "body")} if nullable_fields else {})}
+    args = {
+        **INSPECT,
+        **({key: None for key in ("expected_base", "content", "title", "body")} if nullable_fields else {}),
+    }
     observed = run(root, args)
     assert observed["content"] == "Original documentation\n"
     assert observed["expected_base"] == upstream.initial
@@ -159,8 +221,15 @@ def test_real_keyless_git_inspect_publish_and_replay_receipt(tmp_path, upstream,
     assert upstream.git("show", branch + ":README.md") == "Reviewed documentation: café 🌍"
     assert upstream.git("diff-tree", "--no-commit-id", "--name-only", "-r", upstream.initial, branch) == "README.md"
     assert upstream.git("show", branch + ":.github/workflows/keep.yml") == "name: unchanged"
-    assert upstream.posts == [{"title": "Improve documentation", "body": "One reviewed file.",
-                               "head": branch, "base": "main", "maintainer_can_modify": False}]
+    assert upstream.posts == [
+        {
+            "title": "Improve documentation",
+            "body": "One reviewed file.",
+            "head": branch,
+            "base": "main",
+            "maintainer_can_modify": False,
+        }
+    ]
     receipt = next(root.glob("publication-*.json"))
     assert json.loads(receipt.read_text()) == result
     assert list(root.iterdir()) == [receipt]
@@ -176,34 +245,73 @@ def test_strict_provider_placeholders_are_nullable_only_for_inspect(key):
     for value in ("", "ignored", 0, False, {}, []):
         with pytest.raises(ValueError):
             adapter.validate({**INSPECT, key: value})
-    create = {**INSPECT, "operation": "create", "expected_base": "a" * 40,
-              "content": "Reviewed documentation", "title": "Docs", "body": "Review", key: None}
+    create = {
+        **INSPECT,
+        "operation": "create",
+        "expected_base": "a" * 40,
+        "content": "Reviewed documentation",
+        "title": "Docs",
+        "body": "Review",
+        key: None,
+    }
     with pytest.raises(ValueError):
         adapter.validate(create)
     with pytest.raises(ValueError):
         adapter.validate({**INSPECT, "branch": None})
 
 
-@pytest.mark.parametrize("path", ["../x", "/x", "a//b", "a/../b", "-c", ".git/config", ".GIT/config",
-                                   ".github/workflows/build.yml", ".gitattributes", ".gitmodules", "a/.git/config",
-                                   "a\\b", "a\nb", "file.", ":(glob)*"])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "../x",
+        "/x",
+        "a//b",
+        "a/../b",
+        "-c",
+        ".git/config",
+        ".GIT/config",
+        ".github/workflows/build.yml",
+        ".gitattributes",
+        ".gitmodules",
+        "a/.git/config",
+        "a\\b",
+        "a\nb",
+        "file.",
+        ":(glob)*",
+    ],
+)
 def test_path_bypasses_rejected(path):
     with pytest.raises(ValueError):
         adapter.validate({**INSPECT, "path": path})
 
 
-@pytest.mark.parametrize("extra", [{"repository": "--upload-pack=evil/repo"}, {"repository": "https://github.com/o/r"},
-                                   {"repository": "owner/repo.git"}, {"branch": "main"}, {"force": True},
-                                   {"refspec": "HEAD:main"}, {"config": "core.hooksPath=evil"}, {"shell": "touch pwned"}])
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"repository": "--upload-pack=evil/repo"},
+        {"repository": "https://github.com/o/r"},
+        {"repository": "owner/repo.git"},
+        {"branch": "main"},
+        {"force": True},
+        {"refspec": "HEAD:main"},
+        {"config": "core.hooksPath=evil"},
+        {"shell": "touch pwned"},
+    ],
+)
 def test_arguments_cannot_supply_transport_execution_or_branch(extra):
     with pytest.raises(ValueError):
         adapter.validate({**INSPECT, **extra})
 
 
 def test_stale_base_no_change_binary_symlink_and_parent_alias_are_denied(tmp_path, upstream):
-    for i, args in enumerate([create_args(upstream, expected_base="0" * 40),
-                              create_args(upstream, content="Original documentation\n"),
-                              create_args(upstream, path="alias"), create_args(upstream, path="alias/child")]):
+    for i, args in enumerate(
+        [
+            create_args(upstream, expected_base="0" * 40),
+            create_args(upstream, content="Original documentation\n"),
+            create_args(upstream, path="alias"),
+            create_args(upstream, path="alias/child"),
+        ]
+    ):
         result = run(tmp_path / f"private-{i}", args)
         assert "error" in result and not result["ambiguous"], result
     with pytest.raises(ValueError):
@@ -274,8 +382,10 @@ def test_private_workspace_rejects_symlinks_and_permissive_ownership(tmp_path):
 
 def test_host_environment_hooks_config_and_helpers_are_not_inherited(tmp_path, upstream, monkeypatch):
     poison = tmp_path / "poison.config"
-    poison.write_text("[core]\n hooksPath = /does-not-exist\n[credential]\n helper = !exit 99\n"
-                      "[url \"file:///does-not-exist/\"]\n insteadOf = http://\n")
+    poison.write_text(
+        "[core]\n hooksPath = /does-not-exist\n[credential]\n helper = !exit 99\n"
+        '[url "file:///does-not-exist/"]\n insteadOf = http://\n'
+    )
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(poison))
     monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
     monkeypatch.setenv("GIT_CONFIG_KEY_0", "protocol.http.allow")
@@ -286,15 +396,22 @@ def test_host_environment_hooks_config_and_helpers_are_not_inherited(tmp_path, u
     assert "error" not in run(tmp_path / "private", create_args(upstream))
 
 
-@pytest.mark.parametrize("expected,observed,accepted", [
-    (1, 1, True), (42, 42, True), (42, 1, False), (42, 43, False),
-])
+@pytest.mark.parametrize(
+    "expected,observed,accepted",
+    [
+        (1, 1, True),
+        (42, 42, True),
+        (42, 1, False),
+        (42, 43, False),
+    ],
+)
 def test_parent_lifetime_uses_prefork_identity(monkeypatch, expected, observed, accepted):
     calls = []
     monkeypatch.setattr(adapter.sys, "platform", "linux")
     monkeypatch.setattr(adapter.os, "getppid", lambda: observed)
-    monkeypatch.setattr(adapter.ctypes, "CDLL", lambda *args, **kwargs:
-                        SimpleNamespace(prctl=lambda *args: calls.append(args) or 0))
+    monkeypatch.setattr(
+        adapter.ctypes, "CDLL", lambda *args, **kwargs: SimpleNamespace(prctl=lambda *args: calls.append(args) or 0)
+    )
     if accepted:
         adapter.parent_death_signal(expected)
     else:
@@ -311,8 +428,7 @@ def test_parent_lifetime_requires_explicit_host_identity(expected):
 
 def test_parent_lifetime_registration_failure_still_fails_closed(monkeypatch):
     monkeypatch.setattr(adapter.sys, "platform", "linux")
-    monkeypatch.setattr(adapter.ctypes, "CDLL", lambda *args, **kwargs:
-                        SimpleNamespace(prctl=lambda *args: -1))
+    monkeypatch.setattr(adapter.ctypes, "CDLL", lambda *args, **kwargs: SimpleNamespace(prctl=lambda *args: -1))
     with pytest.raises(OSError, match="Cannot bind Git helper lifetime"):
         adapter.parent_death_signal(1)
 
@@ -378,11 +494,13 @@ def test_wrapper_terminates_then_reaps_unresponsive_helper(monkeypatch):
             self.killed = True
 
     child = Child()
+
     def spawn(argv, **kwargs):
         assert argv[1:4] == ["-I", "-S", "-B"] and argv[-2] == str(Path(adapter.__file__).resolve())
         assert argv[-1] == str(os.getpid())
         assert kwargs["env"] == {} and "shell" not in kwargs
         return child
+
     monkeypatch.setattr(adapter.subprocess, "Popen", spawn)
     checks = iter([False, False, True])
     with pytest.raises(ValueError, match="cancelled.*never replay"):

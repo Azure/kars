@@ -74,6 +74,17 @@ def spec_digest(crd):
 
 
 def exact_schemas(current):
+    # This closed migration predates built-in Sandbox funding. Reconstruct only
+    # its known description change, then require both unchanged historical hashes.
+    current = copy.deepcopy(current)
+    funding = current["spec"]["versions"][0]["schema"]["openAPIV3Schema"][
+        "properties"]["spec"]["properties"]["inferenceBudgetRef"]
+    historical = ("Controller-generated Task/account UID binding; validated against "
+                  "live task authority before private routing")
+    builtin = ("Controller-generated Task or built-in Sandbox/account UID binding; "
+               "validated against live source authority before private routing")
+    require(funding.get("description") in (historical, builtin), "render")
+    funding["description"] = historical
     require(current.get("metadata", {}).get("name") == NAME
             and spec_digest(current) == NEW_DIGEST, "render")
     item = condition_schema(current)

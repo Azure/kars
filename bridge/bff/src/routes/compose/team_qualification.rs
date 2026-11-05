@@ -372,8 +372,7 @@ pub(super) fn admitted_team_fallbacks(
     proposal
         .model_fallbacks
         .iter()
-        .cloned()
-        .filter(|route| {
+        .filter(|&route| {
             route != &proposal.model
                 && options
                     .models
@@ -381,7 +380,7 @@ pub(super) fn admitted_team_fallbacks(
                     .any(|model| *route == format!("{}::{}", model.provider, model.deployment))
                 && seen.insert(route.clone())
         })
-        .filter(|route| {
+        .filter(|&route| {
             let mut trial = proposal.clone();
             trial.model = route.clone();
             trial.model_fallbacks.clear();
@@ -391,5 +390,6 @@ pub(super) fn admitted_team_fallbacks(
             team_proposal_qualification(&trial, options).is_ok()
         })
         .take(8)
+        .cloned()
         .collect()
 }

@@ -121,7 +121,7 @@ pub async fn guard(
     method: &Method,
     segments: &[String],
     body: &[u8],
-) -> Result<Option<AuthorizedMemoryRequest>, Response> {
+) -> Result<Option<AuthorizedMemoryRequest>, Box<Response>> {
     if segments.first().map(String::as_str) != Some("memory_stores") {
         return Ok(None);
     }
@@ -141,7 +141,7 @@ pub async fn guard(
     })?;
     authorize(&access, &state.memory_updates, method, segments, body)
         .map(Some)
-        .map_err(denied)
+        .map_err(|reason| Box::new(denied(reason)))
 }
 
 fn authorize(

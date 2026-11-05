@@ -113,7 +113,7 @@ for (const [label, mutate] of [
   const form = uploadForm(); mutate(form);
   const result = await actions.putGithubAppAction({}, form);
   assert.ok(result.error); assert.equal(env.puts.length, 0); assert.equal(env.reads, 0);
-  assert.doesNotMatch(result.error, /PRIVATE invalid|BEGIN|<script>/);
+  assert.doesNotMatch(result.error, /PRIVATE invalid|BEGIN|<script\b/i);
 });
 
 test("upload preserves operator access but denies users and configured replacement", async () => {

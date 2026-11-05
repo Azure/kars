@@ -3,6 +3,10 @@ Licensed under the MIT License. -->
 
 # Kars Dex security rebuild
 
+Both source-stage recipes explicitly install GNU `patch` before fetching and
+applying the hash-verified upstream patches. This is a build-only dependency;
+the shipping AL3 distroless runtime contains no package manager or patch utility.
+
 **Current prepublication repair:** genuine Go 1.27.3 resolver output now selects
 `golang.org/x/net` 0.62.0 in both root and nested API graphs, including its required
 `x/crypto` 0.58.0 and `x/text` 0.43.0 dependency floors. The first executed resolver

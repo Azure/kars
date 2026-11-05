@@ -271,7 +271,7 @@ fn reviewed_fixture_with_direct(
     sort(&mut plan);
     let mut state = json!({"schema":"kars.reviewed-run/v2", "rootName":root.name_any(), "rootUid":root.uid(),
     "admission":{"state":"run", "runNonce":root.annotations()["kars.azure.com/run-requested"]},
-    "planDigest":format!("sha256:{}", crate::providers::signing::sha256_hex(&serde_json::to_vec(&plan).unwrap())),
+    "planDigest":format!("sha256:{}", crate::providers::signing::sha256_hex(serde_json::to_vec(&plan).unwrap())),
     "plan":plan, "children":{
         "r0":{"name":role.name_any(), "uid":role.uid(), "spec":role.spec},
         "r0-p0":{"name":phase.name_any(), "uid":phase.uid(), "spec":phase.spec}

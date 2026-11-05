@@ -490,10 +490,7 @@ impl Cluster {
         policy
             .data
             .pointer("/spec/modelPreference/primary")
-            .map(|value| {
-                serde_json::from_value(value.clone())
-                    .map_err(|error| kube::Error::SerdeError(error))
-            })
+            .map(|value| serde_json::from_value(value.clone()).map_err(kube::Error::SerdeError))
             .transpose()
     }
 

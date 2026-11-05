@@ -78,7 +78,7 @@ describe("SRE controller upgrade namespace preflight", () => {
       if (file === "helm" && args[0] === "list") return { stdout: releases };
       if (file === "kubectl" && args.includes("karssandboxes")) return { stdout: '{"items":[]}' };
       const result = authority(args);
-      if (operation === "uninstall" && !args.includes("crd") && args.includes("karssreregistrations.kars.azure.com")) {
+      if (operation === "uninstall" && !args.includes("crd") && args.some(arg => arg === "karssreregistrations.kars.azure.com")) {
         const retired = JSON.parse(result.stdout);
         retired.spec.enabled = false;
         retired.status.phase = "Retired";
@@ -111,7 +111,7 @@ describe("SRE controller upgrade namespace preflight", () => {
     execute.mockImplementation(async (file, args, options) => {
       if (file === "helm" && args[0] === "list") return { stdout: releases };
       if (file === "kubectl" && args.includes("karssandboxes")) return { stdout: '{"items":[]}' };
-      if (!args.includes("crd") && args.includes("karssreregistrations.kars.azure.com")) return { stdout: "" };
+      if (!args.includes("crd") && args.some(arg => arg === "karssreregistrations.kars.azure.com")) return { stdout: "" };
       if (file === "helm" && args[0] === "get") return { stdout: JSON.stringify(values) };
       if (file === "helm" && args[0] === "template") {
         expect(args).toEqual(expect.arrayContaining(["--values", "-", "sre.enabled=true"]));
@@ -151,7 +151,7 @@ describe("SRE controller upgrade namespace preflight", () => {
       }
       if (file === "kubectl" && args.includes("karssandboxes")) return { stdout: '{"items":[]}' };
       const result = authority(args);
-      if (file === "kubectl" && !args.includes("crd") && args.includes("karssreregistrations.kars.azure.com")) {
+      if (file === "kubectl" && !args.includes("crd") && args.some(arg => arg === "karssreregistrations.kars.azure.com")) {
         const registration = JSON.parse(result.stdout);
         registration.spec.firstInstallFunding = { intent: { uid: "original-intent" } };
         return { stdout: JSON.stringify(registration) };
@@ -195,7 +195,7 @@ describe("SRE controller upgrade namespace preflight", () => {
     execute.mockImplementation(async (file, args) => {
       if (file === "helm" && args[0] === "list") return { stdout: releases };
       if (file === "kubectl" && args.includes("karssandboxes")) return { stdout: '{"items":[]}' };
-      if (!args.includes("crd") && args.includes("karssreregistrations.kars.azure.com")) return { stdout: "" };
+      if (!args.includes("crd") && args.some(arg => arg === "karssreregistrations.kars.azure.com")) return { stdout: "" };
       if (file === "helm" && args[0] === "get") return { stdout: values };
       return authority(args);
     });

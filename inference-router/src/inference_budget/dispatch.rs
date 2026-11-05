@@ -194,66 +194,6 @@ impl Settlement {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::{sync::Arc, time::Duration};
-    use tokio::sync::Notify;
-    use wiremock::{Mock, Request, ResponseTemplate};
-
-    #[tokio::test]
-    async fn paired_settlement_deadline_includes_calendar_lock_wait() {
-        let (server, calendar) = super::super::calendar::tests::accounting_server().await;
-        let guard = calendar.begin().await.unwrap();
-        let received = Arc::new(Notify::new());
-        let notify = received.clone();
-        Mock::given(wiremock::matchers::path("/v1/calendar/read"))
-            .respond_with(move |_: &Request| {
-                notify.notify_one();
-                ResponseTemplate::new(503).set_delay(Duration::from_secs(5))
-            })
-            .with_priority(1)
-            .mount(&server)
-            .await;
-        let reader = calendar.clone();
-        let blocked_read = tokio::spawn(async move { reader.read().await });
-        tokio::time::timeout(Duration::from_secs(5), received.notified())
-            .await
-            .unwrap();
-        let worker = Settlement {
-            governed: None,
-            calendar: Some(guard),
-        }
-        .spawn(
-            usage::buffered(
-                br#"{"usage":{"input_tokens":4,"output_tokens":5,"total_tokens":9}}"#,
-                Operation::Responses,
-            ),
-            false,
-            Duration::from_millis(20),
-        )
-        .unwrap();
-        let error = tokio::time::timeout(Duration::from_secs(1), worker)
-            .await
-            .expect("settlement worker exceeded its deadline")
-            .unwrap()
-            .unwrap_err();
-        assert!(error.to_string().contains("paired settlement timeout"));
-        blocked_read.abort();
-        assert!(blocked_read.await.unwrap_err().is_cancelled());
-        assert!(calendar.read().await.is_err());
-        assert!(calendar.begin().await.is_err());
-        let commits = server
-            .received_requests()
-            .await
-            .unwrap()
-            .into_iter()
-            .filter(|request| request.url.path() == "/v1/calendar/commit")
-            .count();
-        assert_eq!(commits, 1, "only Begin: expiry must not fabricate a Finish");
-    }
-}
-
 fn operation(method: &Method, path: &str) -> Result<Operation, Error> {
     let denied = || Error {
         stage: "unsupported inference operation",
@@ -566,4 +506,64 @@ pub fn stream(
         },
     )
     .boxed()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{sync::Arc, time::Duration};
+    use tokio::sync::Notify;
+    use wiremock::{Mock, Request, ResponseTemplate};
+
+    #[tokio::test]
+    async fn paired_settlement_deadline_includes_calendar_lock_wait() {
+        let (server, calendar) = super::super::calendar::tests::accounting_server().await;
+        let guard = calendar.begin().await.unwrap();
+        let received = Arc::new(Notify::new());
+        let notify = received.clone();
+        Mock::given(wiremock::matchers::path("/v1/calendar/read"))
+            .respond_with(move |_: &Request| {
+                notify.notify_one();
+                ResponseTemplate::new(503).set_delay(Duration::from_secs(5))
+            })
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        let reader = calendar.clone();
+        let blocked_read = tokio::spawn(async move { reader.read().await });
+        tokio::time::timeout(Duration::from_secs(5), received.notified())
+            .await
+            .unwrap();
+        let worker = Settlement {
+            governed: None,
+            calendar: Some(guard),
+        }
+        .spawn(
+            usage::buffered(
+                br#"{"usage":{"input_tokens":4,"output_tokens":5,"total_tokens":9}}"#,
+                Operation::Responses,
+            ),
+            false,
+            Duration::from_millis(20),
+        )
+        .unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(1), worker)
+            .await
+            .expect("settlement worker exceeded its deadline")
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains("paired settlement timeout"));
+        blocked_read.abort();
+        assert!(blocked_read.await.unwrap_err().is_cancelled());
+        assert!(calendar.read().await.is_err());
+        assert!(calendar.begin().await.is_err());
+        let commits = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|request| request.url.path() == "/v1/calendar/commit")
+            .count();
+        assert_eq!(commits, 1, "only Begin: expiry must not fabricate a Finish");
+    }
 }

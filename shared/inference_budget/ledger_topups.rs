@@ -197,8 +197,8 @@ impl Ledger {
                     .token_top_ups
                     .get(id)
                     .ok_or(BudgetError::Authorization)?;
-                if let Some(previous) = &prior.funding_renewal {
-                    if previous.registration_uid != renewal.registration_uid
+                if let Some(previous) = &prior.funding_renewal
+                    && (previous.registration_uid != renewal.registration_uid
                         || previous.intent_uid != renewal.intent_uid
                         || previous.intent_digest != renewal.intent_digest
                         || previous
@@ -208,10 +208,9 @@ impl Ledger {
                         || chrono::DateTime::parse_from_rfc3339(&prior.expires_at)
                             .map_err(|_| BudgetError::Authorization)?
                             >= chrono::DateTime::parse_from_rfc3339(&grant.expires_at)
-                                .map_err(|_| BudgetError::Authorization)?
-                    {
-                        return Err(BudgetError::Authorization);
-                    }
+                                .map_err(|_| BudgetError::Authorization)?)
+                {
+                    return Err(BudgetError::Authorization);
                 }
             }
         }

@@ -65,9 +65,9 @@ pub(super) async fn task_snapshot(
         }
     }
     for name in names {
-        if !result.contains_key(&name) {
-            let task = tasks.get_opt(&name).await.map_err(api_error)?;
-            result.insert(name, task);
+        if let std::collections::btree_map::Entry::Vacant(entry) = result.entry(name) {
+            let task = tasks.get_opt(entry.key()).await.map_err(api_error)?;
+            entry.insert(task);
         }
     }
     Ok(result)

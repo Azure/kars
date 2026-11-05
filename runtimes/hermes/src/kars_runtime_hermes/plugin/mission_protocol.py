@@ -91,6 +91,7 @@ def loads(raw, limit=MAX_BASE, *, max_nodes=16384):
         elif isinstance(item, list):
             for child in item:
                 visit(child, depth + 1)
+
     visit(value, 0)
     require(len(encoded(value)) <= limit)
     return value
@@ -108,8 +109,10 @@ def artifacts(value):
     require(type(value) is dict and len(value) <= 16)
     require(all(artifact_name(k) and isinstance(v, str) and v.strip() for k, v in value.items()))
     require(len(encoded({k: v for k, v in value.items() if k != OBSERVATION_ARTIFACT})) <= 128 * 1024)
-    require(OBSERVATION_ARTIFACT not in value
-            or len(encoded({OBSERVATION_ARTIFACT: value[OBSERVATION_ARTIFACT]})) <= MAX_ACTIVITY)
+    require(
+        OBSERVATION_ARTIFACT not in value
+        or len(encoded({OBSERVATION_ARTIFACT: value[OBSERVATION_ARTIFACT]})) <= MAX_ACTIVITY
+    )
     return value
 
 
@@ -118,28 +121,58 @@ def reviewed_fetch_url(value, *, allow_origin=False):
         return False
     host, slash, path = value[8:].partition("/")
     labels = host.split(".")
-    return ((bool(slash) or allow_origin) and len(host) <= 253 and len(labels) >= 2
-            and all(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in labels)
-            and re.fullmatch(r"[a-z]{2,63}", labels[-1]) is not None
-            and labels[-1] not in ("local", "internal", "localhost")
-            and re.fullmatch(r"[A-Za-z0-9/_~.!$&'()*+,;=:@?%-]*", path) is not None
-            and re.search(r"%(?![0-9a-fA-F]{2})|%2e", path, re.I) is None
-            and not any(part in (".", "..") for part in path.split("?")[0].split("/")))
+    return (
+        (bool(slash) or allow_origin)
+        and len(host) <= 253
+        and len(labels) >= 2
+        and all(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in labels)
+        and re.fullmatch(r"[a-z]{2,63}", labels[-1]) is not None
+        and labels[-1] not in ("local", "internal", "localhost")
+        and re.fullmatch(r"[A-Za-z0-9/_~.!$&'()*+,;=:@?%-]*", path) is not None
+        and re.search(r"%(?![0-9a-fA-F]{2})|%2e", path, re.I) is None
+        and not any(part in (".", "..") for part in path.split("?")[0].split("/"))
+    )
 
 
 def reviewed_fetch_arguments(reviewed, args):
-    return (type(args) is dict and {"method", "url"} <= set(args)
-            and set(args) <= ({"method", "url", "wait_for_approval_ms"} if reviewed.get("executionMode") == "native" else {"method", "url"})
-            and ("wait_for_approval_ms" not in args or (type(args["wait_for_approval_ms"]) is int and 0 <= args["wait_for_approval_ms"] <= 300000))
-            and args["method"] == "GET"
-            and "network" in reviewed["capabilities"]
-            and (reviewed_fetch_url(args["url"], allow_origin=True) if reviewed.get("executionMode") == "native"
-                 else any(call["arguments"] == args for call in reviewed["requiredToolCalls"])))
+    return (
+        type(args) is dict
+        and {"method", "url"} <= set(args)
+        and set(args)
+        <= (
+            {"method", "url", "wait_for_approval_ms"}
+            if reviewed.get("executionMode") == "native"
+            else {"method", "url"}
+        )
+        and (
+            "wait_for_approval_ms" not in args
+            or (type(args["wait_for_approval_ms"]) is int and 0 <= args["wait_for_approval_ms"] <= 300000)
+        )
+        and args["method"] == "GET"
+        and "network" in reviewed["capabilities"]
+        and (
+            reviewed_fetch_url(args["url"], allow_origin=True)
+            if reviewed.get("executionMode") == "native"
+            else any(call["arguments"] == args for call in reviewed["requiredToolCalls"])
+        )
+    )
 
 
 def phase(value):
-    keys(value, ("name", "objective", "capabilities", "requiredToolCalls", "minToolCalls", "maxToolCalls",
-                 "freshContext", "executionMode"), ("name", "objective", "maxToolCalls"))
+    keys(
+        value,
+        (
+            "name",
+            "objective",
+            "capabilities",
+            "requiredToolCalls",
+            "minToolCalls",
+            "maxToolCalls",
+            "freshContext",
+            "executionMode",
+        ),
+        ("name", "objective", "maxToolCalls"),
+    )
     require("executionMode" not in value or value["executionMode"] == "native", "Unsupported phase execution mode")
     caps = value.get("capabilities", [])
     low, high = value.get("minToolCalls", 0), value["maxToolCalls"]
@@ -149,11 +182,18 @@ def phase(value):
     supported = ("filesystem-read", "filesystem-write", "network")
     if value.get("executionMode") == "native":
         supported += ("memory", "github-pr", "python-execute")
-    require(type(caps) is list and len(caps) <= len(supported) and all(c in supported for c in caps)
-            and len(set(caps)) == len(caps),
-            "Only filesystem and network are supported; scoped memory, github-pr and python-execute require native execution")
-    require("python-execute" not in caps or {"filesystem-read", "filesystem-write", "network"} <= set(caps),
-            "Native python-execute requires explicit filesystem-read, filesystem-write and network capabilities")
+    require(
+        type(caps) is list
+        and len(caps) <= len(supported)
+        and all(c in supported for c in caps)
+        and len(set(caps)) == len(caps),
+        "Only filesystem and network are supported; scoped memory, github-pr and "
+        "python-execute require native execution",
+    )
+    require(
+        "python-execute" not in caps or {"filesystem-read", "filesystem-write", "network"} <= set(caps),
+        "Native python-execute requires explicit filesystem-read, filesystem-write and network capabilities",
+    )
     maximum = 2_147_483_647 if value.get("executionMode") == "native" else 32
     require(integer(low, 0, maximum) and integer(high, low, maximum))
     required = value.get("requiredToolCalls", [])
@@ -163,26 +203,40 @@ def phase(value):
         keys(call, ("name", "arguments"), ("name", "arguments"))
         args = call["arguments"]
         keys(args, ("method", "url"), ("method", "url"))
-        require(call["name"] == "http_fetch" and args["method"] == "GET" and reviewed_fetch_url(args["url"]),
-                "Required calls support only exact HTTPS http_fetch GET; hosted web-search is outside the finite funding contract")
+        require(
+            call["name"] == "http_fetch" and args["method"] == "GET" and reviewed_fetch_url(args["url"]),
+            "Required calls support only exact HTTPS http_fetch GET; hosted web-search "
+            "is outside the finite funding contract",
+        )
         calls.append({"name": "http_fetch", "arguments": {"method": "GET", "url": args["url"]}})
-    require((not calls or "network" in caps)
-            and (value.get("executionMode") == "native" or ("network" in caps) == bool(calls))
-            and len({c["arguments"]["url"] for c in calls}) == len(calls),
-            "Network requires unique reviewed http_fetch URLs and network capability")
+    require(
+        (not calls or "network" in caps)
+        and (value.get("executionMode") == "native" or ("network" in caps) == bool(calls))
+        and len({c["arguments"]["url"] for c in calls}) == len(calls),
+        "Network requires unique reviewed http_fetch URLs and network capability",
+    )
     fresh = value.get("freshContext", False)
     require(type(fresh) is bool and (low == 0 or bool(caps)))
-    return {"name": value["name"], "objective": objective, "capabilities": sorted(caps), "requiredToolCalls": calls,
-            "minToolCalls": low, "maxToolCalls": high, "freshContext": fresh,
-            **({"executionMode": "native"} if value.get("executionMode") == "native" else {})}
+    return {
+        "name": value["name"],
+        "objective": objective,
+        "capabilities": sorted(caps),
+        "requiredToolCalls": calls,
+        "minToolCalls": low,
+        "maxToolCalls": high,
+        "freshContext": fresh,
+        **({"executionMode": "native"} if value.get("executionMode") == "native" else {}),
+    }
 
 
 def peer_context(value):
     fields = ("rootUid", "stateName", "slot", "peers")
     keys(value, fields, fields)
-    require(matches(ID, value["rootUid"])
-            and matches(re.compile(r"kars-reviewed-[a-f0-9]{40}\Z"), value["stateName"])
-            and matches(re.compile(r"(?:r[0-7]-p[0-7]|synthesis)\Z"), value["slot"]))
+    require(
+        matches(ID, value["rootUid"])
+        and matches(re.compile(r"kars-reviewed-[a-f0-9]{40}\Z"), value["stateName"])
+        and matches(re.compile(r"(?:r[0-7]-p[0-7]|synthesis)\Z"), value["slot"])
+    )
     peers = value["peers"]
     require(type(peers) is list and len(peers) <= 64)
     name = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?\Z")
@@ -191,20 +245,30 @@ def peer_context(value):
     for peer in peers:
         fields = ("role", "phase", "slot", "agentName")
         keys(peer, fields, fields)
-        require(matches(name, peer["role"]) and matches(name, peer["phase"])
-                and matches(re.compile(r"r[0-7]-p[0-7]\Z"), peer["slot"]))
+        require(
+            matches(name, peer["role"])
+            and matches(name, peer["phase"])
+            and matches(re.compile(r"r[0-7]-p[0-7]\Z"), peer["slot"])
+        )
         index = peer["slot"][:2]
-        require(peer["agentName"] == "rp-" + value["stateName"][14:34] + "-" + peer["slot"]
-                and peer["slot"] not in slots and (peer["role"], peer["phase"]) not in phases
-                and roles.get(peer["role"], index) == index
-                and indices.get(index, peer["role"]) == peer["role"])
+        require(
+            peer["agentName"] == "rp-" + value["stateName"][14:34] + "-" + peer["slot"]
+            and peer["slot"] not in slots
+            and (peer["role"], peer["phase"]) not in phases
+            and roles.get(peer["role"], index) == index
+            and indices.get(index, peer["role"]) == peer["role"]
+        )
         slots.add(peer["slot"])
         phases.add((peer["role"], peer["phase"]))
         roles[peer["role"]], indices[index] = index, peer["role"]
         result.append({key: peer[key] for key in fields})
     require(value["slot"] == "synthesis" or value["slot"] in slots)
-    return {"rootUid": value["rootUid"], "stateName": value["stateName"], "slot": value["slot"],
-            "peers": sorted(result, key=lambda peer: peer["slot"])}
+    return {
+        "rootUid": value["rootUid"],
+        "stateName": value["stateName"],
+        "slot": value["slot"],
+        "peers": sorted(result, key=lambda peer: peer["slot"]),
+    }
 
 
 def contract(value):
@@ -227,15 +291,24 @@ def contract(value):
     require(value["phaseDigest"] == digest(reviewed))
     result = {"version": version, "reviewedPhase": reviewed, "phaseDigest": value["phaseDigest"]}
     if has_inputs:
-        require(matches(SHA, value["inputDigest"]) and "filesystem-read" in reviewed["capabilities"]
-                and reviewed["maxToolCalls"] > 0)
+        require(
+            matches(SHA, value["inputDigest"])
+            and "filesystem-read" in reviewed["capabilities"]
+            and reviewed["maxToolCalls"] > 0
+        )
         result["inputDigest"] = value["inputDigest"]
     if version in (4, 5):
         names = value["requiredOutputs"]
-        require(type(names) is list and len(names) <= 16 and all(artifact_name(n) for n in names)
-                and len(set(names)) == len(names))
-        require(not names or ("filesystem-write" in reviewed["capabilities"] and reviewed["maxToolCalls"] > 0),
-                "Required exports need a write-capable phase")
+        require(
+            type(names) is list
+            and len(names) <= 16
+            and all(artifact_name(n) for n in names)
+            and len(set(names)) == len(names)
+        )
+        require(
+            not names or ("filesystem-write" in reviewed["capabilities"] and reviewed["maxToolCalls"] > 0),
+            "Required exports need a write-capable phase",
+        )
         result["requiredOutputs"] = sorted(names)
     if version == 5:
         result["peerContext"] = peer_context(value["peerContext"])
@@ -245,8 +318,17 @@ def contract(value):
 def inputs(values):
     require(type(values) is list and 1 <= len(values) <= MAX_INPUT_FILES)
     result = []
-    source_fields = ("namespace", "taskName", "taskUid", "sandboxUid", "podUid", "runNonce", "assignmentId",
-                     "agentDid", "artifactName")
+    source_fields = (
+        "namespace",
+        "taskName",
+        "taskUid",
+        "sandboxUid",
+        "podUid",
+        "runNonce",
+        "assignmentId",
+        "agentDid",
+        "artifactName",
+    )
     for value in values:
         keys(value, ("name", "source", "sha256", "content"), ("name", "source", "sha256", "content"))
         source, content = value["source"], value["content"]
@@ -256,8 +338,14 @@ def inputs(values):
         require(all(matches(ID, source[k]) for k in source_fields[1:7]) and matches(DID, source["agentDid"]))
         require(isinstance(content, str) and content.strip() and len(content.encode()) <= 65536)
         require(value["sha256"] == text_hash(content))
-        result.append({"name": value["name"], "source": {k: source[k] for k in source_fields},
-                       "sha256": value["sha256"], "content": content})
+        result.append(
+            {
+                "name": value["name"],
+                "source": {k: source[k] for k in source_fields},
+                "sha256": value["sha256"],
+                "content": content,
+            }
+        )
     require(len({v["name"] for v in result}) == len(result))
     result.sort(key=lambda v: v["name"])
     require(len(encoded(result)) <= MAX_INPUT)
@@ -276,8 +364,12 @@ def admission(value):
     require(type(value) is dict and value.get("state") in ("idle", "run"))
     fields = common + (("runNonce", "objectiveDigest") if value["state"] == "run" else ())
     keys(value, fields, fields)
-    require(type(value["version"]) is int and value["version"] == 1 and integer(value["taskGeneration"], 1)
-            and matches(SHA, value["authorizationDigest"]))
+    require(
+        type(value["version"]) is int
+        and value["version"] == 1
+        and integer(value["taskGeneration"], 1)
+        and matches(SHA, value["authorizationDigest"])
+    )
     if value["state"] == "run":
         require(matches(ID, value["runNonce"]) and matches(SHA, value["objectiveDigest"]))
     return value
@@ -303,8 +395,10 @@ def message(raw, expected, target, admitted):
         require(not expected.get("requiredOutputs") or value.get("artifactFormat") == "text-v1")
         if "inputDigest" in expected:
             value["inputArtifacts"] = inputs(value.get("inputArtifacts"))
-            require(digest({"schema": "kars.mission-inputs/v1", "inputs": value["inputArtifacts"]})
-                    == expected["inputDigest"])
+            require(
+                digest({"schema": "kars.mission-inputs/v1", "inputs": value["inputArtifacts"]})
+                == expected["inputDigest"]
+            )
         else:
             require("inputArtifacts" not in value)
     else:
@@ -321,8 +415,7 @@ def inference_call_limit(reviewed=None):
 
 def native_timeout_seconds(reviewed=None):
     if reviewed and reviewed.get("executionMode") == "native":
-        return min(2_147_483_647, inference_call_limit(reviewed) * 630_000
-                   + reviewed["maxToolCalls"] * 300_000) / 1000
+        return min(2_147_483_647, inference_call_limit(reviewed) * 630_000 + reviewed["maxToolCalls"] * 300_000) / 1000
     return 600
 
 
@@ -335,25 +428,34 @@ def native_event_limit(reviewed=None):
 def evidence(value, reviewed=None, previous=None, success=False):
     required = ("model", "rounds", "usage") + (("phase",) if reviewed else ())
     keys(value, required, required)
-    require(isinstance(value["model"], str) and value["model"].strip()
-            and integer(value["rounds"], 0, inference_call_limit(reviewed)))
+    require(
+        isinstance(value["model"], str)
+        and value["model"].strip()
+        and integer(value["rounds"], 0, inference_call_limit(reviewed))
+    )
     usage = value["usage"]
     if usage is not None:
         fields = ("promptTokens", "completionTokens", "totalTokens")
         keys(usage, fields, fields)
-        require(all(integer(usage[k]) for k in fields)
-                and usage["totalTokens"] == usage["promptTokens"] + usage["completionTokens"])
+        require(
+            all(integer(usage[k]) for k in fields)
+            and usage["totalTokens"] == usage["promptTokens"] + usage["completionTokens"]
+        )
     if reviewed:
         p = value["phase"]
         fields = ("name", "attemptedToolCalls", "successfulToolCalls", "minToolCalls", "maxToolCalls")
         keys(p, (*fields, "completedRequiredToolCalls"), fields)
-        require(integer(p["attemptedToolCalls"], 0, reviewed["maxToolCalls"])
-                and integer(p["successfulToolCalls"], 0, p["attemptedToolCalls"]))
+        require(
+            integer(p["attemptedToolCalls"], 0, reviewed["maxToolCalls"])
+            and integer(p["successfulToolCalls"], 0, p["attemptedToolCalls"])
+        )
         completed = p.get("completedRequiredToolCalls", 0)
-        require(integer(completed, 0, len(reviewed["requiredToolCalls"]))
-                and completed <= p["successfulToolCalls"]
-                and (not success or completed == len(reviewed["requiredToolCalls"])),
-                "Required reviewed fetch calls were not successfully completed")
+        require(
+            integer(completed, 0, len(reviewed["requiredToolCalls"]))
+            and completed <= p["successfulToolCalls"]
+            and (not success or completed == len(reviewed["requiredToolCalls"])),
+            "Required reviewed fetch calls were not successfully completed",
+        )
         require(all(p[k] == reviewed[k] for k in ("name", "minToolCalls", "maxToolCalls")))
         require(not success or p["successfulToolCalls"] >= reviewed["minToolCalls"])
     if previous:
@@ -362,9 +464,12 @@ def evidence(value, reviewed=None, previous=None, success=False):
         if usage and previous["usage"]:
             require(all(usage[k] >= previous["usage"][k] for k in usage))
         if reviewed:
-            require(all(value["phase"][k] >= previous["phase"][k]
-                        for k in ("attemptedToolCalls", "successfulToolCalls")))
-            require(value["phase"].get("completedRequiredToolCalls", 0)
-                    >= previous["phase"].get("completedRequiredToolCalls", 0))
+            require(
+                all(value["phase"][k] >= previous["phase"][k] for k in ("attemptedToolCalls", "successfulToolCalls"))
+            )
+            require(
+                value["phase"].get("completedRequiredToolCalls", 0)
+                >= previous["phase"].get("completedRequiredToolCalls", 0)
+            )
     require(not success or (value["rounds"] > 0 and usage is not None and usage["totalTokens"] > 0))
     return loads(encoded(value))

@@ -109,10 +109,10 @@ pub(crate) async fn request_owned_team_run(
     let ns = owner.namespace.as_str();
     let name = owner.name.as_str();
     let api: Api<KarsTeam> = cluster.teams(ns);
-    let work = super::read_tasks(cluster, &team).await?;
+    let work = super::read_tasks(cluster, team).await?;
     super::backlog::validate_revision_plan(team, &work)?;
     crate::kars::execution_plans::validate(&team, true).map_err(AppError::BadRequest)?;
-    let patch = run_request_patch(&team)?;
+    let patch = run_request_patch(team)?;
     if team.spec.paused {
         return Err(AppError::BadRequest(
             "team is paused — resume it before running".into(),
@@ -140,7 +140,7 @@ pub(crate) async fn request_owned_team_run(
         .items
         .into_iter()
         .any(|task| {
-            owned_run(&task.metadata, &team)
+            owned_run(&task.metadata, team)
                 && task
                     .annotations()
                     .get("kars.azure.com/team-role")

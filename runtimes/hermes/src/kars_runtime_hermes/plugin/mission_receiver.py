@@ -42,34 +42,55 @@ def bootstrap(home):
             raise
         _CUSTODY = custody
     require_supported_runtime()
-    target = {key: os.environ.get("KARS_MISSION_" + env, "") for key, env in (
-        ("taskName", "TASK_NAME"), ("taskUid", "TASK_UID"), ("sandboxUid", "SANDBOX_UID"),
-        ("podUid", "POD_UID"), ("dispatcherDid", "DISPATCHER_DID"))}
+    target = {
+        key: os.environ.get("KARS_MISSION_" + env, "")
+        for key, env in (
+            ("taskName", "TASK_NAME"),
+            ("taskUid", "TASK_UID"),
+            ("sandboxUid", "SANDBOX_UID"),
+            ("podUid", "POD_UID"),
+            ("dispatcherDid", "DISPATCHER_DID"),
+        )
+    }
     wire.require(all(wire.matches(wire.ID, target[k]) for k in ("taskName", "taskUid", "sandboxUid", "podUid")))
     wire.require(all(":" not in target[k] for k in ("sandboxUid", "podUid")))
     wire.require(wire.matches(wire.DID, target["dispatcherDid"]))
     root = os.environ.get("KARS_MISSION_IDENTITY_ROOT", "")
     wire.require(re.fullmatch(r"[a-fA-F0-9]{64}", root) is not None, "Missing mission identity root")
-    seed = hmac.digest(bytes.fromhex(root), wire.encoded([
-        "kars-mission-identity-v1", "runtime", target["sandboxUid"], target["podUid"]]), "sha256")
+    seed = hmac.digest(
+        bytes.fromhex(root),
+        wire.encoded(["kars-mission-identity-v1", "runtime", target["sandboxUid"], target["podUid"]]),
+        "sha256",
+    )
     from kars_agt_mesh.identity import Identity, IdentityStore
+
     identity = Identity(seed, hmac.digest(seed, b"kars-hermes-mission-exchange-v1", "sha256"))
     target["agentDid"] = identity.did
     contract = wire.configured_contract(os.environ.get("KARS_MISSION_CONTRACT", ""))
     admitted = wire.admission(wire.loads(os.environ.get("KARS_MISSION_ADMISSION", ""), 8192))
     model = os.environ.get("KARS_MODEL") or os.environ.get("AZURE_OPENAI_DEPLOYMENT")
-    wire.require(isinstance(model, str) and 0 < len(model) <= 200 and model == model.strip()
-                 and not any(c.isspace() for c in model), "Installed missions require KARS_MODEL")
+    wire.require(
+        isinstance(model, str)
+        and 0 < len(model) <= 200
+        and model == model.strip()
+        and not any(c.isspace() for c in model),
+        "Installed missions require KARS_MODEL",
+    )
     identity_path = Path(home) / ".agt" / "missions" / target["podUid"] / "identity.json"
-    wire.require(not any(p.is_symlink() for p in (identity_path, *identity_path.parents)),
-                 "Mission identity path cannot contain symlinks")
+    wire.require(
+        not any(p.is_symlink() for p in (identity_path, *identity_path.parents)),
+        "Mission identity path cannot contain symlinks",
+    )
     identity_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     if identity_path.exists():
         wire.require(IdentityStore.load_or_create(identity_path) == identity, "Mission identity mismatch")
     else:
-        data = {"version": 1, "did": identity.did,
-                "ed25519_seed": base64.urlsafe_b64encode(seed).rstrip(b"=").decode(),
-                "x25519_secret": base64.urlsafe_b64encode(identity.x25519_secret).rstrip(b"=").decode()}
+        data = {
+            "version": 1,
+            "did": identity.did,
+            "ed25519_seed": base64.urlsafe_b64encode(seed).rstrip(b"=").decode(),
+            "x25519_secret": base64.urlsafe_b64encode(identity.x25519_secret).rstrip(b"=").decode(),
+        }
         fd = os.open(identity_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, "wb") as file:
             file.write(wire.encoded(data))
@@ -78,21 +99,30 @@ def bootstrap(home):
 
 
 async def authorize(assignment, *, peer_name=None, peer_args=None):
-    context = {"task_uid": assignment["taskUid"], "run_nonce": assignment["runNonce"],
-               "dispatcher_did": assignment["dispatcherDid"], "assignment_id": assignment["assignmentId"]}
-    for snake, camel in (("phase_digest", "phaseDigest"), ("reviewed_phase", "reviewedPhase"),
-                         ("input_digest", "inputDigest")):
+    context = {
+        "task_uid": assignment["taskUid"],
+        "run_nonce": assignment["runNonce"],
+        "dispatcher_did": assignment["dispatcherDid"],
+        "assignment_id": assignment["assignmentId"],
+    }
+    for snake, camel in (
+        ("phase_digest", "phaseDigest"),
+        ("reviewed_phase", "reviewedPhase"),
+        ("input_digest", "inputDigest"),
+    ):
         if camel in assignment:
             context[snake] = assignment[camel]
     action = "task:execute"
     if peer_name is not None:
         from .governance import _action_verb
+
         action = _action_verb(peer_name, peer_args)
         context.update(tool=peer_name, arguments=peer_args)
     try:
         async with httpx.AsyncClient(timeout=2, trust_env=False) as client:
-            async with client.stream("POST", "http://127.0.0.1:8443/agt/evaluate",
-                                     json={"action": action, "context": context}) as response:
+            async with client.stream(
+                "POST", "http://127.0.0.1:8443/agt/evaluate", json={"action": action, "context": context}
+            ) as response:
                 if response.status_code != 200:
                     return False
                 body = bytearray()
@@ -115,12 +145,19 @@ async def model_limits(model):
                     wire.require(len(body) + len(chunk) <= 65536, "Native model metadata exceeds its response bound")
                     body.extend(chunk)
                 data = wire.loads(bytes(body), 65536).get("data")
-                wire.require(isinstance(data, list) and len(data) == 1 and isinstance(data[0], dict)
-                             and data[0].get("id") == model, "Native model metadata does not match the selected model")
+                wire.require(
+                    isinstance(data, list)
+                    and len(data) == 1
+                    and isinstance(data[0], dict)
+                    and data[0].get("id") == model,
+                    "Native model metadata does not match the selected model",
+                )
                 context = data[0].get("context_window")
                 output = data[0].get("max_output_tokens")
-                wire.require(wire.integer(context, 1, 2**53 - 1) and wire.integer(output, 1, 2**53 - 1),
-                             "Native model metadata has no valid context/output limits")
+                wire.require(
+                    wire.integer(context, 1, 2**53 - 1) and wire.integer(output, 1, 2**53 - 1),
+                    "Native model metadata has no valid context/output limits",
+                )
                 return {"contextWindow": context, "maxTokens": output}
 
 
@@ -151,24 +188,43 @@ async def native_execute(assignment, contract, model, progress, *, peer_call=Non
             f"model:\n  context_length: {limits['contextWindow']}\ncompression:\n  enabled: false\n"
             "memory:\n  memory_enabled: false\n  user_profile_enabled: false\n"
             "security:\n  allow_lazy_installs: false\n"
-            "toolsets: []\nmcp_servers: {}\nplugins: {}\n", encoding="utf-8")
+            "toolsets: []\nmcp_servers: {}\nplugins: {}\n",
+            encoding="utf-8",
+        )
         source = Path(kars_runtime_hermes.__file__).resolve().parent.parent
-        env = {"HOME": str(work / "home"), "HERMES_HOME": str(work / "home"), "TMPDIR": str(work / "scratch"),
-               "PYTHONPATH": str(source), "PYTHONDONTWRITEBYTECODE": "1", "PYTHONNOUSERSITE": "1",
-               "PATH": str(Path(sys.executable).parent) + ":/usr/bin:/bin", "HERMES_TELEMETRY_ENABLED": "false",
-               "HERMES_DISABLE_LAZY_INSTALLS": "1", "HERMES_SKIP_NODE_BOOTSTRAP": "1", "TIRITH_ENABLED": "false"}
+        env = {
+            "HOME": str(work / "home"),
+            "HERMES_HOME": str(work / "home"),
+            "TMPDIR": str(work / "scratch"),
+            "PYTHONPATH": str(source),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONNOUSERSITE": "1",
+            "PATH": str(Path(sys.executable).parent) + ":/usr/bin:/bin",
+            "HERMES_TELEMETRY_ENABLED": "false",
+            "HERMES_DISABLE_LAZY_INSTALLS": "1",
+            "HERMES_SKIP_NODE_BOOTSTRAP": "1",
+            "TIRITH_ENABLED": "false",
+        }
         for key in ("KARS_SKILL_CATALOG_DIGEST", "KARS_AGENT_INSTRUCTIONS"):
             if key in os.environ:
                 env[key] = os.environ[key]
         request = {**assignment, "contract": contract, "model": model, "modelLimits": limits, "peerTools": peer_enabled}
         async with asyncio.timeout(wire.native_timeout_seconds(phase)):
             process = await asyncio.create_subprocess_exec(
-                sys.executable, "-m", mission_native.__name__, cwd=work, env=env,
-                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-                limit=wire.MAX_WIRE + 1)
+                sys.executable,
+                "-m",
+                mission_native.__name__,
+                cwd=work,
+                env=env,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+                limit=wire.MAX_WIRE + 1,
+            )
             initial = wire.encoded(request) + b"\n"
-            wire.require(len(initial) <= wire.MAX_WIRE and wire.message_fits(request),
-                         "Native assignment exceeds frame limit")
+            wire.require(
+                len(initial) <= wire.MAX_WIRE and wire.message_fits(request), "Native assignment exceeds frame limit"
+            )
             process.stdin.write(initial)
             await process.stdin.drain()
             result = None
@@ -198,17 +254,19 @@ async def native_execute(assignment, contract, model, progress, *, peer_call=Non
                     attempted = event["evidence"].get("phase", {}).get("attemptedToolCalls", 0)
                 elif event.get("kind") == "peer_request":
                     wire.keys(event, ("kind", "id", "name", "arguments"), ("kind", "id", "name", "arguments"))
-                    wire.require(peer_enabled and wire.integer(event["id"], sequence + 1, sequence + 1)
-                                 and sequence < phase["maxToolCalls"]
-                                 and wire.integer(attempted, sequence + 1, phase["maxToolCalls"]),
-                                 "Native peer request has no reserved assignment invocation")
+                    wire.require(
+                        peer_enabled
+                        and wire.integer(event["id"], sequence + 1, sequence + 1)
+                        and sequence < phase["maxToolCalls"]
+                        and wire.integer(attempted, sequence + 1, phase["maxToolCalls"]),
+                        "Native peer request has no reserved assignment invocation",
+                    )
                     mission_peer.validate_call(event["name"], event["arguments"])
                     sequence += 1
                     # One stdout reader also observes EOF/pipelining during a blocked peer wait.
                     reader = asyncio.create_task(process.stdout.readline())
                     pending_peer = asyncio.create_task(peer_call(event["name"], event["arguments"]))
-                    wait = event["arguments"].get(
-                        "timeout_seconds", 300 if event["name"] == "kars_mesh_await" else 30)
+                    wait = event["arguments"].get("timeout_seconds", 300 if event["name"] == "kars_mesh_await" else 30)
                     async with asyncio.timeout(wait + 5):
                         done, _ = await asyncio.wait((reader, pending_peer), return_when=asyncio.FIRST_COMPLETED)
                         wire.require(reader not in done, "Native pipe closed or pipelined during peer request")
@@ -228,9 +286,12 @@ async def native_execute(assignment, contract, model, progress, *, peer_call=Non
             wire.require(code == 0 and result is not None, "Native worker exited without measured result")
         for item in assignment.get("inputArtifacts", []):
             path = work / "inputs" / item["name"]
-            wire.require(not path.parent.is_symlink() and not path.is_symlink()
-                         and mission_native.read_file_bytes(path) == item["content"].encode(),
-                         "Immutable input changed")
+            wire.require(
+                not path.parent.is_symlink()
+                and not path.is_symlink()
+                and mission_native.read_file_bytes(path) == item["content"].encode(),
+                "Immutable input changed",
+            )
         return result
     except BaseException as error:
         interruption = error
@@ -267,13 +328,19 @@ def interrupted_python_evidence(error, phase, previous, model, assignment):
     if not isinstance(result, dict):
         return {}
     try:
-        wire.require(result.get("kind") == "error" and assignment.get("artifactFormat") == "text-v1"
-                     and phase.get("executionMode") == "native" and "python-execute" in phase["capabilities"])
+        wire.require(
+            result.get("kind") == "error"
+            and assignment.get("artifactFormat") == "text-v1"
+            and phase.get("executionMode") == "native"
+            and "python-execute" in phase["capabilities"]
+        )
         measured = wire.evidence(result["evidence"], phase, previous, success=False)
         wire.require(measured["model"] == model)
         exports = wire.artifacts(result["artifacts"])
-        wire.require(set(exports) == {"kars-python-executions.json"}
-                     and len(exports["kars-python-executions.json"].encode()) <= 65536)
+        wire.require(
+            set(exports) == {"kars-python-executions.json"}
+            and len(exports["kars-python-executions.json"].encode()) <= 65536
+        )
         return {"evidence": measured, "artifacts": exports}
     except (KeyError, ValueError, TypeError):
         return {}
@@ -292,8 +359,14 @@ class MissionReceiver:
         self.send_lock = asyncio.Lock()
 
     def reply(self, assignment, status, **fields):
-        result = {**self.target, **self.contract, "type": "mission:reply", "runNonce": assignment["runNonce"],
-                  "bootId": self.boot_id, "status": status}
+        result = {
+            **self.target,
+            **self.contract,
+            "type": "mission:reply",
+            "runNonce": assignment["runNonce"],
+            "bootId": self.boot_id,
+            "status": status,
+        }
         for key in ("challenge", "assignmentId", "artifactFormat", "activityFormat"):
             if key in assignment:
                 result[key] = assignment[key]
@@ -311,8 +384,9 @@ class MissionReceiver:
     def check_epoch(self, epoch):
         if epoch is not None:
             auth, generation = epoch
-            wire.require(auth is self.client.connection_auth and auth.generation == generation,
-                         "Mesh authorization changed")
+            wire.require(
+                auth is self.client.connection_auth and auth.generation == generation, "Mesh authorization changed"
+            )
             auth.check()
 
     async def native_peer(self, assignment, entry, epoch, owner, name, args):
@@ -323,23 +397,30 @@ class MissionReceiver:
 
         def current():
             self.check_epoch(epoch)
-            wire.require(self.active is owner and not owner.done()
-                         and self.ledger.get(assignment["runNonce"]) is entry
-                         and entry.get("reply", {}).get("status") in ("accepted", "running")
-                         and mesh._MESH_SINGLETON is self.client
-                         and getattr(self.client, "_kars_mission_receiver", None) is self
-                         and self.client._inbox_partition is not None
-                         and asyncio.get_running_loop() is mesh._BACKGROUND_LOOP,
-                         "Native peer assignment is no longer current")
+            wire.require(
+                self.active is owner
+                and not owner.done()
+                and self.ledger.get(assignment["runNonce"]) is entry
+                and entry.get("reply", {}).get("status") in ("accepted", "running")
+                and mesh._MESH_SINGLETON is self.client
+                and getattr(self.client, "_kars_mission_receiver", None) is self
+                and self.client._inbox_partition is not None
+                and asyncio.get_running_loop() is mesh._BACKGROUND_LOOP,
+                "Native peer assignment is no longer current",
+            )
 
         current()
         phase = self.contract.get("reviewedPhase", {})
-        wire.require(phase.get("executionMode") == "native" and "network" in phase["capabilities"],
-                     "Native peer tools require assigned network authority")
+        wire.require(
+            phase.get("executionMode") == "native" and "network" in phase["capabilities"],
+            "Native peer tools require assigned network authority",
+        )
         mission_peer.validate_call(name, args)
         if name == "kars_mesh_send":
-            wire.require(not _is_reserved_message(SimpleNamespace(payload=args["content"].encode())),
-                         "Native peer tools cannot send reserved Mission envelopes")
+            wire.require(
+                not _is_reserved_message(SimpleNamespace(payload=args["content"].encode())),
+                "Native peer tools cannot send reserved Mission envelopes",
+            )
         allowed = await authorize(assignment, peer_name=name, peer_args=args)
         current()
         if not allowed:
@@ -350,12 +431,17 @@ class MissionReceiver:
             elif name == "kars_mesh_inbox":
                 result = await mesh._drain_peer(self.client, max_bytes=mission_peer.RESULT_BYTES)
             elif name == "kars_mesh_await":
-                result = await mesh._await_peer(self.client, args.get("senders", []), args.get("timeout_seconds", 300),
-                                               max_bytes=mission_peer.RESULT_BYTES)
+                result = await mesh._await_peer(
+                    self.client,
+                    args.get("senders", []),
+                    args.get("timeout_seconds", 300),
+                    max_bytes=mission_peer.RESULT_BYTES,
+                )
             else:
                 result = await discover_peer(self.client, args)
-            wire.require(len(wire.encoded(result)) <= mission_peer.RESULT_BYTES,
-                         "Native peer result exceeds byte limit")
+            wire.require(
+                len(wire.encoded(result)) <= mission_peer.RESULT_BYTES, "Native peer result exceeds byte limit"
+            )
         except Exception as exc:
             result = {"error": str(exc)[:512], "partial": []}
         current()
@@ -418,17 +504,19 @@ class MissionReceiver:
             previous = validated
             fields = {"evidence": previous}
             if observations is not None:
-                wire.require(assignment.get("activityFormat") == wire.ACTIVITY,
-                             "Unnegotiated router observations")
+                wire.require(assignment.get("activityFormat") == wire.ACTIVITY, "Unnegotiated router observations")
                 observed = wire.loads(observations, wire.MAX_ACTIVITY, max_nodes=wire.MAX_OBSERVATION_EVENTS * 64)
-                wire.require(isinstance(observations, str) and isinstance(observed, dict)
-                             and wire.integer(observed.get("version"), 1, 1)
-                             and observed.get("source") == "runtime-forwarded-router-observations"
-                             and observed.get("coverage") == "returned-responses-only"
-                             and wire.integer(observed.get("responses"), 1)
-                             and type(observed.get("rounds")) is list
-                             and observed.get("state") in ("observed", "unavailable"),
-                             "Invalid router observations")
+                wire.require(
+                    isinstance(observations, str)
+                    and isinstance(observed, dict)
+                    and wire.integer(observed.get("version"), 1, 1)
+                    and observed.get("source") == "runtime-forwarded-router-observations"
+                    and observed.get("coverage") == "returned-responses-only"
+                    and wire.integer(observed.get("responses"), 1)
+                    and type(observed.get("rounds")) is list
+                    and observed.get("state") in ("observed", "unavailable"),
+                    "Invalid router observations",
+                )
                 latest_observations = observations
             if latest_observations is not None:
                 fields["routerObservations"] = latest_observations
@@ -453,8 +541,11 @@ class MissionReceiver:
                 result = await self.execute(assignment, self.contract, self.model, progress)
             self.check_epoch(epoch)
             wire.require(result.get("kind") in ("result", "error"), "Invalid native terminal")
-            fields = ("kind", "evidence", "error") if result["kind"] == "error" else (
-                "kind", "evidence", "output", "artifacts")
+            fields = (
+                ("kind", "evidence", "error")
+                if result["kind"] == "error"
+                else ("kind", "evidence", "output", "artifacts")
+            )
             wire.keys(result, (*fields, "output", "artifacts") if result["kind"] == "error" else fields, fields)
             measured = wire.evidence(result["evidence"], phase, previous, success=result["kind"] == "result")
             wire.require(measured["model"] == self.model)
@@ -463,18 +554,24 @@ class MissionReceiver:
                 partial = {}
                 if "artifacts" in result:
                     exports = wire.artifacts(result["artifacts"])
-                    wire.require(set(exports) == {"kars-python-executions.json"}
-                                 and assignment.get("artifactFormat") == "text-v1"
-                                 and phase.get("executionMode") == "native"
-                                 and "python-execute" in phase["capabilities"], "Only native Python receipts survive failed execution")
+                    wire.require(
+                        set(exports) == {"kars-python-executions.json"}
+                        and assignment.get("artifactFormat") == "text-v1"
+                        and phase.get("executionMode") == "native"
+                        and "python-execute" in phase["capabilities"],
+                        "Only native Python receipts survive failed execution",
+                    )
                     partial["artifacts"] = exports
                 if "output" in result:
                     output = result["output"]
-                    wire.require(isinstance(output, str) and output.strip()
-                                 and len(output.encode("utf-8")) <= 16384, "Invalid failed Mission explanation")
+                    wire.require(
+                        isinstance(output, str) and output.strip() and len(output.encode("utf-8")) <= 16384,
+                        "Invalid failed Mission explanation",
+                    )
                     partial["output"] = output
-                entry["reply"] = self.reply(assignment, "failed", error=result["error"][:512],
-                                            evidence=measured, **partial)
+                entry["reply"] = self.reply(
+                    assignment, "failed", error=result["error"][:512], evidence=measured, **partial
+                )
             else:
                 output = result["output"]
                 wire.require(isinstance(output, str) and output.strip())

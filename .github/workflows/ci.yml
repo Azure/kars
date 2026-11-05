@@ -262,11 +262,20 @@ jobs:
         with:
           sparse-checkout: |
             /*
-            !/bridge/
+            !/bridge/*
+            /bridge/deploy/
+            !/bridge/deploy/*
+            /bridge/deploy/helm/
+            !/bridge/deploy/helm/*
+            /bridge/deploy/helm/kars-bridge/
           sparse-checkout-cone-mode: false
-      - name: Require standalone core checkout
+      - name: Require CLI charts without Bridge runtime sources
         working-directory: .
-        run: test ! -e bridge
+        run: |
+          test -f deploy/helm/kars/Chart.yaml
+          test -f bridge/deploy/helm/kars-bridge/Chart.yaml
+          test ! -e bridge/bff
+          test ! -e bridge/web
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: v4.1.3
@@ -341,6 +350,25 @@ jobs:
       - name: npm audit (Mesh Plugin dependencies)
         working-directory: mesh-plugin
         run: node ../ci/npm-audit-bulk.mjs package-lock.json
+
+  headlamp-plugin-build:
+    name: Headlamp Plugin Build & Test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: tools/headlamp-plugin
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - name: npm audit (Headlamp dependencies)
+        run: node ../../ci/npm-audit-bulk.mjs package-lock.json
 
   managed-mcp:
     name: Managed MCP Dependencies & Protocol
@@ -424,6 +452,26 @@ jobs:
           # sandbox-images/hermes/Dockerfile.
           pip install -e runtimes/agt-mesh-python
           pip install -e "runtimes/hermes[dev]"
+      - name: Install the image-pinned Hermes runtime for native tests
+        env:
+          HERMES_DISABLE_LAZY_INSTALLS: '1'
+          HERMES_SKIP_NODE_BOOTSTRAP: '1'
+        run: |
+          hermes_commit=$(sed -n 's/^ARG HERMES_COMMIT=\([a-f0-9]\{40\}\)$/\1/p' sandbox-images/hermes/Dockerfile)
+          test "${#hermes_commit}" -eq 40
+          hermes_source="$RUNNER_TEMP/kars-hermes-source"
+          git init -q "$hermes_source"
+          git -C "$hermes_source" fetch --depth=1 https://github.com/NousResearch/hermes-agent.git "$hermes_commit"
+          git -C "$hermes_source" checkout --detach -q FETCH_HEAD
+          test "$(git -C "$hermes_source" rev-parse HEAD)" = "$hermes_commit"
+          (cd sandbox-images/hermes && sha256sum --strict --check hermes-source-SHA256SUMS)
+          git -C "$hermes_source" apply "$GITHUB_WORKSPACE/sandbox-images/hermes/hermes-dependency-fixes.patch"
+          cp sandbox-images/hermes/hermes-uv.lock "$hermes_source/uv.lock"
+          git -C "$hermes_source" apply "$GITHUB_WORKSPACE/sandbox-images/hermes/hermes-foundry-bounds.patch"
+          git -C "$hermes_source" apply "$GITHUB_WORKSPACE/sandbox-images/hermes/hermes-foundry-responses.patch"
+          cp sandbox-images/hermes/azure-foundry-provider.py "$hermes_source/plugins/model-providers/azure-foundry/__init__.py"
+          python -m pip install --constraint sandbox-images/hermes/hermes-core-constraints.txt --editable "$hermes_source"
+          python -c "import importlib.metadata as m, importlib.util; assert m.version('hermes-agent') == '0.21.5'; assert importlib.util.find_spec('run_agent') is not None"
       - name: Run hermes ruff lint
         run: |
           cd runtimes/hermes
@@ -753,11 +801,20 @@ jobs:
           fetch-depth: 0
           sparse-checkout: |
             /*
-            !/bridge/
+            !/bridge/*
+            /bridge/deploy/
+            !/bridge/deploy/*
+            /bridge/deploy/helm/
+            !/bridge/deploy/helm/*
+            /bridge/deploy/helm/kars-bridge/
           sparse-checkout-cone-mode: false
-      - name: Require standalone core checkout
+      - name: Require CLI charts without Bridge runtime sources
         working-directory: .
-        run: test ! -e bridge
+        run: |
+          test -f deploy/helm/kars/Chart.yaml
+          test -f bridge/deploy/helm/kars-bridge/Chart.yaml
+          test ! -e bridge/bff
+          test ! -e bridge/web
 
       - name: Detect runtime-affecting changes
         id: paths

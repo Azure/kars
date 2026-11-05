@@ -296,24 +296,24 @@ fn verify_adopted_policy_update(
     let mut comparison = current.clone();
     // Only an already validated unbounded funding grant authorizes removing
     // calendar or request ceilings. It does not authorize other policy drift.
-    if unbounded_tokens {
-        if let Some(original_budget) = original.get("tokenBudget").and_then(Value::as_object) {
-            match comparison.get_mut("tokenBudget") {
-                None | Some(Value::Null) => {
-                    comparison["tokenBudget"] = Value::Object(original_budget.clone());
-                }
-                Some(Value::Object(budget)) => {
-                    for field in ["dailyTokens", "monthlyTokens", "perRequestTokens"] {
-                        if let Some(value) = original_budget.get(field) {
-                            let selected = budget.entry(field).or_insert(Value::Null);
-                            if selected.is_null() {
-                                *selected = value.clone();
-                            }
+    if unbounded_tokens
+        && let Some(original_budget) = original.get("tokenBudget").and_then(Value::as_object)
+    {
+        match comparison.get_mut("tokenBudget") {
+            None | Some(Value::Null) => {
+                comparison["tokenBudget"] = Value::Object(original_budget.clone());
+            }
+            Some(Value::Object(budget)) => {
+                for field in ["dailyTokens", "monthlyTokens", "perRequestTokens"] {
+                    if let Some(value) = original_budget.get(field) {
+                        let selected = budget.entry(field).or_insert(Value::Null);
+                        if selected.is_null() {
+                            *selected = value.clone();
                         }
                     }
                 }
-                _ => return Err(BudgetError::Authorization),
             }
+            _ => return Err(BudgetError::Authorization),
         }
     }
     let path = "/tokenBudget/dailyTokens";

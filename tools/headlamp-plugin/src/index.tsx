@@ -313,11 +313,6 @@ function phaseChip(phase: string | undefined, reason?: string) {
   );
 }
 
-function chipForItem(item: KubeObject, phaseField: string) {
-  const phase = (getStatus(item) as any)[phaseField] as string | undefined;
-  return phaseChip(phase, readyReason(item));
-}
-
 function urlParams(re: RegExp): RegExpMatchArray | null {
   return window.location.pathname.match(re);
 }

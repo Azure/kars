@@ -93,6 +93,56 @@ class ContractScopeTests(GitFixture):
             self.assertTrue((self.root / path).is_file(), path)
 
 
+    def test_headlamp_ci_verifies_locked_test_and_build_dependencies(self):
+        workflow = (CI.parent / ".github/workflows/ci.yml").read_text()
+        job = workflow.split("  headlamp-plugin-build:", 1)[1].split("  managed-mcp:", 1)[0]
+        for required in (
+            "working-directory: tools/headlamp-plugin", 'node-version: "22"',
+            "npm ci", "npm test", "npm run build",
+            "node ../../ci/npm-audit-bulk.mjs package-lock.json",
+        ):
+            self.assertIn(required, job)
+        self.assertLess(job.index("npm ci"), job.index("npm test"))
+        self.assertLess(job.index("npm ci"), job.index("npm run build"))
+
+    def test_hermes_ci_installs_the_image_runtime_before_native_tests(self):
+        workflow = (CI.parent / ".github/workflows/ci.yml").read_text()
+        job = workflow.split("  hermes-runtime:", 1)[1].split("  kars-agt-mesh-python:", 1)[0]
+        for required in (
+            "sandbox-images/hermes/Dockerfile", 'test "${#hermes_commit}" -eq 40',
+            'test "$(git -C "$hermes_source" rev-parse HEAD)" = "$hermes_commit"',
+            "sha256sum --strict --check hermes-source-SHA256SUMS",
+            "hermes-dependency-fixes.patch", "hermes-foundry-bounds.patch",
+            "hermes-foundry-responses.patch", "sandbox-images/hermes/azure-foundry-provider.py",
+            '--constraint sandbox-images/hermes/hermes-core-constraints.txt --editable "$hermes_source"',
+            "assert m.version('hermes-agent') == '0.21.5'",
+            "assert importlib.util.find_spec('run_agent') is not None",
+        ):
+            self.assertIn(required, job)
+        self.assertLess(job.index("assert m.version"), job.index("python -m pytest -v"))
+
+    def test_cli_consumers_include_both_charts_without_bridge_runtime_sources(self):
+        workflow = (CI.parent / ".github/workflows/ci.yml").read_text()
+        for path in ("cli/src/index.ts", "deploy/helm/kars/Chart.yaml",
+                     "bridge/deploy/helm/kars-bridge/Chart.yaml", "bridge/bff/Cargo.toml",
+                     "bridge/web/package.json", "bridge/deploy/unrelated.yaml"):
+            self.write(path, "fixture\n")
+        self.commit()
+        for job in ("cli-build", "e2e-kind"):
+            block = re.search(rf"(?ms)^  {job}:\n(.*?)(?=^  \S|\Z)", workflow)
+            self.assertIsNotNone(block, job)
+            patterns = re.search(r"sparse-checkout: \|\n((?:            .*\n)+)", block.group(1))
+            self.assertIsNotNone(patterns, job)
+            self.git("sparse-checkout", "set", "--no-cone",
+                     *[line.strip() for line in patterns.group(1).splitlines()])
+            for path in ("cli/src/index.ts", "deploy/helm/kars/Chart.yaml",
+                         "bridge/deploy/helm/kars-bridge/Chart.yaml"):
+                self.assertTrue((self.root / path).is_file(), f"{job}: {path}")
+            for path in ("bridge/bff", "bridge/web", "bridge/deploy/unrelated.yaml"):
+                self.assertFalse((self.root / path).exists(), f"{job}: {path}")
+            self.git("sparse-checkout", "disable")
+
+
 class ContractAggregateTests(unittest.TestCase):
     components = (
         "addon", "bff", "dependencies", "idp", "lockfiles",

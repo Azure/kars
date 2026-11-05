@@ -65,7 +65,11 @@ def payload(record: dict[str, Any], interval: int, timeout: int) -> dict[str, An
     if len(text) > MAX_TEXT_BYTES:
         # Keep failure context and the final diagnosis/remedies rather than only CLI startup logs.
         marker = b"\n[report excerpt truncated; diagnostic coverage incomplete]\n"
-        text = text[:2048].decode("utf-8", errors="ignore").encode() + marker + text[-(MAX_TEXT_BYTES - 2048 - len(marker)):].decode("utf-8", errors="ignore").encode()
+        text = (
+            text[:2048].decode("utf-8", errors="ignore").encode()
+            + marker
+            + text[-(MAX_TEXT_BYTES - 2048 - len(marker)) :].decode("utf-8", errors="ignore").encode()
+        )
     return {
         "sweep_id": record["sweep_id"],
         "started_at_ms": int(record["started_at"] * 1000),
@@ -79,8 +83,11 @@ def payload(record: dict[str, Any], interval: int, timeout: int) -> dict[str, An
 
 
 def publish(record: dict[str, Any], interval: int, timeout: int) -> dict[str, Any]:
-    if (not sre.is_enabled() or os.environ.get("KUBERNETES_SERVICE_HOST") != "127.0.0.1"
-            or os.environ.get("KUBERNETES_SERVICE_PORT") != "9446"):
+    if (
+        not sre.is_enabled()
+        or os.environ.get("KUBERNETES_SERVICE_HOST") != "127.0.0.1"
+        or os.environ.get("KUBERNETES_SERVICE_PORT") != "9446"
+    ):
         raise RuntimeError("Registered private SRE projection is required for reporting")
     report = payload(record, interval, timeout)
     for attempt in range(2):
@@ -90,11 +97,14 @@ def publish(record: dict[str, Any], interval: int, timeout: int) -> dict[str, An
         except (httpx.TransportError, httpx.HTTPStatusError) as exc:
             if attempt or (isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code < 500):
                 raise
-    if (not isinstance(receipt, dict) or receipt.get("persisted") is not True
-            or receipt.get("sweep_id") != report["sweep_id"]
-            or receipt.get("enforcement_changed") is not False
-            or type(receipt.get("accepted_at_ms")) is not int
-            or receipt["accepted_at_ms"] <= 0
-            or not re.fullmatch(r"[a-f0-9]{64}", str(receipt.get("digest", "")))):
+    if (
+        not isinstance(receipt, dict)
+        or receipt.get("persisted") is not True
+        or receipt.get("sweep_id") != report["sweep_id"]
+        or receipt.get("enforcement_changed") is not False
+        or type(receipt.get("accepted_at_ms")) is not int
+        or receipt["accepted_at_ms"] <= 0
+        or not re.fullmatch(r"[a-f0-9]{64}", str(receipt.get("digest", "")))
+    ):
         raise RuntimeError("Report persistence acknowledgement is invalid")
     return receipt

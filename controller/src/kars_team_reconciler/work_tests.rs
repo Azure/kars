@@ -99,7 +99,7 @@ async fn revision_input_admission_blocks_manual_and_cadence_before_task_creation
                 };
                 work::validate_revision_plan(
                     &team,
-                    &work::Selection::Item(binding.clone(), pending.clone()),
+                    &work::Selection::Item(binding.clone(), Box::new(pending.clone())),
                 )
                 .unwrap();
                 pending.history.push(contract::Attempt {
@@ -129,15 +129,16 @@ async fn revision_input_admission_blocks_manual_and_cadence_before_task_creation
                     .to_string();
                 assert!(error.contains("ReviewedInputCapabilityRequired"), "{error}");
                 assert!(error.contains("benchmark-research"), "{error}");
-                let state = store.lock().unwrap();
-                assert!(state.tasks.is_empty());
-                assert!(state.activation_reservations.is_empty());
-                assert_eq!(state.team, team_before);
-                assert_eq!(
-                    state.cms, cms_before,
-                    "feedback, output hash and history are immutable on refusal"
-                );
-                drop(state);
+                {
+                    let state = store.lock().unwrap();
+                    assert!(state.tasks.is_empty());
+                    assert!(state.activation_reservations.is_empty());
+                    assert_eq!(state.team, team_before);
+                    assert_eq!(
+                        state.cms, cms_before,
+                        "feedback, output hash and history are immutable on refusal"
+                    );
+                }
                 assert!(
                     server.received_requests().await.unwrap()[before..]
                         .iter()
@@ -156,8 +157,11 @@ async fn revision_input_admission_blocks_manual_and_cadence_before_task_creation
                 phase.capabilities.push("filesystem-read".into());
                 phase.max_tool_calls = 8;
                 let reviewed = json!(team);
-                work::validate_revision_plan(&team, &work::Selection::Item(binding, pending))
-                    .unwrap();
+                work::validate_revision_plan(
+                    &team,
+                    &work::Selection::Item(binding, Box::new(pending)),
+                )
+                .unwrap();
                 assert_eq!(json!(team), reviewed);
             }
         }
@@ -241,9 +245,12 @@ async fn revision_documents_reuse_verified_rejected_exports_and_reject_changed_c
                 _ => {}
             }
             let before = memory.lock().unwrap().clone();
-            let result =
-                work::revision_documents(&client, &team, &work::Selection::Item(selected, task))
-                    .await;
+            let result = work::revision_documents(
+                &client,
+                &team,
+                &work::Selection::Item(selected, Box::new(task)),
+            )
+            .await;
             if mutation == "none" {
                 let (documents, roles) = result.unwrap();
                 assert!(roles.is_empty());
@@ -320,10 +327,13 @@ async fn revision_failed_synthesis_recovers_all_specialists_as_unaccepted_withou
                 task.history
                     .push(retained_attempt(&failed, &failure_data, "failed"));
                 let before = memory.lock().unwrap().clone();
-                let (documents, roles) =
-                    work::revision_documents(&client, &team, &work::Selection::Item(binding, task))
-                        .await
-                        .unwrap();
+                let (documents, roles) = work::revision_documents(
+                    &client,
+                    &team,
+                    &work::Selection::Item(binding, Box::new(task)),
+                )
+                .await
+                .unwrap();
                 assert_eq!(
                     documents.len(),
                     usize::from(include_prior) + if synthesis { 9 } else { 0 }
@@ -543,8 +553,12 @@ async fn revision_failed_synthesis_rejects_changed_or_incomplete_evidence() {
             }
         }
         let before = memory.lock().unwrap().clone();
-        let result =
-            work::revision_documents(&client, &team, &work::Selection::Item(binding, task)).await;
+        let result = work::revision_documents(
+            &client,
+            &team,
+            &work::Selection::Item(binding, Box::new(task)),
+        )
+        .await;
         assert!(result.is_err(), "{mutation}");
         assert_eq!(*memory.lock().unwrap(), before, "{mutation}");
     }
@@ -593,9 +607,11 @@ fn revision_diagnostic_selection_and_native_admission_without_prior_delivery() {
             item_id: task.id.clone(),
             request_digest: contract::request_digest(&task).unwrap(),
         };
-        let error =
-            work::validate_revision_plan(&team, &work::Selection::Item(binding, task.clone()))
-                .unwrap_err();
+        let error = work::validate_revision_plan(
+            &team,
+            &work::Selection::Item(binding, Box::new(task.clone())),
+        )
+        .unwrap_err();
         assert!(
             error
                 .to_string()

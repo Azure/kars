@@ -114,7 +114,7 @@ test("argument previews follow exact call correlation into result drill-downs wi
   const html = render(value);
   assert.match(html, /Model argument preview · redacted · truncated/);
   assert.match(html, /&lt;script&gt;example&lt;\/script&gt;/);
-  assert.doesNotMatch(html, /<script>/);
+  assert.doesNotMatch(html, /<script\b/i);
   const actions = graph.actionsFromRouter({ producer, observations: value });
   assert.match(actions[2].args, /\/sandbox\/report.md/);
   const wrong = { ...value.trace.events[2], call_id: "other-call" };

@@ -15,10 +15,33 @@ from kars_runtime_hermes.plugin.mission_native_tools import NativeTools, native_
 from kars_runtime_hermes.plugin.mission_observations import ARTIFACT, ReturnedRouterResponses
 
 
+@pytest.mark.parametrize("version", ["0.16.1", "0.21.4", "0.21.5rc1", "0.21.6", "1.0.0"])
+def test_unqualified_runtime_versions_are_rejected(monkeypatch, version):
+    monkeypatch.setattr(native.importlib.metadata, "version", lambda _: version)
+    with pytest.raises(ValueError, match="Hermes 0.16.0 or 0.21.5 is required"):
+        native.require_supported_runtime()
+
+
+def test_missing_runtime_metadata_is_rejected(monkeypatch):
+    def missing(name):
+        raise native.importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(native.importlib.metadata, "version", missing)
+    with pytest.raises(native.importlib.metadata.PackageNotFoundError):
+        native.require_supported_runtime()
+
+
 def phase(calls=()):
-    return wire.phase({"name": "research", "objective": "Research and produce a substantive report",
-                       "executionMode": "native", "capabilities": ["network", "filesystem-read", "filesystem-write"],
-                       "requiredToolCalls": list(calls), "maxToolCalls": 8})
+    return wire.phase(
+        {
+            "name": "research",
+            "objective": "Research and produce a substantive report",
+            "executionMode": "native",
+            "capabilities": ["network", "filesystem-read", "filesystem-write"],
+            "requiredToolCalls": list(calls),
+            "maxToolCalls": 8,
+        }
+    )
 
 
 def measured(reviewed, provider):
@@ -26,9 +49,17 @@ def measured(reviewed, provider):
     return native.Measurements("test-model", reviewed, lambda _: None, observations)
 
 
-@pytest.mark.parametrize("status,truncated,body", [(403, False, "Forbidden"), (302, False, ""),
-    (200, True, "Partial"), (200, False, ""), (200, False, "x" * (2 * 1024 * 1024)),
-    (200, True, "x" * (2 * 1024 * 1024) + "... [truncated at 2097152 bytes]")])
+@pytest.mark.parametrize(
+    "status,truncated,body",
+    [
+        (403, False, "Forbidden"),
+        (302, False, ""),
+        (200, True, "Partial"),
+        (200, False, ""),
+        (200, False, "x" * (2 * 1024 * 1024)),
+        (200, True, "x" * (2 * 1024 * 1024) + "... [truncated at 2097152 bytes]"),
+    ],
+)
 def test_native_fetch_returns_status_and_large_body_as_data(tmp_path, status, truncated, body):
     requests = []
     envelope = {"status": status, "headers": {"content-type": "text/plain"}, "body": body, "truncated": truncated}
@@ -77,8 +108,14 @@ def test_native_invalid_fetch_reports_only_reserved_observed_calls(tmp_path, res
 
 
 def test_native_router_denial_preserves_http_status_without_halting(tmp_path):
-    m = measured(phase(), lambda req: httpx.Response(200, json={"allowed": True})
-                 if req.url.path == "/agt/evaluate" else httpx.Response(403, json={"error": "Denied"}))
+    m = measured(
+        phase(),
+        lambda req: (
+            httpx.Response(200, json={"allowed": True})
+            if req.url.path == "/agt/evaluate"
+            else httpx.Response(403, json={"error": "Denied"})
+        ),
+    )
     tools = NativeTools(tmp_path, m)
     args = {"method": "GET", "url": "https://example.com/denied"}
     m.attempted = 1
@@ -90,8 +127,7 @@ def test_native_router_denial_preserves_http_status_without_halting(tmp_path):
 
 def test_native_github_fetch_uses_public_get_and_preserves_keyless_observation(tmp_path):
     args = {"method": "GET", "url": "https://api.github.com/repos/owner/repo/issues"}
-    envelope = {"status": 200, "headers": {"cache-control": "no-store"},
-                "body": '[{"number":42}]', "truncated": False}
+    envelope = {"status": 200, "headers": {"cache-control": "no-store"}, "body": '[{"number":42}]', "truncated": False}
     requests = []
 
     def provider(req):
@@ -110,9 +146,15 @@ def test_native_github_fetch_uses_public_get_and_preserves_keyless_observation(t
 
 def test_native_required_fetch_remains_an_obligation_not_a_url_allowlist(tmp_path):
     required = {"method": "GET", "url": "https://example.com/required"}
-    m = measured(phase([{"name": "http_fetch", "arguments": required}]), lambda req:
-        httpx.Response(200, json={"allowed": True} if req.url.path == "/agt/evaluate" else
-                       {"status": 200, "headers": {}, "body": "Evidence", "truncated": False}))
+    m = measured(
+        phase([{"name": "http_fetch", "arguments": required}]),
+        lambda req: httpx.Response(
+            200,
+            json={"allowed": True}
+            if req.url.path == "/agt/evaluate"
+            else {"status": 200, "headers": {}, "body": "Evidence", "truncated": False},
+        ),
+    )
     tools = NativeTools(tmp_path, m)
     for index, args in enumerate(({**required, "url": "https://example.com/chosen"}, required)):
         m.attempted += 1
@@ -130,12 +172,16 @@ def test_native_clarification_continues_with_measured_scope(tmp_path, decision):
         if req.url.path == "/agt/evaluate":
             return httpx.Response(200, json={"allowed": True})
         if req.url.path == "/telemetry/tool":
-            return httpx.Response(200, json={"recorded": True, "source": "harness-reported", "enforcement_changed": False})
+            return httpx.Response(
+                200, json={"recorded": True, "source": "harness-reported", "enforcement_changed": False}
+            )
         entry = {"scope_id": "scope-1", "request_id": "request-1", "kind": "clarification", "status": "pending"}
         if req.url.path == "/v1/access-request":
             return httpx.Response(202, json={"status": "queued", "request": entry})
         if req.url.path.endswith("/wait"):
-            return httpx.Response(200, json={**entry, "status": decision, "answer": "Use the report" if decision == "approved" else None})
+            return httpx.Response(
+                200, json={**entry, "status": decision, "answer": "Use the report" if decision == "approved" else None}
+            )
         return httpx.Response(200, json={"status": 200, "headers": {}, "body": "Evidence", "truncated": False})
 
     m = measured(phase(), provider)
@@ -155,7 +201,12 @@ def test_native_clarification_continues_with_measured_scope(tmp_path, decision):
     assert json.loads(tools.fetch(fetch_args))["body"] == "Evidence"
     assert m.successful == 2
     evaluation = json.loads(requests[0].content)
-    assert evaluation["context"] == {"scope_id": "scope-1", "tool_call_id": "question-1", "tool": "kars_access_request", "arguments": args}
+    assert evaluation["context"] == {
+        "scope_id": "scope-1",
+        "tool_call_id": "question-1",
+        "tool": "kars_access_request",
+        "arguments": args,
+    }
     wait = next(req for req in requests if req.url.path.endswith("/wait"))
     assert wait.url.params["scope_id"] == "scope-1" and wait.extensions["timeout"]["read"] > 300
     reports = [json.loads(req.content) for req in requests if req.url.path == "/telemetry/tool"]
@@ -187,10 +238,14 @@ def test_native_fetch_wait_preserves_scope_denial_and_required_get(tmp_path):
         if req.url.path == "/agt/evaluate":
             return httpx.Response(200, json={"allowed": True})
         if req.url.path == "/telemetry/tool":
-            return httpx.Response(200, json={"recorded": True, "source": "harness-reported", "enforcement_changed": False})
+            return httpx.Response(
+                200, json={"recorded": True, "source": "harness-reported", "enforcement_changed": False}
+            )
         count += 1
         if count == 1:
-            return httpx.Response(403, json={"error": "policy_not_installed", "request": entry, "enforcement_changed": False})
+            return httpx.Response(
+                403, json={"error": "policy_not_installed", "request": entry, "enforcement_changed": False}
+            )
         return httpx.Response(200, json={"status": 200, "headers": {}, "body": "Evidence", "truncated": False})
 
     m = measured(phase([{"name": "http_fetch", "arguments": required}]), provider)
@@ -199,8 +254,12 @@ def test_native_fetch_wait_preserves_scope_denial_and_required_get(tmp_path):
     args = {**required, "wait_for_approval_ms": 300000}
     m.attempted = 1
     tools.start("call-1", "http_fetch", args)
-    assert json.loads(tools.fetch(args)) == {"error": "policy_not_installed", "http_status": 403,
-                                           "request": entry, "enforcement_changed": False}
+    assert json.loads(tools.fetch(args)) == {
+        "error": "policy_not_installed",
+        "http_status": 403,
+        "request": entry,
+        "enforcement_changed": False,
+    }
     assert not m.successful and m.pending_fetches()
     m.attempted += 1
     tools.start("call-2", "http_fetch", args)
@@ -240,6 +299,7 @@ def invoke(tools, m, name, args, handler):
 
 def persist_copy(args, **kwargs):
     from pathlib import Path
+
     Path(args["path"]).write_bytes(args["content"].encode("utf-8"))
     return json.dumps({"success": True})
 
@@ -266,8 +326,9 @@ def test_native_copy_preserves_exact_bytes_and_original_authorization(native_fil
     if nullable:
         args["content"] = None
     requests = []
-    m.observations.transport = httpx.MockTransport(lambda req: requests.append(json.loads(req.content))
-                                                 or httpx.Response(200, json={"allowed": True}))
+    m.observations.transport = httpx.MockTransport(
+        lambda req: requests.append(json.loads(req.content)) or httpx.Response(200, json={"allowed": True})
+    )
     result = invoke(tools, m, "write_file", args, persist_copy)
     assert result == {"success": True, "sha256": args["sha256"]}
     assert (tools.root / args["path"]).read_bytes() == content.encode()
@@ -277,8 +338,25 @@ def test_native_copy_preserves_exact_bytes_and_original_authorization(native_fil
     tools.validate_exports(native.read_exports(tools.root / "exports"))
 
 
-@pytest.mark.parametrize("fault", ["digest", "ambient", "mixed", "missing-digest", "missing-source", "host",
-    "skills", "symlink", "reserved-python", "reserved-router", "read-authority", "write-authority", "policy", "append"])
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "digest",
+        "ambient",
+        "mixed",
+        "missing-digest",
+        "missing-source",
+        "host",
+        "skills",
+        "symlink",
+        "reserved-python",
+        "reserved-router",
+        "read-authority",
+        "write-authority",
+        "policy",
+        "append",
+    ],
+)
 def test_native_copy_refuses_unowned_or_unauthorized_sources_before_handler(native_files, fault):
     tools, m = native_files
     args = {"path": "exports/report.md", "source_path": "inputs/facts.md", "sha256": wire.text_hash("Immutable facts")}
@@ -303,6 +381,7 @@ def test_native_copy_refuses_unowned_or_unauthorized_sources_before_handler(nati
         (tools.root / args["source_path"]).symlink_to(tools.root / "inputs/facts.md")
     elif fault.startswith("reserved-"):
         from kars_runtime_hermes.plugin.native_python import ARTIFACT as PYTHON_ARTIFACT
+
         args["path"] = "exports/" + (ARTIFACT if fault == "reserved-router" else PYTHON_ARTIFACT)
     elif fault.endswith("-authority"):
         m.phase["capabilities"].remove("filesystem-" + fault.split("-")[0])
@@ -363,7 +442,10 @@ def test_native_copy_does_not_credit_handler_byte_changes_or_reuse_admission(nat
 
 
 def test_native_copy_schema_keeps_content_and_does_not_mutate_native_registration():
-    original = {"description": "Native writer", "parameters": {"properties": {"path": {}, "content": {}}, "required": ["path", "content"]}}
+    original = {
+        "description": "Native writer",
+        "parameters": {"properties": {"path": {}, "content": {}}, "required": ["path", "content"]},
+    }
     schema = native_write_schema(original)
     assert original["parameters"]["required"] == ["path", "content"]
     assert "source_path" not in original["parameters"]["properties"]
@@ -381,6 +463,7 @@ def test_native_guard_calls_handler_without_forcing_read_first(native_files):
     def write(args, **kwargs):
         seen.append((args, kwargs))
         from pathlib import Path
+
         Path(args["path"]).write_text(args["content"])
         return json.dumps({"success": True})
 
@@ -393,8 +476,18 @@ def test_native_guard_calls_handler_without_forcing_read_first(native_files):
     tools.validate_inputs()
 
 
-@pytest.mark.parametrize("path", ["../escape", "/etc/passwd", "home/config.yaml", "inputs/facts.md",
-                                    "skills/changed.md", f"exports/{ARTIFACT}", "exports/nested/report.md"])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "../escape",
+        "/etc/passwd",
+        "home/config.yaml",
+        "inputs/facts.md",
+        "skills/changed.md",
+        f"exports/{ARTIFACT}",
+        "exports/nested/report.md",
+    ],
+)
 def test_native_guard_refuses_unauthorized_write_before_handler(native_files, path):
     tools, m = native_files
     called = []
@@ -407,8 +500,10 @@ def test_native_guard_refuses_unauthorized_write_before_handler(native_files, pa
 def test_native_guard_rejects_symlink_traversal_and_search(native_files):
     tools, m = native_files
     (tools.root / "scratch/link").symlink_to(tools.root / "home", target_is_directory=True)
-    for name, args in (("write_file", {"path": "scratch/link/config.yaml", "content": "bad"}),
-                       ("search_files", {"path": "scratch", "pattern": "*"})):
+    for name, args in (
+        ("write_file", {"path": "scratch/link/config.yaml", "content": "bad"}),
+        ("search_files", {"path": "scratch", "pattern": "*"}),
+    ):
         result = invoke(tools, m, name, args, lambda *a, **kw: pytest.fail("Unsafe dispatch"))
         assert "symlink" in result["error"]
 
@@ -430,8 +525,12 @@ def test_native_guard_rejects_extra_handler_bypass_arguments(native_files):
 def test_native_guard_router_refusal_blocks_native_handler(native_files):
     tools, m = native_files
     m.observations.transport = httpx.MockTransport(lambda _: httpx.Response(200, json={"allowed": False}))
-    assert "authorization refused" in invoke(tools, m, "read_file", {"path": "inputs/facts.md"},
-        lambda *a, **kw: pytest.fail("Denied dispatch"))["error"]
+    assert (
+        "authorization refused"
+        in invoke(tools, m, "read_file", {"path": "inputs/facts.md"}, lambda *a, **kw: pytest.fail("Denied dispatch"))[
+            "error"
+        ]
+    )
 
 
 def test_native_guard_reads_issued_spill_with_real_page_arguments(native_files):
@@ -439,8 +538,13 @@ def test_native_guard_reads_issued_spill_with_real_page_arguments(native_files):
     path = tools.spill.persist("original large output" * 10000, "native-call")
     seen = []
     try:
-        result = invoke(tools, m, "read_file", {"path": path, "offset": 40, "limit": 8},
-                        lambda args, **kw: seen.append(args) or '{"content":"native page"}')
+        result = invoke(
+            tools,
+            m,
+            "read_file",
+            {"path": path, "offset": 40, "limit": 8},
+            lambda args, **kw: seen.append(args) or '{"content":"native page"}',
+        )
         assert result == {"content": "native page"}
         assert seen == [{"path": path, "offset": 40, "limit": 8}]
         assert m.successful == 1
@@ -498,9 +602,15 @@ def test_native_guard_blocks_auxiliary_document_handlers(native_files, suffix):
 
 def test_native_truncated_fetch_does_not_complete_required_obligation(tmp_path):
     args = {"method": "GET", "url": "https://example.com/required"}
-    m = measured(phase([{"name": "http_fetch", "arguments": args}]), lambda req:
-        httpx.Response(200, json={"allowed": True} if req.url.path == "/agt/evaluate" else
-                       {"status": 200, "headers": {}, "body": "Partial evidence", "truncated": True}))
+    m = measured(
+        phase([{"name": "http_fetch", "arguments": args}]),
+        lambda req: httpx.Response(
+            200,
+            json={"allowed": True}
+            if req.url.path == "/agt/evaluate"
+            else {"status": 200, "headers": {}, "body": "Partial evidence", "truncated": True},
+        ),
+    )
     tools = NativeTools(tmp_path, m)
     m.attempted = 1
     tools.start("call-1", "http_fetch", args)
@@ -514,44 +624,67 @@ def test_native_large_returned_content_keeps_measured_inference():
 
     def provider(request):
         requests.append(request)
-        return httpx.Response(200, json={
-            "choices": [{"message": {"role": "assistant", "content": "Read the returned page"}, "finish_reason": "stop"}],
-            "usage": {"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110},
-        })
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"role": "assistant", "content": "Read the returned page"}, "finish_reason": "stop"}
+                ],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110},
+            },
+        )
 
     m = native.Measurements("test-model", phase(), lambda _: None)
     with httpx.Client(transport=native.MeasuredTransport(m, httpx.MockTransport(provider), set())) as client:
-        response = client.post(native.ROUTER + "/chat/completions", json={
-            "model": "test-model", "messages": [{"role": "tool", "content": "x" * (2 * 1024 * 1024)}],
-        })
+        response = client.post(
+            native.ROUTER + "/chat/completions",
+            json={
+                "model": "test-model",
+                "messages": [{"role": "tool", "content": "x" * (2 * 1024 * 1024)}],
+            },
+        )
     assert response.status_code == 200
     assert len(requests) == m.rounds == 1
     assert m.usage == {"promptTokens": 100, "completionTokens": 10, "totalTokens": 110}
 
 
-@pytest.mark.parametrize("message,stage", list(native.CALENDAR_FAILURE_STAGES.items()) + [
-    ("private-secret", "unclassified"),
-    ("Calendar token accounting unavailable at /v1/calendar/commit; inference remains blocked private-secret",
-     "unclassified"),
-    ({"private-secret": True}, "unclassified"),
-    (None, "unclassified"),
-])
+@pytest.mark.parametrize(
+    "message,stage",
+    list(native.CALENDAR_FAILURE_STAGES.items())
+    + [
+        ("private-secret", "unclassified"),
+        (
+            "Calendar token accounting unavailable at /v1/calendar/commit; inference remains blocked private-secret",
+            "unclassified",
+        ),
+        ({"private-secret": True}, "unclassified"),
+        (None, "unclassified"),
+    ],
+)
 def test_calendar_failure_retains_only_exact_fixed_stage(message, stage):
     requests = []
 
     def provider(request):
         requests.append(request)
-        return httpx.Response(503, json={"error": {
-            "code": "token_accounting_unavailable", "message": message,
-            "details": "private-secret",
-        }})
+        return httpx.Response(
+            503,
+            json={
+                "error": {
+                    "code": "token_accounting_unavailable",
+                    "message": message,
+                    "details": "private-secret",
+                }
+            },
+        )
 
     m = native.Measurements("test-model", phase(), lambda _: None)
     with httpx.Client(transport=native.MeasuredTransport(m, httpx.MockTransport(provider), set())) as client:
         with pytest.raises(RuntimeError, match="Inference request rejected"):
             client.post(native.ROUTER + "/chat/completions", json={"model": "test-model"})
-    assert m.failure == ("Inference request rejected (HTTP 503); reported code=token_accounting_unavailable"
-                         f"; reported accounting stage={stage}")
+    assert m.failure == (
+        "Inference request rejected (HTTP 503); reported code=token_accounting_unavailable"
+        f"; reported accounting stage={stage}"
+    )
     assert "private-secret" not in m.failure
     assert m.usage is None
     assert len(requests) == m.rounds == 1
@@ -559,9 +692,15 @@ def test_calendar_failure_retains_only_exact_fixed_stage(message, stage):
 
 def test_calendar_stage_is_not_trusted_under_unrelated_error_code():
     def provider(request):
-        return httpx.Response(503, json={"error": {
-            "code": "unrelated", "message": next(iter(native.CALENDAR_FAILURE_STAGES)),
-        }})
+        return httpx.Response(
+            503,
+            json={
+                "error": {
+                    "code": "unrelated",
+                    "message": next(iter(native.CALENDAR_FAILURE_STAGES)),
+                }
+            },
+        )
 
     m = native.Measurements("test-model", phase(), lambda _: None)
     with httpx.Client(transport=native.MeasuredTransport(m, httpx.MockTransport(provider), set())) as client:
@@ -571,16 +710,18 @@ def test_calendar_stage_is_not_trusted_under_unrelated_error_code():
     assert m.usage is None and m.rounds == 1
 
 
-@pytest.mark.parametrize("body,stage,category", [
-    (b"private-secret", "response JSON", "invalid value"),
-    (b"\xff", "response JSON", "text encoding"),
-    (b"null", "usage measurement", "invalid shape"),
-    (b'{"choices":[]}', "completion shape", "invalid value"),
-    (b'{"choices":null}', "completion shape", "invalid type"),
-    (b'{"choices":[{"message":null}]}', "completion shape", "invalid shape"),
-    (b'{"choices":[{"message":{"tool_calls":[{"function":null}]}}]}',
-     "tool validation", "invalid shape"),
-])
+@pytest.mark.parametrize(
+    "body,stage,category",
+    [
+        (b"private-secret", "response JSON", "invalid value"),
+        (b"\xff", "response JSON", "text encoding"),
+        (b"null", "usage measurement", "invalid shape"),
+        (b'{"choices":[]}', "completion shape", "invalid value"),
+        (b'{"choices":null}', "completion shape", "invalid type"),
+        (b'{"choices":[{"message":null}]}', "completion shape", "invalid shape"),
+        (b'{"choices":[{"message":{"tool_calls":[{"function":null}]}}]}', "tool validation", "invalid shape"),
+    ],
+)
 def test_response_failure_reports_only_fixed_stage_and_category(body, stage, category):
     m = native.Measurements("test-model", phase(), lambda _: None)
     transport = httpx.MockTransport(lambda _: httpx.Response(200, content=body))
@@ -593,12 +734,15 @@ def test_response_failure_reports_only_fixed_stage_and_category(body, stage, cat
     assert m.usage is None and m.rounds == 1
 
 
-@pytest.mark.parametrize("error,category", [
-    (httpx.ReadTimeout("private-secret"), "timeout"),
-    (httpx.DecodingError("private-secret"), "decoding"),
-    (httpx.RemoteProtocolError("private-secret"), "HTTP transport"),
-    (RuntimeError("private-secret"), "unclassified"),
-])
+@pytest.mark.parametrize(
+    "error,category",
+    [
+        (httpx.ReadTimeout("private-secret"), "timeout"),
+        (httpx.DecodingError("private-secret"), "decoding"),
+        (httpx.RemoteProtocolError("private-secret"), "HTTP transport"),
+        (RuntimeError("private-secret"), "unclassified"),
+    ],
+)
 def test_transport_failure_does_not_publish_exception_message(error, category):
     def provider(_):
         raise error
@@ -621,10 +765,15 @@ def test_progress_failure_is_not_misreported_as_provider_usage_failure():
             raise RuntimeError("private-secret")
 
     m = native.Measurements("test-model", phase(), progress)
-    transport = httpx.MockTransport(lambda _: httpx.Response(200, json={
-        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
-        "choices": [{"message": {"content": "private-secret"}, "finish_reason": "stop"}],
-    }))
+    transport = httpx.MockTransport(
+        lambda _: httpx.Response(
+            200,
+            json={
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+                "choices": [{"message": {"content": "private-secret"}, "finish_reason": "stop"}],
+            },
+        )
+    )
     with httpx.Client(transport=native.MeasuredTransport(m, transport, set())) as client:
         with pytest.raises(RuntimeError):
             client.post(native.ROUTER + "/chat/completions", json={"model": "test-model"})

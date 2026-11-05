@@ -4,6 +4,7 @@
 """Actual clean native subprocess, encrypted parent client, and pipe failure boundaries."""
 
 import asyncio
+import importlib.util
 import json
 import os
 import time
@@ -50,7 +51,8 @@ class NoMeshImport:
 sys.meta_path.insert(0, NoMeshImport())
 count = 0
 operations = [
-    [('kars_discover', {'name':'peer', 'did':None}), ('kars_mesh_send', {'to_agent':'peer', 'content':'native peer answer'})],
+    [('kars_discover', {'name':'peer', 'did':None}),
+     ('kars_mesh_send', {'to_agent':'peer', 'content':'native peer answer'})],
     [('kars_mesh_await', {'senders':['peer'], 'timeout_seconds':0.2})],
     [('kars_mesh_inbox', {})],
     [('kars_mesh_await', {'timeout_seconds':0.03})],
@@ -104,9 +106,12 @@ assert all(registry.get_entry(name) is None for name in peer_names)
 """
 
 
+@pytest.mark.skipif(importlib.util.find_spec("run_agent") is None, reason="Requires native pinned Hermes")
 @pytest.mark.parametrize("installed", [True], indirect=True)
 @pytest.mark.parametrize("large_assignment", [False, True])
-def test_installed_receiver_real_native_peer_bridge(installed, runtime, monkeypatch, tmp_path, model_metadata, large_assignment):
+def test_installed_receiver_real_native_peer_bridge(
+    installed, runtime, monkeypatch, tmp_path, model_metadata, large_assignment
+):
     real_spawn = asyncio.create_subprocess_exec
     processes = []
 
@@ -125,8 +130,12 @@ def test_installed_receiver_real_native_peer_bridge(installed, runtime, monkeypa
     _, contract, _, assignment = native_binding()
     if large_assignment:
         original = assignment["inputArtifacts"][0]
-        documents = wire.inputs([dict(original, name=f"memory-{i}.md", content="x" * 63000,
-                                      sha256=wire.text_hash("x" * 63000)) for i in range(6)])
+        documents = wire.inputs(
+            [
+                dict(original, name=f"memory-{i}.md", content="x" * 63000, sha256=wire.text_hash("x" * 63000))
+                for i in range(6)
+            ]
+        )
         contract["inputDigest"] = wire.digest(dict(schema="kars.mission-inputs/v1", inputs=documents))
         assignment.update(contract, inputArtifacts=documents, content="x" * 8192)
         r.admitted = wire.admission(dict(r.admitted, objectiveDigest=wire.text_hash(assignment["content"])))
@@ -155,8 +164,12 @@ def test_installed_receiver_real_native_peer_bridge(installed, runtime, monkeypa
         from datetime import datetime, timezone
 
         assert req.method == "GET"
-        agent = {"did": "did:mesh:" + "d" * 32, "capabilities": ["peer"],
-                 "metadata": {"display_name": "peer"}, "last_seen": datetime.now(timezone.utc).isoformat()}
+        agent = {
+            "did": "did:mesh:" + "d" * 32,
+            "capabilities": ["peer"],
+            "metadata": {"display_name": "peer"},
+            "last_seen": datetime.now(timezone.utc).isoformat(),
+        }
         if req.url.path == "/agt/registry/v1/discover":
             assert dict(req.url.params) == {"capability": "peer", "limit": "16"}
             return httpx.Response(200, json={"results": [agent], "total": 1})
@@ -293,11 +306,15 @@ def test_cancelled_parent_wait_leaves_no_consumer(installed, monkeypatch):
     asyncio.run_coroutine_threadsafe(run(), mesh._BACKGROUND_LOOP).result(timeout=5)
 
 
-@pytest.mark.parametrize("payload", [
-    "Peer evidence: café → 再試行\nSecond line".encode(),
-    b'{"type":"text","content":"untrusted peer findings"}',
-    b"", b"\xff\xfe\x00",
-])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "Peer evidence: café → 再試行\nSecond line".encode(),
+        b'{"type":"text","content":"untrusted peer findings"}',
+        b"",
+        b"\xff\xfe\x00",
+    ],
+)
 @pytest.mark.parametrize("operation", ["inbox", "await"])
 def test_peer_result_exposes_lossless_text_without_a_decoder(installed, payload, operation):
     import base64
@@ -455,10 +472,15 @@ def test_peer_schema_rejects_authority_and_unbounded_arguments(name, args):
         peer.validate_call(name, args)
 
 
-@pytest.mark.parametrize("args", [
-    {"name": "peer"}, {"name": "peer", "did": None},
-    {"did": "did:mesh:" + "a" * 32}, {"name": None, "did": "did:mesh:" + "a" * 32},
-])
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"name": "peer"},
+        {"name": "peer", "did": None},
+        {"did": "did:mesh:" + "a" * 32},
+        {"name": None, "did": "did:mesh:" + "a" * 32},
+    ],
+)
 def test_discovery_accepts_omitted_or_nullable_alternative(args):
     from kars_runtime_hermes.plugin.discover import _lookup
 
@@ -520,7 +542,7 @@ async def test_parent_enforces_channel_authority_and_budget(boundary, monkeypatc
         contract["reviewedPhase"]["capabilities"].remove("network")
     real_spawn = asyncio.create_subprocess_exec
     processes = []
-    script = '''
+    script = """
 import json,sys
 sys.stdin.buffer.readline()
 print(json.dumps({'kind':'progress','evidence':{'phase':{'attemptedToolCalls':1}}}),flush=True)
@@ -530,7 +552,7 @@ sys.stdin.buffer.readline()
 event['id'] = SECOND
 print(json.dumps(event),flush=True)
 sys.stdin.buffer.readline()
-'''.replace("SECOND", "1" if boundary == "duplicate-id" else "2")
+""".replace("SECOND", "1" if boundary == "duplicate-id" else "2")
 
     async def spawn(executable, *args, **kwargs):
         process = await real_spawn(executable, "-c", script, **kwargs)
@@ -540,8 +562,9 @@ sys.stdin.buffer.readline()
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
     callback = AsyncMock(return_value={"value": "x" * wire.MAX_WIRE} if boundary == "large-result" else {})
     with pytest.raises(ValueError):
-        await asyncio.wait_for(receiver.native_execute(
-            assignment, contract, "mission-model", AsyncMock(), peer_call=callback), 5)
+        await asyncio.wait_for(
+            receiver.native_execute(assignment, contract, "mission-model", AsyncMock(), peer_call=callback), 5
+        )
     assert callback.await_count == (0 if boundary == "no-network" else 1)
     assert all(p.returncode is not None for p in processes)
     assert not list((tmp_path / "missions").iterdir())

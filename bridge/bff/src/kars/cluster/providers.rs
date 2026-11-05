@@ -254,9 +254,11 @@ fn configured_provider(envs: &[EnvVar]) -> Option<(String, String, String)> {
     )
 }
 
+pub type FoundryConnection = (Option<String>, Option<String>, Option<String>, bool);
+
 fn parse_foundry_connection(
     controller: k8s_openapi::api::core::v1::Container,
-) -> Result<(Option<String>, Option<String>, Option<String>, bool), String> {
+) -> Result<FoundryConnection, String> {
     let envs = controller.env.unwrap_or_default();
     if controller
         .env_from
@@ -607,9 +609,7 @@ impl Cluster {
     /// Deployment env: `(project_endpoint, inference_endpoint, memory_store_id,
     /// has_api_key)`. All `None`/false when Foundry has not been onboarded. The
     /// API key is NEVER returned — only whether one is wired.
-    pub async fn get_foundry_connection(
-        &self,
-    ) -> Result<(Option<String>, Option<String>, Option<String>, bool), String> {
+    pub async fn get_foundry_connection(&self) -> Result<FoundryConnection, String> {
         use k8s_openapi::api::apps::v1::Deployment;
         let api: Api<Deployment> = Api::namespaced(self.client.clone(), &self.core_namespace());
         let dep = api.get("kars-controller").await.map_err(|_| {

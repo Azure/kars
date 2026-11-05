@@ -234,7 +234,7 @@ async fn run(cli: Cli) -> Result<u8> {
 
     let json = serde_json::to_string(&report::wire_report(&report, format)?)
         .context("serialize report")?;
-    let output_is_stdout = cli.output == PathBuf::from("/dev/stdout");
+    let output_is_stdout = cli.output == std::path::Path::new("/dev/stdout");
     if !output_is_stdout {
         write_report(&cli.output, &json)
             .with_context(|| format!("write {}", cli.output.display()))?;

@@ -127,7 +127,7 @@ export function createMissionPeers(deps: MissionPeerDependencies): MissionPeers 
       const selected = new Set<PeerInboxEntry>();
       const received = new Set<string>();
       let truncated = false;
-      let completed = name === "mesh_inbox";
+      let completed: boolean;
       const timedOut = () => {
         invocation.signal.throwIfAborted(); invocation.assertCurrent(); deps.assertCurrent();
         if (Date.now() >= invocation.deadline) throw new Error("Native peer invocation deadline exceeded");

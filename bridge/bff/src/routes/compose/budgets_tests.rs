@@ -354,12 +354,12 @@ fn prompt_includes_current_selected_model_bounds_and_excludes_expired_entries() 
     assert!(!prompt.contains("400001"));
     assert!(
         context
-            .check(&[model.deployment.clone()], Some(6000))
+            .check(std::slice::from_ref(&model.deployment), Some(6000))
             .is_err()
     );
     assert!(
         context
-            .check(&[model.deployment.clone()], Some(6001))
+            .check(std::slice::from_ref(&model.deployment), Some(6001))
             .is_ok()
     );
     catalog["contracts"][0]["validUntil"] = json!("2000-01-01T00:00:00Z");

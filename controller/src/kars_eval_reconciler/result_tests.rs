@@ -47,26 +47,27 @@ async fn long_eval_names_preserve_workload_intent_and_report_attribution() {
             .unwrap();
         assert_eq!(result.state, "AllPassed");
         assert_eq!(result.result.unwrap().job_name, job);
-        let stored = f.store.lock().unwrap();
-        for object in stored
-            .jobs
-            .values()
-            .chain(stored.crons.values())
-            .chain(stored.cms.values())
         {
-            assert_eq!(object["metadata"]["ownerReferences"][0]["name"], name);
-            assert_eq!(object["metadata"]["ownerReferences"][0]["uid"], "eval-uid");
+            let stored = f.store.lock().unwrap();
+            for object in stored
+                .jobs
+                .values()
+                .chain(stored.crons.values())
+                .chain(stored.cms.values())
+            {
+                assert_eq!(object["metadata"]["ownerReferences"][0]["name"], name);
+                assert_eq!(object["metadata"]["ownerReferences"][0]["uid"], "eval-uid");
+                assert_eq!(
+                    object["metadata"]["labels"][LABEL_KEY_CLAW_EVAL],
+                    bounded_name(&name, 63)
+                );
+            }
             assert_eq!(
-                object["metadata"]["labels"][LABEL_KEY_CLAW_EVAL],
-                bounded_name(&name, 63)
+                stored.jobs[&job]["spec"]["template"]["spec"]["volumes"][0]["configMap"]["name"],
+                corpus_configmap_name(&name)
             );
+            assert!(stored.cms.contains_key(&evidence::name(&f.eval)));
         }
-        assert_eq!(
-            stored.jobs[&job]["spec"]["template"]["spec"]["volumes"][0]["configMap"]["name"],
-            corpus_configmap_name(&name)
-        );
-        assert!(stored.cms.contains_key(&evidence::name(&f.eval)));
-        drop(stored);
         let selector = format!("{LABEL_KEY_CLAW_EVAL}={}", bounded_name(&name, 63));
         assert!(
             f._server

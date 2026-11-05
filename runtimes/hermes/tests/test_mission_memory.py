@@ -20,17 +20,30 @@ UPDATE = {"operation": "update", "scope": "reviewed_scope", "text": "Reviewed de
 
 
 def memory_phase(capabilities=None):
-    return wire.phase(dict(name="remember", objective="Reuse governed memory for reviewed decisions",
-                           capabilities=["memory"] if capabilities is None else capabilities,
-                           executionMode="native", maxToolCalls=8))
+    return wire.phase(
+        dict(
+            name="remember",
+            objective="Reuse governed memory for reviewed decisions",
+            capabilities=["memory"] if capabilities is None else capabilities,
+            executionMode="native",
+            maxToolCalls=8,
+        )
+    )
 
 
 @pytest.fixture
 def memory(tmp_path, monkeypatch):
     monkeypatch.setenv("KARS_PROVIDER", "azure-openai")
     monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", "https://foundry.example/api/projects/reviewed")
-    state = {"allowed": True, "status": 200, "result": {"memories": []}, "isError": False,
-             "policies": [], "calls": [], "reports": []}
+    state = {
+        "allowed": True,
+        "status": 200,
+        "result": {"memories": []},
+        "isError": False,
+        "policies": [],
+        "calls": [],
+        "reports": [],
+    }
 
     def provider(request):
         payload = json.loads(request.content)
@@ -39,15 +52,25 @@ def memory(tmp_path, monkeypatch):
             return httpx.Response(200, json={"allowed": state["allowed"]})
         if request.url.path == "/telemetry/tool":
             state["reports"].append(payload)
-            return httpx.Response(200, json={"recorded": True, "source": "harness-reported",
-                                            "enforcement_changed": False})
+            return httpx.Response(
+                200, json={"recorded": True, "source": "harness-reported", "enforcement_changed": False}
+            )
         assert request.url.path == "/platform/mcp"
         assert request.headers["accept"] == "application/json, text/event-stream"
         state["calls"].append(payload)
         if state.get("timeout"):
             raise httpx.ReadTimeout("provider unavailable")
-        return httpx.Response(state["status"], json={"jsonrpc": "2.0", "id": 1, "result": {
-            "content": [{"type": "text", "text": json.dumps(state["result"])}], "isError": state["isError"]}})
+        return httpx.Response(
+            state["status"],
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "content": [{"type": "text", "text": json.dumps(state["result"])}],
+                    "isError": state["isError"],
+                },
+            },
+        )
 
     transport = httpx.MockTransport(provider)
     observations = ReturnedRouterResponses(transport)
@@ -66,21 +89,39 @@ def invoke(memory, args):
     return tools.invoke_memory("foundry_memory", foundry._foundry_memory, args)
 
 
-@pytest.mark.parametrize("arguments,outcome", [
-    (SEARCH, {"memories": [{"content": "Retained decision"}]}),
-    (UPDATE, {"status": "queued", "update_id": "update-1"}),
-    (UPDATE, {"status": "completed", "update_id": "update-1", "usage": {"total_tokens": 17}}),
-])
+@pytest.mark.parametrize(
+    "arguments,outcome",
+    [
+        (SEARCH, {"memories": [{"content": "Retained decision"}]}),
+        (UPDATE, {"status": "queued", "update_id": "update-1"}),
+        (UPDATE, {"status": "completed", "update_id": "update-1", "usage": {"total_tokens": 17}}),
+    ],
+)
 def test_memory_only_reuses_platform_client_and_preserves_outcomes(memory, arguments, outcome):
     tools, measurements, state = memory
     state["result"] = outcome
     assert json.loads(invoke(memory, arguments)) == outcome
     assert measurements.phase["capabilities"] == ["memory"]
     assert measurements.attempted == measurements.successful == 1
-    assert state["calls"] == [{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
-        "name": "foundry.memory", "arguments": arguments}}]
-    assert state["policies"] == [{"action": "tool:foundry_memory", "context": {
-        "tool_call_id": "memory-1", "tool": "foundry_memory", "arguments": arguments, "scope_id": "returned-scope"}}]
+    assert state["calls"] == [
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "foundry.memory", "arguments": arguments},
+        }
+    ]
+    assert state["policies"] == [
+        {
+            "action": "tool:foundry_memory",
+            "context": {
+                "tool_call_id": "memory-1",
+                "tool": "foundry_memory",
+                "arguments": arguments,
+                "scope_id": "returned-scope",
+            },
+        }
+    ]
     assert [r["ok"] for r in state["reports"]] == [True]
     assert "Reviewed decision" not in json.dumps(state["reports"])
     assert list(tools.root.iterdir()) == []  # Never replace governed storage with local files.
@@ -88,12 +129,28 @@ def test_memory_only_reuses_platform_client_and_preserves_outcomes(memory, argum
     assert len(state["calls"]) == len(state["reports"]) == 1
 
 
-@pytest.mark.parametrize("patch", [
-    {"operation": "delete_scope"}, {"operation": "unknown"}, {"scope": ""}, {"scope": " \n"}, {"scope": 1},
-    {"text": 1}, {"query": None}, {"top_k": 0}, {"top_k": -1}, {"top_k": 1.5}, {"top_k": True},
-    {"top_k": 2**53}, {"store_name": "another-store"}, {"role": "system"},
-    {"operation": "update"}, {"operation": "update", "text": ""}, {"operation": "update", "text": "  "},
-])
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"operation": "delete_scope"},
+        {"operation": "unknown"},
+        {"scope": ""},
+        {"scope": " \n"},
+        {"scope": 1},
+        {"text": 1},
+        {"query": None},
+        {"top_k": 0},
+        {"top_k": -1},
+        {"top_k": 1.5},
+        {"top_k": True},
+        {"top_k": 2**53},
+        {"store_name": "another-store"},
+        {"role": "system"},
+        {"operation": "update"},
+        {"operation": "update", "text": ""},
+        {"operation": "update", "text": "  "},
+    ],
+)
 def test_malformed_memory_is_reported_without_dispatch(memory, patch):
     _, measurements, state = memory
     assert "error" in json.loads(invoke(memory, {**SEARCH, **patch}))
@@ -121,8 +178,9 @@ def test_memory_required_fields_are_enforced(memory, missing):
     assert not memory[2]["calls"] and memory[2]["reports"][0]["ok"] is False
 
 
-@pytest.mark.parametrize("guard", ["unreserved", "wrong-tool", "uncounted", "no-capability",
-                                 "legacy", "cancelled", "closed"])
+@pytest.mark.parametrize(
+    "guard", ["unreserved", "wrong-tool", "uncounted", "no-capability", "legacy", "cancelled", "closed"]
+)
 def test_memory_cannot_bypass_native_reservation_or_authority(memory, guard):
     tools, measurements, state = memory
     measurements.attempted = 0 if guard == "uncounted" else 1
@@ -195,8 +253,14 @@ class Registry:
         self.entries = {}
 
     def register(self, **kwargs):
-        entry = dict(is_async=False, check_fn=None, description=None, emoji=None,
-                     max_result_size_chars=None, dynamic_schema_overrides=None)
+        entry = dict(
+            is_async=False,
+            check_fn=None,
+            description=None,
+            emoji=None,
+            max_result_size_chars=None,
+            dynamic_schema_overrides=None,
+        )
         entry.update(kwargs)
         self.entries[entry["name"]] = SimpleNamespace(**entry)
 
@@ -224,8 +288,13 @@ def test_memory_registration_is_explicit_narrow_and_restored(memory, monkeypatch
     measurements.phase = memory_phase(caps)
     registry = Registry()
     if existing:
-        registry.register(name="foundry_memory", toolset="foundry", schema=foundry._FOUNDRY_MEMORY_SCHEMA,
-                          handler=foundry._foundry_memory, dynamic_schema_overrides=lambda: pytest.fail("Broad schema"))
+        registry.register(
+            name="foundry_memory",
+            toolset="foundry",
+            schema=foundry._FOUNDRY_MEMORY_SCHEMA,
+            handler=foundry._foundry_memory,
+            dynamic_schema_overrides=lambda: pytest.fail("Broad schema"),
+        )
     previous = registry.get_entry("foundry_memory")
     monkeypatch.setitem(sys.modules, "tools", SimpleNamespace(file_tools=object()))
     monkeypatch.setattr(tools.spill, "install", lambda: None)
@@ -238,7 +307,9 @@ def test_memory_registration_is_explicit_narrow_and_restored(memory, monkeypatch
         assert "kars_access_request" in names
         if "memory" in caps:
             assert names == {"foundry_memory", "kars_access_request"}
-            memory_definition = next(tool["function"] for tool in definitions if tool["function"]["name"] == "foundry_memory")
+            memory_definition = next(
+                tool["function"] for tool in definitions if tool["function"]["name"] == "foundry_memory"
+            )
             assert memory_definition == MEMORY_SCHEMA
             assert registry.get_entry("foundry_memory").dynamic_schema_overrides is None
             measurements.attempted = 1
@@ -267,10 +338,24 @@ def test_memory_registration_is_restored_on_install_failure(memory, monkeypatch)
     assert registry.get_entry("foundry_memory") is None
 
 
-@pytest.mark.parametrize("operation,outcome", [
-    ("search", {"backend": "builtin", "retrieval": "lexical", "scope": "private_owner_role", "memories": [{"text": "Helsinki"}]}),
-    ("update", {"backend": "builtin", "status": "completed", "memory_id": "durable-id", "approved_knowledge": False}),
-])
+@pytest.mark.parametrize(
+    "operation,outcome",
+    [
+        (
+            "search",
+            {
+                "backend": "builtin",
+                "retrieval": "lexical",
+                "scope": "private_owner_role",
+                "memories": [{"text": "Helsinki"}],
+            },
+        ),
+        (
+            "update",
+            {"backend": "builtin", "status": "completed", "memory_id": "durable-id", "approved_knowledge": False},
+        ),
+    ],
+)
 def test_builtin_memory_is_router_selected_without_foundry_or_local_files(memory, monkeypatch, operation, outcome):
     monkeypatch.delenv("KARS_PROVIDER", raising=False)
     monkeypatch.delenv("FOUNDRY_PROJECT_ENDPOINT", raising=False)

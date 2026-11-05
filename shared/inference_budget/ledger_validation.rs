@@ -43,8 +43,8 @@ impl Ledger {
         {
             return Err(BudgetError::Corrupt);
         }
-        if let Some(history) = &self.history {
-            if !valid_digest(&history.root)
+        if let Some(history) = &self.history
+            && (!valid_digest(&history.root)
                 || history
                     .node_unknown
                     .iter()
@@ -53,10 +53,9 @@ impl Ledger {
                 || history.node_unknown.keys().any(|uid| {
                     self.effective_node_limits(uid)
                         .map_or(true, |limits| limits.finite())
-                })
-            {
-                return Err(BudgetError::Corrupt);
-            }
+                }))
+        {
+            return Err(BudgetError::Corrupt);
         }
         let mut root_unknown = self
             .history

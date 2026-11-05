@@ -61,7 +61,7 @@ struct Link {
 enum Node {
     Leaf {
         key: String,
-        record: HistoryRecord,
+        record: Box<HistoryRecord>,
     },
     Branch {
         prefix: String,
@@ -97,7 +97,7 @@ fn summary(node: &Node) -> Result<Summary, StoreError> {
             if record.key() != *key {
                 return Err(BudgetError::Corrupt.into());
             }
-            match record {
+            match record.as_ref() {
                 HistoryRecord::Node {
                     node,
                     unknown_usage_attempts,
@@ -317,7 +317,7 @@ impl Tree {
                     if !route(&stored).starts_with(&required) {
                         return Err(BudgetError::Corrupt.into());
                     }
-                    return Ok((stored == key).then_some(record));
+                    return Ok((stored == key).then_some(*record));
                 }
                 Node::Branch { prefix, children } => {
                     if !prefix.starts_with(&required) {
@@ -351,7 +351,7 @@ impl Tree {
                     .map(|record| {
                         self.put(Node::Leaf {
                             key: key.into(),
-                            record,
+                            record: Box::new(record),
                         })
                     })
                     .transpose();
@@ -367,7 +367,7 @@ impl Tree {
                         .map(|record| {
                             self.put(Node::Leaf {
                                 key: key.into(),
-                                record,
+                                record: Box::new(record),
                             })
                         })
                         .transpose();
@@ -384,19 +384,18 @@ impl Tree {
                 prefix,
                 mut children,
             } = page.node
+                && common == prefix.len()
             {
-                if common == prefix.len() {
-                    let digit = path.as_bytes()[prefix.len()] as char;
-                    let child = children.remove(&digit);
-                    if let Some(changed) = self.change(child, key, record, depth + 1).await? {
-                        children.insert(digit, changed);
-                    }
-                    return match children.len() {
-                        0 => Ok(None),
-                        1 => Ok(children.into_values().next()),
-                        _ => self.put(Node::Branch { prefix, children }).map(Some),
-                    };
+                let digit = path.as_bytes()[prefix.len()] as char;
+                let child = children.remove(&digit);
+                if let Some(changed) = self.change(child, key, record, depth + 1).await? {
+                    children.insert(digit, changed);
                 }
+                return match children.len() {
+                    0 => Ok(None),
+                    1 => Ok(children.into_values().next()),
+                    _ => self.put(Node::Branch { prefix, children }).map(Some),
+                };
             }
             let Some(record) = record else {
                 return Ok(Some(link));
@@ -406,7 +405,7 @@ impl Tree {
             }
             let leaf = self.put(Node::Leaf {
                 key: key.into(),
-                record,
+                record: Box::new(record),
             })?;
             let children = BTreeMap::from([
                 (old_path.as_bytes()[common] as char, link),

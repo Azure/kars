@@ -227,7 +227,7 @@ test("unavailable baselines retain observations without inventing a mode or comp
     assert.match(html, /Baseline unavailable \/ comparison unknown/);
     assert.match(html, new RegExp(diagnostic));
     assert.match(html, /unavailable \/ not compared/);
-    assert.match(html, /actual\.example\.com/);
+    assert.ok(html.split(/[<>]/).some(text => text === "actual.example.com"));
     assert.match(html, /tabular-nums">2</);
     assert.match(html, /Observations are retained; comparison is unavailable/);
     assert.doesNotMatch(html, /empty baseline \(Learn\)|empty baseline \(Strict deny-all\)|No beyond-declared DNS in sample/);

@@ -8,7 +8,6 @@
 
 import Link from "@/components/navigation-link";
 import { notFound } from "next/navigation";
-import { HonestState } from "@/components/honest-state";
 import { TeamEdit } from "./team-edit";
 import { QualificationControl } from "./qualification-control";
 import { currentPrincipal } from "@/lib/session";

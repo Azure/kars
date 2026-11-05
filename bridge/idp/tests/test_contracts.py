@@ -60,6 +60,16 @@ class SourceContracts(unittest.TestCase):
         self.assertIn("GOTOOLCHAIN=local", dockerfile)
         self.assertNotIn("go get", (ROOT / "scripts/build.sh").read_text())
 
+    def test_source_stages_install_patch_before_fetching(self):
+        for name in ("Dockerfile", "Dockerfile.locks"):
+            with self.subTest(recipe=name):
+                source = (ROOT / name).read_text().split("\nFROM source AS ", 1)[0]
+                install = "apt-get install -y --no-install-recommends patch"
+                self.assertIn(install, source)
+                self.assertLess(source.index("apt-get update"), source.index(install))
+                self.assertLess(source.index(install), source.index("RUN sh /packaging/scripts/fetch-source.sh"))
+                self.assertIn("rm -rf /var/lib/apt/lists/*", source)
+
     def test_resolver_is_separate_from_runtime_build(self):
         runtime = (ROOT / "Dockerfile").read_text()
         maintenance = (ROOT / "Dockerfile.locks").read_text()

@@ -36,8 +36,10 @@
 //!
 //! Persistence file is JSON of shape
 //! `{ "sandboxes": { "<name>": { "day_key", "daily", "month_key",
-//! "monthly" } } }`. Atomic-rename pattern: write to `*.tmp`, fsync,
-//! rename over the target. On startup we load on best-effort — a
+//! "monthly" } } }`. Atomic-rename pattern: exclusively create a private,
+//! uniquely named sibling file, write, fsync, then rename over the target.
+//! The operator-configured parent directory must not be writable by sandbox agents.
+//! On startup we load on best-effort — a
 //! corrupt or missing legacy file starts fresh and cannot establish a durable
 //! quota. Calendar accounts instead reject missing/replaced/corrupt state.
 
@@ -487,26 +489,128 @@ impl TokenBudgetTracker {
     }
 }
 
-/// Atomic write helper: serialize → tmp → fsync → rename. Failures
-/// surface to the caller, which logs and continues (counter
-/// in-memory remains authoritative for the current process).
+/// Atomic write in the operator-owned directory. Exclusive creation prevents
+/// following pre-existing staging symlinks or truncating another writer's file.
+/// Failures leave the prior target intact and the in-memory counters authoritative.
 fn persist_atomically(target: &Path, state: &PersistedState) -> std::io::Result<()> {
+    use std::io::Write;
+
     let bytes = serde_json::to_vec(state).map_err(std::io::Error::other)?;
-    let tmp = target.with_extension("tmp");
-    {
-        use std::io::Write;
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(&bytes)?;
-        f.sync_all()?;
+    let parent = target.parent().unwrap_or_else(|| Path::new("."));
+    let staging = parent.join(format!(
+        ".kars-token-budgets-{:032x}.tmp",
+        rand::random::<u128>()
+    ));
+    let mut file = create_budget_staging_file(&staging)?;
+    let result = (|| {
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&staging, target)
+    })();
+    drop(file);
+    if result.is_err() {
+        // Only remove a staging file this invocation successfully created.
+        let _ = std::fs::remove_file(&staging);
     }
-    std::fs::rename(&tmp, target)?;
-    Ok(())
+    result
+}
+
+fn create_budget_staging_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn persistence_staging_creation_never_truncates_an_existing_file() {
+        let dir = tempfile::tempdir_in(".").unwrap();
+        let path = dir.path().join("occupied");
+        std::fs::write(&path, b"existing accounting").unwrap();
+        let error = create_budget_staging_file(&path).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&path).unwrap(), b"existing accounting");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persistence_staging_creation_rejects_existing_and_dangling_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir_in(".").unwrap();
+        let victim = dir.path().join("victim");
+        let staging = dir.path().join("occupied");
+        symlink("victim", &staging).unwrap();
+        assert!(create_budget_staging_file(&staging).is_err());
+        assert!(
+            !victim.exists(),
+            "a dangling symlink must not create its target"
+        );
+        std::fs::write(&victim, b"do not truncate").unwrap();
+        assert!(create_budget_staging_file(&staging).is_err());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"do not truncate");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persistence_replaces_target_symlink_without_following_it_or_legacy_staging() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let dir = tempfile::tempdir_in(".").unwrap();
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, b"do not truncate").unwrap();
+        let target = dir.path().join("budgets.json");
+        symlink("victim", &target).unwrap();
+        symlink("victim", target.with_extension("tmp")).unwrap();
+        let state = PersistedState {
+            sandboxes: HashMap::from([(
+                "sandbox".into(),
+                SandboxCounters {
+                    day_key: 739749,
+                    daily: 12345,
+                    month_key: 24322,
+                    monthly: 67890,
+                },
+            )]),
+        };
+        persist_atomically(&target, &state).unwrap();
+        assert_eq!(std::fs::read(&victim).unwrap(), b"do not truncate");
+        assert!(
+            std::fs::symlink_metadata(target.with_extension("tmp"))
+                .unwrap()
+                .is_symlink()
+        );
+        assert!(!std::fs::symlink_metadata(&target).unwrap().is_symlink());
+        let restored: PersistedState =
+            serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+        assert_eq!(restored.sandboxes, state.sandboxes);
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 3);
+    }
+
+    #[test]
+    fn persistence_failed_rename_cleans_staging_and_preserves_existing_target() {
+        let dir = tempfile::tempdir_in(".").unwrap();
+        let target = dir.path().join("existing-directory");
+        std::fs::create_dir(&target).unwrap();
+        let retained = target.join("retained");
+        std::fs::write(&retained, b"retained accounting").unwrap();
+        assert!(persist_atomically(&target, &PersistedState::default()).is_err());
+        assert_eq!(std::fs::read(&retained).unwrap(), b"retained accounting");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
 
     /// Test clock holding a fixed `DateTime<Utc>` (mutable via
     /// `set`). Lets us cross UTC midnight + month boundary

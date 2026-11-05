@@ -680,6 +680,8 @@ adding or changing them before adoption is not an initial ownership transition.
 The adopted receipt continues to bind subsequent runner upgrades to that baseline.
 
 Older sealed values without `inferenceBudget.calendarPolicy` mean `enforce`.
+An explicit null is rejected if Helm preserves it, or falls back to `enforce`
+if Helm removes it during values coalescing; null never selects `record-only`.
 After adoption, operators may select `enforce` or `record-only` without replacing
 the original SRE intent or receipt. The catalog update still requires the native
 `karsbudgetaccounts/fund` permission. Record-only retains actual usage and pending

@@ -64,7 +64,7 @@ impl ReviewedStreamPins {
     fn observe(
         &mut self,
         phases: Vec<crate::routes::tasks::ReviewedPhaseDto>,
-        nonce: &str,
+        root_run_id: &str,
     ) -> Vec<Event> {
         let mut snapshots: BTreeMap<_, _> = phases
             .into_iter()
@@ -94,7 +94,7 @@ impl ReviewedStreamPins {
                 Event::default()
                     .event("reviewed-phase-activity")
                     .json_data(serde_json::json!({
-                        "run_nonce": nonce, "phase_key": key, "activity": activity,
+                        "run_nonce": root_run_id, "phase_key": key, "activity": activity,
                     }))
                     .ok()
             })
@@ -623,7 +623,7 @@ mod tests {
         assert_eq!(snapshots[1]["observations"], observed());
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 21);
-        for poll in calls[1..].chunks_exact(5) {
+        for poll in calls[1..].as_chunks::<5>().0 {
             assert!(poll[0].ends_with("/karstasks/briefing"));
             assert!(poll[3].contains("kars-mission-attempt-"));
             assert!(poll[4].ends_with("/karstasks/briefing"));

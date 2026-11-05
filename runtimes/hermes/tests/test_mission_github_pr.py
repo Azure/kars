@@ -13,14 +13,27 @@ from kars_runtime_hermes.plugin.mission_native_tools import NativeTools
 from kars_runtime_hermes.plugin.mission_observations import ReturnedRouterResponses
 from test_mission_memory import Registry
 
-ARGS = {"operation": "create", "repository": "owner/repo", "path": "README.md", "expected_base": "a" * 40,
-        "content": "Reviewed documentation", "title": "Docs", "body": "One file"}
+ARGS = {
+    "operation": "create",
+    "repository": "owner/repo",
+    "path": "README.md",
+    "expected_base": "a" * 40,
+    "content": "Reviewed documentation",
+    "title": "Docs",
+    "body": "One file",
+}
 
 
 @pytest.fixture
 def github(tmp_path, monkeypatch):
-    state = {"allowed": True, "recorded": True, "calls": [], "reports": [], "policies": [],
-             "result": {"http_status": 201, "response": {"html_url": "https://github.com/owner/repo/pull/17"}}}
+    state = {
+        "allowed": True,
+        "recorded": True,
+        "calls": [],
+        "reports": [],
+        "policies": [],
+        "result": {"http_status": 201, "response": {"html_url": "https://github.com/owner/repo/pull/17"}},
+    }
 
     def provider(request):
         payload = json.loads(request.content)
@@ -29,7 +42,9 @@ def github(tmp_path, monkeypatch):
             return httpx.Response(200, json={"allowed": state["allowed"]})
         assert request.url.path == "/telemetry/tool"
         state["reports"].append(payload)
-        return httpx.Response(200, json={"recorded": state["recorded"], "source": "harness-reported", "enforcement_changed": False})
+        return httpx.Response(
+            200, json={"recorded": state["recorded"], "source": "harness-reported", "enforcement_changed": False}
+        )
 
     def invoke(identity, args, cancelled):
         assert identity == ["task", "run", "assignment"] and not cancelled()
@@ -40,8 +55,15 @@ def github(tmp_path, monkeypatch):
 
     observations = ReturnedRouterResponses(httpx.MockTransport(provider))
     observations.scope = "scope-1"
-    phase = wire.phase({"name": "docs", "objective": "Produce the reviewed documentation PR", "executionMode": "native",
-                        "capabilities": ["github-pr"], "maxToolCalls": 8})
+    phase = wire.phase(
+        {
+            "name": "docs",
+            "objective": "Produce the reviewed documentation PR",
+            "executionMode": "native",
+            "capabilities": ["github-pr"],
+            "maxToolCalls": 8,
+        }
+    )
     measurements = native.Measurements("test-model", phase, lambda _: None, observations)
     tools = NativeTools(tmp_path, measurements)
     tools.github_identity = ["task", "run", "assignment"]
@@ -60,14 +82,20 @@ def test_governed_publication_preserves_observed_response_and_receipt(github):
     tools, m, state = github
     assert call(github) == state["result"]
     assert m.successful == 1 and m.failure is None
-    assert state["policies"] == [{"action": "tool:github_pr", "context": {
-        "scope_id": "scope-1", "tool_call_id": "github-1", "tool": "github_pr", "arguments": ARGS}}]
+    assert state["policies"] == [
+        {
+            "action": "tool:github_pr",
+            "context": {"scope_id": "scope-1", "tool_call_id": "github-1", "tool": "github_pr", "arguments": ARGS},
+        }
+    ]
     assert state["calls"] == [ARGS] and [r["ok"] for r in state["reports"]] == [True]
     assert "error" in json.loads(tools.invoke_github(ARGS))
     assert state["calls"] == [ARGS]  # No replay without a new observed invocation.
 
 
-@pytest.mark.parametrize("failure", ["readonly", "legacy", "denied", "invalid", "unobserved", "scope", "closed", "identity"])
+@pytest.mark.parametrize(
+    "failure", ["readonly", "legacy", "denied", "invalid", "unobserved", "scope", "closed", "identity"]
+)
 def test_missing_authority_cannot_dispatch_helper(github, failure):
     tools, m, state = github
     args = ARGS
@@ -91,7 +119,12 @@ def test_missing_authority_cannot_dispatch_helper(github, failure):
 
 def test_ambiguous_response_is_failed_evidence_not_a_success(github):
     _, m, state = github
-    state["result"] = {"error": "Response lost", "ambiguous": True, "replay_forbidden": True, "branch": "kars/reviewed/id"}
+    state["result"] = {
+        "error": "Response lost",
+        "ambiguous": True,
+        "replay_forbidden": True,
+        "branch": "kars/reviewed/id",
+    }
     assert call(github) == state["result"]
     assert m.successful == 0 and [r["ok"] for r in state["reports"]] == [False]
     assert len(state["calls"]) == 1
@@ -120,8 +153,12 @@ def test_registry_only_exposes_reviewed_github_and_restores_prior_handler(github
         m.phase["capabilities"] = []
     registry = Registry()
     if existing:
-        registry.register(name="github_pr", toolset="unrelated", schema={"name": "github_pr"},
-                          handler=lambda *_: pytest.fail("Original handler cannot be used by native assignment"))
+        registry.register(
+            name="github_pr",
+            toolset="unrelated",
+            schema={"name": "github_pr"},
+            handler=lambda *_: pytest.fail("Original handler cannot be used by native assignment"),
+        )
     previous = registry.get_entry("github_pr")
     monkeypatch.setitem(sys.modules, "tools", SimpleNamespace(file_tools=object()))
     monkeypatch.setattr(tools.spill, "install", lambda: None)
@@ -141,8 +178,13 @@ def test_registry_only_exposes_reviewed_github_and_restores_prior_handler(github
 
 
 def test_wire_digest_binds_explicit_native_github_capability():
-    phase = {"name": "docs", "objective": "Produce the reviewed documentation PR", "executionMode": "native",
-             "capabilities": ["github-pr"], "maxToolCalls": 8}
+    phase = {
+        "name": "docs",
+        "objective": "Produce the reviewed documentation PR",
+        "executionMode": "native",
+        "capabilities": ["github-pr"],
+        "maxToolCalls": 8,
+    }
     assert wire.phase(phase)["capabilities"] == ["github-pr"]
     phase.pop("executionMode")
     with pytest.raises(ValueError):

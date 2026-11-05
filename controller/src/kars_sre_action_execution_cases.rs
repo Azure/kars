@@ -73,13 +73,14 @@ async fn every_action_uses_exact_named_scope_and_real_token_request_flow() {
                 .cleanup_pending
         );
         assert!(result.finalizers().is_empty());
-        let state = cluster.0.lock().unwrap();
-        assert_eq!(state.writes, 1, "{kind}");
-        assert_eq!(state.token_requests, 1);
-        assert!(!state.objects.keys().any(|p| p.contains("/roles/")
-            || p.contains("/rolebindings/")
-            || p.contains("/serviceaccounts/")));
-        drop(state);
+        {
+            let state = cluster.0.lock().unwrap();
+            assert_eq!(state.writes, 1, "{kind}");
+            assert_eq!(state.token_requests, 1);
+            assert!(!state.objects.keys().any(|p| p.contains("/roles/")
+                || p.contains("/rolebindings/")
+                || p.contains("/serviceaccounts/")));
+        }
         let requests = server.received_requests().await.unwrap();
         let role_request = requests
             .iter()

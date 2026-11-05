@@ -227,24 +227,25 @@ pub(super) async fn harvest_and_retire_runs(
                 crate::team_commons::record_run(
                     client,
                     team,
-                    &id,
-                    title,
-                    &run,
-                    &run,
-                    output,
+                    crate::team_commons::RunSummary {
+                        id: &id,
+                        title,
+                        author: &run,
+                        source_task: &run,
+                        content: output,
+                    },
                     archive.as_ref(),
                 )
                 .await?;
             }
             stats.succeeded += 1;
-            if let Some(finished) = data.get("finishedAt") {
-                if stats
+            if let Some(finished) = data.get("finishedAt")
+                && stats
                     .last_success_at
                     .as_ref()
                     .is_none_or(|previous| previous < finished)
-                {
-                    stats.last_success_at = Some(finished.clone());
-                }
+            {
+                stats.last_success_at = Some(finished.clone());
             }
         } else {
             stats.barren += 1;

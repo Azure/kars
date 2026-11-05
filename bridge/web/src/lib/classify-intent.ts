@@ -57,7 +57,7 @@ export function classifyIntent(raw: string): IntentClassification {
 
   const affirmativeText = text.replace(
     /\b(?:not|no|without)\s+(?:(?:a|an)\s+)?(?:(?:standing|ongoing|persistent|recurring|recurrent|continuous|on[- ]demand|one-off|one-time|single-run)\s+)*(?:teams?|missions?|tasks?|reports?|assignments?|work)\b/g,
-    "",
+    " ",
   );
   if (/\b(?:one[- ]off|one[- ]time|single[- ]run|bounded mission)\b/.test(affirmativeText)) {
     return {

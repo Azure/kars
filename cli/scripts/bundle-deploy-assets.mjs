@@ -26,7 +26,7 @@ if (existsSync(coreChart)) {
   const locked = existsSync(lockPath) ? parse(readFileSync(lockPath, "utf8"))?.dependencies : [];
   const valid = (items) => Array.isArray(items) && items.every((item) =>
     typeof item?.name === "string" && /^[a-z0-9][a-z0-9.-]*$/.test(item.name)
-    && typeof item.version === "string" && /^\d+\.\d+\.\d+(?:[-+][a-zA-Z0-9.-]+)*$/.test(item.version)
+    && typeof item.version === "string" && /^\d+\.\d+\.\d+(?:[-+][a-zA-Z0-9.-]+(?:\+[a-zA-Z0-9.-]+)*)?$/.test(item.version)
     && typeof item.repository === "string" && item.repository.length > 0)
     && new Set(items.map((item) => item.name)).size === items.length;
   if (!valid(dependencies) || !valid(locked) || dependencies.length !== locked.length

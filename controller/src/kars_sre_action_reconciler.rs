@@ -786,11 +786,9 @@ async fn reconcile(cr: Arc<KarsSREAction>, ctx: Arc<Ctx>) -> Result<Action, Reco
                 // Preserve the journal/finalizer if status persistence failed.
                 // Retry will mark this consumed attempt interrupted, not replay it.
                 if let Some(execution) = claimed.status.as_ref().and_then(|s| s.execution.as_ref())
+                    && let Err(cleanup) = authority::cleanup(&ctx.client, &claimed, execution).await
                 {
-                    if let Err(cleanup) = authority::cleanup(&ctx.client, &claimed, execution).await
-                    {
-                        tracing::error!(error = %cleanup, "SRE authority cleanup after status failure requires retry");
-                    }
+                    tracing::error!(error = %cleanup, "SRE authority cleanup after status failure requires retry");
                 }
                 return Err(error);
             }

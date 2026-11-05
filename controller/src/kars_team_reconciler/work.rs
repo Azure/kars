@@ -19,7 +19,7 @@ pub(super) enum Selection {
     Idle,
     Blocked,
     AwaitingReview,
-    Item(contract::Binding, contract::TeamTask),
+    Item(contract::Binding, Box<contract::TeamTask>),
 }
 
 fn invalid(message: impl Into<String>) -> ReconcileError {
@@ -51,7 +51,7 @@ pub(super) async fn select(client: &Client, team: &KarsTeam) -> Result<Selection
                 item_id: item.id.clone(),
                 request_digest: contract::request_digest(item)?,
             },
-            item.clone(),
+            Box::new(item.clone()),
         ));
     }
     Ok(

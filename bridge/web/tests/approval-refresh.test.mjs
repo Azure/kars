@@ -324,7 +324,8 @@ const renderDetail = (detail, actionKind = "egress") => renderToStaticMarkup(
 test("access requests explain destination, reason and review expiry without exposing raw identity by default", () => {
   const html = renderDetail(accessDetail());
   const visible = html.split("<details>")[0];
-  assert.match(visible, /Destination:.*www.debian.org.*port 443/);
+  assert.match(visible, /Destination:/);
+  assert.ok(visible.split(/[<>]/).some(text => text === "www.debian.org · port 443"));
   assert.match(visible, /not currently allowed/);
   assert.match(visible, /Request expires:/);
   assert.match(visible, /<time dateTime="2026-11-01T17:12:49.000Z">2026-11-01 17:12:49 UTC/);
@@ -357,7 +358,7 @@ test("incomplete access records never fabricate destination or expiry and preser
     assert.match(renderDetail(accessDetail({ expiresAtUnix })), /Not recorded/);
   }
   const html = renderDetail(accessDetail({ target: "<script>alert(1)</script>", reason: "<img src=x onerror=alert(1)>" }));
-  assert.doesNotMatch(html, /<script>|<img /);
+  assert.doesNotMatch(html, /<script\b|<img\b/i);
   assert.match(html, /&lt;script&gt;/);
 });
 
@@ -367,7 +368,8 @@ test("task-scoped approval uses the same presentation without changing actionabl
       approvals: [{ ...approval(actionable ? "Pending" : "Expired", actionable), action_kind: "egress", detail: accessDetail() }],
       decider: "reviewer", authWired: true,
     }));
-    assert.match(html, /Destination:.*www.debian.org/);
+    assert.match(html, /Destination:/);
+    assert.ok(html.split(/[<>]/).some(text => text === "www.debian.org · port 443"));
     assert.equal(html.includes("Act on approval"), actionable);
     assert.match(html, /<details><summary/);
   }

@@ -58,16 +58,25 @@ fn mission_github_access_requires_reviewed_write_capability() {
     assert!(mission_github_write_enabled(Some(&blueprint)));
 }
 
+struct MissionFallbackRequirements<'a> {
+    capabilities: &'a std::collections::BTreeSet<String>,
+    max_parallel: i32,
+    total_tokens: Option<i64>,
+}
+
 fn validate_mission_fallback_route(
     options: &crate::routes::options::Options,
     blueprint: &BlueprintDto,
     runtime: &str,
     model: &ModelDto,
-    required_capabilities: &std::collections::BTreeSet<String>,
-    max_parallel: i32,
-    total_tokens: Option<i64>,
+    requirements: MissionFallbackRequirements<'_>,
     qualification_run: bool,
 ) -> AppResult<()> {
+    let MissionFallbackRequirements {
+        capabilities: required_capabilities,
+        max_parallel,
+        total_tokens,
+    } = requirements;
     if !options
         .models
         .iter()
@@ -585,9 +594,11 @@ pub async fn create_task(
                 blueprint,
                 runtime,
                 fallback,
-                &required_capabilities,
-                max_parallel,
-                total_tokens,
+                MissionFallbackRequirements {
+                    capabilities: &required_capabilities,
+                    max_parallel,
+                    total_tokens,
+                },
                 req.qualification_run,
             )?;
         }

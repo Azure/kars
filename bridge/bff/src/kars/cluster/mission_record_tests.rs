@@ -372,7 +372,7 @@ async fn deliverable_index_joins_exact_ownership_and_revision_bound_files() {
     assert_eq!(
         current.output_sha256,
         Some(crate::providers::signing::sha256_hex(
-            &serde_json::to_vec(&producer).unwrap(),
+            serde_json::to_vec(&producer).unwrap(),
         ))
     );
     assert_eq!(

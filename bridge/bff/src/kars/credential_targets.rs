@@ -391,7 +391,7 @@ impl Cluster {
                 owner: Some(target.clone()),
             },
             None,
-            super::credentials::BindingRetry::Lifecycle(Some(object)),
+            super::credentials::BindingRetry::Lifecycle(Some(Box::new(object))),
         )
         .await
     }

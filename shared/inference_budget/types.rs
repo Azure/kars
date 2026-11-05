@@ -20,6 +20,8 @@ pub enum BudgetScope {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+// Names match Kubernetes kinds and the persisted governed-inference contract.
+#[allow(clippy::enum_variant_names)]
 pub enum RootKind {
     KarsTask,
     KarsTeam,

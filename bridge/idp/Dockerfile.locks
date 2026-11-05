@@ -7,6 +7,8 @@ FROM golang:1.27.3-bookworm@sha256:d9b6a1beb9474adc2a1ce842573639b44b2a0dd49b666
 ENV GOTOOLCHAIN=local GOWORK=off GOPROXY=https://proxy.golang.org \
     GOSUMDB=sum.golang.org GOMODCACHE=/work/mod GOCACHE=/work/cache \
     GOFLAGS=-mod=readonly CGO_ENABLED=1
+RUN apt-get update && apt-get install -y --no-install-recommends patch \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /src/dex
 COPY locks/inputs.lock /packaging/locks/inputs.lock
 COPY scripts/fetch-source.sh scripts/source-inventory.sh scripts/apply-source-patches.sh scripts/verify-source-toolchain.sh /packaging/scripts/

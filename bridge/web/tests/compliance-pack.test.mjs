@@ -76,7 +76,7 @@ test("empty mappings and absent inclusion do not imply passing evidence", () => 
 test("claim content is escaped and does not change status semantics", () => {
   const html = render(pack([{ ...control("UNKNOWN"), evidence: '<script>alert("PASS")</script>' }]));
   assert.match(html, /&lt;script&gt;/);
-  assert.doesNotMatch(html, /<script>/);
+  assert.doesNotMatch(html, /<script\b/i);
   assert.match(html, /Claim UNKNOWN/);
 });
 

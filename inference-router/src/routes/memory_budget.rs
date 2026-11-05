@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub async fn authorize(
     state: &AppState,
     request: Option<&AuthorizedMemoryRequest>,
-) -> Result<Option<String>, Response> {
+) -> Result<Option<String>, Box<Response>> {
     let Some(budget) = &state.inference_budget else {
         return Ok(None);
     };
@@ -34,10 +34,10 @@ pub async fn authorize(
         "This Foundry operation is outside the closed governed-inference contract; memory requires an authorized private partition or live binding and unbounded funding without a monetary ceiling",
         "unsupported_budget_operation",
         "unsupported_budget_operation",
-    ).into_response())
+    ).into_response().into())
 }
 
-fn unavailable(message: &'static str) -> Response {
+fn unavailable(message: &'static str) -> Box<Response> {
     crate::errors::openai_coded(
         StatusCode::SERVICE_UNAVAILABLE,
         message,
@@ -45,6 +45,7 @@ fn unavailable(message: &'static str) -> Response {
         "memory_accounting_unavailable",
     )
     .into_response()
+    .into()
 }
 
 pub struct Observation {
@@ -60,7 +61,7 @@ impl Observation {
         binding: Option<String>,
         operation: &str,
         body: &[u8],
-    ) -> Result<Option<Self>, Response> {
+    ) -> Result<Option<Self>, Box<Response>> {
         let Some(binding) = binding else {
             return Ok(None);
         };

@@ -2,7 +2,8 @@
 // Licensed under the MIT License.
 
 import { Command } from "commander";
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync } from "node:fs";
+import { readBoundedFileSync } from "../lib/bounded-file.js";
 import { createHash } from "node:crypto";
 import { execa } from "execa";
 import { parseAllDocuments } from "yaml";
@@ -194,13 +195,13 @@ export function credentialGrantsCommand():Command {
   migration.command("retire").argument("<reviewed-migration>").argument("<rendered-release>")
     .requiredOption("--receipt <file>","New private durable receipt; retain it for resume/finalize").option("--context <context>")
     .action(async(file,rendered,options)=>{
-      if(statSync(file).size>2_097_152||statSync(rendered).size>16*1024*1024)throw new Error("Migration inputs exceed their bounds");
-      const parsed=parseAllDocuments(readFileSync(rendered,"utf8"));
+      const review=JSON.parse(readBoundedFileSync(file,2_097_152,"Migration inputs exceed their bounds or are not regular files"));
+      const parsed=parseAllDocuments(readBoundedFileSync(rendered,16*1024*1024,"Migration inputs exceed their bounds or are not regular files"));
       if(parsed.some(document=>document.errors.length))throw new Error("Rendered migration release contains invalid YAML");
       const documents:unknown[]=parsed.map(document=>document.toJS({maxAliasCount:100})).filter(value=>value!=null);
       const run=execute(options.context);
       await withRootMigrationJournal(options.receipt,true,async journal=>{
-        const receipt=await prepareRootMigration(run,JSON.parse(readFileSync(file,"utf8")),documents,journal);
+        const receipt=await prepareRootMigration(run,review,documents,journal);
         await retireRootMigration(run,receipt,journal);
       });
       console.log("Root retired at zero; reviewed image installed Pending. Rotate budget TLS key and public CA in place, then finalize with this receipt.");
@@ -259,8 +260,7 @@ export function credentialGrantsCommand():Command {
     });
   imageRecovery.command("apply").argument("<reviewed-recovery>").option("--context <context>")
     .action(async(file,options)=>{
-      if(statSync(file).size>131_072)throw new Error("Root image recovery review exceeds its bound");
-      await applyRootImageRecovery(execute(options.context),JSON.parse(readFileSync(file,"utf8")));
+      await applyRootImageRecovery(execute(options.context),JSON.parse(readBoundedFileSync(file,131_072,"Root image recovery review exceeds its bound or is not a regular file")));
       console.log("Previously qualified controller image restored; existing proofs and grants preserved. Ordinary root upgrades remain blocked.");
     });
   command.command("review-root-migration").argument("<rendered-release>")
@@ -269,14 +269,12 @@ export function credentialGrantsCommand():Command {
     .option("--companion-image <deployment>","Explicitly review image-only refresh of an already-enrolled Deployment in the private root namespace (repeatable)",repeat,[])
     .option("--sealed-root <file>","Historical root Deployment JSON matching the existing seal; review retirement of an already-rolled image-only delta without rollback")
     .action(async(file,options)=>{
-      if(statSync(file).size>16*1024*1024)throw new Error("Rendered migration release exceeds 16 MiB");
-      const parsed=parseAllDocuments(readFileSync(file,"utf8"));
+      const parsed=parseAllDocuments(readBoundedFileSync(file,16*1024*1024,"Rendered migration release exceeds 16 MiB or is not a regular file"));
       if(parsed.some(document=>document.errors.length))throw new Error("Rendered migration release contains invalid YAML");
       const documents:unknown[]=parsed.map(document=>document.toJS({maxAliasCount:100})).filter(value=>value!=null);
       let historicalRoot;
       if(options.sealedRoot){
-        if(statSync(options.sealedRoot).size>1_048_576)throw new Error("Historical root witness exceeds 1 MiB");
-        historicalRoot=record(JSON.parse(readFileSync(options.sealedRoot,"utf8")));
+        historicalRoot=record(JSON.parse(readBoundedFileSync(options.sealedRoot,1_048_576,"Historical root witness exceeds 1 MiB or is not a regular file")));
       }
       const review=await previewPrivateRootMigration(execute(options.context),options.privateRoot,options.release,documents,historicalRoot,options.companionImage);
       console.log(JSON.stringify(review,null,2));
@@ -314,8 +312,7 @@ export function credentialGrantsCommand():Command {
     });
   revisionRecovery.command("apply").argument("<reviewed-recovery>").option("--context <context>")
     .action(async(file,options)=>{
-      if(statSync(file).size>262_144)throw new Error("Budget revision recovery review exceeds its bound");
-      await applyBudgetRevisionRecovery(execute(options.context),JSON.parse(readFileSync(file,"utf8")));
+      await applyBudgetRevisionRecovery(execute(options.context),JSON.parse(readBoundedFileSync(file,262_144,"Budget revision recovery review exceeds its bound or is not a regular file")));
       console.log("Same-key TLS revision rebound and strict qualification verified. Confirm current-generation WriterReady and PrivateConsumptionReady before use.");
     });
   command.command("preview").requiredOption("--namespace <namespace>")

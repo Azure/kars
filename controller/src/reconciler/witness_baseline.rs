@@ -296,23 +296,21 @@ async fn revoke(
     let mut errors = Vec::new();
     // Independently remove each owned half even when its counterpart is foreign
     // or deletion fails. Never delete/adopt a foreign grant by name alone.
-    if let Some(binding) = binding.filter(|b| owned(&b.metadata, sandbox, namespace)) {
-        if let Err(error) = Api::<RoleBinding>::namespaced(client.clone(), &namespace.name_any())
+    if let Some(binding) = binding.filter(|b| owned(&b.metadata, sandbox, namespace))
+        && let Err(error) = Api::<RoleBinding>::namespaced(client.clone(), &namespace.name_any())
             .delete(GRANT, &delete_params(&binding.metadata)?)
             .await
-            && !matches!(&error, kube::Error::Api(e) if e.code == 404)
-        {
-            errors.push(format!("revoke witness binding: {error}"));
-        }
+        && !matches!(&error, kube::Error::Api(e) if e.code == 404)
+    {
+        errors.push(format!("revoke witness binding: {error}"));
     }
-    if let Some(role) = role.filter(|r| owned(&r.metadata, sandbox, namespace)) {
-        if let Err(error) = Api::<Role>::namespaced(client.clone(), &namespace.name_any())
+    if let Some(role) = role.filter(|r| owned(&r.metadata, sandbox, namespace))
+        && let Err(error) = Api::<Role>::namespaced(client.clone(), &namespace.name_any())
             .delete(GRANT, &delete_params(&role.metadata)?)
             .await
-            && !matches!(&error, kube::Error::Api(e) if e.code == 404)
-        {
-            errors.push(format!("revoke witness role: {error}"));
-        }
+        && !matches!(&error, kube::Error::Api(e) if e.code == 404)
+    {
+        errors.push(format!("revoke witness role: {error}"));
     }
     if role.is_some_and(|r| !owned(&r.metadata, sandbox, namespace))
         || binding.is_some_and(|b| !owned(&b.metadata, sandbox, namespace))

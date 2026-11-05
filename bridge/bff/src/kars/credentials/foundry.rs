@@ -37,25 +37,23 @@ pub(crate) fn saved_foundry_project(
         .transpose()
 }
 
+type CatalogPatch = (
+    BTreeMap<String, String>,
+    BTreeMap<String, String>,
+    json_patch::Patch,
+);
+
 fn catalog_patch(
     current: &Secret,
     project: Option<&FoundryProject>,
     models: &[String],
     api_key: Option<&str>,
-) -> Result<
-    (
-        BTreeMap<String, String>,
-        BTreeMap<String, String>,
-        json_patch::Patch,
-    ),
-    kube::Error,
-> {
-    if let Some(project) = project {
-        if project.api_key_auth != api_key.is_some()
-            || api_key.is_some_and(|key| key.trim().is_empty())
-        {
-            return Err(failure("Foundry authentication and credential must agree"));
-        }
+) -> Result<CatalogPatch, kube::Error> {
+    if let Some(project) = project
+        && (project.api_key_auth != api_key.is_some()
+            || api_key.is_some_and(|key| key.trim().is_empty()))
+    {
+        return Err(failure("Foundry authentication and credential must agree"));
     }
     let uid = current
         .uid()

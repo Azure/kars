@@ -91,7 +91,7 @@ async fn revision_manifest_hydrates_28_retained_exports_for_native_phases_and_re
         seal_team_revision(
             &mut fresh,
             &documents,
-            &revision_roles(&plan(&failed).unwrap()),
+            &revision_roles(plan(&failed).unwrap()),
         )
         .unwrap();
         seal_team_test_run(&mut fresh);
@@ -126,7 +126,7 @@ async fn revision_manifest_hydrates_28_retained_exports_for_native_phases_and_re
         seal_team_revision(
             &mut diagnostics_only,
             &documents[8..],
-            &revision_roles(&plan(&failed).unwrap()),
+            &revision_roles(plan(&failed).unwrap()),
         )
         .unwrap();
         seal_team_test_run(&mut diagnostics_only);

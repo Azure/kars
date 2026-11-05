@@ -883,7 +883,7 @@ mod tests {
         request.identity.pod_uid = receipt.pod_uid.clone();
         request.sequence = receipt.sequence;
         request.tokens = receipt.tokens;
-        request.event = receipt.event.clone();
+        request.event = receipt.event;
         (ledger, request, fixture["audits"].clone())
     }
 
@@ -924,7 +924,7 @@ mod tests {
     fn never_reserved_begin_and_finish_markers_survive_normal_period_rollover() {
         for event in [Event::Begin, Event::Finish] {
             let (mut ledger, mut request, mut audits) = never_reserved_fixture();
-            ledger.writers.get_mut("writer").unwrap().event = event.clone();
+            ledger.writers.get_mut("writer").unwrap().event = event;
             let encoded = serde_json::to_value(event).unwrap();
             audits["writer:45"]["writerBefore"]["event"] = encoded.clone();
             audits["writer:45"]["writerAfter"]["event"] = encoded;

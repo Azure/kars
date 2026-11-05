@@ -269,6 +269,10 @@ pub async fn resources(
     Ok(bound)
 }
 
+#[allow(
+    dead_code,
+    reason = "Controller admission uses this fetch-and-check helper; the BFF checks its fetched Team"
+)]
 pub async fn check(
     client: Client,
     ns: &str,

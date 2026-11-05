@@ -464,7 +464,6 @@ fn child(
                 .as_ref()
                 .and_then(|e| e.runtime.clone())
         },
-        ..Default::default()
     });
     ensure!(
         crate::kars_task::spec_attenuation_violations(&spec, &parent.spec).is_empty(),
@@ -787,7 +786,7 @@ fn aliased_phase_documents(record: &Value, source: Source, name: String) -> Resu
         })
         .collect();
     // JSON preserves runtime insertion order; the dispatcher validates lexical aliases.
-    documents.sort_by(|(a, _), (b, _)| a.cmp(b));
+    documents.sort_by_key(|(name, _)| *name);
     for (index, (artifact_name, content)) in documents.into_iter().enumerate() {
         let content = content
             .as_str()
@@ -1587,9 +1586,9 @@ pub(crate) async fn reconcile(client: &Client, task: &KarsTask) -> Result<bool> 
                 if let Some(status) = child.status.as_ref().filter(|status| {
                     child.metadata.generation.is_some()
                         && status.observed_generation == child.metadata.generation
-                }) {
-                    if status.execution_phase.as_deref() == Some("Degraded") {
-                        phase_hold.get_or_insert_with(|| {
+                }) && status.execution_phase.as_deref() == Some("Degraded")
+                {
+                    phase_hold.get_or_insert_with(|| {
                             format!(
                                 "ReviewedPhaseHeld: role '{}' phase '{}' (task '{}'): {}",
                                 role.name,
@@ -1600,7 +1599,6 @@ pub(crate) async fn reconcile(client: &Client, task: &KarsTask) -> Result<bool> 
                                 )
                             )
                         });
-                    }
                 }
                 break;
             }

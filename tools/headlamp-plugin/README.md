@@ -73,10 +73,18 @@ KarsMemory retain their compiled-versus-loaded digest comparisons.
 
 ## Build
 
+Use Node.js 22 for the plugin build toolchain.
+
 ```bash
-npm install
+npm ci
+npm test
 npm run build       # → dist/main.js
 ```
+
+The Headlamp Plugin Build & Test CI job installs this lockfile, runs the tests
+and production bundle build, and audits dependencies. Vitest, its mocker and
+Istanbul coverage provider use paired patched versions through npm overrides.
+Passing these checks does not establish installed Headlamp acceptance.
 
 The Core Helm installation packages this plugin into the AL3 Headlamp image.
 Build `sandbox-images/headlamp/Dockerfile` from the repository root; update that

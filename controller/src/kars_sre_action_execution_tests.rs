@@ -181,15 +181,15 @@ impl Respond for Cluster {
             if target && controller {
                 return error(403);
             }
-            if let Some(rv) = body["metadata"].get("resourceVersion") {
-                if *rv != object["metadata"]["resourceVersion"] {
-                    return error(409);
-                }
+            if let Some(rv) = body["metadata"].get("resourceVersion")
+                && *rv != object["metadata"]["resourceVersion"]
+            {
+                return error(409);
             }
-            if let Some(uid) = body["metadata"].get("uid") {
-                if *uid != object["metadata"]["uid"] {
-                    return error(409);
-                }
+            if let Some(uid) = body["metadata"].get("uid")
+                && *uid != object["metadata"]["uid"]
+            {
+                return error(409);
             }
             if target {
                 assert_eq!(body["metadata"]["uid"], "target-uid");
@@ -225,15 +225,15 @@ impl Respond for Cluster {
             return response(200, object);
         }
         if method == "DELETE" {
-            if let Some(uid) = body["preconditions"].get("uid") {
-                if *uid != object["metadata"]["uid"] {
-                    return error(409);
-                }
+            if let Some(uid) = body["preconditions"].get("uid")
+                && *uid != object["metadata"]["uid"]
+            {
+                return error(409);
             }
-            if let Some(rv) = body["preconditions"].get("resourceVersion") {
-                if *rv != object["metadata"]["resourceVersion"] {
-                    return error(409);
-                }
+            if let Some(rv) = body["preconditions"].get("resourceVersion")
+                && *rv != object["metadata"]["resourceVersion"]
+            {
+                return error(409);
             }
             // DeleteParams expresses dryRun in the JSON DeleteOptions body.
             let dry_run = dry_run || body["dryRun"] == json!(["All"]);

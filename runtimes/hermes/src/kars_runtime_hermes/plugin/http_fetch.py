@@ -37,14 +37,19 @@ def fetch_response(args: dict[str, Any], request=None, *, telemetry=None):
         scope = listed.json().get("scope", {}).get("id")
         if not isinstance(scope, str) or not scope:
             raise ValueError("Router scope unavailable")
-    return request("POST", "/egress/fetch", **({"timeout": wait / 1000 + 35} if wait else {}), json={
-        "url": str(args.get("url", "")).strip(),
-        "method": str(args.get("method", "GET")).upper(),
-        "headers": args.get("headers") if isinstance(args.get("headers"), dict) else {},
-        "body": str(args.get("body") or ""),
-        **({"telemetry": telemetry} if telemetry is not None else {}),
-        **({"scope_id": scope, "wait_for_approval_ms": wait} if wait else {}),
-    })
+    return request(
+        "POST",
+        "/egress/fetch",
+        **({"timeout": wait / 1000 + 35} if wait else {}),
+        json={
+            "url": str(args.get("url", "")).strip(),
+            "method": str(args.get("method", "GET")).upper(),
+            "headers": args.get("headers") if isinstance(args.get("headers"), dict) else {},
+            "body": str(args.get("body") or ""),
+            **({"telemetry": telemetry} if telemetry is not None else {}),
+            **({"scope_id": scope, "wait_for_approval_ms": wait} if wait else {}),
+        },
+    )
 
 
 def _http_fetch(args: dict[str, Any], **_kwargs: Any) -> str:
@@ -63,10 +68,15 @@ def _http_fetch(args: dict[str, Any], **_kwargs: Any) -> str:
             result = {"body": resp.text[:500]}
         if not isinstance(result, dict):
             result = {"body": resp.text[:500]}
-        return json.dumps({**result, "error": result.get("error", f"egress denied (HTTP {resp.status_code})"),
-                           "http_status": resp.status_code})
+        return json.dumps(
+            {
+                **result,
+                "error": result.get("error", f"egress denied (HTTP {resp.status_code})"),
+                "http_status": resp.status_code,
+            }
+        )
     # Return body verbatim — caller can parse as needed.
-    return resp.text[:32 * 1024]  # cap at 32KB for prompt safety
+    return resp.text[: 32 * 1024]  # cap at 32KB for prompt safety
 
 
 _HTTP_FETCH_SCHEMA = {
@@ -85,8 +95,15 @@ _HTTP_FETCH_SCHEMA = {
             "method": {"type": "string", "description": "GET / POST / PUT / PATCH / DELETE / HEAD (default GET)"},
             "headers": {"type": "object", "description": "Optional HTTP headers"},
             "body": {"type": "string", "description": "Optional request body (string)"},
-            "wait_for_approval_ms": {"type": "integer", "minimum": 0, "maximum": 300000,
-                                     "description": "Wait for installed egress policy before dispatch; queue approval alone is not permission. Default 0 returns denial and request details."},
+            "wait_for_approval_ms": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 300000,
+                "description": (
+                    "Wait for installed egress policy before dispatch; queue approval alone is "
+                    "not permission. Default 0 returns denial and request details."
+                ),
+            },
         },
         "required": ["url"],
     },
@@ -102,4 +119,3 @@ def register(ctx: Any) -> None:  # noqa: ANN401
         description=_HTTP_FETCH_SCHEMA["description"],
     )
     logger.info("http_fetch registered")
-

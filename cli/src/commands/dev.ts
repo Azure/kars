@@ -864,8 +864,6 @@ Notes:
               "Internal error: credentials missing after first-run prompt.",
             );
           }
-          const { default: inquirer } = await import("inquirer");
-
           // Optional rebuild prompt is now hoisted to the common
           // first-run block — applies to both targets.
 

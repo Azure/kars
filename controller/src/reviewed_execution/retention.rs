@@ -116,7 +116,7 @@ fn retained_inputs_accept_exact_full_or_historical_sets_without_partial_exports(
             actual,
             vec![memory.clone()],
             vec![draft.clone(), csv.clone(), handoff.clone()],
-            &[handoff.clone()],
+            std::slice::from_ref(&handoff),
         )
     };
     let full = vec![memory.clone(), draft.clone(), csv.clone(), handoff.clone()];
@@ -124,7 +124,7 @@ fn retained_inputs_accept_exact_full_or_historical_sets_without_partial_exports(
     assert!(check(&full));
     assert!(check(&historical));
     assert!(!check(&[memory.clone(), draft.clone(), handoff.clone()]));
-    assert!(!check(&[handoff.clone()]));
+    assert!(!check(std::slice::from_ref(&handoff)));
     for valid in [full, historical] {
         let mut changed = valid.clone();
         changed[1].source.pod_uid = "replacement".into();

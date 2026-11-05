@@ -36,6 +36,8 @@ describe("existing registry with native operation custody", () => {
   });
   it("bounds hydration to sixteen actual lookups even when registry ignores limit", async () => {
     handler = (req, res) => {
+      res.setHeader("Content-Type", "application/json; charset=utf-8");
+      res.setHeader("X-Content-Type-Options", "nosniff");
       if (req.url!.includes("/discover")) res.end(JSON.stringify({ results: Array.from({ length: 40 }, (_, i) => ({ did: `did:mesh:${i.toString(16).padStart(32, "0")}` })) }));
       else res.end(JSON.stringify({ did: decodeURIComponent(req.url!.split("/").at(-1)!), metadata: { display_name: "reviewer" }, last_seen: new Date().toISOString() }));
     };

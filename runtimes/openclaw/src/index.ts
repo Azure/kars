@@ -92,7 +92,6 @@ import {
   routerCall as _routerCall,
   routerCallStrict as _routerCallStrict,
   readAdminToken as _readAdminToken,
-  readAdminTokenSync as _readAdminTokenSync,
   pushTrustToRouter,
   pushSigningCounter,
 } from "./core/router-client.js";
@@ -103,10 +102,6 @@ import {
   nameToAmidTs,
   parentTrustedAmids,
   parentTrustedNames,
-  peerSigningKeys,
-  getCachedAmid,
-  pickFreshestRegistryMatch,
-  resolveAmidByName as _resolveAmidByName,
   resolveAmidToName as _resolveAmidToName,
   resolveSigningKey as _resolveSigningKey,
   seedTrustedPeers,
@@ -116,13 +111,6 @@ import {
 import { getMeshRegistry } from "./core/mesh-registry.js";
 
 // Thin wrappers so internal callers don't need to thread `routerUrl` through.
-async function resolveAmidByName(
-  agentName: string,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  opts: { timeoutMs?: number; registryBase?: string; scopeFilter?: (a: any) => boolean; bypassCache?: boolean } = {},
-): Promise<string | undefined> {
-  return _resolveAmidByName(agentName, routerUrl, opts);
-}
 async function resolveAmidToName(amid: string): Promise<string> {
   return _resolveAmidToName(amid, routerUrl);
 }
@@ -361,9 +349,7 @@ async function notifyInboxToMemory(log: { info: (m: string) => void; warn: (m: s
 }
 import { discoverFoundryProject, type FoundryProjectInfo } from "./core/foundry-discovery.js";
 import { callFoundryMemory, memoryUpdateSummary } from "./core/foundry-memory.js";
-import { delegateToNativeAgent } from "./core/agt-task-delegate.js";
-import { meshSendWithIdentity, meshHandleTransportMessage, pendingTransfers, MESH_CHUNK_THRESHOLD, MESH_CHUNK_SIZE, MESH_MAX_CHUNKS, MESH_TRANSFER_TTL, type PendingMeshTransfer } from "./core/mesh-transport.js";
-import { TASK_TOOLS } from "./core/agt-task-tools.js";
+import { meshSendWithIdentity, meshHandleTransportMessage } from "./core/mesh-transport.js";
 import { recordMeshSession as _recordMeshSession, agtReconnect as _agtReconnect, notifyInboxToMemory as _notifyInboxToMemory, startTaskProgressHeartbeat } from "./core/agt-heartbeat.js";
 import { runOffloadTask as _runOffloadTask, startProactiveOffloadIfNeeded as _startProactiveOffloadIfNeeded } from "./core/agt-offload.js";
 import { processTaskWithTools as _processTaskWithTools, type TaskLoopDeps } from "./core/agt-task-loop.js";
@@ -2416,8 +2402,8 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
 }
 
 // ---------------------------------------------------------------------------
-// Router HTTP helpers (`_routerCall`, `_routerCallStrict`, `_readAdminToken`,
-// `_readAdminTokenSync`) live in cli/src/core/router-client.ts and are
+// Router HTTP helpers (`_routerCall`, `_routerCallStrict`, `_readAdminToken`)
+// live in core/router-client.ts and are
 // imported at the top of this file.
 // ---------------------------------------------------------------------------
 
@@ -2933,48 +2919,6 @@ const azureClawPlugin = definePluginEntry({
     // These are first-class tools the LLM can call directly.
     // Registered as required tools (always available, no tools.allow needed).
     // API: execute(_id, params) → { content: [{ type: "text", text }] }
-
-    async function routerCall(method: string, path: string, body?: unknown, extraHeaders?: Record<string, string>): Promise<any> {
-      const http = await import("node:http");
-      const url = routerUrl(path);
-      return new Promise((resolve, reject) => {
-        const opts: any = {
-          method,
-          timeout: 15000,
-          headers: { "x-kars-sandbox": process.env.SANDBOX_NAME || "self", ...extraHeaders } as Record<string, string>,
-        };
-        if (body) opts.headers["Content-Type"] = "application/json";
-        // Auto-attach admin token for privileged endpoints. Caller can still
-        // override via extraHeaders. Without this, /agt/trust mutations and
-        // /admin/* calls return 401 — see also the spawn_destroy trust cleanup.
-        if (!opts.headers["Authorization"] && /^\/(agt\/trust|agt\/handoff|admin)\b/.test(path)) {
-          const tok = _readAdminTokenSync();
-          if (tok) opts.headers["Authorization"] = `Bearer ${tok}`;
-        }
-        let settled = false;
-        const settle = (fn: () => void) => { if (!settled) { settled = true; fn(); } };
-        const req = http.request(url, opts, (res: any) => {
-          let data = "";
-          const maxLen = 64 * 1024; // 64 KB safety cap
-          // Must handle response stream errors (e.g. from req.destroy() on timeout)
-          res.on("error", () => {});
-          res.on("data", (c: Buffer) => {
-            if (data.length < maxLen) data += c.toString();
-          });
-          res.on("end", () => {
-            if (res.statusCode && res.statusCode >= 400) {
-              settle(() => reject(new Error(`HTTP ${res.statusCode}: ${data.slice(0, 500)}`)));
-              return;
-            }
-            settle(() => { try { resolve(JSON.parse(data)); } catch { resolve({ raw: data.slice(0, 2000) }); } });
-          });
-        });
-        req.on("error", (e: Error) => settle(() => reject(e)));
-        req.setTimeout(15000, () => { req.destroy(); settle(() => reject(new Error("timeout"))); });
-        if (body) req.write(JSON.stringify(body));
-        req.end();
-      });
-    }
 
     // ── kars AGT tool registrations (S15.f.9) ────────────────────
     // Extracted to core/agt-tools/agt.ts. Tool bodies are byte-identical;

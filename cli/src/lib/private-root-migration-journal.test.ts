@@ -58,8 +58,8 @@ describe("durable private migration journal", () => {
     try {
       await withRootMigrationJournal(file, true, async journal => {
         await journal.save(receipt);
-        expect(statSync(file).mode & 0o777).toBe(0o600);
         expect(readFileSync(file, "utf8")).toContain('"phase":"prepared"');
+        expect(statSync(file).mode & 0o777).toBe(0o600);
         await expect(withRootMigrationJournal(file, false, async () => {})).rejects.toThrow();
         await journal.save({ ...receipt, phase: "quiescent" });
       });

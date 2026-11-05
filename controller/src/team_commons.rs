@@ -329,19 +329,30 @@ pub async fn ensure_commons(client: &Client, team: &KarsTeam) -> Result<()> {
     Ok(())
 }
 
+pub(crate) struct RunSummary<'a> {
+    pub id: &'a str,
+    pub title: &'a str,
+    pub author: &'a str,
+    pub source_task: &'a str,
+    pub content: &'a str,
+}
+
 /// Append a summary or enrich its verified archive without rewriting audited
 /// summary bytes or its original charter-derived title. Returns `true` when
 /// either record was written.
 pub(crate) async fn record_run(
     client: &Client,
     team: &KarsTeam,
-    id: &str,
-    title: &str,
-    author: &str,
-    source_task: &str,
-    content: &str,
+    summary: RunSummary<'_>,
     archive: Option<&RunArchive>,
 ) -> Result<bool> {
+    let RunSummary {
+        id,
+        title,
+        author,
+        source_task,
+        content,
+    } = summary;
     let identity = CommonsIdentity::for_team(team)?;
     let cms: Api<ConfigMap> = Api::namespaced(client.clone(), &identity.namespace);
     let existing = cms

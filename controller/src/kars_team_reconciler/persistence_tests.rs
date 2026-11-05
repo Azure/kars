@@ -179,12 +179,13 @@ impl Respond for KubeServer {
             return failure(404);
         };
         if method == "GET" {
-            if !is_task && name.starts_with("kars-mission-output-") {
-                if let Some(task) = store.task_on_output_read.take() {
-                    store
-                        .tasks
-                        .insert(task["metadata"]["name"].as_str().unwrap().into(), task);
-                }
+            if !is_task
+                && name.starts_with("kars-mission-output-")
+                && let Some(task) = store.task_on_output_read.take()
+            {
+                store
+                    .tasks
+                    .insert(task["metadata"]["name"].as_str().unwrap().into(), task);
             }
             return match if is_task {
                 store.tasks.get(name)
@@ -245,12 +246,10 @@ impl Respond for KubeServer {
             return response(200, task);
         }
         if method == "PUT" {
-            if is_task {
-                if let Some(task) = store.task_on_retirement.take() {
-                    store
-                        .tasks
-                        .insert(task["metadata"]["name"].as_str().unwrap().into(), task);
-                }
+            if is_task && let Some(task) = store.task_on_retirement.take() {
+                store
+                    .tasks
+                    .insert(task["metadata"]["name"].as_str().unwrap().into(), task);
             }
             if !is_task && store.fail_commons_write {
                 return failure(409);
@@ -739,11 +738,13 @@ async fn five_entry_history_recovers_cadence_after_oversized_objective_rejection
         crate::team_commons::record_run(
             &client,
             &team,
-            &format!("00000000-0000-4000-8000-{n:012}"),
-            &team.spec.charter,
-            &format!("engineering-run-{n:032x}"),
-            &format!("engineering-run-{n:032x}"),
-            &"f".repeat(400),
+            crate::team_commons::RunSummary {
+                id: &format!("00000000-0000-4000-8000-{n:012}"),
+                title: &team.spec.charter,
+                author: &format!("engineering-run-{n:032x}"),
+                source_task: &format!("engineering-run-{n:032x}"),
+                content: &"f".repeat(400),
+            },
             None,
         )
         .await

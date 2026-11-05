@@ -2,6 +2,7 @@
 # Licensed under the MIT License.
 
 """Unit coverage; real supervisor tests require the actual Linux Task sandbox."""
+
 import base64
 import copy
 import json
@@ -19,18 +20,28 @@ from kars_runtime_hermes.plugin.mission_native_tools import NativeTools
 
 
 SOURCE = "print('actual output')\n"
-ARGS = {"entrypoint": "app.py", "files": [{"path": "scratch/app.py", "name": "app.py",
-                                            "sha256": python.digest(SOURCE.encode())}]}
+ARGS = {
+    "entrypoint": "app.py",
+    "files": [{"path": "scratch/app.py", "name": "app.py", "sha256": python.digest(SOURCE.encode())}],
+}
 IDENTITY = ["test-task", "test-run", "test-assignment", "call-1"]
 
 
-@pytest.mark.parametrize("mutation", [
-    {"entrypoint": "../app.py"}, {"entrypoint": "app.sh"}, {"timeout_seconds": True},
-    {"timeout_seconds": 61}, {"argv": ["bad\0arg"]}, {"argv": ["x" * 1025]},
-    {"command": "python app.py"}, {"files": []},
-    {"files": [{"path": "scratch/app.py", "name": "../app.py", "sha256": ARGS["files"][0]["sha256"]}]},
-    {"files": [ARGS["files"][0], ARGS["files"][0]]},
-])
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"entrypoint": "../app.py"},
+        {"entrypoint": "app.sh"},
+        {"timeout_seconds": True},
+        {"timeout_seconds": 61},
+        {"argv": ["bad\0arg"]},
+        {"argv": ["x" * 1025]},
+        {"command": "python app.py"},
+        {"files": []},
+        {"files": [{"path": "scratch/app.py", "name": "../app.py", "sha256": ARGS["files"][0]["sha256"]}]},
+        {"files": [ARGS["files"][0], ARGS["files"][0]]},
+    ],
+)
 def test_rejects_unbounded_or_shell_arguments(mutation):
     with pytest.raises(ValueError):
         python.validate({**copy.deepcopy(ARGS), **mutation})
@@ -63,13 +74,29 @@ def test_reservation_bounds_raw_and_outer_json_without_fabricated_receipts(byte)
     previous = [{"ok": False, "reason": "timeout", "exit_code": -9, "descendants_cleaned": True}]
     reservation = python.reserve_receipt(previous, args, IDENTITY)
     data = bytes([byte]) * python.OUTPUT_BYTES
-    stream = {"text": data.decode("utf-8", errors="replace"), "base64": base64.b64encode(data).decode(),
-              "sha256": python.digest(data), "observed_bytes": 6144, "truncated": True}
-    receipt = {"version": 1, "identity": IDENTITY, "entrypoint": args["entrypoint"], "files": args["files"],
-               "argv": args["argv"], "timeout_seconds": 30, "elapsed_ms": 70000, "reason": "output_limit",
-               "exit_code": -9, "descendants_cleaned": True,
-               "network": "existing-agent-governed-proxy; no claim of live collection",
-               "stdout": stream, "stderr": stream, "ok": False}
+    stream = {
+        "text": data.decode("utf-8", errors="replace"),
+        "base64": base64.b64encode(data).decode(),
+        "sha256": python.digest(data),
+        "observed_bytes": 6144,
+        "truncated": True,
+    }
+    receipt = {
+        "version": 1,
+        "identity": IDENTITY,
+        "entrypoint": args["entrypoint"],
+        "files": args["files"],
+        "argv": args["argv"],
+        "timeout_seconds": 30,
+        "elapsed_ms": 70000,
+        "reason": "output_limit",
+        "exit_code": -9,
+        "descendants_cleaned": True,
+        "network": "existing-agent-governed-proxy; no claim of live collection",
+        "stdout": stream,
+        "stderr": stream,
+        "ok": False,
+    }
     actual = python.append_receipt(previous, receipt)
     assert len(actual.encode()) <= len(reservation.encode()) <= python.MAX_RECEIPTS
     assert len(python.encoded(actual)) <= len(python.encoded(reservation))
@@ -78,15 +105,23 @@ def test_reservation_bounds_raw_and_outer_json_without_fabricated_receipts(byte)
 
 @pytest.mark.parametrize("hard", [python.resource.RLIM_INFINITY, 16])
 def test_process_limits_do_not_charge_other_sandboxes_sharing_the_uid(hard):
-    with patch.object(python.resource, "getrlimit", return_value=(hard, hard)), \
-            patch.object(python.resource, "setrlimit") as set_limit:
+    with (
+        patch.object(python.resource, "getrlimit", return_value=(hard, hard)),
+        patch.object(python.resource, "setrlimit") as set_limit,
+    ):
         python._limits()
-    ceilings = {python.resource.RLIMIT_CPU: 30, python.resource.RLIMIT_AS: 512 * 1024 * 1024,
-                python.resource.RLIMIT_FSIZE: 8 * 1024 * 1024, python.resource.RLIMIT_NOFILE: 64,
-                python.resource.RLIMIT_CORE: 0}
+    ceilings = {
+        python.resource.RLIMIT_CPU: 30,
+        python.resource.RLIMIT_AS: 512 * 1024 * 1024,
+        python.resource.RLIMIT_FSIZE: 8 * 1024 * 1024,
+        python.resource.RLIMIT_NOFILE: 64,
+        python.resource.RLIMIT_CORE: 0,
+    }
     assert {call.args[0] for call in set_limit.call_args_list} == set(ceilings)
     for call in set_limit.call_args_list:
-        expected = ceilings[call.args[0]] if hard == python.resource.RLIM_INFINITY else min(hard, ceilings[call.args[0]])
+        expected = (
+            ceilings[call.args[0]] if hard == python.resource.RLIM_INFINITY else min(hard, ceilings[call.args[0]])
+        )
         assert call.args[1] == (expected, expected)
 
 
@@ -96,8 +131,13 @@ def test_non_linux_fails_before_materialization():
 
 
 def test_python_requires_explicit_native_file_and_network_authority():
-    phase = {"name": "test", "objective": "Execute and retain real test outputs", "maxToolCalls": 8,
-             "executionMode": "native", "capabilities": ["filesystem-read", "filesystem-write", "network", "python-execute"]}
+    phase = {
+        "name": "test",
+        "objective": "Execute and retain real test outputs",
+        "maxToolCalls": 8,
+        "executionMode": "native",
+        "capabilities": ["filesystem-read", "filesystem-write", "network", "python-execute"],
+    }
     assert "python-execute" in wire.phase(phase)["capabilities"]
     for capability in ("filesystem-read", "filesystem-write", "network"):
         with pytest.raises(ValueError):
@@ -109,15 +149,19 @@ def test_python_requires_explicit_native_file_and_network_authority():
 
 class Observations:
     scope = "scope-1"
+
     def __init__(self, allow=True):
         self.allow = allow
         self.calls = []
+
     def authorize_tool(self, *args):
         self.calls.append(("authorize", args))
         return self.allow
+
     def report_tool(self, *args):
         self.calls.append(("report", args))
         return True
+
     def artifact(self):
         return None
 
@@ -125,8 +169,15 @@ class Observations:
 def tools_at(root, allow=True):
     for name in ("inputs", "scratch", "exports"):
         (root / name).mkdir()
-    phase = wire.phase({"name": "test", "objective": "Execute and retain actual program output", "maxToolCalls": 8,
-                       "executionMode": "native", "capabilities": ["filesystem-read", "filesystem-write", "network", "python-execute"]})
+    phase = wire.phase(
+        {
+            "name": "test",
+            "objective": "Execute and retain actual program output",
+            "maxToolCalls": 8,
+            "executionMode": "native",
+            "capabilities": ["filesystem-read", "filesystem-write", "network", "python-execute"],
+        }
+    )
     m = Measurements("test-model", phase, lambda _: None, Observations(allow))
     tools = NativeTools(root, m)
     tools.python_identity = IDENTITY[:3]
@@ -139,8 +190,14 @@ def tools_at(root, allow=True):
 @pytest.mark.parametrize("exit_code", [0, 7])
 def test_adapter_retains_actual_failure_or_success_and_consumes_admission(tmp_path, exit_code):
     tools = tools_at(tmp_path)
-    receipt = {"version": 1, "ok": exit_code == 0, "reason": "exited", "exit_code": exit_code,
-               "descendants_cleaned": True, "stdout": {"text": "actual output"}}
+    receipt = {
+        "version": 1,
+        "ok": exit_code == 0,
+        "reason": "exited",
+        "exit_code": exit_code,
+        "descendants_cleaned": True,
+        "stdout": {"text": "actual output"},
+    }
     with patch.object(python, "invoke", return_value=receipt) as invoke:
         assert json.loads(tools.invoke_python(ARGS)) == receipt
         invoke.assert_called_once()
@@ -183,8 +240,13 @@ def test_adapter_executes_with_90000_bytes_of_exports_and_retains_failure(tmp_pa
     assert tools.m.successful == 0
     assert (tmp_path / "exports" / "report.md").read_text() == "x" * 45000
     assert (tmp_path / "exports" / "research.md").read_text() == "y" * 45000
-    wire.artifacts({"report.md": "x" * 45000, "research.md": "y" * 45000,
-                    python.ARTIFACT: tools.execution_artifacts()[python.ARTIFACT]})
+    wire.artifacts(
+        {
+            "report.md": "x" * 45000,
+            "research.md": "y" * 45000,
+            python.ARTIFACT: tools.execution_artifacts()[python.ARTIFACT],
+        }
+    )
 
 
 def test_adapter_explains_receipt_capacity_and_accepts_shorter_export_retry(tmp_path):
@@ -210,14 +272,18 @@ def test_adapter_explains_receipt_capacity_and_accepts_shorter_export_retry(tmp_
         assert json.loads(tools.execution_artifacts()[python.ARTIFACT])["runs"] == [receipt]
 
 
-SANDBOX = pytest.mark.skipif(sys.platform != "linux" or os.getuid() != 1000
-                            or os.environ.get("KARS_PYTHON_SANDBOX_TESTS") != "1",
-                            reason="Requires opt-in real Linux Task sandbox UID 1000; not host validation")
+SANDBOX = pytest.mark.skipif(
+    sys.platform != "linux" or os.getuid() != 1000 or os.environ.get("KARS_PYTHON_SANDBOX_TESTS") != "1",
+    reason="Requires opt-in real Linux Task sandbox UID 1000; not host validation",
+)
 
 
 def run_source(source, **kwargs):
-    args = {"entrypoint": "app.py", "files": [{"path": "inputs/app.py", "name": "app.py",
-                                                "sha256": python.digest(source.encode())}], **kwargs}
+    args = {
+        "entrypoint": "app.py",
+        "files": [{"path": "inputs/app.py", "name": "app.py", "sha256": python.digest(source.encode())}],
+        **kwargs,
+    }
     reservation = python.reserve_receipt([], args, IDENTITY)
     result = python.invoke(args, [source], IDENTITY)
     actual = python.append_receipt([], result)
@@ -237,11 +303,13 @@ def test_linux_full_invalid_utf8_streams_fit_reserved_receipt():
 
 @SANDBOX
 def test_linux_real_stdout_stderr_status_environment_and_limits():
-    result = run_source("import os, resource, sys\nprint('actual')\nprint('failure', file=sys.stderr)\n"
-                        "assert os.environ['HTTPS_PROXY'] == 'http://127.0.0.1:8444'\n"
-                        "assert 'AZURE_OPENAI_API_KEY' not in os.environ\n"
-                        "assert resource.getrlimit(resource.RLIMIT_NOFILE)[1] <= 64\n"
-                        "sys.exit(7)\n")
+    result = run_source(
+        "import os, resource, sys\nprint('actual')\nprint('failure', file=sys.stderr)\n"
+        "assert os.environ['HTTPS_PROXY'] == 'http://127.0.0.1:8444'\n"
+        "assert 'AZURE_OPENAI_API_KEY' not in os.environ\n"
+        "assert resource.getrlimit(resource.RLIMIT_NOFILE)[1] <= 64\n"
+        "sys.exit(7)\n"
+    )
     assert result["exit_code"] == 7 and result["reason"] == "exited" and not result["ok"]
     assert base64.b64decode(result["stdout"]["base64"]) == b"actual\n"
     assert base64.b64decode(result["stderr"]["base64"]) == b"failure\n"
@@ -250,9 +318,12 @@ def test_linux_real_stdout_stderr_status_environment_and_limits():
 
 @SANDBOX
 def test_linux_timeout_and_detached_descendant_cleanup():
-    result = run_source("import os, time\npid=os.fork()\n"
-                        "if pid == 0:\n os.setsid()\n print(os.getpid(), flush=True)\n time.sleep(90)\n"
-                        "else:\n time.sleep(90)\n", timeout_seconds=1)
+    result = run_source(
+        "import os, time\npid=os.fork()\n"
+        "if pid == 0:\n os.setsid()\n print(os.getpid(), flush=True)\n time.sleep(90)\n"
+        "else:\n time.sleep(90)\n",
+        timeout_seconds=1,
+    )
     assert result["reason"] == "timeout" and result["descendants_cleaned"], result["stderr"]["text"]
     with pytest.raises(ProcessLookupError):
         os.kill(int(result["stdout"]["text"].strip()), 0)
@@ -260,12 +331,15 @@ def test_linux_timeout_and_detached_descendant_cleanup():
 
 @SANDBOX
 def test_linux_invocation_process_overflow_cleans_up():
-    result = run_source("import os, time\n"
-                        "for _ in range(65):\n"
-                        " pid = os.fork()\n"
-                        " if pid == 0:\n  time.sleep(20)\n  os._exit(0)\n"
-                        " print(pid, flush=True)\n"
-                        "time.sleep(20)\n", timeout_seconds=10)
+    result = run_source(
+        "import os, time\n"
+        "for _ in range(65):\n"
+        " pid = os.fork()\n"
+        " if pid == 0:\n  time.sleep(20)\n  os._exit(0)\n"
+        " print(pid, flush=True)\n"
+        "time.sleep(20)\n",
+        timeout_seconds=10,
+    )
     assert result["reason"] == "process_limit" and not result["ok"], result["stderr"]["text"]
     assert result["descendants_cleaned"]
     for pid in result["stdout"]["text"].split():
@@ -283,8 +357,10 @@ def test_linux_output_overflow_is_explicit():
 @SANDBOX
 def test_linux_cancellation_returns_real_receipt():
     source = "import time\nprint('started', flush=True)\ntime.sleep(90)\n"
-    args = {"entrypoint": "app.py", "files": [{"path": "inputs/app.py", "name": "app.py",
-                                               "sha256": python.digest(source.encode())}]}
+    args = {
+        "entrypoint": "app.py",
+        "files": [{"path": "inputs/app.py", "name": "app.py", "sha256": python.digest(source.encode())}],
+    }
     started = time.monotonic()
     result = python.invoke(args, [source], IDENTITY, lambda: time.monotonic() - started > 0.5)
     assert result["reason"] == "cancelled" and not result["ok"] and result["descendants_cleaned"]

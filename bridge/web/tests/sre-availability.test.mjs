@@ -170,7 +170,7 @@ test("SRE action parameters are rendered as escaped text, not HTML", async () =>
   const html = await render({ actions: [proposal({ image: "<script>execute()</script>", replicas: false })] });
   assert.match(html, /&lt;script&gt;execute\(\)&lt;\/script&gt;/);
   assert.match(html, /&quot;replicas&quot;: false/);
-  assert.doesNotMatch(html, /<script>/);
+  assert.doesNotMatch(html, /<script\b/i);
 });
 
 test("SRE review describes short-lived scoped authority without promising one-use credentials", async () => {
@@ -330,7 +330,7 @@ test("report text is escaped and truncation is visible", async () => {
   const html = await render({ report });
   assert.match(html, /Report excerpt truncated; omitted evidence is not verified/);
   assert.match(html, /&lt;script&gt;remediate\(\)&lt;\/script&gt;/);
-  assert.doesNotMatch(html, /<script>/);
+  assert.doesNotMatch(html, /<script\b/i);
 });
 
 test("shared uptime formatting preserves agent units and unknown observations", () => {

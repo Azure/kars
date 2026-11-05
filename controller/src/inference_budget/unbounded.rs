@@ -52,10 +52,10 @@ pub(super) fn configured(map: &ConfigMap) -> Result<Allowances, BudgetError> {
 
 pub(super) fn validate_receipt(ledger: &Ledger, grants: &Allowances) -> Result<(), BudgetError> {
     ledger.validate()?;
-    if let Some(receipt) = &ledger.unbounded_tokens {
-        if grants.get(&ledger.account_uid) != Some(receipt) {
-            return Err(BudgetError::Authorization);
-        }
+    if let Some(receipt) = &ledger.unbounded_tokens
+        && grants.get(&ledger.account_uid) != Some(receipt)
+    {
+        return Err(BudgetError::Authorization);
     }
     Ok(())
 }

@@ -151,15 +151,13 @@ async fn unregistered_bootstrap_default_cannot_be_discarded_by_a_provider_switch
     let cluster = super::Cluster {
         client: kube::Client::try_from(config).unwrap(),
     };
-    for error in [cluster
+    let error = cluster
         .set_controller_catalog("new-model", Some("https://new.example"), None)
         .await
-        .unwrap_err()]
-    {
-        assert!(
-            matches!(error, kube::Error::Api(status) if status.code == 409 && status.reason == "ProviderRegistrationRequired")
-        );
-    }
+        .unwrap_err();
+    assert!(
+        matches!(error, kube::Error::Api(status) if status.code == 409 && status.reason == "ProviderRegistrationRequired")
+    );
     server.abort();
 }
 

@@ -323,7 +323,7 @@ pub(super) fn valid(reply: &Reply) -> Option<()> {
                 return None;
             }
         }
-        2 | 3 | 4 | 5 => {
+        2..=5 => {
             if reply.version == 5 {
                 peer_context(fields.get("peerContext")?)?;
             }

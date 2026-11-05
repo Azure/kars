@@ -75,7 +75,7 @@ describe("governed inference budget Helm contract", () => {
     const beta = parse(readFileSync(join(chart, "values-kind-beta.yaml"), "utf8"));
     expect(beta.inferenceBudget.calendarPolicy).toBe("record-only");
     expect(catalog(render({ ...configured, ...beta.inferenceBudget })).data["calendar-policy"]).toBe("record-only");
-    for (const calendarPolicy of ["", "invalid", false, null, 1]) {
+    for (const calendarPolicy of ["", "invalid", false, 1, [], {}]) {
       expect(() => render({ ...configured, calendarPolicy })).toThrow(/calendarPolicy must be enforce or record-only/);
     }
     expect(() => render({ enabled: false, calendarPolicy: "record-only" })).toThrow(/requires inferenceBudget.enabled/);
@@ -83,6 +83,19 @@ describe("governed inference budget Helm contract", () => {
       doc.kind === "ValidatingAdmissionPolicy" && doc.metadata.name === "kars-inference-budget-token-top-ups");
     expect(admission.spec.validations[0].expression).toContain("variables.oldCalendarPolicy == variables.newCalendarPolicy");
     expect(admission.spec.validations[0].expression).toContain("check('fund').allowed()");
+  });
+  it("fails closed whether Helm preserves or removes a null calendar policy", () => {
+    let documents: any[];
+    try {
+      // Helm versions differ in whether null chart defaults survive coalescing.
+      documents = render({ ...configured, calendarPolicy: null });
+    } catch (error) {
+      expect(String(error)).toMatch(/calendarPolicy must be enforce or record-only/);
+      return;
+    }
+    const catalog = documents.find((doc: any) =>
+      doc.kind === "ConfigMap" && doc.metadata.name === "kars-inference-budget-contracts");
+    expect(catalog.data["calendar-policy"]).toBe("enforce");
   });
   it("persists unbounded token consent behind native fund permission without changing original grants", () => {
     const unboundedTokenAllowances = [{

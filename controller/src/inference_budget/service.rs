@@ -166,183 +166,6 @@ impl IntoResponse for Failure {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn record_only_admission_uses_current_authority_not_a_caller_flag_or_contract() {
-        use crate::inference_budget_contract::{
-            ExecutionIdentity, Limits, RootIdentity, TaskAuthority,
-            catalog::Catalog,
-            ledger::Ledger,
-            tariffs::{AttemptQuote, Operation},
-        };
-        let root: RootIdentity = serde_json::from_value(json!({
-            "kind":"KarsTask", "resource":{"namespace":"workspace", "name":"root", "uid":"root-uid"},
-            "workspaceUid":"workspace-uid", "clusterUid":"cluster-uid"
-        })).unwrap();
-        let digest = format!("sha256:{}", "a".repeat(64));
-        let authority: TaskAuthority = serde_json::from_value(json!({
-            "task":root.resource, "parentUid":null, "rootTaskUid":"root-uid",
-            "authorizationDigest":digest, "effectiveAuthorization":{"reviewed":true}, "limits":{}
-        }))
-        .unwrap();
-        let identity: ExecutionIdentity = serde_json::from_value(json!({
-            "taskUid":"root-uid", "authorizationDigest":digest,
-            "sandbox":{"namespace":"workspace", "name":"sandbox", "uid":"sandbox-uid"},
-            "runtimeNamespaceUid":"namespace-uid", "podName":"pod", "podUid":"pod-uid"
-        }))
-        .unwrap();
-        let ledger = Ledger::new("account-uid".into(), root, Limits::default())
-            .unwrap()
-            .register_task(authority)
-            .unwrap()
-            .next;
-        let catalog = Catalog {
-            version: "v1".into(),
-            contracts: vec![],
-            non_inference_egress_hosts: vec![],
-        };
-        let quote = AttemptQuote::record_only(
-            "provider",
-            "https://models.example",
-            "uncontracted",
-            Operation::Responses,
-        );
-        assert!(ledger.unbounded_tokens.is_none());
-        authorize_quote(&catalog, &ledger, &identity, &quote, 100).unwrap();
-        for limits in [
-            Limits {
-                tokens: Some(100),
-                usd_micros: None,
-            },
-            Limits {
-                tokens: None,
-                usd_micros: Some(100),
-            },
-        ] {
-            let mut finite = ledger.clone();
-            finite.limits = limits;
-            assert!(authorize_quote(&catalog, &finite, &identity, &quote, 100).is_err());
-            let mut finite = ledger.clone();
-            finite.nodes.get_mut("root-uid").unwrap().authority.limits = limits;
-            assert!(authorize_quote(&catalog, &finite, &identity, &quote, 100).is_err());
-        }
-        let mut revoked = ledger.clone();
-        revoked.nodes.get_mut("root-uid").unwrap().active = false;
-        assert!(authorize_quote(&catalog, &revoked, &identity, &quote, 100).is_err());
-        let mut forged = identity.clone();
-        forged.authorization_digest = format!("sha256:{}", "b".repeat(64));
-        assert!(authorize_quote(&catalog, &ledger, &forged, &quote, 100).is_err());
-        let mut invalid = catalog.clone();
-        invalid.non_inference_egress_hosts.push("*.example".into());
-        assert!(authorize_quote(&invalid, &ledger, &identity, &quote, 100).is_err());
-        let invalid = AttemptQuote::record_only(
-            "provider",
-            "https://user:secret@models.example",
-            "model",
-            Operation::Responses,
-        );
-        assert!(authorize_quote(&catalog, &ledger, &identity, &invalid, 100).is_err());
-    }
-
-    #[tokio::test]
-    async fn calendar_policy_metadata_preserves_the_legacy_usage_body() {
-        use crate::inference_budget_contract::calendar::{
-            Observation, PENDING_HEADER, POLICY_HEADER, Policy, Usage,
-        };
-        let usage = Usage {
-            day: 1,
-            month: 1,
-            daily: 39,
-            monthly: 39,
-        };
-        let response = calendar_response(Observation {
-            usage: usage.clone(),
-            policy: Policy::RecordOnly,
-            pending_requests: Some(2),
-        });
-        assert_eq!(response.headers()[POLICY_HEADER], "record-only");
-        assert_eq!(response.headers()[PENDING_HEADER], "2");
-        let body = axum::body::to_bytes(response.into_body(), 4096)
-            .await
-            .unwrap();
-        assert_eq!(serde_json::from_slice::<Usage>(&body).unwrap(), usage);
-    }
-
-    #[tokio::test]
-    async fn broker_failures_preserve_status_and_sanitized_error_contracts() {
-        for (error, status, code) in [
-            (
-                StoreError::PrivacyPending,
-                StatusCode::SERVICE_UNAVAILABLE,
-                "inference_privacy_pending",
-            ),
-            (
-                StoreError::Contention,
-                StatusCode::SERVICE_UNAVAILABLE,
-                "inference_budget_contention",
-            ),
-            (
-                StoreError::Api {
-                    stage: "verify budget Pod",
-                    code: Some(404),
-                },
-                StatusCode::SERVICE_UNAVAILABLE,
-                "inference_budget_unavailable",
-            ),
-            (
-                StoreError::Api {
-                    stage: "commit ledger transition",
-                    code: Some(503),
-                },
-                StatusCode::SERVICE_UNAVAILABLE,
-                "inference_budget_unavailable",
-            ),
-            (
-                StoreError::Api {
-                    stage: "commit ledger transition",
-                    code: None,
-                },
-                StatusCode::SERVICE_UNAVAILABLE,
-                "inference_budget_unavailable",
-            ),
-            (
-                StoreError::Missing,
-                StatusCode::SERVICE_UNAVAILABLE,
-                "inference_budget_unavailable",
-            ),
-            (
-                StoreError::Ledger(BudgetError::Authorization),
-                StatusCode::FORBIDDEN,
-                "inference_budget_authority",
-            ),
-            (
-                StoreError::Ledger(BudgetError::Exhausted),
-                StatusCode::TOO_MANY_REQUESTS,
-                "inference_budget_exhausted",
-            ),
-            (
-                StoreError::Ledger(BudgetError::Capacity),
-                StatusCode::SERVICE_UNAVAILABLE,
-                "inference_budget_capacity",
-            ),
-        ] {
-            let message = error.to_string();
-            let response = Failure(error).into_response();
-            assert_eq!(response.status(), status);
-            let body = axum::body::to_bytes(response.into_body(), 4096)
-                .await
-                .unwrap();
-            assert_eq!(
-                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
-                json!({"error": {"code": code, "message": message}})
-            );
-        }
-    }
-}
-
 pub(super) async fn authenticated_account(
     broker: &Broker,
     headers: &HeaderMap,
@@ -568,4 +391,181 @@ async fn settle(
         tracing::error!(account_uid = %command.account_uid, "Governed inference contract bound breached; account frozen");
     }
     Ok(Json(result))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn record_only_admission_uses_current_authority_not_a_caller_flag_or_contract() {
+        use crate::inference_budget_contract::{
+            ExecutionIdentity, Limits, RootIdentity, TaskAuthority,
+            catalog::Catalog,
+            ledger::Ledger,
+            tariffs::{AttemptQuote, Operation},
+        };
+        let root: RootIdentity = serde_json::from_value(json!({
+            "kind":"KarsTask", "resource":{"namespace":"workspace", "name":"root", "uid":"root-uid"},
+            "workspaceUid":"workspace-uid", "clusterUid":"cluster-uid"
+        })).unwrap();
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let authority: TaskAuthority = serde_json::from_value(json!({
+            "task":root.resource, "parentUid":null, "rootTaskUid":"root-uid",
+            "authorizationDigest":digest, "effectiveAuthorization":{"reviewed":true}, "limits":{}
+        }))
+        .unwrap();
+        let identity: ExecutionIdentity = serde_json::from_value(json!({
+            "taskUid":"root-uid", "authorizationDigest":digest,
+            "sandbox":{"namespace":"workspace", "name":"sandbox", "uid":"sandbox-uid"},
+            "runtimeNamespaceUid":"namespace-uid", "podName":"pod", "podUid":"pod-uid"
+        }))
+        .unwrap();
+        let ledger = Ledger::new("account-uid".into(), root, Limits::default())
+            .unwrap()
+            .register_task(authority)
+            .unwrap()
+            .next;
+        let catalog = Catalog {
+            version: "v1".into(),
+            contracts: vec![],
+            non_inference_egress_hosts: vec![],
+        };
+        let quote = AttemptQuote::record_only(
+            "provider",
+            "https://models.example",
+            "uncontracted",
+            Operation::Responses,
+        );
+        assert!(ledger.unbounded_tokens.is_none());
+        authorize_quote(&catalog, &ledger, &identity, &quote, 100).unwrap();
+        for limits in [
+            Limits {
+                tokens: Some(100),
+                usd_micros: None,
+            },
+            Limits {
+                tokens: None,
+                usd_micros: Some(100),
+            },
+        ] {
+            let mut finite = ledger.clone();
+            finite.limits = limits;
+            assert!(authorize_quote(&catalog, &finite, &identity, &quote, 100).is_err());
+            let mut finite = ledger.clone();
+            finite.nodes.get_mut("root-uid").unwrap().authority.limits = limits;
+            assert!(authorize_quote(&catalog, &finite, &identity, &quote, 100).is_err());
+        }
+        let mut revoked = ledger.clone();
+        revoked.nodes.get_mut("root-uid").unwrap().active = false;
+        assert!(authorize_quote(&catalog, &revoked, &identity, &quote, 100).is_err());
+        let mut forged = identity.clone();
+        forged.authorization_digest = format!("sha256:{}", "b".repeat(64));
+        assert!(authorize_quote(&catalog, &ledger, &forged, &quote, 100).is_err());
+        let mut invalid = catalog.clone();
+        invalid.non_inference_egress_hosts.push("*.example".into());
+        assert!(authorize_quote(&invalid, &ledger, &identity, &quote, 100).is_err());
+        let invalid = AttemptQuote::record_only(
+            "provider",
+            "https://user:secret@models.example",
+            "model",
+            Operation::Responses,
+        );
+        assert!(authorize_quote(&catalog, &ledger, &identity, &invalid, 100).is_err());
+    }
+
+    #[tokio::test]
+    async fn calendar_policy_metadata_preserves_the_legacy_usage_body() {
+        use crate::inference_budget_contract::calendar::{
+            Observation, PENDING_HEADER, POLICY_HEADER, Policy, Usage,
+        };
+        let usage = Usage {
+            day: 1,
+            month: 1,
+            daily: 39,
+            monthly: 39,
+        };
+        let response = calendar_response(Observation {
+            usage: usage.clone(),
+            policy: Policy::RecordOnly,
+            pending_requests: Some(2),
+        });
+        assert_eq!(response.headers()[POLICY_HEADER], "record-only");
+        assert_eq!(response.headers()[PENDING_HEADER], "2");
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        assert_eq!(serde_json::from_slice::<Usage>(&body).unwrap(), usage);
+    }
+
+    #[tokio::test]
+    async fn broker_failures_preserve_status_and_sanitized_error_contracts() {
+        for (error, status, code) in [
+            (
+                StoreError::PrivacyPending,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "inference_privacy_pending",
+            ),
+            (
+                StoreError::Contention,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "inference_budget_contention",
+            ),
+            (
+                StoreError::Api {
+                    stage: "verify budget Pod",
+                    code: Some(404),
+                },
+                StatusCode::SERVICE_UNAVAILABLE,
+                "inference_budget_unavailable",
+            ),
+            (
+                StoreError::Api {
+                    stage: "commit ledger transition",
+                    code: Some(503),
+                },
+                StatusCode::SERVICE_UNAVAILABLE,
+                "inference_budget_unavailable",
+            ),
+            (
+                StoreError::Api {
+                    stage: "commit ledger transition",
+                    code: None,
+                },
+                StatusCode::SERVICE_UNAVAILABLE,
+                "inference_budget_unavailable",
+            ),
+            (
+                StoreError::Missing,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "inference_budget_unavailable",
+            ),
+            (
+                StoreError::Ledger(BudgetError::Authorization),
+                StatusCode::FORBIDDEN,
+                "inference_budget_authority",
+            ),
+            (
+                StoreError::Ledger(BudgetError::Exhausted),
+                StatusCode::TOO_MANY_REQUESTS,
+                "inference_budget_exhausted",
+            ),
+            (
+                StoreError::Ledger(BudgetError::Capacity),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "inference_budget_capacity",
+            ),
+        ] {
+            let message = error.to_string();
+            let response = Failure(error).into_response();
+            assert_eq!(response.status(), status);
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+                json!({"error": {"code": code, "message": message}})
+            );
+        }
+    }
 }

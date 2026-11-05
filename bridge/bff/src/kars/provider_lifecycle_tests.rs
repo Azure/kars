@@ -117,20 +117,21 @@ async fn provider_lifecycle_bootstrap_api_key_reuses_enrolled_shared_store() {
         key["secret"],
         json!({"name":"kars-inference-providers","uid":"registry","key":"KARS_PROVIDER_AZURE_OPENAI_API_KEY"})
     );
-    let data = state.lock().unwrap();
-    assert!(
-        data.calls
-            .iter()
-            .all(|(_, path, _)| !path.contains("/secrets/kars-provider-"))
-    );
-    assert!(
-        data.calls
-            .iter()
-            .filter(|(method, _, _)| method != "GET")
-            .all(|(method, target, _)| method == "PATCH"
-                && (target == &path || target == &settings_path))
-    );
-    drop(data);
+    {
+        let data = state.lock().unwrap();
+        assert!(
+            data.calls
+                .iter()
+                .all(|(_, path, _)| !path.contains("/secrets/kars-provider-"))
+        );
+        assert!(
+            data.calls
+                .iter()
+                .filter(|(method, _, _)| method != "GET")
+                .all(|(method, target, _)| method == "PATCH"
+                    && (target == &path || target == &settings_path))
+        );
+    }
     state.lock().unwrap().calls.clear();
     let error = cluster
         .mutate_secret_keys(&ns, "kars-inference-providers", |keys| {

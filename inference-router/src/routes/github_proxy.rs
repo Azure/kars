@@ -97,7 +97,7 @@ pub(super) async fn prepare_fetch(
     state: &AppState,
     peer: Option<SocketAddr>,
     req: &serde_json::Value,
-) -> Result<Option<Fetch>, Response> {
+) -> Result<Option<Fetch>, Box<Response>> {
     let url = req.get("url").and_then(|v| v.as_str()).unwrap_or("");
     let candidate = reqwest::Url::parse(url).ok().is_some_and(|url| {
         url.host_str().is_some_and(|host| {
@@ -121,15 +121,15 @@ async fn prepare_service_fetch(
     service: Service,
     peer: Option<SocketAddr>,
     req: &serde_json::Value,
-) -> Result<Option<Fetch>, Response> {
+) -> Result<Option<Fetch>, Box<Response>> {
     match service.config.current().await {
         Ok(Some(_)) => {}
         Ok(None) if !service.config.was_configured() => return Ok(None),
         _ => {
-            return Err(deny(
+            return Err(Box::new(deny(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "GitHub service configuration is unavailable",
-            ));
+            )));
         }
     }
     let peer = peer.filter(|peer| peer.ip().is_loopback()).ok_or_else(|| {

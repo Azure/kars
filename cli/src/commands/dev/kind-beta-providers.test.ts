@@ -3,7 +3,7 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHash, X509Certificate } from "node:crypto";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -138,9 +138,12 @@ describe("Kind provider budget identity", () => {
     f.issue.mockResolvedValue(oldIdentity); await expect(f.rotate()).rejects.toThrow("previously exposed");
     expect(f.execute.mock.calls.some(([args]) => args[0] === "patch")).toBe(false);
   });
-  it.each(["symlink", "permissions", "different-attempt", "malformed"])("refuses %s recovery records", async fault => {
+  it.each(["symlink", "dangling-symlink", "hardlink", "oversize", "permissions", "different-attempt", "malformed"])("refuses %s recovery records", async fault => {
     const f = fixture(); await f.rotate(); const file = path.join(f.dir, "budget-rotation.json");
     if (fault === "symlink") { const other = path.join(f.dir, "other"); writeFileSync(other, readFileSync(file), { mode: 0o600 }); rmSync(file); symlinkSync(other, file); }
+    if (fault === "dangling-symlink") { rmSync(file); symlinkSync(path.join(f.dir, "absent"), file); }
+    if (fault === "hardlink") linkSync(file, path.join(f.dir, "hardlink"));
+    if (fault === "oversize") writeFileSync(file, " ".repeat(65537));
     if (fault === "permissions") chmodSync(file, 0o644);
     if (fault === "different-attempt") { const record = JSON.parse(readFileSync(file, "utf8")); record.attempt = "c".repeat(64); writeFileSync(file, JSON.stringify(record)); }
     if (fault === "malformed") writeFileSync(file, "{}");

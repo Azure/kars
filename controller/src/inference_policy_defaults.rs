@@ -226,10 +226,10 @@ mod tests {
             let writes = Arc::new(Mutex::new(Vec::new()));
             let captured = writes.clone();
             Mock::given(|_: &wiremock::Request| true).respond_with(move |request: &wiremock::Request| {
-                if scenario != "denied" && request.method == "GET" {
-                    if let Some(value) = objects.get(request.url.path()) {
-                        return ResponseTemplate::new(200).set_body_json(value);
-                    }
+                if scenario != "denied" && request.method == "GET"
+                    && let Some(value) = objects.get(request.url.path())
+                {
+                    return ResponseTemplate::new(200).set_body_json(value);
                 }
                 if request.method == "PATCH" && request.url.path() == policy_path {
                     let body: Value = request.body_json().unwrap();

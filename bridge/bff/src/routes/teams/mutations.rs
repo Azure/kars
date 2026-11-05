@@ -574,7 +574,7 @@ pub async fn update_team(
         crate::routes::compose::validate_execution_plan(execution_plan)
             .map_err(AppError::BadRequest)?;
         let effective_roles = b.roles.as_deref().unwrap_or(existing_roles.as_slice());
-        super::preflight::validate_roster_plan(&effective_roles, &execution_plan)?;
+        super::preflight::validate_roster_plan(effective_roles, execution_plan)?;
         validate_team_model_routes(
             &options,
             TeamModelRoutes {

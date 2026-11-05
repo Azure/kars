@@ -443,8 +443,9 @@ impl Cluster {
         Ok(())
     }
 
-    pub(crate) fn mission_attempt_name(uid: &str, nonce: &str) -> String {
-        let key = sha256_hex(serde_json::to_vec(&[uid, nonce]).expect("string pair"));
+    /// Deterministic record address from public identifiers, not a cryptographic nonce.
+    pub(crate) fn mission_attempt_name(uid: &str, run_id: &str) -> String {
+        let key = sha256_hex(serde_json::to_vec(&[uid, run_id]).expect("string pair"));
         format!("kars-mission-attempt-{}", &key[..40])
     }
 

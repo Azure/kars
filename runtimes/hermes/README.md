@@ -941,10 +941,19 @@ Historical failure/skipped evidence above remains unchanged.
 ## Development
 
 ```bash
-cd runtimes/hermes
-pip install -e ".[dev]"
-pytest
+pip install -e runtimes/agt-mesh-python
+pip install -e "runtimes/hermes[dev]"
+python -m pytest runtimes/hermes/tests
 ```
+
+Adapter-only environments skip tests requiring the genuine Hermes runtime; those
+skips are not native qualification. Bootstrap unit fixtures supply only supported
+version metadata, while separate guard tests reject missing or unqualified runtime
+metadata. CI additionally installs the source commit selected by the image
+Dockerfile, applies the same dependency/Foundry patches and provider override, and
+checks the installed version and native module before running the complete suite.
+This runs native tests on the hosted runner without a local image build; installed
+AL3 image and customer-workflow acceptance remain separate gates.
 
 Focused installed-mission acceptance (from the repository root) requires a Python
 3.11–3.13 environment with genuine `hermes-agent==0.16.0` or `hermes-agent==0.21.5`, the shared Python mesh

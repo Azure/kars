@@ -22,6 +22,7 @@ pub(super) fn extract_json_object(raw: &str) -> Option<serde_json::Value> {
 ///      integration headers (Copilot/Foundry) and enforces governance, so this
 ///      works on workload-identity clusters with NO static token in the Bridge —
 ///      reusing exactly the secure path agents use.
+///
 /// Finite funding selects only the verified standing actor router before these
 /// legacy paths; any refusal on that route is terminal, never a fallback signal.
 pub(super) async fn orchestrator_complete(
