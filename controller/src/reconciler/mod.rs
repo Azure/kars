@@ -119,6 +119,9 @@ struct Context {
     ollama_endpoint: String,
     openai_moderation_api_key: String,
     openai_moderation_endpoint: String,
+    /// Opt-in blocklist feeds for every router (`BLOCKLIST_EXTRA_FEEDS`,
+    /// controller env via Helm `controller.extraEnv`). Empty = OISD only.
+    blocklist_extra_feeds: String,
     /// `KARS_DEV_PROFILE=true` (set only in `kars dev`) — triggers
     /// relaxed sub-agent CRD defaults in the router spawn helper.
     dev_profile: bool,
@@ -1764,13 +1767,10 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
 
         // ── Blocklist ConfigMap + env vars ──
         // The blocklist is always-on: router loads a seed file at startup, then
-        // auto-refreshes from OISD + URLhaus feeds every 6 hours.
+        // auto-refreshes from the OISD feed every 6 hours.
         // (`blocklist_cm_name` is hoisted above the deployment block so the
         // CronJob (Step 4d) can reach it in overlay mode.)
-        router_env.push(json!({"name": "BLOCKLIST_ENABLED", "value": "true"}));
-        router_env.push(
-            json!({"name": "BLOCKLIST_SEED_PATH", "value": "/etc/kars/blocklist/domains.txt"}),
-        );
+        router_env.extend(blocklist_router_env(&ctx.blocklist_extra_feeds));
 
         // Runtime-contract markers on the router too. The router needs
         // `KARS_RUNTIME_KIND` so its spawn endpoint can stamp every
@@ -2908,9 +2908,9 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
 
     // ── Step 4d: Blocklist seed ConfigMap + CronJob ──────────────────────
     // Create ConfigMap with seed blocklist (immediate protection from day 0).
-    // Create CronJob that fetches fresh lists from OISD + URLhaus every 6h
-    // and patches the ConfigMap — so even if the router can't reach feeds
-    // directly, the mounted file stays fresh.
+    // Create CronJob that fetches a fresh OISD list every 6h and patches the
+    // ConfigMap — so even if the router can't reach feeds directly, the
+    // mounted file stays fresh.
     //
     // **OverlayMode (S8):** skipped. The blocklist is mounted into the
     // kars-managed router container; in overlay mode the upstream
@@ -2959,7 +2959,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             )
             .await?;
 
-        // CronJob: fetch OISD + URLhaus → patch ConfigMap every 6h
+        // CronJob: fetch OISD → patch ConfigMap every 6h
         // Uses kubectl to patch the ConfigMap in-place. The router's background
         // task also fetches feeds directly, so this is defense-in-depth.
         let cronjob_name = format!("{}-blocklist-refresh", name);
@@ -2996,11 +2996,6 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                                         "curl -sfL --max-time 60 --max-filesize 52428800 ",
                                         "'https://small.oisd.nl/domainswild' >> /tmp/domains.txt 2>/dev/null || ",
                                         "echo '# OISD fetch failed' >> /tmp/domains.txt; ",
-                                        // Fetch URLhaus hostfile
-                                        "curl -sfL --max-time 60 --max-filesize 52428800 ",
-                                        "'https://urlhaus.abuse.ch/downloads/hostfile/' >> /tmp/urlhaus.txt 2>/dev/null && ",
-                                        "grep '^127\\.0\\.0\\.1' /tmp/urlhaus.txt | awk '{print $2}' >> /tmp/domains.txt || ",
-                                        "echo '# URLhaus fetch failed' >> /tmp/domains.txt; ",
                                         // Patch the ConfigMap via kubectl
                                         "kubectl create configmap ", // Continued in args
                                     )],
@@ -3186,6 +3181,20 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
 
     tracing::info!("KarsSandbox {name} reconciled successfully");
     Ok(Action::requeue(Duration::from_secs(300)))
+}
+
+/// Blocklist env for the router. `BLOCKLIST_EXTRA_FEEDS` is forwarded
+/// verbatim when set; the router validates every entry (https only).
+fn blocklist_router_env(extra_feeds: &str) -> Vec<serde_json::Value> {
+    let mut env = vec![
+        json!({"name": "BLOCKLIST_ENABLED", "value": "true"}),
+        json!({"name": "BLOCKLIST_SEED_PATH", "value": "/etc/kars/blocklist/domains.txt"}),
+    ];
+    let extra_feeds = extra_feeds.trim();
+    if !extra_feeds.is_empty() {
+        env.push(json!({"name": "BLOCKLIST_EXTRA_FEEDS", "value": extra_feeds}));
+    }
+    env
 }
 
 /// How long to wait before requeuing a failed reconcile, by error kind.
@@ -3377,6 +3386,7 @@ pub async fn run(client: Client) -> Result<()> {
             .or_else(|_| std::env::var("OPENAI_API_KEY"))
             .unwrap_or_default(),
         openai_moderation_endpoint: std::env::var("OPENAI_MODERATION_ENDPOINT").unwrap_or_default(),
+        blocklist_extra_feeds: std::env::var("BLOCKLIST_EXTRA_FEEDS").unwrap_or_default(),
         dev_profile,
         cluster_name: std::env::var("CLUSTER_NAME")
             .ok()
