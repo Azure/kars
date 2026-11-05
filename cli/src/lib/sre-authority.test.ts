@@ -222,6 +222,7 @@ describe("SRE cluster registrar boundary",()=>{
           return {stdout:'[{"name":"kars","namespace":"kars-system","status":"pending-upgrade"}]'};
         }
         if(file==="helm"&&args[0]==="version")return {stdout:version};
+        if(file==="helm"&&args[0]==="get"&&args[1]==="values")return {stdout:JSON.stringify({sre:{enabled:false}})};
         if(file==="helm"&&args[0]==="template")return {stdout:actionCrd};
         if(file==="helm"&&args[0]==="upgrade")return {stdout:""};
         return f.execute(file,args,options);

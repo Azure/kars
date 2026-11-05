@@ -139,7 +139,12 @@ kars sre authority stage --namespace kars-system --release kars \
 ```
 
 Review the output, then run the same command without `--dry-run`. Staging does
-not enroll an occupant or issue private SRE credentials.
+not enroll an occupant or issue private SRE credentials. For an enabled Helm
+installation, staging retains its installed SRE provider/model selection,
+including selections inherited from the old chart's defaults. Resetting to the
+new chart defaults alone would discard those selections. Explicit empty SRE
+overrides continue to inherit the configured Core inference defaults; staging
+does not choose a replacement provider or model.
 
 SRE installation and staging inspect all Helm release statuses. Helm 3 uses
 `list --all`; Helm 4 removed that flag and lists all statuses by default. The
@@ -163,8 +168,12 @@ It does not adopt the old object or rewrite its other fields or metadata.
 Known API defaults are tolerated; foreign installation ownership,
 custom schemas/versions/validators, replacements, and API failures stop
 staging. Resolve those conflicts through explicit installation/schema review,
-not force adoption. Both registration and action APIs must be established
-before their dependent policies can be used.
+not force adoption. The current durable-execution action schema is recognized
+only for creation when absent or an exact, ownership-verified installed match;
+its execution-claim fields are never stripped or treated as legacy params.
+This recognition does not extend the closed BASE365 migration to current charts.
+Both registration and action APIs must be established before their dependent
+policies can be used.
 
 ```sh
 kars sre authority preview --namespace kars-system --release kars

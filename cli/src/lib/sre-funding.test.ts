@@ -104,7 +104,8 @@ describe("explicit fresh SRE funding", () => {
     const plan = await f.plan();
     const flags = await plan.flags(created);
     const values = {
-      ...f.values, azure: { workloadIdentity: { clientId: "dummy" } }, sre: { enabled: true },
+      ...f.values, azure: { workloadIdentity: { clientId: "dummy" } },
+      sre: { enabled: true, provider: "azure-openai", model: "gpt-4o-mini" },
       inferenceBudget: { ...f.values.inferenceBudget, catalogVersion: "test-v1",
         contracts: [{ id: "offline-shape-test" }], caBundle: "public-test-ca", tlsSecretName: "test-budget-tls",
         routerImageDigest: `sha256:${"1".repeat(64)}` },

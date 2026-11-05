@@ -16,10 +16,15 @@
   },
   "devDependencies": {
     "@kinvolk/headlamp-plugin": "^0.13.0",
-    "vite": "6.4.4"
+    "vite": "6.4.5"
   },
   "overrides": {
-    "vitest": "^4.1.12",
+    "glob@^10.0.0": "14.0.2",
+    "minimatch@^10.0.0 || ^11.0.0": "11.0.1",
+    "@storybook/builder-webpack5": {
+      "webpack-dev-middleware": "7.4.6"
+    },
+    "vitest": "4.1.12",
     "@vitest/coverage-istanbul": "4.1.12",
     "@vitest/mocker": "4.1.12",
     "tmp": "^0.2.6",

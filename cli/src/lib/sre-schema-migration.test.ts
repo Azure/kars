@@ -11,7 +11,8 @@ import { CANONICAL_SCHEMAS, EVALUATOR_V2, MIGRATION } from "./sre-migration-cata
 import { planCoreHelmSchemas } from "./core-helm-schemas.js";
 
 describe("closed BASE365 SRE schema migration", () => {
-  it.each(["KarsAuthConfig", "KarsSkill", "KarsTask", "KarsTeam", "A2AAgent",
+  it.each(["KarsApproval", "KarsMemory", "KarsSREAction", "KarsSRERegistration",
+    "KarsAuthConfig", "KarsSkill", "KarsTask", "KarsTeam", "A2AAgent",
     "InferencePolicy", "ToolPolicy", "KarsReceipt", "KarsBudgetAccount", "KarsSandbox"])(
     "does not extend the historical migration permit to the current %s schema",
     async kind => {

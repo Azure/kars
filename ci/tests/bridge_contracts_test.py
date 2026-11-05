@@ -105,6 +105,18 @@ class ContractScopeTests(GitFixture):
         self.assertLess(job.index("npm ci"), job.index("npm test"))
         self.assertLess(job.index("npm ci"), job.index("npm run build"))
 
+    def test_witness_ci_build_preserves_reviewed_al3_defaults(self):
+        workflow = (CI.parent / ".github/workflows/bridge-ci.yml").read_text()
+        build = workflow.split("      - name: Build the public witness image without publishing", 1)[1]
+        build = build.split("      - name:", 1)[0]
+        self.assertIn("--file deploy/ebpf-witness/aggregator/Dockerfile", build)
+        self.assertIn('--build-arg SOURCE_REVISION="$GITHUB_SHA"', build)
+        for argument in ("PYTHON_BASE=", "PYTHON_BUILD_BASE="):
+            self.assertNotIn(argument, build)
+        dockerfile = (CI.parent / "deploy/ebpf-witness/aggregator/Dockerfile").read_text()
+        self.assertRegex(dockerfile, r"ARG PYTHON_BASE=mcr\.microsoft\.com/azurelinux/distroless/python:[\w.-]+@sha256:[0-9a-f]{64}")
+        self.assertIn("FROM ${PYTHON_BASE}", dockerfile)
+
     def test_hermes_ci_installs_the_image_runtime_before_native_tests(self):
         workflow = (CI.parent / ".github/workflows/ci.yml").read_text()
         job = workflow.split("  hermes-runtime:", 1)[1].split("  kars-agt-mesh-python:", 1)[0]

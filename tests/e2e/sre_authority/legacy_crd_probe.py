@@ -4,6 +4,7 @@
 """Same-Kind historical Helm wait/upgrade proof without controller execution."""
 
 from pathlib import Path
+import json
 import re
 import time
 import types
@@ -77,8 +78,16 @@ def exercise(root):
         create_registration_crd(h, obj)
         h.k("wait", "--for=condition=Established", "crd/karssreregistrations.kars.azure.com",
             "--timeout=60s", timeout=70)
+        saved = json.loads(h.run(["helm", "--kube-context", CONTEXT, "get", "values", "kars",
+                                  "--namespace", SYSTEM, "--all", "-o", "json"]))
+        sre = saved.get("sre", {})
+        require(sre.get("enabled") is True
+                and all(isinstance(sre.get(key), str) and sre[key] for key in ("provider", "model")),
+                "Historical SRE must retain its installed provider/model selection")
         h.run(["helm", "--kube-context", CONTEXT, "upgrade", "kars", str(root / "deploy/helm/kars"),
                "--namespace", SYSTEM, "--reset-then-reuse-values", "--set", "sre.authorityStage=true",
+               "--set-json", "sre.provider=" + json.dumps(sre["provider"]),
+               "--set-json", "sre.model=" + json.dumps(sre["model"]),
                "--dry-run=server"], timeout=90)
         write_report(root, "legacy-helm-readiness.json", {
             "apiServer": version, "legacyCommit": LEGACY_COMMIT,

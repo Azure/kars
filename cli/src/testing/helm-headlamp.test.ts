@@ -611,7 +611,17 @@ describe("Core-managed AL3 Headlamp", () => {
       const matrix = workflow.jobs[job].strategy.matrix[key];
       expect(matrix.find((image: { name: string }) => image.name === "headlamp"))
         .toMatchObject({ dockerfile: "sandbox-images/headlamp/Dockerfile" });
-      if (file.startsWith("release-")) {
+      if (file === "release-public-interim") {
+        const steps = workflow.jobs[job].steps;
+        expect(steps.find((step: { name: string }) => step.name === "Record image build receipt"))
+          .toMatchObject({ env: { DIGEST: "${{ steps.push.outputs.digest }}" },
+            run: expect.stringContaining("image-receipts/${{ matrix.image.ghcr }}.json") });
+        expect(steps.find((step: { with?: { name?: string } }) => step.with?.name === "image-${{ matrix.image.ghcr }}-${{ env.VERSION }}").with)
+          .toMatchObject({ path: "image-receipts/*.json", "if-no-files-found": "error" });
+        expect(workflow.jobs["cli-pack"].needs).toContain("build-images");
+        expect(workflow.jobs["cli-pack"].steps.find((step: { with?: { pattern?: string } }) => step.with?.pattern === "image-*-${{ env.VERSION }}").with)
+          .toMatchObject({ path: "image-receipts", "merge-multiple": true });
+      } else if (file === "release-internal") {
         expect(workflow.jobs[job].outputs.headlamp_digest).toBe("${{ steps.digests.outputs.headlamp }}");
         expect(text).toContain("${{ needs.build-images.outputs.headlamp_digest }}");
       }

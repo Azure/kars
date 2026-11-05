@@ -265,6 +265,7 @@ jobs:
             !/bridge/*
             /bridge/deploy/
             !/bridge/deploy/*
+            /bridge/deploy/rbac.yaml
             /bridge/deploy/helm/
             !/bridge/deploy/helm/*
             /bridge/deploy/helm/kars-bridge/
@@ -804,6 +805,7 @@ jobs:
             !/bridge/*
             /bridge/deploy/
             !/bridge/deploy/*
+            /bridge/deploy/rbac.yaml
             /bridge/deploy/helm/
             !/bridge/deploy/helm/*
             /bridge/deploy/helm/kars-bridge/

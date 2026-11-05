@@ -20,7 +20,10 @@ mod topups;
 mod unbounded;
 #[path = "ledger_validation.rs"]
 mod validation;
-pub use topups::{BridgeReactivation, FundingRenewal, MAX_TOKEN_TOP_UPS, TokenTopUp};
+// Public contract export; the controller binary only names it in tests.
+#[allow(unused_imports)]
+pub use topups::FundingRenewal;
+pub use topups::{BridgeReactivation, MAX_TOKEN_TOP_UPS, TokenTopUp};
 pub use unbounded::UnboundedTokenAllowance;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]

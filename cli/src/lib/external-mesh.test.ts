@@ -28,7 +28,11 @@ describe("external mesh is not part of a disabled-Helm-mesh core operation", () 
       if (bin === "helm") throw new Error("External Helm owner must not be queried");
       if (args[1] === "deployment,service") return { stdout: JSON.stringify({ items: resources }) };
       if (args[0] === "get" && args[1] === "deployments") return { stdout: '{"items":[]}' };
-      if (args[0] === "get" && args[1] === "deployment" && args[2] === "kars-controller") return { stdout: "True" };
+      if (args[0] === "get" && args[1] === "deployment" && args[2] === "kars-controller") return { stdout: args.includes("json") ? JSON.stringify({
+        metadata: { name: "kars-controller", namespace: "kars-system", generation: 1 },
+        spec: { replicas: 1, template: { spec: { containers: [{ name: "controller", image: "example/controller:latest" }] } } },
+        status: { observedGeneration: 1, updatedReplicas: 1, readyReplicas: 1, conditions: [{ type: "Available", status: "True" }] },
+      }) : "True" };
       return { stdout: "" };
     }) as unknown as Execute;
     const mesh = await inspectMeshInstallation(execute);

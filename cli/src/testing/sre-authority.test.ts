@@ -75,7 +75,8 @@ describe("SRE authority chart and mutation integration",()=>{
 
   it("creates a cluster registration and no default registrar or runtime privilege bindings",()=>{
     for(const enabled of [false,true]){
-      const output=execFileSync("helm",["template","kars",chart,"--namespace","kars-system","--set",`sre.enabled=${enabled}`],{encoding:"utf8",timeout:10_000});
+      const output=execFileSync("helm",["template","kars",chart,"--namespace","kars-system","--set",`sre.enabled=${enabled}`,
+        "--set","sre.provider=azure-openai","--set","sre.model=gpt-4o-mini"],{encoding:"utf8",timeout:10_000});
       const docs=parseAllDocuments(output).map(doc=>doc.toJSON()).filter(Boolean);
       const registration=docs.find(doc=>doc.kind==="CustomResourceDefinition"&&doc.metadata.name==="karssreregistrations.kars.azure.com");
       expect(registration.spec.scope).toBe("Cluster");

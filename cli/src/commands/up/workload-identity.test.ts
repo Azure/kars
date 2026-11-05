@@ -67,6 +67,12 @@ beforeEach(() => {
     if (bin === "helm" && args[0] === "list") return { stdout: "[]" };
     if (bin === "helm" && args[0] === "upgrade") return { stdout: "" };
     if (bin === "kubectl" && args[0] === "get" && args[1] === "deployment,service") return { stdout: '{"items":[]}' };
+    if (bin === "kubectl" && args[0] === "get" && args[1] === "deployment" && args[2] === "kars-controller" && args.includes("json")) return { stdout: JSON.stringify({
+      metadata: { name: "kars-controller", namespace: "kars-system", generation: 1 },
+      spec: { replicas: 1, template: { spec: { containers: [{ name: "controller", image: "mirror.azurecr.io/kars-controller:latest" }] } } },
+      status: { observedGeneration: 1, updatedReplicas: 1, readyReplicas: 1, conditions: [{ type: "Available", status: "True" }] },
+    }) };
+    if (bin === "kubectl" && args[0] === "get" && args[1] === "apiservice" && args[2] === "v1beta1.metrics.k8s.io" && args.includes("--ignore-not-found")) return { stdout: "" };
     if (bin === "kubectl" && args[0] === "rollout") return { stdout: "" };
     const command = `${bin} ${args.join(" ")}`;
     state.unexpected.push(command);

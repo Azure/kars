@@ -109,7 +109,8 @@ impl Input {
     }
 
     pub fn digest(&self) -> String {
-        sha256_hex(serde_json::to_vec(self).expect("report serializes"))
+        let serialized = serde_json::to_vec(self).expect("report serializes");
+        sha256_hex(serialized.as_slice())
     }
 }
 

@@ -86,6 +86,56 @@ and production bundle build, and audits dependencies. Vitest, its mocker and
 Istanbul coverage provider use paired patched versions through npm overrides.
 Passing these checks does not establish installed Headlamp acceptance.
 
+### Dependency maintenance
+
+Keep Vitest, its mocker and Istanbul coverage provider paired at 4.1.12, with
+Vite 6.4.5 and the Storybook 9.1.21 security override. Refresh compatible
+transitives in the lockfile rather than replacing the Headlamp toolchain.
+Three scoped overrides cross upstream dependency ranges because their current
+major lines have no published fix for the corresponding advisory:
+
+| Consumer | Override | Compatibility contract |
+| --- | --- | --- |
+| React docgen and quick-temp's rimraf 5 | glob 10 → 14.0.2 (`GHSA-3g3m-2fjr-6pw4`) | Retains `globSync`, promise-based `glob`, absolute string results and cancellation; neither consumer uses the removed CLI shell option. |
+| TypeScript ESLint | minimatch 10 → 11.0.1 (`GHSA-g3hv-75wg-m249`) | Retains the named `minimatch` function with `dot`; legacy callable minimatch 3 stays separate. Glob 14 owns its compatible minimatch 11 implementation rather than overriding glob 10's internals. |
+| Storybook webpack builder | webpack-dev-middleware 6 → 7.4.6 (`GHSA-g84c-rxfj-3j2c`) | Retains the webpack 5 middleware and callback lifecycle. Version 7 requires Node ≥18.12 and memfs 4; Node 22 satisfies this. The published 7.4.6 release includes the containment fix. |
+
+`src/dependency-contracts.test.ts` covers those consumer APIs, a real in-memory
+webpack middleware lifecycle, and rejection of the non-slash-terminated
+`publicPath` traversal. Run the clean install, complete tests, production build,
+and all-severity audit on GitHub after any lockfile update; a static comparison
+against previously reported advisories is not a fresh audit.
+
+Two known low-severity advisories currently have **no published patched version**
+and remain unresolved, not suppressed:
+
+- [`GHSA-gcqx-w48m-w2h4`](https://github.com/advisories/GHSA-gcqx-w48m-w2h4):
+  Headlamp → Storybook react-webpack5 → builder-webpack5 →
+  fork-ts-checker-webpack-plugin 8 → deepmerge 4.3.1. The checker merges build
+  configuration; this is development tooling, not a plugin runtime dependency.
+- [`GHSA-848j-6mx2-7j84`](https://github.com/advisories/GHSA-848j-6mx2-7j84):
+  Headlamp → vite-plugin-node-polyfills → node-stdlib-browser → crypto-browserify
+  → browserify-sign/create-ecdh → elliptic 6.6.1. Headlamp's maintained Vite config
+  enables only process, buffer and stream polyfills, not crypto. This reduces
+  current bundle reachability but does not clear the installed dependency finding
+  or establish the security of the separately supplied Headlamp host.
+
+A maintained-release check also found no dependency-removal path: Headlamp
+0.14.0 still declares both Storybook's webpack framework and the Node polyfill
+plugin. Storybook builder-webpack5 9.1.21 retains fork-ts-checker 8; even
+builder-webpack5 10.6.5 retains fork-ts-checker 9.1.0, which still requires
+`deepmerge ^4.2.2`. Vite's polyfill plugin 0.28.0 still requires
+node-stdlib-browser 1.3.1, whose crypto-browserify route still requires elliptic.
+These are ordinary, non-optional dependencies. Polyfill `include`, `exclude`,
+and `overrides` configure bundle aliases, not the installed dependency graph;
+the existing limited `include` setting therefore cannot remove the audit finding.
+
+Neither dependency is removed or replaced with an API-incompatible library to
+make the audit appear clean. Both remain in full dependency audit coverage.
+All-severity clearance requires a maintained upstream release that fixes or
+replaces these dependencies; upgrading the checked toolchain versions alone
+does not achieve it.
+
 The Core Helm installation packages this plugin into the AL3 Headlamp image.
 Build `sandbox-images/headlamp/Dockerfile` from the repository root; update that
 image through the owning Core release, not by copying files into a running pod.
