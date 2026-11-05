@@ -440,7 +440,8 @@ async fn unchanged_legacy_hermes_client_uses_https_standard_files_logs_and_propo
         .env("AGENT_FILES",f.directory.path()).env("LEGACY_SOURCE",source)
         .arg("-c").arg(r#"
 import importlib.util, os, pathlib, sys, types
-package = types.ModuleType("legacy"); package.__path__ = []
+package = types.ModuleType("legacy")
+package.__path__ = [str(pathlib.Path(os.environ["LEGACY_SOURCE"]).parent)]
 sys.modules["legacy"] = package
 spec = importlib.util.spec_from_file_location("legacy.sre_kube", os.environ["LEGACY_SOURCE"])
 module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)

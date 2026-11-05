@@ -302,6 +302,14 @@ impl Respond for Server {
     }
 }
 
+fn test_client(server: &MockServer) -> Client {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let config = crate::kube_client_config::preserve_request_semantics(kube::Config::new(
+        server.uri().parse().unwrap(),
+    ));
+    Client::try_from(config).unwrap()
+}
+
 async fn setup(
     account: Option<KarsBudgetAccount>,
     fault: Fault,
@@ -319,8 +327,7 @@ async fn setup(
         .respond_with(Server(state.clone()))
         .mount(&server)
         .await;
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
+    let client = test_client(&server);
     (server, Store::new(client, "kars-system"), state)
 }
 

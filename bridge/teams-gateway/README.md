@@ -41,6 +41,12 @@ rerun the tests below. Keep canonical public registry URLs and SHA512 integrity
 for both upgraded MSAL packages; obtain packages through the configured feed
 when public registry access is unavailable.
 
+## Network dependency patches
+
+The gateway also pins `ip-address` 10.7.4 and `qs` 6.16.1. The compatibility
+suite verifies every locked and installed copy and its public-registry SHA512
+binding; SDK authentication tests continue to exercise the existing integration.
+
 ## Focused validation
 
 Run from `bridge/teams-gateway` with `NODE_OPTIONS=--max-old-space-size=1536`:

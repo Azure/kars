@@ -271,8 +271,12 @@ is introduced.
 
 [GO-2026-5932](https://vuln.go.dev/ID/GO-2026-5932.json) concerns
 `golang.org/x/crypto/openpgp` and its subpackages, not every package in
-`golang.org/x/crypto`. The released crypto request is **v0.57.0**, with no
-module suppression, exclusion or waiver.
+`golang.org/x/crypto`. The current reviewed graph selects **v0.58.0**, which
+still receives the module-level annotation. The exact reviewed maintenance
+candidate is **v0.58.1-0.20261009181718-2f1f834330b2** (fixed version metadata
+verified through proxy.golang.org). It is not yet the committed resolved graph.
+The GitHub-hosted procedure below must return a real resolver artifact before
+review and promotion. There is no module suppression, exclusion or waiver.
 
 Each build now retains the actual
 `go list -deps -json=ImportPath,Module ./cmd/dex` result as
@@ -468,6 +472,78 @@ source tests enabled, each baseline snapshot is also compared byte-for-byte
 with its original file from the pinned upstream tarball.
 
 ## Hosted lock generation
+
+### GitHub-hosted crypto fix candidate (prepared, not yet resolved)
+
+`.github/workflows/bridge-idp-locks.yml` runs on path-scoped PR events for
+`bridge/idp/**` or that workflow. Publishing these files to the current PR
+triggers it without first registering `workflow_dispatch` on the default branch.
+After the workflow reaches the default branch, its input-free manual dispatch
+also works with an explicitly selected source ref. The job checks out the exact
+PR head SHA (not an unrecorded merge result), uses read-only repository permission
+and no persisted checkout credentials, secrets, registry login or image publish.
+It runs only the existing pinned Linux AMD64 `Dockerfile.locks` resolver through
+Buildx's local `lock-artifact` exporter; it does not run the runtime image build.
+Heavy builds/resolution stay on GitHub, not the developer machine.
+
+`scripts/hosted-locks.py prepare` first verifies the current reviewed locks,
+copies an isolated candidate context under `artifacts/dex-lock-candidate/`, and
+changes **only that copy's** crypto request to
+`golang.org/x/crypto@v0.58.1-0.20261009181718-2f1f834330b2`. This is a source-reviewed
+literal, not a workflow input or shell-interpolated version. The existing resolver
+now reads the same quoted crypto request for the root and nested API modules.
+The committed `locks/requests.txt` and `locks/generated/` remain coherent and
+unchanged until a subsequent artifact review. Normal runtime builds remain
+read-only consumers of the committed locks; the OpenPGP inventory rejection
+remains mandatory.
+
+The evidence includes `provenance.json` with exact source/workflow SHA-256 inputs,
+source/event SHAs, repository, run ID and attempt; `resolver.log`; the unmodified
+`resolved/` Go output; and, on successful validation, `verified.json` binding the
+provenance and complete lock checksum manifest. Validation reuses `check_modules`
+and also rejects any upstream `.snapshot` byte change. `job-status.txt`,
+`source-diff.log` and logs survive failures, with each run/attempt uploaded as a
+separate `dex-lock-candidate-RUN_ID-ATTEMPT` artifact (30-day retention). Download
+failed attempts for diagnosis, not import. Retain downloaded evidence beyond
+GitHub's retention window when keeping qualification history.
+
+After publication, inspect the specific workflow's run and source SHA:
+
+```sh
+gh run list --workflow bridge-idp-locks.yml --branch YOUR_PR_BRANCH
+gh run view RUN_ID --json conclusion,headSha,event,url,jobs
+mkdir -p artifacts/dex-lock-review-RUN_ID
+gh run download RUN_ID --name dex-lock-candidate-RUN_ID-ATTEMPT \
+  --dir artifacts/dex-lock-review-RUN_ID/evidence
+PYTHONDONTWRITEBYTECODE=1 python3 bridge/idp/scripts/import-locks.py \
+  --hosted-artifact artifacts/dex-lock-review-RUN_ID/evidence \
+  --output artifacts/dex-lock-review-RUN_ID/reviewed
+```
+
+Check the GitHub run succeeded and its repository/source/run/attempt match the
+downloaded provenance. Checksums detect drift; they are not a substitute for
+retrieving the artifact from the trusted GitHub run. The importer revalidates all
+current reviewed source/version checksums and the real module graph before
+writing a **new** review directory. A changed checkout fails closed: review
+against the published input bytes, not a rewritten provenance file. It never
+promotes a hosted candidate directly to `locks/generated` or overwrites output.
+Review `dependencies.patch`, all actual module selections, both root/API
+checksums, toolchain provenance and unchanged source baselines. Only a subsequent
+explicit promotion should replace the reviewed generated directory and update
+`locks/requests.txt` together from that verified artifact. Then run fresh hosted
+runtime, race, inventory and unsuppressed scanner qualification. Preparing this
+job or importing locks alone does **not** resolve the advisory or qualify an image.
+
+Lightweight local contracts (no Go/Docker invocation, network or installation):
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s bridge/idp/tests -p 'test_*.py'
+```
+
+### Historical resolver transport and replay
+
+The following ACR/log transport remains readable for retained historical evidence;
+use the GitHub job above for this candidate and keep heavy work hosted.
 
 The earlier hosted workflow was selected when local Docker/Go were unavailable
 and disk was below its admission floor; that is historical evidence, not a

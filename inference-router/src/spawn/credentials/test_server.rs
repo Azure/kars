@@ -294,6 +294,9 @@ pub(super) async fn start(state: State) -> (MockServer, Client, Arc<Mutex<State>
         .mount(&server)
         .await;
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
+    let config = crate::kube_client_config::preserve_request_semantics(kube::Config::new(
+        server.uri().parse().unwrap(),
+    ));
+    let client = Client::try_from(config).unwrap();
     (server, client, state)
 }

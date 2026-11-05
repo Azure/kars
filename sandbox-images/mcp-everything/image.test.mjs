@@ -3,11 +3,16 @@
 
 import assert from "node:assert/strict";
 import { fork } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { readFile } from "node:fs/promises";
 import { Server } from "node:net";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { Hono } from "hono";
+import { serve } from "@hono/node-server";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
@@ -52,17 +57,55 @@ if (process.argv.includes("--server-fixture")) {
     const manifest = await readJson("package.json");
     const lock = await readJson("package-lock.json");
     for (const [name, version] of Object.entries({
-      "fast-uri": "3.1.8", hono: "4.13.7", "ip-address": "10.7.1", "proxy-addr": "2.0.8",
+      "@hono/node-server": "2.1.3", "fast-uri": "3.1.9", hono: "4.13.11",
+      "ip-address": "10.7.4", "proxy-addr": "2.0.8", qs: "6.16.1",
     })) {
       assert.equal(manifest.overrides[name], version);
-      assert.equal(lock.packages[`node_modules/${name}`].version, version);
-      assert.equal((await readJson(`node_modules/${name}/package.json`)).version, version);
+      const copies = Object.entries(lock.packages).filter(([path]) => path.endsWith(`node_modules/${name}`));
+      assert.ok(copies.length > 0, name);
+      for (const [path, metadata] of copies) {
+        assert.equal(metadata.version, version, path);
+        assert.equal((await readJson(`${path}/package.json`)).version, version, path);
+      }
     }
     for (const [name, metadata] of Object.entries(lock.packages)) {
       if (!name) continue;
-      assert.ok(metadata.resolved.startsWith("https://registry.npmjs.org/"), name);
+      const url = new URL(metadata.resolved);
+      assert.equal(url.origin, "https://registry.npmjs.org", name);
+      assert.deepEqual([url.username, url.password, url.search, url.hash], ["", "", "", ""], name);
+      assert.match(url.pathname, /\.tgz$/, name);
       assert.match(metadata.integrity, /^sha512-[A-Za-z0-9+/]+={0,2}$/, name);
     }
+  });
+
+  test("the SDK web transport works through Hono and the supported Node adapter v2", async t => {
+    const sdk = new McpServer({ name: "hono-compatibility", version: "1.0.0" });
+    sdk.registerTool("check", { description: "Local compatibility probe" }, async () => ({
+      content: [{ type: "text", text: "hono-node-v2-compatible" }],
+    }));
+    const transport = new WebStandardStreamableHTTPServerTransport({
+      enableJsonResponse: true, sessionIdGenerator: randomUUID,
+    });
+    await sdk.connect(transport);
+    const app = new Hono();
+    app.all("/mcp", context => transport.handleRequest(context.req.raw));
+    const server = serve({ fetch: app.fetch, hostname: "127.0.0.1", port: 0 });
+    t.after(async () => {
+      await sdk.close();
+      server.closeAllConnections();
+      await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    });
+    if (!server.listening) await once(server, "listening", { signal: AbortSignal.timeout(5000) });
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+    const client = new Client({ name: "hono-client", version: "1.0.0" });
+    t.after(() => client.close());
+    await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${address.port}/mcp`)));
+    assert.equal(client.getServerVersion().name, "hono-compatibility");
+    assert.ok((await client.listTools()).tools.some(tool => tool.name === "check"));
+    const result = await client.callTool({ name: "check", arguments: {} });
+    assert.notEqual(result.isError, true);
+    assert.deepEqual(result.content, [{ type: "text", text: "hono-node-v2-compatible" }]);
   });
 
   test("the actual Everything HTTP transport remains compatible", async t => {

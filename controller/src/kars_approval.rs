@@ -449,8 +449,9 @@ mod tests {
     #[test]
     fn snapshot_preserves_legacy_bytes_and_freezes_requester_identity() {
         let mut spec = KarsApprovalSpec::default();
+        // The legacy serializer used preserve_order, including taskRef before action.
         let legacy =
-            r#"{"action":{"kind":"custom","summary":""},"taskRef":{"name":""},"ttl":null}"#;
+            r#"{"taskRef":{"name":""},"action":{"kind":"custom","summary":""},"ttl":null}"#;
         assert_eq!(request_snapshot(&spec), legacy);
         spec.requested_by = Some(ApprovalActor {
             subject: "requester-sub".into(),
@@ -468,6 +469,23 @@ mod tests {
         spec.requested_by = None;
         assert_ne!(request_snapshot(&spec), bound);
         assert_eq!(request_snapshot(&spec), legacy);
+    }
+
+    #[test]
+    fn snapshot_preserves_legacy_bytes_with_optional_action_fields() {
+        let spec: KarsApprovalSpec = serde_json::from_value(serde_json::json!({
+            "taskRef": {"name": "task"},
+            "action": {
+                "kind": "tierRaise", "summary": "Review", "detail": "Reason",
+                "requestedTier": 3
+            },
+            "ttl": "PT15M"
+        }))
+        .unwrap();
+        assert_eq!(
+            request_snapshot(&spec),
+            r#"{"taskRef":{"name":"task"},"action":{"kind":"tierRaise","summary":"Review","detail":"Reason","requestedTier":3},"ttl":"PT15M"}"#
+        );
     }
 
     #[test]

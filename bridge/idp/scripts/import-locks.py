@@ -9,6 +9,7 @@ import base64
 import gzip
 import hashlib
 import io
+import importlib.util
 from pathlib import Path
 import re
 import shutil
@@ -32,7 +33,7 @@ def decode_artifact(log):
     require(len(blocks) == 1, "expected exactly one unprefixed lock artifact in the raw ACR log")
     require(len(blocks[0]) < 8 * 1024 * 1024, "unexpectedly large lock artifact")
     payload = base64.b64decode(blocks[0], validate=True)
-    digests = re.findall(r"(?m)^([0-9a-f]{64})  /tmp/dex-locks\.tar\.gz\r?$", log)
+    digests = re.findall(r"(?m)^([0-9a-f]{64})  /(?:tmp|work)/dex-locks\.tar\.gz\r?$", log)
     require(len(digests) == 1 and hashlib.sha256(payload).hexdigest() == digests[0],
             "missing or mismatched transport SHA-256")
     # Bound the entire tar, including headers and directory entries, before
@@ -59,15 +60,26 @@ def decode_artifact(log):
     return result
 
 
-def import_artifact(log, target):
+def import_artifact(log, target, hosted_artifact=None):
     target = Path(target).resolve()
     default = ROOT / "locks/generated"
     checkout = next((path for path in (ROOT, *ROOT.parents) if (path / ".git").exists()), ROOT)
-    require(target == default or not target.is_relative_to(checkout),
-            "alternate lock-review output must be outside the source checkout")
+    review_area = checkout / "artifacts"
+    require(target == default or not target.is_relative_to(checkout) or
+            (target != review_area and target.is_relative_to(review_area)),
+            "alternate lock-review output must be outside the source checkout or inside checkout/artifacts")
     require(not target.exists(), "lock output already exists; review it rather than overwriting")
     require(target.parent.is_dir(), "lock-review output parent directory must already exist")
-    files = decode_artifact(Path(log).read_text())
+    requests = (ROOT / "locks/requests.txt").read_bytes()
+    if hosted_artifact is not None:
+        require(target != default, "hosted candidates must be imported to a separate review directory")
+        spec = importlib.util.spec_from_file_location("hosted_locks", ROOT / "scripts/hosted-locks.py")
+        hosted = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hosted)
+        files = hosted.verify(Path(hosted_artifact))
+        requests = hosted.candidate_requests()
+    else:
+        files = decode_artifact(Path(log).read_text())
     with tempfile.TemporaryDirectory(prefix=".dex-lock-import-", dir=target.parent) as temporary:
         stage = Path(temporary)
         generated = stage / "locks/generated"
@@ -76,19 +88,22 @@ def import_artifact(log, target):
             path = generated / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
-        for name in ("inputs.lock", "requests.txt"):
-            shutil.copyfile(ROOT / "locks" / name, stage / "locks" / name)
+        shutil.copyfile(ROOT / "locks/inputs.lock", stage / "locks/inputs.lock")
+        (stage / "locks/requests.txt").write_bytes(requests)
         check_modules(stage)
         generated.rename(target)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("log", type=Path)
+    parser.add_argument("log", type=Path, nargs="?", help="Historical no-push resolver log")
+    parser.add_argument("--hosted-artifact", type=Path,
+                        help="Downloaded GitHub evidence directory with verified provenance and resolved locks")
     parser.add_argument("--output", type=Path, default=ROOT / "locks/generated",
-                        help="New review directory outside the checkout; existing qualified locks are never overwritten")
+                        help="New review directory outside source or in checkout/artifacts; never overwrites locks")
     args = parser.parse_args()
-    import_artifact(args.log, args.output)
+    require((args.log is None) != (args.hosted_artifact is None), "choose a log or --hosted-artifact")
+    import_artifact(args.log, args.output, args.hosted_artifact)
     print("Imported active Go locks and archival .snapshot baselines. Review dependencies.patch and all selected modules before building.")
 
 

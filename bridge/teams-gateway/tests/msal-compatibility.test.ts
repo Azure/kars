@@ -98,6 +98,27 @@ function sdkWithNetwork(fail = false) {
 }
 
 describe("Teams SDK with patched MSAL", () => {
+  it("keeps every installed and locked network parsing dependency patched", () => {
+    const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+    const lock = JSON.parse(readFileSync(new URL("../package-lock.json", import.meta.url), "utf8"));
+    for (const metadata of Object.values(lock.packages) as { resolved?: string }[]) {
+      if (!metadata.resolved) continue;
+      const url = new URL(metadata.resolved);
+      expect(url.origin).toBe("https://registry.npmjs.org");
+      expect([url.username, url.password, url.search, url.hash]).toEqual(["", "", "", ""]);
+      expect(url.pathname).toMatch(/\.tgz$/);
+    }
+    for (const [name, version] of Object.entries({ "ip-address": "10.7.4", qs: "6.16.1" })) {
+      expect(manifest.overrides[name]).toBe(version);
+      const copies = Object.entries(lock.packages).filter(([path]) => path.endsWith(`node_modules/${name}`));
+      expect(copies.length).toBeGreaterThan(0);
+      for (const [path, metadata] of copies) {
+        expect(metadata).toMatchObject({ version, resolved: `https://registry.npmjs.org/${name}/-/${name}-${version}.tgz`, integrity: expect.stringMatching(/^sha512-/) });
+        expect(JSON.parse(readFileSync(new URL(`../${path}/package.json`, import.meta.url), "utf8")).version).toBe(version);
+      }
+    }
+  });
+
   it("resolves the patched version for the SDK and every locked MSAL copy", () => {
     expect(sdkRequire("@azure/msal-node/package.json").version).toBe("7.1.0");
     const lock = JSON.parse(readFileSync(new URL("../package-lock.json", import.meta.url), "utf8"));

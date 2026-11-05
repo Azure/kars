@@ -31,7 +31,8 @@
     "@microsoft/teams.apps": {
       "@azure/msal-node": "7.1.0"
     },
-    "qs": "6.16.0",
+    "ip-address": "10.7.4",
+    "qs": "6.16.1",
     "vite": "7.3.7",
     "rollup": "4.62.3",
     "esbuild": "^0.28.1",

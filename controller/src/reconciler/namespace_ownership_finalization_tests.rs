@@ -94,6 +94,13 @@ fn context(client: Client) -> Arc<Context> {
     })
 }
 
+fn memory_account_path(sandbox_uid: &str) -> String {
+    format!(
+        "/api/v1/namespaces/kars-memory-system/serviceaccounts/kars-memory-{}",
+        &crate::builtin_memory::digest(sandbox_uid)[..40]
+    )
+}
+
 fn response(code: u16, body: Value) -> ResponseTemplate {
     ResponseTemplate::new(code).set_body_json(body)
 }
@@ -138,6 +145,12 @@ impl Respond for Server {
                 }),
             ),
             ("GET", "/apis/apps/v1/namespaces/kars-demo/deployments/demo") => failure(404),
+            ("GET", path)
+                if path
+                    == memory_account_path(state.sandbox["metadata"]["uid"].as_str().unwrap()) =>
+            {
+                failure(404)
+            }
             (
                 "DELETE",
                 "/apis/rbac.authorization.k8s.io/v1/clusterrolebindings/kars-spawner-demo",
@@ -227,7 +240,10 @@ async fn setup(state: State) -> (MockServer, Client, Arc<StdMutex<State>>) {
         .mount(&server)
         .await;
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
+    let config = crate::kube_client_config::preserve_request_semantics(kube::Config::new(
+        server.uri().parse().unwrap(),
+    ));
+    let client = Client::try_from(config).unwrap();
     (server, client, state)
 }
 
@@ -334,6 +350,24 @@ async fn reconciler_entry_cancels_prestage_when_deletion_races_binding_after_fin
         );
     }
     let requests = server.received_requests().await.unwrap();
+    let account_path = memory_account_path(sandbox_uid.as_str().unwrap());
+    let account_reads = requests
+        .iter()
+        .enumerate()
+        .filter(|(_, request)| request.url.path() == account_path)
+        .collect::<Vec<_>>();
+    assert_eq!(account_reads.len(), 1);
+    assert_eq!(account_reads[0].1.method, "GET");
+    let finalizer_removal = requests
+        .iter()
+        .rposition(|request| request.method == "PATCH" && request.url.path() == CR_PATH)
+        .unwrap();
+    assert!(account_reads[0].0 < finalizer_removal);
+    let final_patch: Value = serde_json::from_slice(&requests[finalizer_removal].body).unwrap();
+    assert_eq!(
+        final_patch["metadata"]["finalizers"],
+        json!([OTHER_FINALIZER])
+    );
     assert!(requests.iter().all(|request| {
         !(request.url.path().contains("/deployments/")
             || request.method == "DELETE" && request.url.path() == NS_PATH)

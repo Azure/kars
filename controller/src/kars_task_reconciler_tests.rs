@@ -243,7 +243,10 @@ async fn receipt_echo_is_idempotent_without_skipping_signing_log_checks_or_error
     use wiremock::{Mock, MockServer, ResponseTemplate};
     let server = MockServer::start().await;
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
+    let config = crate::kube_client_config::preserve_request_semantics(kube::Config::new(
+        server.uri().parse().unwrap(),
+    ));
+    let client = Client::try_from(config).unwrap();
     let receipt_path = "/apis/kars.azure.com/v1alpha1/namespaces/default/karsreceipts/t";
     let stored = Arc::new(Mutex::new(json!({})));
     let fail_echo = Arc::new(AtomicBool::new(false));

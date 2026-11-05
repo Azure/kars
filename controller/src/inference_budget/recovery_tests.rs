@@ -334,7 +334,7 @@ async fn paused_team_recovery_keeps_live_dispatch_but_revokes_deleted_team() {
         .with_priority(1)
         .mount(&server)
         .await;
-    let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
+    let client = test_client(&server);
     reconcile_account(&client, &store, &original).await.unwrap();
     let current = store
         .read(&original.spec.root, "account-uid")
@@ -522,7 +522,7 @@ async fn changed_authority_survives(conflict: bool, batched: bool) {
             .mount(&server)
             .await;
     }
-    let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
+    let client = test_client(&server);
     reconcile_account(&client, &store, &original).await.unwrap();
     assert!(enrollment.occurred.load(Ordering::SeqCst));
     assert_eq!(reads.load(Ordering::SeqCst), 2);
@@ -624,7 +624,7 @@ async fn recovery_snapshot_batches_128_tasks_and_rechecks_next_scan() {
     use crate::inference_budget::recovery::task_snapshot;
     use wiremock::matchers::{method, path, query_param};
     let server = MockServer::start().await;
-    let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
+    let client = test_client(&server);
     let api = Api::namespaced(client, "workspace");
     let tasks: Vec<_> = (0..128).map(|i| named_task(&format!("task-{i}"))).collect();
     let names: std::collections::BTreeSet<String> =
@@ -652,7 +652,7 @@ async fn recovery_snapshot_follows_continuation_before_proving_absence() {
     use crate::inference_budget::recovery::task_snapshot;
     use wiremock::matchers::{method, path, query_param};
     let server = MockServer::start().await;
-    let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
+    let client = test_client(&server);
     let api = Api::namespaced(client, "workspace");
     Mock::given(method("GET"))
         .and(path(TASKS))
@@ -701,7 +701,7 @@ async fn recovery_snapshot_never_interprets_truncated_inventory_as_absence() {
     use crate::inference_budget::recovery::task_snapshot;
     use wiremock::matchers::{method, path};
     let server = MockServer::start().await;
-    let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
+    let client = test_client(&server);
     let api = Api::namespaced(client, "workspace");
     let page = Arc::new(AtomicUsize::new(0));
     let seen = page.clone();
@@ -735,7 +735,7 @@ async fn recovery_snapshot_never_interprets_truncated_inventory_as_absence() {
 async fn recovery_snapshot_absence_requires_a_complete_inventory() {
     use crate::inference_budget::recovery::task_snapshot;
     let server = MockServer::start().await;
-    let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
+    let client = test_client(&server);
     let api = Api::namespaced(client, "workspace");
     Mock::given(wiremock::matchers::path(TASKS))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -763,7 +763,7 @@ async fn recovery_snapshot_fails_closed_on_list_error_or_inconsistent_pagination
         "oversized-page",
     ] {
         let server = MockServer::start().await;
-        let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
+        let client = test_client(&server);
         let api = Api::namespaced(client, "workspace");
         let calls = Arc::new(AtomicUsize::new(0));
         Mock::given(wiremock::matchers::path(TASKS))
@@ -816,7 +816,7 @@ async fn recovery_unchanged_authority_with_invalid_live_source_still_revokes_and
     let original = original_account(now);
     let (server, store, state) = setup(Some(original.clone()), Fault::None).await;
     live_sources(&server, Arc::new(Mutex::new(task_authority("B").0)), None).await;
-    let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
+    let client = test_client(&server);
     reconcile_account(&client, &store, &original).await.unwrap();
     let current = state.lock().unwrap().account.clone().unwrap();
     let ledger = Store::ledger(&current).unwrap();
