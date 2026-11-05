@@ -52,7 +52,12 @@ def role_binding(h, name, role, account, namespace=None, account_namespace=OPERA
         "subjects": [{"kind": "ServiceAccount", "name": account, "namespace": account_namespace}]})
 
 
-def install_historical_chart(h):
+def install_historical_chart(h, *, preloaded_addons=False):
+    addon_args = []
+    if preloaded_addons:
+        values = h.root / ".e2e-addon-values.json"
+        require(values.is_file(), "Preloaded add-on values are required for the full historical journey")
+        addon_args = ["--values", str(values)]
     h.run(["git", "fetch", "--no-tags", "--depth=1", "https://github.com/Azure/kars.git", LEGACY_COMMIT], timeout=90)
     # git archive is binary; invoke separately without decoding tar as text.
     import subprocess
@@ -82,7 +87,7 @@ def install_historical_chart(h):
     h.run(["helm", "install", "kars", str(destination / "deploy/helm/kars"),
            "--kube-context", CONTEXT, "--namespace", SYSTEM, "--create-namespace",
            wait_arg, "--timeout", "120s",
-           "--values", str(h.root / ".e2e-addon-values.json"),
+           *addon_args,
            "--set", "controller.replicas=0", "--set", "controller.image.repository=kars-controller",
            "--set", "controller.image.tag=e2e", "--set", "controller.image.pullPolicy=Never",
            "--set", "inferenceRouter.image.repository=kars-inference-router",
@@ -102,7 +107,7 @@ def prepare_legacy(h):
     require(not h.get("validatingadmissionpolicy", "kars-sre-source-authority"),
             "Legacy fixtures must precede the new SRE admission guards")
     require(not h.get("namespace", RUNTIME), "Disposable cluster contains a pre-existing SRE namespace")
-    install_historical_chart(h)
+    install_historical_chart(h, preloaded_addons=True)
     source = h.get("karssandbox", "sre", SYSTEM)
     require(source is not None, "Historical chart did not create its source CR")
     h.state["legacy_source_uid"] = source["metadata"]["uid"]

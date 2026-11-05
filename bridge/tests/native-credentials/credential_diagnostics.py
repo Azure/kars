@@ -5,7 +5,9 @@
 
 import re
 
-from native_api import Failure, resource
+from native_api import Failure, command, core, require, resource
+from observation_diagnostics import READ_ERRORS, recheck_actor, resolve_actor
+from rollout_diagnostics import bounded_integer, container_state
 
 PREFIX = "kars.azure.com/private-"
 CATEGORIES = {
@@ -21,6 +23,7 @@ GOVERNED_CATEGORIES = {
     "binding_shape", "grant_identity", "target_identity", "owner_authority",
     "source_identity", "source_metadata", "source_owner", "legacy_review",
     "bundle_owner", "bundle_missing", "target_changed", "grant_changed", "source_changed",
+    "target_bundle_reference", "target_task_authority", "target_task_metadata", "target_task_execution", "target_task_caller",
     "grant_api", "namespace_api", "target_api", "source_metadata_api", "source_value_api",
     "bundle_read_api", "bundle_create_api", "bundle_bind_api", "bundle_write_api",
     "source_recheck_api", "source_bind_api", "legacy_import_api", "legacy_identity_api",
@@ -73,6 +76,75 @@ def metrics_discovery(setup):
                 "reason": condition.get("reason") if condition.get("reason") in reasons else "OtherOrAbsent"}
     except Exception:
         return {"available": False, "category": "api-unavailable"}
+
+
+METRICS_UNAVAILABLE = "Metrics runtime diagnostic unavailable"
+METRICS_SCRAPE_ERRORS = {
+    "certificate signed by unknown authority": "kubelet-unknown-ca",
+    "because it doesn't contain any IP SANs": "kubelet-ip-san-missing",
+    "certificate is valid for": "kubelet-name-mismatch",
+    "certificate has expired or is not yet valid": "kubelet-certificate-time",
+    "context deadline exceeded": "kubelet-timeout",
+    "i/o timeout": "kubelet-timeout",
+    "connect: connection refused": "kubelet-connection-refused",
+    "403 Forbidden": "kubelet-forbidden",
+    "401 Unauthorized": "kubelet-unauthorized",
+}
+
+
+def metrics_log_categories(raw):
+    require(isinstance(raw, str) and len(raw.encode()) <= 131072, METRICS_UNAVAILABLE)
+    categories = set()
+    scrape_errors = 0
+    for line in raw.splitlines()[-512:]:
+        entry = re.fullmatch(r'[IWEF]\d{4} \d{2}:\d{2}:\d{2}\.\d+ +\d+ '
+                             r'(scraper|server)\.go:\d+\] (.*)', line)
+        if not entry:
+            continue
+        message = entry[2]
+        if entry[1] == "scraper" and message.startswith('"Failed to scrape node" err='):
+            scrape_errors += 1
+            matches = {category for text, category in METRICS_SCRAPE_ERRORS.items() if text in message}
+            categories.update(matches or {"kubelet-scrape-unclassified"})
+        elif entry[1] == "server" and message.startswith('"Failed probe" probe="metric-storage-ready" err="no metrics to serve"'):
+            categories.add("metric-storage-not-ready")
+    return {"coverage": "bounded-process-log-tail", "scrapeErrorRecords": scrape_errors,
+            "categories": sorted(categories)}
+
+
+def metrics_logs(actor, pod, previous):
+    try:
+        raw = command("kubectl", "logs", "-n", actor["namespace"], pod["name"], "-c", actor["container"],
+                      "--tail=512", "--limit-bytes=131072", "--request-timeout=10s",
+                      *(["--previous"] if previous else []), timeout=15)
+        return {"available": True, **metrics_log_categories(raw)}
+    except READ_ERRORS:
+        return {"available": False, "category": "log-read-unavailable"}
+
+
+def metrics_runtime(setup):
+    """Failure-only scrape categories from the existing Deployment/Pod lineage verifier."""
+    try:
+        actor = resolve_actor(setup, "metrics", None)
+        pods = []
+        for pod in actor["pods"]:
+            observed = actor["anchors"][core(actor["namespace"], "pods", pod["name"])]
+            states = [item for item in observed.get("status", {}).get("containerStatuses", [])
+                      if item.get("name") == actor["container"]]
+            require(len(states) == 1 and type(states[0].get("ready")) is bool, METRICS_UNAVAILABLE)
+            state = states[0]
+            current = container_state(state.get("state", {}))
+            restarts = bounded_integer(state.get("restartCount"), 1000000)
+            pods.append({**pod, "ready": state["ready"], "restartCount": restarts, "state": current,
+                         "lastState": container_state(state.get("lastState", {})),
+                         "logs": metrics_logs(actor, pod, False) if current["phase"] == "running"
+                         else {"available": False, "category": "process-not-running"},
+                         "previousLogs": metrics_logs(actor, pod, True) if restarts
+                         else {"available": False, "category": "no-previous-process"}})
+        recheck_actor(setup, actor)
+        return {"available": True, "diagnosticOnly": True, "pods": pods}
+    except READ_ERRORS:
+        return {"available": False, "diagnosticOnly": True, "category": "identity-or-state-unavailable"}
 
 
 def namespace_retirement(setup):

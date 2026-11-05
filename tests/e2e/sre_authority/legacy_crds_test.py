@@ -7,6 +7,7 @@ import copy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import threading
 import types
 import unittest
@@ -45,6 +46,57 @@ def flattened(historical):
 
 
 class LegacyCRDTests(unittest.TestCase):
+    def test_historical_install_only_consumes_explicitly_preloaded_addon_values(self):
+        from sre_authority.fixtures import install_historical_chart
+        for preloaded, present in ((False, False), (False, True), (True, True)):
+            with self.subTest(preloaded=preloaded, present=present), TemporaryDirectory() as directory:
+                root = Path(directory)
+                values = root / ".e2e-addon-values.json"
+                if present:
+                    values.write_text('{"metricsServer":{"image":{"pullPolicy":"Never"}}}')
+                h = Mock(root=root, work=root)
+                h.run.side_effect = lambda args, **_kwargs: (
+                    "v4.0.0" if args[:2] == ["helm", "version"] else
+                    "--wait=legacy" if args[0] == "bash" else "")
+                with patch("sre_authority.fixtures.tarfile.open") as archive, \
+                        patch("sre_authority.fixtures.preflight_legacy_crds"), \
+                        patch("subprocess.run", return_value=types.SimpleNamespace(stdout=b"archive")):
+                    archive.return_value.__enter__.return_value.getmembers.return_value = []
+                    install_historical_chart(h, preloaded_addons=preloaded)
+                installs = [call for call in h.run.call_args_list if call.args[0][:2] == ["helm", "install"]]
+                self.assertEqual(len(installs), 1)
+                args = installs[0].args[0]
+                self.assertEqual("--values" in args, preloaded)
+                if preloaded:
+                    self.assertEqual(args[args.index("--values") + 1], str(values))
+                self.assertIn("--wait=legacy", args)
+                self.assertEqual(args[args.index("--timeout") + 1], "120s")
+                self.assertEqual(installs[0].kwargs["timeout"], 180)
+                self.assertIn("controller.replicas=0", args)
+                self.assertNotIn("monitoring.enabled=false", args)
+                upgrades = [call.args[0] for call in h.run.call_args_list
+                            if call.args[0][:2] == ["helm", "upgrade"]]
+                self.assertEqual(len(upgrades), 1)
+                self.assertIn("--reuse-values", upgrades[0])
+
+    def test_full_historical_install_refuses_missing_or_nonfile_addon_values_before_commands(self):
+        from sre_authority.fixtures import install_historical_chart
+        for directory_instead in (False, True):
+            with self.subTest(directory_instead=directory_instead), TemporaryDirectory() as directory:
+                root = Path(directory)
+                if directory_instead:
+                    (root / ".e2e-addon-values.json").mkdir()
+                h = Mock(root=root, work=root)
+                with self.assertRaisesRegex(AssertionError, "Preloaded add-on values are required"):
+                    install_historical_chart(h, preloaded_addons=True)
+                h.run.assert_not_called()
+                h.k.assert_not_called()
+
+    def test_full_historical_journey_explicitly_requires_preloaded_addons(self):
+        source = Path(__file__).with_name("fixtures.py").read_text()
+        prepare = source.split("def prepare_legacy(h):", 1)[1].split("def seed_control_consumer(h):", 1)[0]
+        self.assertIn("install_historical_chart(h, preloaded_addons=True)", prepare)
+
     def test_early_new_crd_preview_proves_no_persisted_revision_or_identity_reuse(self):
         from sre_authority.legacy_crd_probe import preview_registration_identity
         from sre_authority.registration_schema import CRD_PATH
@@ -170,7 +222,7 @@ class LegacyCRDTests(unittest.TestCase):
 
     def test_initial_helm_uses_existing_versioned_waiter_without_custom_creation(self):
         fixture = Path(__file__).with_name("fixtures.py").read_text()
-        install = fixture.split("def install_historical_chart(h):", 1)[1].split("def prepare_legacy(h):", 1)[0]
+        install = fixture.split("def install_historical_chart(h, *, preloaded_addons=False):", 1)[1].split("def prepare_legacy(h):", 1)[0]
         self.assertLess(install.index("preflight_legacy_crds(h,"), install.index('h.run(["helm", "install"'))
         self.assertIn('sre_migration_helm_wait_arg "$2"', install)
         self.assertIn('wait_arg, "--timeout", "120s"', install)

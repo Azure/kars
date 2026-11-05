@@ -193,8 +193,16 @@ jobs:
             kars-native-router:latest kars-native-runtime:latest kars-native-bff:latest kars-native-probe:latest \
             kars-native-metrics-server:latest
       - name: Exercise normal BFF entrypoints and native controller authority
+        id: native_runtime
         timeout-minutes: 35
         run: python3 tests/native-credentials/run.py
+      - name: Exercise Team projection on the same native debug profile and default worker stack
+        if: ${{ !cancelled() && (steps.native_runtime.outcome == 'success' || steps.native_runtime.outcome == 'failure') }}
+        run: |
+          cargo test --manifest-path .native/core/Cargo.toml --locked \
+            -p kars-controller --bin kars-controller \
+            kars_task_reconciler::rebind::tests::credential_rebind_full_reconcile_preserves_authority_before_resume \
+            -- --exact --nocapture
       - name: Retain only bounded secret-free native outcomes
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4

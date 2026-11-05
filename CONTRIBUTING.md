@@ -196,7 +196,11 @@ Nothing is published to a registry by these preparation steps.
 Only the disposable `kars-e2e` fixture uses `Never` pull policies, carried from
 historical Helm installation through authority staging and the final upgrade.
 Production image references, `Always` policies and migration deadlines are
-unchanged. Without `KARS_E2E_PREBUILT_ADDONS=1`, the harness builds these add-ons
+unchanged. The full historical journey explicitly requires the generated
+`.e2e-addon-values.json`; missing values fail before installation. The standalone
+SRE schema job does not execute add-ons or consume that file: its historical
+install retains the archived defaults and its current upgrade is a server dry-run.
+Without `KARS_E2E_PREBUILT_ADDONS=1`, the harness builds these add-ons
 locally; prefer hosted CI for these heavy builds. A built CLI and Helm are needed
 for the lightweight preparation/rendering regressions:
 

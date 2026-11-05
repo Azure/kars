@@ -51,6 +51,25 @@ Only the Native fixture selects that local image with `pullPolicy: Never`; the
 Metrics API remains enabled with the chart's serving and kubelet TLS validation.
 Bootstrap currently waits for the controller, not Metrics API readiness: loading
 an image is not proof of working discovery or successful Namespace retirement.
+Failure capture reuses the controller's Namespace/ServiceAccount/Deployment/
+ReplicaSet/Pod identity checks for metrics-server, then projects only closed
+scrape and storage-readiness categories from bounded current/previous log tails.
+It rechecks identities before retaining facts; raw log messages, node addresses,
+certificates and error bodies are discarded. `MissingEndpoints` alone is not a
+kubelet certificate diagnosis, and an empty log tail does not prove health.
+
+The Native lane also runs the existing default-worker Team rebind/projection
+regression after the runtime journey, including when that journey fails, using
+the same unoptimized Cargo profile as its controller binary. The regression is
+mandatory and does not replace live acceptance. Its fixed phase markers can
+localize a test failure, not establish the live overflowing frame: it covers
+Task reconciliation and direct Sandbox projection, not the full parent Sandbox
+poll path. No worker stacks, readiness deadlines or security policies change.
+Target-recheck diagnostics distinguish bundle reference, Task authority,
+metadata/spec, execution-transition and materialized-caller rejection from the
+strict pre-write target UID/resourceVersion fence. Late-private controller
+reissuance/restore deadlines likewise retain fixed categories rather than being
+misreported as unknown CLI failures; they still fail and preserve the receipt.
 
 ## Identity and operator authentication
 

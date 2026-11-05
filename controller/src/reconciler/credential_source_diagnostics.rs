@@ -40,12 +40,18 @@ pub(super) fn classify(reason: &str) -> (&'static str, Option<u16>) {
         "Previously bound credential bundle disappeared; explicit operator recovery is required" => {
             "bundle_missing"
         }
-        "Credential target changed before bundle write"
-        | "Sandbox bundle reference was replaced or is stale"
-        | "Task bundle authority changed during anchor recovery"
-        | "Task bundle target metadata or spec changed during anchor recovery"
-        | "Task bundle recovery encountered an unsupported execution transition"
-        | "Materialized Task bundle caller changed identity, ownership or spec" => "target_changed",
+        "Credential target changed before bundle write" => "target_changed",
+        "Sandbox bundle reference was replaced or is stale" => "target_bundle_reference",
+        "Task bundle authority changed during anchor recovery" => "target_task_authority",
+        "Task bundle target metadata or spec changed during anchor recovery" => {
+            "target_task_metadata"
+        }
+        "Task bundle recovery encountered an unsupported execution transition" => {
+            "target_task_execution"
+        }
+        "Materialized Task bundle caller changed identity, ownership or spec" => {
+            "target_task_caller"
+        }
         "Credential grant changed before bundle write" => "grant_changed",
         "Credential source changed before bundle write"
         | "Credential source changed during read" => "source_changed",
@@ -126,8 +132,33 @@ mod tests {
                 None,
             ),
             (
-                "Task bundle authority changed during anchor recovery",
+                "Credential target changed before bundle write",
                 "target_changed",
+                None,
+            ),
+            (
+                "Sandbox bundle reference was replaced or is stale",
+                "target_bundle_reference",
+                None,
+            ),
+            (
+                "Task bundle authority changed during anchor recovery",
+                "target_task_authority",
+                None,
+            ),
+            (
+                "Task bundle target metadata or spec changed during anchor recovery",
+                "target_task_metadata",
+                None,
+            ),
+            (
+                "Task bundle recovery encountered an unsupported execution transition",
+                "target_task_execution",
+                None,
+            ),
+            (
+                "Materialized Task bundle caller changed identity, ownership or spec",
+                "target_task_caller",
                 None,
             ),
             (

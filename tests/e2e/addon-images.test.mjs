@@ -92,7 +92,10 @@ test('fixture overrides only pull policies, preserving image names and all enabl
 test('historical install retains fixture values into authority stage and final install', () => {
   const fixture = readFileSync(new URL('./sre_authority/fixtures.py', import.meta.url), 'utf8');
   const runner = readFileSync(new URL('./run.sh', import.meta.url), 'utf8');
-  assert.ok(fixture.includes('"--values", str(h.root / ".e2e-addon-values.json")'));
+  assert.ok(fixture.includes('install_historical_chart(h, preloaded_addons=True)'));
+  assert.match(fixture, /if preloaded_addons:\s+values = h.root \/ "\.e2e-addon-values.json"/);
+  assert.ok(fixture.includes('addon_args = ["--values", str(values)]'));
+  assert.match(fixture, /\*addon_args,/);
   assert.ok(runner.includes('--values "$ROOT_DIR/.e2e-addon-values.json"'));
   assert.match(runner, /build_images\s+prepare_addon_images\s+prepare_managed_mcp\s+prepare_sre_authority_legacy/);
   assert.match(fixture, /"--router-image", "kars-inference-router:e2e", timeout=180/);
