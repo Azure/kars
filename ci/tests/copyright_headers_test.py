@@ -66,6 +66,7 @@ class HeaderTests(unittest.TestCase):
             "a.toml": b"[package]\nname = 'fixture'\n",
             "a.yaml": b"---\nname: value\n",
             "a.yml": b"on: [push]\njobs: {}\n",
+            "a.qls": b"- import: codeql-suites/rust-security-and-quality.qls\n  from: codeql/rust-queries\n",
             "a.md": b"# Title\n\nText\n",
             "a.css": b'@import "theme.css";\na { color: red; }\n',
             "a.hbs": b"<!DOCTYPE html>\n<p>{{name}}</p>\n",

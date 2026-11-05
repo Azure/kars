@@ -486,6 +486,16 @@ async fn prepare_inner(
     bindings: &CredentialBindings,
     task_consumer: Option<bundle::TaskConsumer<'_>>,
 ) -> Result<Secret, String> {
+    // Bundle construction also runs beneath the sandbox projection state machine.
+    Box::pin(prepare_bundle(client, target, bindings, task_consumer)).await
+}
+
+async fn prepare_bundle(
+    client: &Client,
+    target: &CredentialTarget,
+    bindings: &CredentialBindings,
+    task_consumer: Option<bundle::TaskConsumer<'_>>,
+) -> Result<Secret, String> {
     validate_bindings(bindings)?;
     let mut target_object = targets::read(client, target).await?;
     if target.kind == "KarsSandbox" {
@@ -624,6 +634,13 @@ async fn prepare_inner(
 }
 
 pub(crate) async fn for_sandbox(
+    client: &Client,
+    sandbox: &crate::crd::KarsSandbox,
+) -> Result<Secret, String> {
+    Box::pin(for_sandbox_inner(client, sandbox)).await
+}
+
+async fn for_sandbox_inner(
     client: &Client,
     sandbox: &crate::crd::KarsSandbox,
 ) -> Result<Secret, String> {

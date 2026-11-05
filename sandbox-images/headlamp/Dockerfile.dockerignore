@@ -15,6 +15,7 @@
 !sandbox-images/headlamp/build-frontend.mjs
 !tools/headlamp-plugin/package.json
 !tools/headlamp-plugin/package-lock.json
+!tools/headlamp-plugin/patch-build-tool.mjs
 !tools/headlamp-plugin/tsconfig.json
 !tools/headlamp-plugin/src
 !tools/headlamp-plugin/src/**

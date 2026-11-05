@@ -33,7 +33,7 @@ STYLES = {
 }
 SUFFIX_STYLES = {
     **dict.fromkeys((".rs", ".go", ".ts", ".tsx", ".mts", ".js", ".mjs", ".cjs", ".bicep"), "slash"),
-    **dict.fromkeys((".sh", ".py", ".toml", ".yaml", ".yml"), "hash"),
+    **dict.fromkeys((".sh", ".py", ".toml", ".yaml", ".yml", ".qls"), "hash"),
     ".md": "html",
     ".css": "css",
     ".hbs": "handlebars",

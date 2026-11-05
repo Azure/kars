@@ -31,7 +31,30 @@ def verify(root: Path) -> None:
             raise ValueError(f"Headlamp build-input digest mismatch: {name}")
 
 
+def verify_npm_inventory(report: Path) -> None:
+    scan = json.loads(report.read_text())
+    results = scan.get("Results") if isinstance(scan, dict) else None
+    if isinstance(results, list):
+        for result in results:
+            if not isinstance(result, dict) or result.get("Type") != "npm":
+                continue
+            target = result.get("Target")
+            if not isinstance(target, str) or Path(target).name != "package-lock.json":
+                continue
+            packages = result.get("Packages")
+            if isinstance(packages, list) and packages and all(
+                isinstance(package, dict)
+                and all(isinstance(package.get(key), str) and package[key] for key in ("Name", "Version"))
+                for package in packages
+            ):
+                return
+    raise ValueError("Headlamp filesystem scan must contain a nonempty npm lock inventory")
+
+
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        raise SystemExit("usage: headlamp_build_evidence.py EVIDENCE_DIRECTORY")
-    verify(Path(sys.argv[1]))
+    if len(sys.argv) == 3 and sys.argv[1] == "--npm-inventory":
+        verify_npm_inventory(Path(sys.argv[2]))
+    elif len(sys.argv) == 2:
+        verify(Path(sys.argv[1]))
+    else:
+        raise SystemExit("usage: headlamp_build_evidence.py EVIDENCE_DIRECTORY | --npm-inventory REPORT")

@@ -116,6 +116,43 @@ async fn ordinary_sandbox_task_and_team_creation_keep_existing_value_fences_and_
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn governed_sandbox_bundles_stay_heap_bounded_on_a_default_worker_stack() {
+    let f = fixture::setup("KarsSandbox").await;
+    tokio::spawn(async move {
+        let preparation = prepare(&f.client, &f.target, &f.bindings);
+        let size = std::mem::size_of_val(&preparation);
+        assert!(size <= 1024, "bundle preparation embeds {size} bytes");
+        drop(preparation);
+        for suspended in [true, false] {
+            let sandbox = {
+                let mut state = f.state.lock().unwrap();
+                let path = state.target_path.clone();
+                let object = state.objects.get_mut(&path).unwrap();
+                object["spec"]["suspended"] = json!(suspended);
+                fixture::bump(object);
+                serde_json::from_value::<crate::crd::KarsSandbox>(object.clone()).unwrap()
+            };
+            let future = for_sandbox(&f.client, &sandbox);
+            let size = std::mem::size_of_val(&future);
+            assert!(
+                size <= 1024,
+                "sandbox credential dispatch embeds {size} bytes"
+            );
+            let ready = future.await.unwrap();
+            assert_eq!(ready.metadata.uid.as_deref(), Some("exclusive-bundle-uid"));
+            assert_eq!(
+                ready.data.as_ref().unwrap()["TELEGRAM_BOT_TOKEN"].0,
+                b"initial-value"
+            );
+        }
+        let state = f.state.lock().unwrap();
+        assert_eq!((state.creates, state.anchors, state.writes), (1, 1, 1));
+    })
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn preexisting_unanchored_lookalikes_are_never_adopted_or_cleared() {
     for filled in [false, true] {

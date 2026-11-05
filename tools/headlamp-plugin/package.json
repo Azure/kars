@@ -7,7 +7,8 @@
   "scripts": {
     "build": "headlamp-plugin build",
     "start": "headlamp-plugin start",
-    "test": "vitest run --config vitest.config.mts",
+    "postinstall": "node patch-build-tool.mjs",
+    "test": "node --test patch-build-tool.test.mjs && vitest run --config vitest.config.mts",
     "lint": "headlamp-plugin lint",
     "format": "headlamp-plugin format"
   },

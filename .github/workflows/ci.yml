@@ -380,7 +380,17 @@ jobs:
       - run: npm test
       - run: npm run build
       - name: Headlamp frontend preparation contracts
-        run: node --test ../../sandbox-images/headlamp/build-frontend.test.mjs
+        run: node --test ../../sandbox-images/headlamp/build-frontend.test.mjs patch-build-tool.test.mjs
+      - name: Compile patched Headlamp build-tool examples
+        run: |
+          set -euo pipefail
+          go version
+          for example in consume publish; do
+            (
+              cd "node_modules/@kinvolk/headlamp-plugin/official-plugins/keda/test-files/$example"
+              go test -mod=readonly ./...
+            )
+          done
       - name: npm audit (Headlamp dependencies)
         run: node ../../ci/npm-audit-bulk.mjs package-lock.json
       - name: Build the shipping Headlamp image without publishing
@@ -437,9 +447,15 @@ jobs:
               frontend-inventory) mode=sbom; input="$RUNNER_TEMP/headlamp-evidence/frontend.cdx.json" ;;
               plugin-lock) mode=fs; input=tools/headlamp-plugin ;;
             esac
-            trivy "$mode" --scanners vuln --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+            options=()
+            if [ "$mode" = fs ]; then options+=(--include-dev-deps); fi
+            trivy "$mode" "${options[@]}" --scanners vuln --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
               --ignore-unfixed=false --list-all-pkgs --format json --exit-code 1 \
               --output "$RUNNER_TEMP/headlamp-evidence/$source-scan.json" "$input" || failed=1
+            if [ "$mode" = fs ]; then
+              python3 ci/headlamp_build_evidence.py --npm-inventory \
+                "$RUNNER_TEMP/headlamp-evidence/$source-scan.json" || failed=1
+            fi
           done
           exit "$failed"
       - name: Retain Headlamp qualification evidence including failures

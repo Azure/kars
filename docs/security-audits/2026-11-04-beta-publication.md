@@ -171,6 +171,69 @@ official bundle containing the upstream fix passes the same coverage and
 positive/negative controls. Do not mark the four alerts fixed until the corrected
 full Kars analysis proves it.
 
+## Follow-up: governed credentials and Headlamp scanner coverage
+
+The published `c6a255af` revision passed Bridge CI, all three cold API/admission
+installs and the six unchanged upstream CodeQL controls. Its native qualification
+still failed: the first legitimate reviewed v2 sandbox did not acquire a
+credential-bundle UID annotation before the controller entered stack-overflow
+CrashLoopBackOff. Earlier v1 projection and invalid-v2 rejection cases passed.
+This narrows the failing path but does not identify the exact overflowing frame.
+
+The successor adds heap boundaries around shared credential-bundle preparation
+and sandbox dispatch, without changing grant/source identity checks, bundle
+ownership, UID/resourceVersion fencing or runtime isolation. Its new regression
+uses the existing HTTP fixture on a default Tokio worker stack, checks bounded
+public futures, and exercises suspended-to-active bundle reuse. Formatting has
+passed; Rust compilation, the regression and elimination of the live controller
+crash still require hosted proof. No stack-size increase or native build-profile
+change is used to mask the failure.
+
+Headlamp source repairs address the **67 advisory occurrences** retained across
+image, frontend-lock, frontend-SBOM and build-tool example reports, including
+CRITICAL, HIGH, MEDIUM, LOW and UNKNOWN findings. These are not 67 distinct
+vulnerabilities and are not yet clean-scan results. Repairs remove unused lint
+paths, update retained frontend dependencies and backend Go dependencies, and
+apply a version/checksum-fenced patch to both RabbitMQ build-tool examples. The
+CLI fixture now tests the maintained frontend preparation rather than a removed
+upstream Vite configuration. The Helm upgrade also raises the Kubernetes client
+floor; actual backend compilation and behavior remain required.
+
+The retained plugin filesystem scan contained only two Go module inventories
+and omitted npm development dependencies. Both filesystem scans now request
+`--include-dev-deps`; a fail-closed check requires a populated npm
+`package-lock.json` inventory. This checks inventory presence, not exact
+package-by-package completeness. It accepts the retained frontend report and
+rejects the retained Go-only plugin report. All severity levels, unfixed findings
+and the scanner's nonzero failure status remain enforced. Expanded coverage may
+expose additional findings that also require repair. CI now runs the patch
+contracts and compiles both patched examples with `go test -mod=readonly ./...`.
+
+CodeQL controls passed against the corrected source, but initialization failed
+while attempting a second external clone. Analysis now selects a repository-local
+suite importing the verified source pack; controls resolve that same suite,
+require every selected query to reside in the exact source tree, preserve the
+full baseline query set, and reject stale library resolution. Search-path options
+bind action database initialization, query execution, interpretation and query
+resolution to the verified checkout. The local suite avoids relying on an
+unverified absolute external `queries.uses` path. Actual pinned-action execution
+and full Kars analysis, including the four HIGH alerts, remain unproven.
+
+Focused local evidence for these repairs:
+
+- Headlamp frontend/build-tool contracts: 15 passed.
+- Headlamp CLI fixture selectors: 2 passed; 64 intentionally unselected.
+- Headlamp build-input and npm-inventory checks: 14 passed.
+- CodeQL coverage and action-binding checks: 13 passed.
+- SRE authority tests for the repaired historical schema assertion: 195 passed.
+- Shell syntax, CodeQL ShellCheck, unique-key workflow/suite YAML parsing,
+  targeted Rust formatting and scoped whitespace checks passed.
+
+These checks do not establish clean rebuilt images, example/backend compilation,
+Headlamp browser behavior, complete native qualification or fresh released Kind
+installation. Heavy builds remain on GitHub. Beta installation acceptance remains
+**0/2**, and genuine human audit signatures remain **0/2**.
+
 ## Verdict
 
 **Not accepted for release.** Required hosted verification and real author plus

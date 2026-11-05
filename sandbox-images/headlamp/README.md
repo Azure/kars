@@ -106,8 +106,9 @@ all upstream scripts with the single bounded Kars production build command, and
 removes the extracted `.storybook` and `rsbuild.config.ts` configurations. The
 packaged product does not provide those development workflows: its maintained build
 already called Vite directly, with `npm ci --omit=dev`. This change removes the
-unused roots from lock resolution too. Other regular dependencies, optional platform
-packages, existing security pins and unrelated Vite settings are retained. It does
+unused roots from lock resolution too. Apart from the lint-only roots removed in the
+hosted follow-up below, other regular dependencies, optional platform packages,
+existing security pins and unrelated Vite settings are retained. It does
 not alter the upstream repository or claim its original development lock is fixed.
 
 The broad Vite polyfill plugin is removed, not retained as an alternate path.
@@ -158,6 +159,153 @@ rendered-inventory scans, and fresh browser checks covering SVGs, Monaco, termin
 stream consumers and loaded plugins. The polyfill integration has not been bundled
 or exercised in a browser locally. Preserve failed evidence; the source repair and
 lightweight tests alone are not image or installed acceptance.
+
+## Hosted all-severity follow-up (2026-11-05)
+
+[CI 42020001347, Headlamp job 127220711620](https://github.com/Azure/kars/actions/runs/42020001347/job/127220711620)
+built the real AL3 image at `c6a255af`, including the scoped polyfills, and verified
+its exported build-input hashes. Its retained scans **failed**: 13 image findings
+(6 MEDIUM, 4 LOW, 3 UNKNOWN), 31 frontend-lock findings (19 HIGH, 11 MEDIUM,
+1 LOW), 1 rendered-inventory MEDIUM finding, and 22 plugin-source findings
+(6 CRITICAL, 14 HIGH, 2 MEDIUM). YAML overlaps the image/lock/inventory reports;
+these are occurrences, not 67 distinct advisories. Neither deepmerge nor elliptic
+appeared in the frontend findings. The following repairs need a new hosted run;
+they do not change that failed evidence into a successful qualification.
+
+### Frontend: retain production consumers, remove only unused lint roots
+
+The exported Vite configuration invokes React/Babel, SVGR and static-copy plugins,
+not ESLint. The rendered module evidence contains no ESLint packages. Traversing
+the actual regenerated lock, including dependency/optional/peer edges, shows that
+removing these ten unused roots eliminates all installed brace-expansion, flatted
+and minimatch packages, including the affected minimatch 9 path:
+
+- `@headlamp-k8s/eslint-config`, `@typescript-eslint/eslint-plugin`, `eslint`,
+  `eslint-config-prettier`, `eslint-plugin-import`, `eslint-plugin-jsx-a11y`,
+  `eslint-plugin-react`, `eslint-plugin-react-hooks`,
+  `eslint-plugin-simple-import-sort`, `eslint-plugin-unused-imports`.
+- The removed paths include ESLint → file-entry-cache → flat-cache → flatted,
+  ESLint/config/plugins → minimatch 3 → brace-expansion 1, and TypeScript ESLint →
+  typescript-estree → minimatch 9 → brace-expansion 2. There is no forced minimatch
+  9-to-11 API migration and no continued installation of an unused linter.
+- Generated `eslintConfig`, `prettier`, `husky` and `lint-staged` configuration is
+  removed with its unsupported consumers. The obsolete upstream `axe-core` and
+  `domain-browser` `npm:dry-uninstall` overrides are removed, not used as fixes.
+  Repository linting, source files and the real Vite consumers are unchanged.
+
+| Reported package/version | Advisory IDs (CVE-2026 unless stated) | Repair |
+| --- | --- | --- |
+| `@babel/core` 7.28.3 | 49356 | 7.29.6; retained React/SVGR JSX compilation |
+| `brace-expansion` 1.1.12 / 2.0.2 | 102276, 102278, 13149, 14257, 69152, 102277, 33750 | Remove unused lint dependency paths |
+| `browserslist` 4.25.3 | 73088, 73089 | 4.28.7; retain Babel target configuration |
+| `flatted` 3.3.1 | 32141, 33228 | Remove unused ESLint cache path |
+| `minimatch` 9.0.9 | 118764 | Remove unused TypeScript ESLint path |
+| `picomatch` 2.3.1 / 4.0.2 | 33671, 33672 | Same-major 2.3.2 / 4.0.4; retain Vite/Rollup/file matching |
+| `postcss` 8.5.3 | 45623, 73646, 41305, 69153 | 8.5.23; retain Vite CSS processing |
+| `source-map-js` 1.2.1 | 93749 | 1.2.2; retain PostCSS source maps |
+| `yaml` 1.10.2 / 2.7.0 | 33532 | Same-major 1.10.3 for cosmiconfig; 2.8.3 for the app |
+
+The build asserts that patched `yaml@2.8.3`, as well as `js-yaml@4.3.2`, is present
+in rendered package evidence. Every remaining lock entry is still scanned.
+Published npm manifests confirm the selected patch versions support the Node 22
+builder; local tests do not substitute for resolving and building the new lock.
+
+### Backend: update the dependencies of real Helm and telemetry features
+
+Headlamp's `pkg/helm/{charts,release,repository}.go` uses Helm repository/search,
+chart loading, install, upgrade, rollback and uninstall APIs. Helm retains its
+containerd dependency. `cmd/headlamp.go` initializes `pkg/telemetry` and uses its
+middleware/spans. These are real consumers, not dependencies that can be removed
+because they appeared in a scan. `build-backend.sh` now requests:
+
+| Embedded package/version | Finding | Minimum selected requirement |
+| --- | --- | --- |
+| containerd 1.7.33 | CVE-2026-53493, CVE-2026-53495, CVE-2026-95838 | 1.7.36 |
+| OTLP trace, gRPC and HTTP exporters 1.42.0; OTel SDK 1.44.0 | CVE-2026-81870; HTTP also CVE-2026-39882 | All four modules 1.45.0 |
+| x/crypto 0.57.0 | GO-2026-5932 (UNKNOWN) | 0.58.1-0.20261009181718-2f1f834330b2 |
+| x/net 0.60.0 | CVE-2026-78661, CVE-2026-97045 (UNKNOWN) | 0.62.0 |
+| Helm 3.18.5 | CVE-2026-35206 | 3.20.2 |
+
+These module versions were verified against the public Go proxy. The crypto
+pseudo-version is the published advisory fix, not a fabricated release. Their
+Go requirements fit the existing 1.27.3 builder. Helm's upgrade also raises the
+Kubernetes client module floor from 0.33 to 0.35: that compatibility change must
+pass the hosted build/tests, not be inferred from version ordering. The maintained
+backend test command now includes `./pkg/helm ./pkg/telemetry` alongside its
+existing packages. Go's normal minimum-version selection and checksum verification
+remain enabled; no replacement module or compatibility stub is introduced.
+
+### Plugin build tool: patch actual retained Go examples
+
+The 22 plugin-source findings were eleven RabbitMQ advisories in **each** of
+`@kinvolk/headlamp-plugin/official-plugins/keda/test-files/{consume,publish}/go.mod`:
+CVE-2026-77403, -77404, -77405, -77406, -77407, -77408, -77410, -77411, -77412,
+-79921 and -107386. Both modules request `github.com/rabbitmq/amqp091-go@v1.3.4`.
+They are development examples inside npm build-tool 0.13.1, not shipped Go binaries
+or dependencies of the Kars browser bundle. Inspection of published build-tool
+0.14.0 confirmed the same vulnerable requirements, so upgrading that npm package
+alone would not repair them.
+
+`tools/headlamp-plugin/patch-build-tool.mjs` is the single npm `postinstall` path
+used by hosted installs and the Docker build. It retains both example programs,
+changes their real Go requirements to AMQP 1.14.0, raises their Go directive to
+AMQP's minimum 1.20, and updates `go.sum` using the published module/go.mod hashes
+from `sum.golang.org` (including its goleak test dependency). A subsequent example
+build therefore resolves the patched library; this is not a renamed package,
+changed scanner label, deleted fixture, or ignored advisory. The actual Dial,
+channel, queue, publish/consume and delivery-acknowledgement APIs used by these
+examples remain exported with compatible signatures in 1.14.0.
+
+The patch validates the locked npm package version and both original modules
+before any write, preserves other dependencies and all Go source, and supports
+idempotent execution. Tests cover upstream drift, checksums, no partial writes,
+install wiring and copies of the actual installed examples. The Docker context
+copies the helper before `npm ci`; no runtime installer is added. Remove this
+patch when a reviewed upstream build-tool release fixes both example modules.
+
+### Coverage gap and remaining qualification
+
+The retained plugin report contains **only the two Go targets**, not the npm lock.
+Its Trivy filesystem invocation lacked `--include-dev-deps`, while all plugin npm
+roots are `devDependencies`. Therefore that report is not proof that the plugin
+build dependency graph is clean. The shared CI owner must add
+`--include-dev-deps` to **filesystem** scans (both frontend-lock and plugin-lock),
+retaining `--severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL`, `--ignore-unfixed=false`,
+`--list-all-pkgs`, failure exit codes and artifact retention. Confirm the next
+plugin report actually contains `package-lock.json`; any newly exposed findings
+still require repair. In the existing scan loop, build the additional arguments as
+`dependency_args=(); if [ "$mode" = fs ]; then dependency_args+=(--include-dev-deps); fi`
+and pass `"${dependency_args[@]}"` to Trivy. Fail if either lock report lacks its npm
+inventory, for example:
+
+```bash
+jq -e 'any(.Results[]?; .Type == "npm" and ((.Target // "") | endswith("package-lock.json")) and ((.Packages // []) | length > 0))' "$HEADLAMP_EVIDENCE_DIR/plugin-lock-scan.json"
+```
+
+No shared CI or audit document is edited here.
+
+Focused local checks, using existing dependencies and no installs/builds/containers:
+
+```bash
+node --test sandbox-images/headlamp/build-frontend.test.mjs tools/headlamp-plugin/patch-build-tool.test.mjs
+sh -n sandbox-images/headlamp/build-backend.sh
+cd cli && ./node_modules/.bin/vitest run src/testing/helm-headlamp.test.ts -t 'patches frontend dependencies|reuses pinned upstream assets'
+```
+
+Results: **15/15 Node tests passed, zero skipped**; shell syntax passed; **2/2
+selected CLI tests passed** (64 unrelated tests intentionally unselected). Scoped
+`git diff --check` also passed. No full dependency installation, Go compilation or
+image build was run locally.
+
+The CLI fixture now supplies the real Vite preparation contract, checks pruning,
+pins, preserved configuration and idempotence, and keeps its files inside the
+repository. Production validation is not relaxed. Required hosted gates remain:
+fresh npm lock resolution/installation; native backend/frontend/plugin image
+builds and upstream tests; compilation of the retained patched Go examples;
+exported-input/hash validation; unfiltered all-severity image, frontend lock,
+rendered inventory and **development-inclusive** plugin lock/source scans; and
+fresh browser checks for login, Helm, YAML editing, Monaco, SVGs, terminal streams
+and loaded plugins. This source repair is not a clean-scan or browser-acceptance claim.
 
 ## Writable frontend lifecycle
 

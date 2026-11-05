@@ -23,7 +23,7 @@ printf '%s\n' "$CODEQL_SOURCE_SHA" > "$CODEQL_EVIDENCE/source-sha.txt"
   --format=text > "$CODEQL_EVIDENCE/bundled-queries.txt"
 "$CODEQL_BIN" pack install "$CODEQL_SOURCE/rust/ql/src"
 "$CODEQL_BIN" pack install "$CODEQL_SOURCE/rust/ql/test"
-"$CODEQL_BIN" resolve queries "$CODEQL_SOURCE/rust/ql/src/codeql-suites/rust-security-and-quality.qls" \
+"$CODEQL_BIN" resolve queries ./.github/codeql-rust.qls \
   --search-path="$CODEQL_SOURCE" --format=text > "$CODEQL_EVIDENCE/source-queries.txt"
 "$CODEQL_BIN" resolve library-path \
   --query="$CODEQL_SOURCE/rust/ql/src/queries/security/CWE-022/TaintedPath.ql" \
@@ -41,7 +41,12 @@ def query_ids(name):
         raise SystemExit('empty resolved query suite')
     ids = set()
     for path in paths:
-        text = Path(path.strip()).read_text()
+        path = Path(path.strip())
+        if name == 'source-queries.txt' and not path.resolve().is_relative_to(
+            (source / 'rust/ql/src').resolve()
+        ):
+            raise SystemExit('analysis suite resolved a query outside the verified source')
+        text = path.read_text()
         found = re.findall(r'^\s*\*\s*@id\s+(\S+)', text, re.MULTILINE)
         if len(found) != 1:
             raise SystemExit('resolved query lacks a unique ID')
@@ -81,3 +86,27 @@ bash "$CODEQL_SOURCE/rust/ql/test/setup.sh"
   "$CODEQL_SOURCE/rust/ql/test/library-tests/dataflow/local" \
   "$CODEQL_SOURCE/rust/ql/test/library-tests/dataflow/models" \
   2>&1 | tee "$CODEQL_EVIDENCE/control-tests.log"
+
+# Analyze with the source and library resolution that just passed the controls.
+python3 - "$CODEQL_SOURCE" "${GITHUB_OUTPUT:?}" "${GITHUB_ENV:?}" <<'BINDING'
+import json
+from pathlib import Path
+import sys
+
+source, output, environment = map(Path, sys.argv[1:])
+source = source.resolve(strict=True)
+suite = source / 'rust/ql/src/codeql-suites/rust-security-and-quality.qls'
+if not suite.is_file() or not (source / 'rust/ql/lib').is_dir():
+    raise SystemExit('verified Rust suite or library is absent')
+if any(char in str(source) for char in '\r\n'):
+    raise SystemExit('invalid Rust source path')
+options = {
+    'database': {command: [f'--search-path={source}'] for command in (
+        'init', 'run-queries', 'interpret-results')},
+    'resolve': {'queries': [f'--search-path={source}']},
+}
+with environment.open('a') as handle:
+    handle.write('CODEQL_ACTION_EXTRA_OPTIONS=' + json.dumps(options) + '\n')
+with output.open('a') as handle:
+    handle.write('suite=./.github/codeql-rust.qls\n')
+BINDING

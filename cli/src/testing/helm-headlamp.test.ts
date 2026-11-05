@@ -561,28 +561,69 @@ describe("Core-managed AL3 Headlamp", () => {
   });
 
   it("patches frontend dependencies without changing product identity or unrelated upstream configuration", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "kars-headlamp-frontend-"));
+    const directory = mkdtempSync(join(root, "sandbox-images/headlamp/.cli-frontend-"));
     try {
       mkdirSync(join(directory, "frontend"));
       mkdirSync(join(directory, "app"));
       writeFileSync(join(directory, "app/package.json"), JSON.stringify({ version: "0.41.0", productName: "Headlamp" }));
       const manifest = {
-        dependencies: { "js-yaml": "^4.1.1", lodash: "^4.17.23", vite: "^6.4.1", react: "^18.3.1" },
+        dependencies: {
+          "js-yaml": "^4.1.1", yaml: "^2.7.0", lodash: "^4.17.23", vite: "^6.4.1", react: "^18.3.1",
+          "vite-plugin-node-polyfills": "^0.23.0", "vite-plugin-svgr": "^4.3.0", eslint: "^8.57.0",
+        },
         overrides: { "js-yaml": "^4.1.1", cheerio: "1.0.0-rc.12" },
-        devDependencies: { vitest: "^3.0.5" },
+        devDependencies: { vitest: "^3.0.5", "@storybook/react-vite": "^9.1.19" },
+        scripts: { build: "vite build", storybook: "storybook dev" },
+        eslintConfig: { extends: ["@headlamp-k8s"] },
       };
+      const config = `import { nodePolyfills } from 'vite-plugin-node-polyfills';
+import svgr from 'vite-plugin-svgr';
+export default {
+  define: { global: 'globalThis' },
+  envPrefix: 'REACT_APP_',
+  plugins: [
+    svgr(),
+    nodePolyfills({
+      include: ['process', 'buffer', 'stream'],
+    }),
+  ],
+  build: { outDir: 'build', commonjsOptions: { transformMixedEsModules: true } },
+};
+`;
+      const configFile = join(directory, "frontend/vite.config.ts");
+      writeFileSync(configFile, config);
+      writeFileSync(join(directory, "frontend/rsbuild.config.ts"), "export default {};");
+      mkdirSync(join(directory, "frontend/.storybook"));
+      writeFileSync(join(directory, "frontend/.storybook/main.ts"), "export default {};");
       const file = join(directory, "frontend/package.json");
       writeFileSync(file, JSON.stringify(manifest));
       const prepare = () => execa(process.execPath, [`${root}sandbox-images/headlamp/build-frontend.mjs`, "prepare"],
         { cwd: join(directory, "frontend") });
       await prepare();
       const result = JSON.parse(readFileSync(file, "utf8"));
-      expect(result.dependencies).toEqual({ "js-yaml": "4.3.2", lodash: "4.18.1", vite: "6.4.3", react: "^18.3.1" });
-      expect(result.devDependencies).toEqual(manifest.devDependencies);
+      expect(result.dependencies).toEqual({
+        "js-yaml": "4.3.2", yaml: "2.8.3", lodash: "4.18.1", vite: "6.4.5", react: "^18.3.1",
+        "vite-plugin-svgr": "^4.3.0", "@rollup/plugin-inject": "5.0.5", buffer: "6.0.3", process: "0.11.10", "stream-browserify": "3.0.0",
+      });
+      expect(result.devDependencies).toBeUndefined();
+      expect(result.eslintConfig).toBeUndefined();
+      expect(result.scripts).toEqual({ build: "node --max-old-space-size=3072 kars-build.mjs build" });
       expect(result.overrides).toEqual({
         "js-yaml": "$js-yaml", lodash: "$lodash", cheerio: "1.0.0-rc.12",
-        "fast-uri@^3.0.0": "3.1.7", "nanoid@^3.0.0": "3.3.18",
+        "fast-uri@^3.0.0": "3.1.9", "nanoid@^3.0.0": "3.3.18",
+        "@babel/core": "7.29.6", browserslist: "4.28.7", "picomatch@^2.0.0": "2.3.2", "picomatch@^4.0.0": "4.0.4",
+        postcss: "8.5.23", "source-map-js": "1.2.2", "yaml@^1.0.0": "1.10.3", "yaml@^2.0.0": "$yaml",
       });
+      const preparedConfig = config
+        .replace("import { nodePolyfills } from 'vite-plugin-node-polyfills';\n", "// Node polyfills are supplied by kars-build.mjs for the production build.\n")
+        .replace("    nodePolyfills({\n      include: ['process', 'buffer', 'stream'],\n    }),\n", "");
+      expect(readFileSync(configFile, "utf8")).toBe(preparedConfig);
+      for (const removed of ["rsbuild.config.ts", ".storybook/main.ts"]) {
+        expect(() => readFileSync(join(directory, "frontend", removed))).toThrow();
+      }
+      await prepare();
+      expect(JSON.parse(readFileSync(file, "utf8"))).toEqual(result);
+      expect(readFileSync(configFile, "utf8")).toBe(preparedConfig);
       expect(readFileSync(join(directory, "frontend/.env"), "utf8")).toBe(
         "REACT_APP_HEADLAMP_VERSION=0.41.0\n" +
         "REACT_APP_HEADLAMP_GIT_VERSION=066c5be9deb14b12bcef3485b531c64a84a2a219\n" +

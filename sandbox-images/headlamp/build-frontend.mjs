@@ -11,6 +11,11 @@ import { pathToFileURL } from "node:url";
 const root = process.cwd();
 const read = file => JSON.parse(fs.readFileSync(file, "utf8"));
 const write = (file, value) => fs.writeFileSync(file, JSON.stringify(value, null, 2) + "\n");
+const lintDependencies = [
+  "@headlamp-k8s/eslint-config", "@typescript-eslint/eslint-plugin", "eslint", "eslint-config-prettier",
+  "eslint-plugin-import", "eslint-plugin-jsx-a11y", "eslint-plugin-react", "eslint-plugin-react-hooks",
+  "eslint-plugin-simple-import-sort", "eslint-plugin-unused-imports",
+];
 
 export function productionPolyfills(inject, resolve) {
   const buffer = "\0kars-headlamp-buffer";
@@ -57,6 +62,7 @@ export { process, process as default };`],
 export function verifyProductionLock(manifest, lock) {
   assert.equal(lock.lockfileVersion, 3, "Expected an npm v3 build lock");
   assert.deepEqual(lock.packages[""].dependencies, manifest.dependencies, "Build lock does not match the prepared manifest");
+  assert(!lintDependencies.some(name => name in manifest.dependencies), "Lint-only roots remain in the build manifest");
   assert(!Object.keys(manifest.devDependencies ?? {}).length, "Development roots remain in the build manifest");
   assert(!Object.keys(lock.packages[""].devDependencies ?? {}).length, "Development roots remain in the build lock");
   for (const [name, metadata] of Object.entries(lock.packages)) {
@@ -86,6 +92,9 @@ if (command === "prepare") {
     preparedConfig = config.replace(polyfillImport, marker).replace(polyfillCall, "");
   }
   delete manifest.dependencies["vite-plugin-node-polyfills"];
+  for (const name of lintDependencies) delete manifest.dependencies[name];
+  for (const name of ["eslintConfig", "prettier", "husky", "lint-staged"]) delete manifest[name];
+  for (const name of ["axe-core", "domain-browser"]) delete manifest.overrides[name];
   delete manifest.devDependencies;
   manifest.scripts = { build: "node --max-old-space-size=3072 kars-build.mjs build" };
   Object.assign(manifest.dependencies, {
@@ -96,8 +105,17 @@ if (command === "prepare") {
     "js-yaml": "4.3.2",
     lodash: "4.18.1",
     vite: "6.4.5",
+    yaml: "2.8.3",
   });
   Object.assign(manifest.overrides, {
+    "@babel/core": "7.29.6",
+    browserslist: "4.28.7",
+    "picomatch@^2.0.0": "2.3.2",
+    "picomatch@^4.0.0": "4.0.4",
+    postcss: "8.5.23",
+    "source-map-js": "1.2.2",
+    "yaml@^1.0.0": "1.10.3",
+    "yaml@^2.0.0": "$yaml",
     "js-yaml": "$js-yaml",
     lodash: "$lodash",
     "fast-uri@^3.0.0": "3.1.9",
@@ -155,7 +173,8 @@ if (command === "prepare") {
       },
     }],
   });
-  assert(packages.has("js-yaml@4.3.2"), "Patched YAML library absent from bundle evidence");
+  assert(packages.has("yaml@2.8.3"), "Patched yaml library absent from bundle evidence");
+  assert(packages.has("js-yaml@4.3.2"), "Patched js-yaml library absent from bundle evidence");
   assert(packages.has("lodash@4.18.1"), "Patched lodash absent from bundle evidence");
   const staticPackage = recordPackage(path.join(root, "node_modules/monaco-editor"));
   assert(fs.existsSync("build/assets/vs"), "Dynamically loaded Monaco assets missing");

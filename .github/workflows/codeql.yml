@@ -53,6 +53,7 @@ jobs:
 
       - name: Verify corrected Rust suite coverage and behavioral controls
         if: matrix.language == 'rust'
+        id: rust-controls
         env:
           CODEQL_BIN: ${{ runner.temp }}/kars-codeql-bundle/codeql/codeql
           CODEQL_SOURCE: ${{ runner.temp }}/kars-codeql-source
@@ -68,7 +69,7 @@ jobs:
           # Temporary full-suite replacement for upstream github/codeql#22917.
           # Restore bundled defaults once a fixed release passes these controls.
           config: ${{ matrix.language == 'rust' && '{"name":"Kars CodeQL Config","paths-ignore":[],"disable-default-queries":true}' || '' }}
-          queries: ${{ matrix.language == 'rust' && 'github/codeql/rust/ql/src/codeql-suites/rust-security-and-quality.qls@fdf5c8481ffef04e04c7376167fb5ce25aae8453' || 'security-and-quality' }}
+          queries: ${{ matrix.language == 'rust' && steps.rust-controls.outputs.suite || 'security-and-quality' }}
           tools: ${{ steps.rust-tools.outputs.archive }}
 
       - name: Autobuild

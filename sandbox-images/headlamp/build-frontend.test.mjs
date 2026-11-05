@@ -12,6 +12,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { productionPolyfills, verifyProductionLock } from "./build-frontend.mjs";
 
 const command = fileURLToPath(new URL("build-frontend.mjs", import.meta.url));
+const lintOnly = [
+  "@headlamp-k8s/eslint-config", "@typescript-eslint/eslint-plugin", "eslint", "eslint-config-prettier",
+  "eslint-plugin-import", "eslint-plugin-jsx-a11y", "eslint-plugin-react", "eslint-plugin-react-hooks",
+  "eslint-plugin-simple-import-sort", "eslint-plugin-unused-imports",
+];
 const upstreamConfig = `import { nodePolyfills } from 'vite-plugin-node-polyfills';
 export default {
   define: { global: 'globalThis' },
@@ -36,7 +41,8 @@ function fixture(t, app = { version: "0.41.0", productName: "Headlamp" }) {
   const manifest = {
     name: "headlamp-frontend",
     dependencies: {
-      "js-yaml": "4.1.0", lodash: "4.17.21", vite: "6.4.3", react: "18.3.1",
+      ...Object.fromEntries(lintOnly.map(name => [name, "1.0.0"])),
+      "js-yaml": "4.1.0", yaml: "^2.7.0", lodash: "4.17.21", vite: "6.4.3", react: "18.3.1",
       "vite-plugin-node-polyfills": "^0.23.0", "vite-plugin-svgr": "^4.3.0",
       "vite-plugin-static-copy": "^3.1.2", "monaco-editor": "^0.52.0", typescript: "5.6.2",
     },
@@ -44,7 +50,11 @@ function fixture(t, app = { version: "0.41.0", productName: "Headlamp" }) {
       "@storybook/react-vite": "^9.1.19", vitest: "^3.0.5",
       "@rsbuild/plugin-node-polyfill": "^1.4.1", "@rsbuild/plugin-svgr": "^1.2.2",
     },
-    overrides: { "fast-uri@^3.0.0": "3.1.7", unrelated: "1.2.3" },
+    overrides: { "fast-uri@^3.0.0": "3.1.7", unrelated: "1.2.3", "axe-core": "npm:dry-uninstall", "domain-browser": "npm:dry-uninstall" },
+    eslintConfig: { extends: ["@headlamp-k8s", "prettier"] },
+    prettier: "@headlamp-k8s/eslint-config/prettier-config",
+    husky: { hooks: { "pre-commit": "lint-staged" } },
+    "lint-staged": { "*.ts": ["eslint"] },
     scripts: { build: "vite build", star: "rsbuild dev", storybook: "storybook dev", test: "vitest" },
     optionalDependencies: { "@rollup/rollup-linux-x64-gnu": "*" },
   };
@@ -66,11 +76,19 @@ test("preparation pins patched dependencies while preserving upstream build sett
   const expected = structuredClone(f.manifest);
   delete expected.devDependencies;
   delete expected.dependencies["vite-plugin-node-polyfills"];
+  for (const name of lintOnly) delete expected.dependencies[name];
+  for (const name of ["eslintConfig", "prettier", "husky", "lint-staged"]) delete expected[name];
+  delete expected.overrides["axe-core"];
+  delete expected.overrides["domain-browser"];
   Object.assign(expected.dependencies, {
     "@rollup/plugin-inject": "5.0.5", buffer: "6.0.3", process: "0.11.10", "stream-browserify": "3.0.0",
-    "js-yaml": "4.3.2", lodash: "4.18.1", vite: "6.4.5",
+    "js-yaml": "4.3.2", lodash: "4.18.1", vite: "6.4.5", yaml: "2.8.3",
   });
-  Object.assign(expected.overrides, { "js-yaml": "$js-yaml", lodash: "$lodash", "fast-uri@^3.0.0": "3.1.9", "nanoid@^3.0.0": "3.3.18" });
+  Object.assign(expected.overrides, {
+    "js-yaml": "$js-yaml", lodash: "$lodash", "fast-uri@^3.0.0": "3.1.9", "nanoid@^3.0.0": "3.3.18",
+    "@babel/core": "7.29.6", browserslist: "4.28.7", "picomatch@^2.0.0": "2.3.2", "picomatch@^4.0.0": "4.0.4",
+    postcss: "8.5.23", "source-map-js": "1.2.2", "yaml@^1.0.0": "1.10.3", "yaml@^2.0.0": "$yaml",
+  });
   expected.scripts = { build: "node --max-old-space-size=3072 kars-build.mjs build" };
   assert.deepEqual(manifest, expected);
   const configPath = path.join(f.frontend, "vite.config.ts");
@@ -136,6 +154,13 @@ test("production lock verification rejects either finding at any depth without f
   const mismatch = structuredClone(lock);
   mismatch.packages[""].dependencies.react = "0.0.0";
   assert.throws(() => verifyProductionLock(manifest, mismatch), /does not match/);
+  for (const name of lintOnly) {
+    const staleManifest = structuredClone(manifest);
+    staleManifest.dependencies[name] = "1.0.0";
+    const staleLock = structuredClone(lock);
+    staleLock.packages[""].dependencies = staleManifest.dependencies;
+    assert.throws(() => verifyProductionLock(staleManifest, staleLock), /Lint-only roots/);
+  }
   const staleDev = structuredClone(lock);
   staleDev.packages[""].devDependencies = { storybook: "9.1.19" };
   assert.throws(() => verifyProductionLock(manifest, staleDev), /Development roots/);
