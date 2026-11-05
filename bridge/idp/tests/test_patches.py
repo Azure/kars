@@ -5,6 +5,7 @@ import hashlib
 import io
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tarfile
@@ -31,7 +32,42 @@ def checksums(path):
     return result
 
 
+def module_version_key(version):
+    match = re.fullmatch(
+        r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+        r"(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
+        r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?", version)
+    if match is None:
+        raise ValueError("expected a complete Go module semantic version")
+    prerelease = match[4]
+    identifiers = []
+    for part in prerelease.split(".") if prerelease is not None else []:
+        if part.isdigit():
+            if len(part) > 1 and part.startswith("0"):
+                raise ValueError("numeric prerelease identifier has a leading zero")
+            identifiers.append((0, int(part)))
+        else:
+            identifiers.append((1, part))
+    return (*map(int, match.group(1, 2, 3)), prerelease is None, tuple(identifiers))
+
+
 class PatchContracts(unittest.TestCase):
+    def test_module_version_order_preserves_pseudoversions_and_prerelease_precedence(self):
+        ordered = ["v1.2.0", "v1.2.1-0.20261104120000-aaaaaaaaaaaa",
+                   "v1.2.1-0.20261105120000-bbbbbbbbbbbb", "v1.2.1-alpha.2",
+                   "v1.2.1-alpha.10", "v1.2.1-alpha.beta", "v1.2.1", "v1.10.0"]
+        for before, after in zip(ordered, ordered[1:]):
+            with self.subTest(before=before, after=after):
+                self.assertLess(module_version_key(before), module_version_key(after))
+        self.assertEqual(module_version_key("v1.2.1+incompatible"), module_version_key("v1.2.1"))
+        self.assertLess(module_version_key("v0.0.0-20261104120000-aaaaaaaaaaaa"),
+                        module_version_key("v0.0.0-20261105120000-bbbbbbbbbbbb"))
+        self.assertLess(module_version_key("v1.2.1-rc.1.0.20261104120000-aaaaaaaaaaaa"),
+                        module_version_key("v1.2.1"))
+        for invalid in ("v01.2.3", "v1.2", "v1.2.3-", "v1.2.3-alpha..1", "v1.2.3-01", "v1.2.3+"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                module_version_key(invalid)
+
     def test_all_reviewed_inputs_are_pinned(self):
         patches = ROOT / "patches"
         manifest = checksums(patches / "SHA256SUMS")
@@ -271,8 +307,7 @@ class AppliedPatchContracts(unittest.TestCase):
             self.assertEqual(selected, version, module)
             original = next(line.split()[1] for line in manifest.splitlines()
                             if line.startswith(f"\t{module} "))
-            self.assertGreaterEqual(tuple(map(int, version.removeprefix('v').split('.'))),
-                                    tuple(map(int, original.removeprefix('v').split('.'))))
+            self.assertGreaterEqual(module_version_key(version), module_version_key(original), module)
         self.assertIn("\ngo 1.27.0\n", manifest)
         result = subprocess.run(["sh", str(ROOT / "scripts/verify-source-toolchain.sh"),
                                  "go1.26.8", str(self.source / "go.mod")],

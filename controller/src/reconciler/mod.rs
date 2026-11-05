@@ -176,6 +176,14 @@ struct Context {
 
 /// Main reconciliation function — called whenever a KarsSandbox changes.
 async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Action, ReconcileError> {
+    // Keep the sandbox state machine off the watcher and metrics futures' stacks.
+    Box::pin(reconcile_inner(sandbox, ctx)).await
+}
+
+async fn reconcile_inner(
+    sandbox: Arc<KarsSandbox>,
+    ctx: Arc<Context>,
+) -> Result<Action, ReconcileError> {
     let name = sandbox.name_any();
 
     // Validate sandbox name — must be K8s-safe (alphanumeric + hyphens)

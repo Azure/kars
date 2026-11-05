@@ -379,8 +379,76 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run build
+      - name: Headlamp frontend preparation contracts
+        run: node --test ../../sandbox-images/headlamp/build-frontend.test.mjs
       - name: npm audit (Headlamp dependencies)
         run: node ../../ci/npm-audit-bulk.mjs package-lock.json
+      - name: Build the shipping Headlamp image without publishing
+        id: headlamp_image
+        working-directory: .
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/headlamp-evidence"
+          docker build --platform linux/amd64 --progress=plain \
+            --tag kars-headlamp:latest --file sandbox-images/headlamp/Dockerfile . \
+            2>&1 | tee "$RUNNER_TEMP/headlamp-evidence/build.log"
+          docker image inspect kars-headlamp:latest > "$RUNNER_TEMP/headlamp-evidence/image.json"
+      - name: Extract and verify Headlamp build inputs
+        id: headlamp_inputs
+        working-directory: .
+        run: |
+          set -euo pipefail
+          image_id="$(docker image inspect --format '{{.Id}}' kars-headlamp:latest)"
+          container_id="$(docker create "$image_id")"
+          trap 'docker rm "$container_id" >/dev/null' EXIT
+          docker cp "$container_id:/usr/share/kars/headlamp/." "$RUNNER_TEMP/headlamp-evidence/"
+          python3 ci/headlamp_build_evidence.py "$RUNNER_TEMP/headlamp-evidence"
+          (
+            cd "$RUNNER_TEMP/headlamp-evidence/frontend-build"
+            node "$GITHUB_WORKSPACE/sandbox-images/headlamp/build-frontend.mjs" verify-lock
+          )
+      - name: Scan shipping Headlamp image at every severity
+        id: headlamp_scan
+        if: ${{ !cancelled() && steps.headlamp_image.outcome == 'success' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.70.0
+          cache: 'false'
+          scan-type: image
+          image-ref: kars-headlamp:latest
+          scanners: vuln
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          ignore-unfixed: false
+          list-all-pkgs: 'true'
+          exit-code: '1'
+          format: json
+          output: ${{ runner.temp }}/headlamp-evidence/image-scan.json
+      - name: Scan canonical Headlamp lock inventory and plugin at every severity
+        if: ${{ !cancelled() && steps.headlamp_inputs.outcome == 'success' }}
+        working-directory: .
+        run: |
+          set -euo pipefail
+          trivy --version | tee "$RUNNER_TEMP/headlamp-evidence/trivy-version.txt"
+          grep -Eq '^Version: 0[.]70[.]0([[:space:]]|$)' "$RUNNER_TEMP/headlamp-evidence/trivy-version.txt"
+          failed=0
+          for source in frontend-lock frontend-inventory plugin-lock; do
+            case "$source" in
+              frontend-lock) mode=fs; input="$RUNNER_TEMP/headlamp-evidence/frontend-build" ;;
+              frontend-inventory) mode=sbom; input="$RUNNER_TEMP/headlamp-evidence/frontend.cdx.json" ;;
+              plugin-lock) mode=fs; input=tools/headlamp-plugin ;;
+            esac
+            trivy "$mode" --scanners vuln --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+              --ignore-unfixed=false --list-all-pkgs --format json --exit-code 1 \
+              --output "$RUNNER_TEMP/headlamp-evidence/$source-scan.json" "$input" || failed=1
+          done
+          exit "$failed"
+      - name: Retain Headlamp qualification evidence including failures
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: headlamp-qualification-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/headlamp-evidence/
+          if-no-files-found: warn
 
   managed-mcp:
     name: Managed MCP Dependencies & Protocol
@@ -578,9 +646,6 @@ jobs:
         if: ${{ !cancelled() && steps.sre_schema.outcome == 'success' }}
         id: sre_bootstrap
         run: PYTHONPATH=tests/e2e python3 -m sre_authority.bootstrap_probe --retirement-bind-proof
-      - name: Collect nil-schema adapter candidate evidence without weakening production gates
-        if: failure() && steps.sre_bootstrap.outcome == 'failure'
-        run: PYTHONPATH=tests/e2e python3 -m sre_authority.bootstrap_probe --json-params-candidate
       - name: Collect namespace-accessor candidate evidence without relaxing the failing production gate
         if: failure() && steps.sre_schema.outcome == 'failure'
         run: python3 tests/e2e/sre_authority/registration_schema.py --namespace-accessor-candidate --exercise
@@ -601,7 +666,6 @@ jobs:
             e2e-sre-schema-diag/namespace-accessor-candidate.json
             e2e-sre-schema-diag/namespace-accessor-candidate-instances.json
             e2e-sre-schema-diag/bootstrap-*.json
-            e2e-sre-schema-diag/candidate-bootstrap-*.json
           if-no-files-found: warn
           retention-days: 7
       - name: Remove disposable schema cluster

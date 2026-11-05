@@ -36,6 +36,8 @@ POLICIES = {
     "rebind": "kars-credential-rebind-authority",
     "exposure": "kars-no-public-router-exposure",
     "authority": "kars-credential-grant-authority",
+    **{f"github-authority-{group}": f"kars-credential-github-authority-{group}"
+       for group in range(4)},
 }
 TEMPLATES = ("credential-store-admission.yaml", "credential-rebind-admission.yaml",
              "admission-no-public-router-exposure.yaml", "crd-karscredentialgrant.yaml",
@@ -127,7 +129,8 @@ def select_shipped(raw):
         validations = spec.get("validations", [])
         require(policy.get("apiVersion") == "admissionregistration.k8s.io/v1"
                 and spec.get("failurePolicy") == "Fail" and len(bindings) == 1
-                and len(validations) == {"store": 1, "rebind": 3, "exposure": 3, "authority": 4}[key]
+                and len(validations) == {"store": 1, "rebind": 3, "exposure": 3, "authority": 3,
+                                        **{f"github-authority-{group}": 8 for group in range(4)}}[key]
                 and all(isinstance(v.get("expression"), str) and v["expression"].strip()
                         and isinstance(v.get("message"), str) and v["message"]
                         and v.get("reason", "Invalid") in ("Invalid", "Forbidden")

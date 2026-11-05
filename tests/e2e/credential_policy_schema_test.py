@@ -42,7 +42,8 @@ def documents():
             "matchConditions": [{"name": "unchanged", "expression": "true"}],
             "variables": [{"name": "unchanged", "expression": "true"}],
             "validations": [{"expression": "true", "message": f"Unit invariant {key} {index}"}
-                            for index in range({"store": 1, "rebind": 3, "exposure": 3, "authority": 4}[key])]}
+                            for index in range({"store": 1, "rebind": 3, "exposure": 3, "authority": 3,
+                                                **{f"github-authority-{group}": 8 for group in range(4)}}[key])]}
         binding = {"policyName": name, "validationActions": ["Deny", "Audit"]}
         if key == "store":
             spec["paramKind"] = {"apiVersion": "kars.azure.com/v1alpha1", "kind": "KarsCredentialGrant"}
@@ -201,6 +202,25 @@ class CredentialPolicySchemaTests(unittest.TestCase):
             with self.subTest(mutate=mutate), self.assertRaises(schema.Failure):
                 schema.select_shipped(json.dumps({"kind": "List", "items": objects}))
 
+    def test_each_split_github_authority_guard_is_required_and_fail_closed(self):
+        for group in range(4):
+            name = schema.POLICIES[f"github-authority-{group}"]
+            for mutation in ("missing-policy", "missing-validation", "audit-only"):
+                objects = documents()
+                policy = next(obj for obj in objects if obj["kind"] == "ValidatingAdmissionPolicy"
+                              and obj["metadata"]["name"] == name)
+                if mutation == "missing-policy":
+                    objects.remove(policy)
+                elif mutation == "missing-validation":
+                    policy["spec"]["validations"].pop()
+                else:
+                    binding = next(obj for obj in objects
+                                   if obj["kind"] == "ValidatingAdmissionPolicyBinding"
+                                   and obj["spec"]["policyName"] == name)
+                    binding["spec"]["validationActions"] = ["Audit"]
+                with self.subTest(group=group, mutation=mutation), self.assertRaises(schema.Failure):
+                    schema.select_shipped(json.dumps({"kind": "List", "items": objects}))
+
     @unittest.skipUnless(shutil.which("helm"), "Helm is required for cold chart rendering")
     def test_real_cold_chart_render_preserves_core_preflight(self):
         root = Path(__file__).resolve().parents[2]
@@ -213,10 +233,22 @@ class CredentialPolicySchemaTests(unittest.TestCase):
                 return result.stdout
             self.assertEqual(args[0], "kubectl")
             self.assertIn("kind: ValidatingAdmissionPolicy", kwargs["data"])
-            return json.dumps({"kind": "List", "items": documents()})
+            parsed = subprocess.run([
+                "node", "-e", "const fs = require('node:fs'); "
+                "const yaml = require('./cli/node_modules/yaml'); "
+                "console.log(JSON.stringify({kind: 'List', items: "
+                "yaml.parseAllDocuments(fs.readFileSync(0, 'utf8')).map(d => d.toJS()).filter(Boolean)}));",
+            ], cwd=root, input=kwargs["data"], capture_output=True, text=True,
+                check=True, timeout=30)
+            return parsed.stdout
 
         with patch.object(schema, "command", side_effect=run):
-            schema.render(root, "v1.31.0")
+            _, sources = schema.render(root, "v1.31.0")
+        self.assertEqual(len(sources), 8)
+        for group in range(4):
+            policy, binding = sources[f"github-authority-{group}"]
+            self.assertEqual(len(policy["spec"]["validations"]), 8)
+            self.assertIn("Deny", binding["spec"]["validationActions"])
         with patch.object(shared, "command", side_effect=run), patch.object(shared, "select_shipped"):
             shared.render(root, "v1.31.0")
 
@@ -367,7 +399,7 @@ class CredentialPolicySchemaTests(unittest.TestCase):
         with fixture_transport(api), patch.object(schema, "render", return_value=selected()), \
              contextlib.redirect_stdout(io.StringIO()):
             schema.exercise(Path("."), 1, "v1.31.0", TOKEN, results)
-        self.assertEqual(len(results), 45)
+        self.assertEqual(len(results), 49)
         self.assertEqual(len([r for r in results if r["category"] == "intended-denial"]), 18)
         self.assertEqual(api.objects, {})
         self.assertEqual(results[-1], {"case": "cleanup", "httpStatus": 0, "category": "cleaned"})

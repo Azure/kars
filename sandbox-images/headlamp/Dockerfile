@@ -36,6 +36,7 @@ RUN npm run build
 FROM ${AZURELINUX_DISTROLESS}
 COPY --from=frontend /build/frontend/build /headlamp/frontend
 COPY --from=frontend /build/frontend/frontend-evidence.json /build/frontend/frontend.cdx.json /usr/share/kars/headlamp/
+COPY --from=frontend --chmod=0444 /build/frontend/package.json /build/frontend/package-lock.json /build/frontend/vite.config.ts /usr/share/kars/headlamp/frontend-build/
 COPY --from=upstream /headlamp/plugins /headlamp/plugins
 COPY --from=upstream /headlamp/static-plugins /headlamp/static-plugins
 COPY --from=backend /download/headlamp-server /headlamp/headlamp-server
@@ -46,7 +47,7 @@ ADD --chmod=0444 --checksum=sha256:cfc7749b96f63bd31c3c42b5c471bf756814053e847c1
 LABEL org.opencontainers.image.title="Kars Headlamp" \
       org.opencontainers.image.description="Headlamp v0.41.0 and the Kars plugin on Azure Linux 3 distroless" \
       org.kars.headlamp.backend-patch="go1.27.3-dependencies.3-static-cache.1-oidc-navigation.1" \
-      org.kars.headlamp.frontend-patch="npm-runtime-dependencies.1" \
+      org.kars.headlamp.frontend-patch="npm-runtime-dependencies.2" \
       org.opencontainers.image.source="https://github.com/Azure/kars" \
       org.opencontainers.image.licenses="Apache-2.0 AND MIT"
 ENV HEADLAMP_STATIC_PLUGINS_DIR=/headlamp/static-plugins \

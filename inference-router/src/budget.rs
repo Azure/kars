@@ -612,6 +612,67 @@ mod tests {
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
+    #[tokio::test]
+    async fn persistence_request_data_cannot_select_the_configured_path() {
+        use axum::{Json, Router, body::Body, extract::State, http::Request, routing::post};
+        use tower::ServiceExt;
+
+        async fn record(
+            State(tracker): State<TokenBudgetTracker>,
+            Json((sandbox, tokens)): Json<(String, u64)>,
+        ) {
+            // Exercise the destructured State binding across an async capture, too.
+            async move { tracker.record_usage(&sandbox, tokens).await }.await;
+        }
+
+        let dir = tempfile::tempdir_in(".").unwrap();
+        let storage = dir.path().join("operator-owned");
+        std::fs::create_dir(&storage).unwrap();
+        let path = storage.join("budgets.json");
+        let victim = dir.path().join("victim.json");
+        std::fs::write(&victim, b"unrelated file").unwrap();
+        let absolute_victim = std::fs::canonicalize(&victim).unwrap();
+        let tracker = TokenBudgetTracker::with_persistence(0, 0, &path);
+        let app = Router::new()
+            .route("/record", post(record))
+            .with_state(tracker.clone());
+        let names = [
+            "../victim.json".to_owned(),
+            absolute_victim.to_string_lossy().into_owned(),
+            r"..\victim.json".to_owned(),
+            "budgets.json.tmp".to_owned(),
+        ];
+        for (index, name) in names.iter().enumerate() {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/record?persist_path=../victim.json")
+                        .header("content-type", "application/json")
+                        .header("x-persist-path", "../victim.json")
+                        .body(Body::from(
+                            serde_json::to_vec(&(name, index as u64 + 1)).unwrap(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+        }
+        assert_eq!(tracker.persist_path.as_ref(), Some(&path));
+        let snapshot: PersistedState =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(snapshot.sandboxes.len(), names.len());
+        for (index, name) in names.iter().enumerate() {
+            assert_eq!(snapshot.sandboxes[name].daily, index as u64 + 1);
+            assert_eq!(snapshot.sandboxes[name].monthly, index as u64 + 1);
+        }
+        assert_eq!(std::fs::read(&victim).unwrap(), b"unrelated file");
+        assert_eq!(std::fs::read_dir(&storage).unwrap().count(), 1);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
     /// Test clock holding a fixed `DateTime<Utc>` (mutable via
     /// `set`). Lets us cross UTC midnight + month boundary
     /// deterministically without touching system time.

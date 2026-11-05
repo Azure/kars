@@ -4,11 +4,13 @@
 import copy
 import json
 from pathlib import Path
+import shutil
+import subprocess
 import unittest
 from unittest.mock import patch
 
 from sre_authority.bootstrap_diagnostics import api_result, collect, control_plane_status, exception_summary, failure_facts, firewall_summary, object_status, policy_status, probe_command_result, public_stack_facts, router_log_summary, router_readiness_facts
-from sre_authority.bootstrap_probe import PATHS, builtin_documents, converted_objects, exercise, preserved_json_candidate, safe_controller
+from sre_authority.bootstrap_probe import PATHS, builtin_documents, converted_objects, exercise, safe_controller
 
 POLICIES = {"kars-sre-private-mounts": {"spec": {"validations": [
     {"message": "Private SRE material requires authority"}]}}}
@@ -257,24 +259,36 @@ COMMIT
         with self.assertRaises(RuntimeError):
             converted_objects(json.dumps({"kind": "Secret", "data": "do-not-publish"}))
 
-    def test_candidate_changes_only_known_public_json_params_representation(self):
-        params = {"type": "object", "additionalProperties": True, "description": "public"}
-        action = {"kind": "CustomResourceDefinition", "metadata": {"name": "karssreactions.kars.azure.com"},
-            "spec": {"versions": [{"schema": {"openAPIV3Schema": {"properties": {"spec": {"properties": {
-                "action": {"properties": {"params": params}}, "approval": {"type": "object"}
-            }}}}}}]}}
-        policy = {"kind": "ValidatingAdmissionPolicy", "metadata": {"name": "kars-sre-pending-proposals"},
-                  "spec": {"validations": [{"expression": "object.spec.approval.state == 'Pending'"}]}}
-        source = [action, policy]
-        before = copy.deepcopy(source)
-        changed = preserved_json_candidate(source)
-        self.assertEqual(source, before)
-        self.assertEqual(changed[1], policy)
-        actual = changed[0]["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]["properties"]["action"]["properties"]["params"]
-        self.assertEqual(actual, {"type": "object", "x-kubernetes-preserve-unknown-fields": True, "description": "public"})
-        params["additionalProperties"] = {"type": "string"}
-        with self.assertRaises(RuntimeError):
-            preserved_json_candidate(source)
+    @unittest.skipUnless(shutil.which("helm"), "Helm is required for cold chart rendering")
+    def test_shipped_schema_preserves_json_and_sre_inventory_matches_all_rendered_policies(self):
+        from sre_authority.common import POLICIES as expected
+        root = Path(__file__).resolve().parents[3]
+        rendered = subprocess.run([
+            "helm", "template", "kars", str(root / "deploy/helm/kars"),
+            "--namespace", "kars-system", "--kube-version", "1.31.0",
+            "--set", "sre.enabled=false", "--set", "sre.authorityStage=true",
+        ], cwd=root, capture_output=True, text=True, check=True, timeout=30)
+        converted = subprocess.run([
+            "node", "-e", "const fs = require('node:fs'); const yaml = require('./cli/node_modules/yaml'); "
+            "console.log(JSON.stringify(yaml.parseAllDocuments(fs.readFileSync(0, 'utf8'))"
+            ".map(d => d.toJS()).filter(Boolean)));",
+        ], cwd=root, input=rendered.stdout, capture_output=True, text=True, check=True, timeout=30)
+        objects = json.loads(converted.stdout)
+        actions = [obj for obj in objects if obj["kind"] == "CustomResourceDefinition"
+                   and obj["metadata"]["name"] == "karssreactions.kars.azure.com"]
+        self.assertEqual(len(actions), 1)
+        params = actions[0]["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]["properties"]["action"]["properties"]["params"]
+        self.assertEqual(params["type"], "object")
+        self.assertIs(params["x-kubernetes-preserve-unknown-fields"], True)
+        self.assertNotIn("additionalProperties", params)
+        self.assertEqual({obj["metadata"]["name"] for obj in objects
+                          if obj["kind"] == "ValidatingAdmissionPolicy"
+                          and obj["metadata"]["name"].startswith("kars-sre-")},
+                         {"kars-sre-" + name for name in expected})
+        self.assertIn("report-authority", expected)
+        workflow = (root / ".github/workflows/ci.yml").read_text()
+        self.assertNotIn("--json-params-candidate", workflow)
+        self.assertIn("sre_authority.bootstrap_probe --retirement-bind-proof", workflow)
 
     def test_arbitrary_failure_is_not_security_proof_in_candidate_cases(self):
         from sre_authority.bootstrap_cases import admission_cases

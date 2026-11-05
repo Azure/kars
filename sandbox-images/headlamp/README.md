@@ -16,9 +16,15 @@ checks remain enabled; registry configuration is confined to the build stage.
 The recipe retains the existing CLI's Headlamp 0.41.0 version, pins its upstream
 multi-platform image, and copies its shipped plugins into AL3 distroless.
 The frontend is rebuilt from the same pinned source with targeted npm security
-patches in `build-frontend.mjs`. Its 3 GiB Node heap replaces the upstream 8 GiB
-heap request for bounded builders; product/version environment and Vite configuration
-are preserved. The build emits rendered-module/package evidence, output hashes,
+patches in `build-frontend.mjs`. Vite 6.4.5 replaces the vulnerable 6.4.3 build
+pin, and fast-uri 3.1.9 replaces 3.1.7 to address URI scheme/host normalization
+and relative-reference advisories. These source pins require a fresh hosted image
+build and all-severity scan; prior clean image evidence does not cover the update.
+Run `node --test sandbox-images/headlamp/build-frontend.test.mjs` to check the
+actual preparation command, preserved upstream settings and pinned product identity.
+Its 3 GiB Node heap replaces the upstream 8 GiB heap request for bounded builders;
+product/version environment and the Vite configuration outside the scoped polyfill
+replacement are preserved. The build emits rendered-module/package evidence, output hashes,
 and a CycloneDX inventory, including the separately copied Monaco assets.
 These describe actual build outputs, not every development dependency in the lock.
 The backend is rebuilt from the same pinned source with Go 1.27.3
@@ -70,6 +76,88 @@ and browser-inventory scans with zero HIGH/CRITICAL findings and no ignores.
 This qualifies that image, not installed SSO. AMD64 and installed login/RBAC
 acceptance remain separate. Changing the base OS alone is
 not a vulnerability fix for embedded dependencies or proof of installed behavior.
+
+## Scoped production frontend dependencies (2026-11-05)
+
+[deepmerge GHSA-gcqx-w48m-w2h4](https://github.com/advisories/GHSA-gcqx-w48m-w2h4)
+and [elliptic GHSA-848j-6mx2-7j84](https://github.com/advisories/GHSA-848j-6mx2-7j84)
+have no published patched releases. The repair removes their unused dependency
+paths from the actual production build instead of suppressing findings, renaming
+vulnerable packages or claiming an unpublished fix.
+
+Inspection of the pinned
+[frontend manifest](https://github.com/kubernetes-sigs/headlamp/blob/066c5be9deb14b12bcef3485b531c64a84a2a219/frontend/package.json),
+[source lock](https://github.com/kubernetes-sigs/headlamp/blob/066c5be9deb14b12bcef3485b531c64a84a2a219/frontend/package-lock.json),
+[Vite configuration](https://github.com/kubernetes-sigs/headlamp/blob/066c5be9deb14b12bcef3485b531c64a84a2a219/frontend/vite.config.ts)
+and published package code established these paths:
+
+- Storybook → fork-ts-checker 8 → deepmerge in the reported regenerated lock;
+  the pinned source lock additionally has RSBuild SVGR → deepmerge and
+  RSBuild SVGR → SVGR SVGO → deepmerge. Vite's SVGR 4.3.0 instead declares
+  SVGR core and JSX, not the SVGO plugin. Production SVG conversion is retained.
+- Vite node-polyfills → node-stdlib-browser → crypto-browserify →
+  create-ecdh/browserify-sign → elliptic. RSBuild's node-polyfill plugin independently
+  declares crypto-browserify. The production Vite configuration enables only
+  process, buffer and stream; selecting these aliases did not prevent installation
+  of the unused crypto dependency tree.
+
+`prepare` now removes `devDependencies` from the generated build manifest, replaces
+all upstream scripts with the single bounded Kars production build command, and
+removes the extracted `.storybook` and `rsbuild.config.ts` configurations. The
+packaged product does not provide those development workflows: its maintained build
+already called Vite directly, with `npm ci --omit=dev`. This change removes the
+unused roots from lock resolution too. Other regular dependencies, optional platform
+packages, existing security pins and unrelated Vite settings are retained. It does
+not alter the upstream repository or claim its original development lock is fixed.
+
+The broad Vite polyfill plugin is removed, not retained as an alternate path.
+An exact-match, fail-closed patch removes its import and invocation from the pinned
+Vite configuration. The build supplies `productionPolyfills` using direct
+`buffer@6.0.3`, `process@0.11.10`, `stream-browserify@3.0.0` and
+`@rollup/plugin-inject@5.0.5`. Small ESM adapters retain default/named Buffer and
+process exports, free Buffer/process/global injection, and plain and `node:` aliases
+for the three selected builtins. The upstream `global: 'globalThis'` definition is
+unchanged. No crypto implementation is fabricated: an attempted `crypto` or
+`node:crypto` import fails the build rather than receiving an empty browser module.
+The alternative Rollup polyfill package was rejected because it stubs crypto.
+
+Before invoking Vite, `build` verifies the regenerated npm v3 lock matches the
+prepared dependency roots, has no root development dependencies, and contains
+neither deepmerge nor elliptic (including nested paths and named aliases). The
+read-only `verify-lock` command exposes the same check for hosted qualification;
+it does not replace scanning for every other advisory or alter lock contents.
+
+### Hosted qualification and scanning handoff
+
+The Dockerfile retains the **actual regenerated** `package.json`, `package-lock.json`
+and patched `vite.config.ts` in `/usr/share/kars/headlamp/frontend-build/`, mode 0444.
+`frontend-evidence.json` records their SHA-256 hashes in `buildInputs`. No installed
+frontend `node_modules` is shipped; bundled code and the lock evidence are distinct.
+The retained lock intentionally exposes build dependencies to scanning as well.
+
+The hosted image-qualification job must extract that entire directory together
+with `/usr/share/kars/headlamp/frontend-evidence.json`, verify the three hashes,
+run the existing all-severity source-lock scanner on the canonical
+`frontend-build/package-lock.json`, and retain the unfiltered report and inputs as
+artifacts even on failure. Keep final-image, rendered-inventory and plugin scans;
+no existing scan is removed or downgraded. If a job also inventories the untouched
+upstream development lock, retain its results as upstream-source evidence rather
+than misidentifying that lock as the packaged production build. The shared CI
+workflow is not modified by this change.
+
+Local tests exercise manifest/configuration preparation, identity/drift rejection,
+idempotence, lock rejection, exact alias wiring and crypto rejection. With existing
+`tools/headlamp-plugin` dependencies, they also exercise real Rollup injection and
+Buffer/process/stream behavior without bundling. These two integration checks skip
+explicitly if those dependencies are absent; tests never install them. All fixtures
+stay in this directory and are removed afterward.
+
+Still required on GitHub-hosted runners: fresh lock resolution and installation,
+full frontend/image build on supported architectures, all-severity lock/image/
+rendered-inventory scans, and fresh browser checks covering SVGs, Monaco, terminal/
+stream consumers and loaded plugins. The polyfill integration has not been bundled
+or exercised in a browser locally. Preserve failed evidence; the source repair and
+lightweight tests alone are not image or installed acceptance.
 
 ## Writable frontend lifecycle
 

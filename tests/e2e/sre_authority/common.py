@@ -36,7 +36,7 @@ PRIVACY_REVISION = "kars.azure.com/sre-privacy/v2"
 FIELD_MANAGER = "kars-controller/karssandbox"
 STANDIN = "kars-sandbox-e2e:dev"
 POLICIES = (
-    "source-authority", "registration-authority", "private-identity",
+    "source-authority", "registration-authority", "report-authority", "private-identity",
     "binding-authority", "private-material", "source-retirement",
     "pending-proposals", "consumer-authority", "private-mounts",
     "private-workloads", "private-cronjobs", "private-connect", "role-authority", "no-legacy-tokens",

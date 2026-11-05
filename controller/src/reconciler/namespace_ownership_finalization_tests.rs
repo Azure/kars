@@ -256,6 +256,26 @@ fn only_finalizer_io(requests: &[Request]) {
     }));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn reconciler_entry_stays_heap_bounded_on_a_default_worker_stack() {
+    let initial = State::legacy(Fault::None);
+    let observed = initial.observed();
+    let (server, client, _) = setup(initial).await;
+    let future = reconcile(observed, context(client));
+    let size = std::mem::size_of_val(&future);
+    assert!(size <= 1024, "sandbox entry future embeds {size} bytes");
+    let measured = crate::metrics::observe_reconcile("KarsSandbox", future);
+    let size = std::mem::size_of_val(&measured);
+    assert!(size <= 1024, "metrics wrapper embeds {size} bytes");
+    assert_eq!(
+        tokio::spawn(measured).await.unwrap().unwrap(),
+        Action::await_change()
+    );
+    let requests = server.received_requests().await.unwrap();
+    only_finalizer_io(&requests);
+    assert_eq!(requests.len(), 3);
+}
+
 #[tokio::test]
 async fn reconciler_entry_finalizes_terminating_legacy_self_host_without_deployment_or_adoption() {
     let state = State::legacy(Fault::None);
