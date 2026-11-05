@@ -870,3 +870,22 @@ fn error_requeue_is_never_zero() {
         ReconcileError::SerdeJson(serde_json::from_str::<serde_json::Value>("{bad").unwrap_err());
     assert!(error_requeue_duration(&serde_err) > Duration::ZERO);
 }
+
+#[test]
+fn blocklist_router_env_is_oisd_only_by_default() {
+    for unset in ["", "   "] {
+        let env = blocklist_router_env(unset);
+        let names: Vec<&str> = env.iter().filter_map(|e| e["name"].as_str()).collect();
+        assert_eq!(names, ["BLOCKLIST_ENABLED", "BLOCKLIST_SEED_PATH"]);
+    }
+}
+
+#[test]
+fn blocklist_router_env_forwards_extra_feeds() {
+    let env = blocklist_router_env(" hosts:https://feeds.example.com/hosts ");
+    let extra = env
+        .iter()
+        .find(|e| e["name"] == "BLOCKLIST_EXTRA_FEEDS")
+        .expect("BLOCKLIST_EXTRA_FEEDS forwarded");
+    assert_eq!(extra["value"], "hosts:https://feeds.example.com/hosts");
+}

@@ -119,6 +119,9 @@ struct Context {
     ollama_endpoint: String,
     openai_moderation_api_key: String,
     openai_moderation_endpoint: String,
+    /// Opt-in blocklist feeds for every router (`BLOCKLIST_EXTRA_FEEDS`,
+    /// controller env via Helm `controller.extraEnv`). Empty = OISD only.
+    blocklist_extra_feeds: String,
     /// `KARS_DEV_PROFILE=true` (set only in `kars dev`) — triggers
     /// relaxed sub-agent CRD defaults in the router spawn helper.
     dev_profile: bool,
@@ -1767,10 +1770,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         // auto-refreshes from the OISD feed every 6 hours.
         // (`blocklist_cm_name` is hoisted above the deployment block so the
         // CronJob (Step 4d) can reach it in overlay mode.)
-        router_env.push(json!({"name": "BLOCKLIST_ENABLED", "value": "true"}));
-        router_env.push(
-            json!({"name": "BLOCKLIST_SEED_PATH", "value": "/etc/kars/blocklist/domains.txt"}),
-        );
+        router_env.extend(blocklist_router_env(&ctx.blocklist_extra_feeds));
 
         // Runtime-contract markers on the router too. The router needs
         // `KARS_RUNTIME_KIND` so its spawn endpoint can stamp every
@@ -3183,6 +3183,20 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
     Ok(Action::requeue(Duration::from_secs(300)))
 }
 
+/// Blocklist env for the router. `BLOCKLIST_EXTRA_FEEDS` is forwarded
+/// verbatim when set; the router validates every entry (https only).
+fn blocklist_router_env(extra_feeds: &str) -> Vec<serde_json::Value> {
+    let mut env = vec![
+        json!({"name": "BLOCKLIST_ENABLED", "value": "true"}),
+        json!({"name": "BLOCKLIST_SEED_PATH", "value": "/etc/kars/blocklist/domains.txt"}),
+    ];
+    let extra_feeds = extra_feeds.trim();
+    if !extra_feeds.is_empty() {
+        env.push(json!({"name": "BLOCKLIST_EXTRA_FEEDS", "value": extra_feeds}));
+    }
+    env
+}
+
 /// How long to wait before requeuing a failed reconcile, by error kind.
 /// S7.D: ±20% jitter applied so retries spread across the interval and
 /// don't thundering-herd the API server when many CRs hit the same
@@ -3372,6 +3386,7 @@ pub async fn run(client: Client) -> Result<()> {
             .or_else(|_| std::env::var("OPENAI_API_KEY"))
             .unwrap_or_default(),
         openai_moderation_endpoint: std::env::var("OPENAI_MODERATION_ENDPOINT").unwrap_or_default(),
+        blocklist_extra_feeds: std::env::var("BLOCKLIST_EXTRA_FEEDS").unwrap_or_default(),
         dev_profile,
         cluster_name: std::env::var("CLUSTER_NAME")
             .ok()

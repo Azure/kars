@@ -7,7 +7,8 @@
 //! (malware C2, phishing, cryptojacking, etc.). It combines:
 //!
 //! - **Seed file**: loaded from ConfigMap at startup (always available, even offline)
-//! - **Live feeds**: refreshed in background from OISD on a timer
+//! - **Live feeds**: refreshed in background from OISD on a timer, plus any opt-in
+//!   feeds named in `BLOCKLIST_EXTRA_FEEDS` (empty by default)
 //! - **High-risk TLDs**: blocked unconditionally (.tk, .ml, .ga, .cf, .gq — free TLDs
 //!   abused by >80% of phishing campaigns per APWG data)
 //! - **IP-direct blocking**: bare IP addresses in URLs are suspicious and blocked
@@ -38,6 +39,87 @@ const MAX_DOMAINS_PER_FEED: usize = 500_000;
 
 /// Well-known threat intelligence feed URL.
 const OISD_SMALL_URL: &str = "https://small.oisd.nl/domainswild";
+
+/// Max opt-in feeds accepted from `BLOCKLIST_EXTRA_FEEDS`.
+pub const MAX_EXTRA_FEEDS: usize = 8;
+
+/// Line format of an opt-in feed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeedFormat {
+    /// Hostfile lines: `0.0.0.0 domain` or `127.0.0.1 domain`.
+    Hosts,
+    /// One domain per line (`*.` prefix stripped), like OISD.
+    Domains,
+}
+
+/// An opt-in feed from `BLOCKLIST_EXTRA_FEEDS`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtraFeed {
+    pub format: FeedFormat,
+    pub url: String,
+    /// Host of `url`, used in logs instead of the full URL.
+    pub host: String,
+}
+
+/// Parse `BLOCKLIST_EXTRA_FEEDS`: comma-separated `hosts:<https-url>` /
+/// `domains:<https-url>` entries. Returns the accepted feeds and one
+/// message per ignored entry. Only `https` URLs without credentials are
+/// accepted, duplicate URLs are dropped and at most [`MAX_EXTRA_FEEDS`]
+/// feeds are kept. Messages name the entry by position, never by URL.
+pub fn parse_extra_feeds(value: &str) -> (Vec<ExtraFeed>, Vec<String>) {
+    let mut feeds: Vec<ExtraFeed> = Vec::new();
+    let mut ignored = Vec::new();
+    let entries = value.split(',').map(str::trim).filter(|e| !e.is_empty());
+    for (i, entry) in entries.enumerate() {
+        let n = i + 1;
+        let Some((kind, url)) = entry.split_once(':') else {
+            ignored.push(format!(
+                "entry {n}: expected hosts:<https-url> or domains:<https-url>"
+            ));
+            continue;
+        };
+        let format = match kind.trim().to_ascii_lowercase().as_str() {
+            "hosts" => FeedFormat::Hosts,
+            "domains" => FeedFormat::Domains,
+            _ => {
+                ignored.push(format!("entry {n}: unknown format, use hosts: or domains:"));
+                continue;
+            }
+        };
+        let url = url.trim();
+        let Some(host) = https_feed_host(url) else {
+            ignored.push(format!(
+                "entry {n}: only https URLs with a host and without credentials are accepted"
+            ));
+            continue;
+        };
+        if feeds.iter().any(|f| f.url == url) {
+            ignored.push(format!("entry {n}: duplicate URL"));
+            continue;
+        }
+        if feeds.len() >= MAX_EXTRA_FEEDS {
+            ignored.push(format!(
+                "entry {n}: more than {MAX_EXTRA_FEEDS} extra feeds"
+            ));
+            continue;
+        }
+        feeds.push(ExtraFeed {
+            format,
+            url: url.to_string(),
+            host,
+        });
+    }
+    (feeds, ignored)
+}
+
+/// Host of an https URL without credentials, or `None`.
+fn https_feed_host(url: &str) -> Option<String> {
+    let u = reqwest::Url::parse(url).ok()?;
+    if u.scheme() != "https" || !u.username().is_empty() || u.password().is_some() {
+        return None;
+    }
+    u.host_str().map(str::to_string)
+}
 
 /// Thread-safe blocklist that can be shared across handlers and updated in background.
 #[derive(Clone)]
@@ -167,12 +249,13 @@ impl Blocklist {
     }
 
     /// Start the background refresh task. Call once at startup.
-    /// Fetches from OISD every `refresh_interval` seconds.
+    /// Fetches from OISD and the opt-in `extra_feeds` every `refresh_interval` seconds.
     pub fn start_refresh_task(
         &self,
         client: reqwest::Client,
         refresh_secs: Option<u64>,
         seed_path: Option<String>,
+        extra_feeds: Vec<ExtraFeed>,
     ) {
         let domains = Arc::clone(&self.domains);
         let interval = Duration::from_secs(refresh_secs.unwrap_or(DEFAULT_REFRESH_SECS));
@@ -216,6 +299,20 @@ impl Blocklist {
                             } else {
                                 tracing::warn!(error = %e, "Blocklist: OISD fetch failed — keeping existing");
                             }
+                        }
+                    }
+                }
+
+                // Opt-in feeds (BLOCKLIST_EXTRA_FEEDS), same timeout and size caps as OISD.
+                // A feed that fails is left out of this cycle's set.
+                for feed in &extra_feeds {
+                    match fetch_feed(&client, &feed.url).await {
+                        Ok(content) => {
+                            let count = parse_feed(feed.format, &content, &mut new_domains);
+                            tracing::info!(count, host = %feed.host, "Blocklist: loaded extra feed");
+                        }
+                        Err(e) => {
+                            tracing::warn!(host = %feed.host, error = %e, "Blocklist: extra feed fetch failed — skipped this cycle");
                         }
                     }
                 }
@@ -419,8 +516,15 @@ fn parse_domain_list(content: &str, dest: &mut HashSet<String>) -> usize {
     count
 }
 
+/// Parse feed content in the given line format.
+fn parse_feed(format: FeedFormat, content: &str, dest: &mut HashSet<String>) -> usize {
+    match format {
+        FeedFormat::Hosts => parse_hostfile(content, dest),
+        FeedFormat::Domains => parse_domain_list(content, dest),
+    }
+}
+
 /// Parse hostfile format ("127.0.0.1 domain" or "0.0.0.0 domain").
-#[allow(dead_code)] // no built-in hostfile feed since URLhaus was retired
 fn parse_hostfile(content: &str, dest: &mut HashSet<String>) -> usize {
     let mut count = 0;
     for line in content.lines() {
@@ -452,6 +556,11 @@ async fn fetch_feed(client: &reqwest::Client, url: &str) -> anyhow::Result<Strin
         .header("user-agent", "kars-Blocklist/1.0")
         .send()
         .await?;
+
+    // Feed URLs are https; refuse a redirect to plain http.
+    if resp.url().scheme() != "https" {
+        anyhow::bail!("redirected to a non-https URL");
+    }
 
     if !resp.status().is_success() {
         anyhow::bail!("HTTP {}", resp.status());
@@ -548,6 +657,82 @@ mod tests {
         assert_eq!(count, 2);
         assert!(set.contains("malware.com"));
         assert!(set.contains("phish.net"));
+    }
+
+    #[test]
+    fn test_parse_extra_feeds_unset_is_empty() {
+        for unset in ["", " , "] {
+            let (feeds, ignored) = parse_extra_feeds(unset);
+            assert!(feeds.is_empty());
+            assert!(ignored.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_parse_extra_feeds_accepts_hosts_and_domains() {
+        let (feeds, ignored) = parse_extra_feeds(
+            " hosts:https://feeds.example.com/list?format=hosts , DOMAINS:https://lists.example.org/domains.txt",
+        );
+        assert!(ignored.is_empty(), "{ignored:?}");
+        assert_eq!(
+            feeds,
+            vec![
+                ExtraFeed {
+                    format: FeedFormat::Hosts,
+                    url: "https://feeds.example.com/list?format=hosts".into(),
+                    host: "feeds.example.com".into(),
+                },
+                ExtraFeed {
+                    format: FeedFormat::Domains,
+                    url: "https://lists.example.org/domains.txt".into(),
+                    host: "lists.example.org".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_extra_feeds_rejects_bad_entries() {
+        let (feeds, ignored) = parse_extra_feeds(
+            "hosts:http://plain.example.com/hosts,\
+             https://no-format.example.com/list,\
+             csv:https://unknown.example.com/list,\
+             domains:https://user:secret@creds.example.com/list,\
+             domains:not a url",
+        );
+        assert!(feeds.is_empty());
+        assert_eq!(ignored.len(), 5, "{ignored:?}");
+        assert!(ignored.iter().all(|m| !m.contains("secret")));
+    }
+
+    #[test]
+    fn test_parse_extra_feeds_drops_duplicates_and_caps_count() {
+        let list: Vec<String> = (0..MAX_EXTRA_FEEDS + 2)
+            .map(|i| format!("domains:https://feed{i}.example.com/list"))
+            .collect();
+        let value = format!("{},domains:https://feed0.example.com/list", list.join(","));
+        let (feeds, ignored) = parse_extra_feeds(&value);
+        assert_eq!(feeds.len(), MAX_EXTRA_FEEDS);
+        assert_eq!(ignored.len(), 3, "{ignored:?}");
+    }
+
+    #[test]
+    fn test_parse_feed_by_format() {
+        let mut set = HashSet::new();
+        assert_eq!(
+            parse_feed(FeedFormat::Hosts, "0.0.0.0 evil.example\n", &mut set),
+            1
+        );
+        assert_eq!(
+            parse_feed(FeedFormat::Domains, "*.bad.example\n", &mut set),
+            1
+        );
+        assert!(set.contains("evil.example") && set.contains("bad.example"));
+        // A plain domain line is not a hostfile line.
+        assert_eq!(
+            parse_feed(FeedFormat::Hosts, "other.example\n", &mut set),
+            0
+        );
     }
 
     #[test]
