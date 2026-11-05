@@ -281,6 +281,18 @@ client render cannot satisfy live CNI or sealed-lookup guards, preparation uses
 the authoritative server render instead. Server guard failures still stop before
 writes; fresh-install bootstrap and successful missing-dependency bootstrap plans
 retain their existing checks.
+
+The historical SRE schema acceptance fixture predates bundled monitoring. Its
+prerequisite phase renders the current cold chart to select monitoring CRDs and
+uses the same guarded dependency planner to create only absent definitions and
+wait for publication. It does **not** install that cold chart or apply its Core
+resources. Only then does it render the unchanged historical authority-stage
+upgrade with live lookups, compare the exact monitoring schema fingerprint, and
+run the full Helm server dry-run. This avoids requiring PodMonitor, Prometheus
+and ServiceMonitor discovery before their prerequisite definitions exist; neither
+SRE ownership guards nor chart validation are disabled. This fixture preparation
+is not evidence that a released customer installation or upgrade has passed.
+
 The separate render/apply ownership mode retains its template-render semantics;
 it does not run Helm's install/adoption validation against non-Helm-owned CRDs.
 

@@ -547,17 +547,28 @@ class CanonicalSeedProbeTests(unittest.TestCase):
 
     def test_monitoring_dependency_bootstrap_uses_production_guards_and_exact_upgrade_values(self):
         from sre_authority.legacy_crd_probe import prepare_monitoring_dependencies
-        args = ["upgrade", "kars", "chart", "--reset-then-reuse-values", "--set", "sre.authorityStage=true"]
-        h = Mock()
+        args = ["upgrade", "kars", "/reviewed/source/deploy/helm/kars",
+                "--reset-then-reuse-values", "--set", "sre.authorityStage=true"]
+        h = Mock(root=Path("/reviewed/source"))
         h.run.return_value = json.dumps({"monitoringSchemas": 10, "published": True})
         self.assertEqual(prepare_monitoring_dependencies(h, args), 10)
         command = h.run.call_args.args[0]
         self.assertEqual(command[:3], ["node", "--input-type=module", "-e"])
-        self.assertEqual(json.loads(h.run.call_args.kwargs["data"]), args)
-        self.assertIn("renderCoreSchemaChart(execa", command[3])
-        self.assertIn("planMonitoringSchemas(run, documents)", command[3])
-        self.assertIn("monitoringSchemaFingerprint(await serverRender())", command[3])
-        self.assertNotIn("planCoreHelmSchemas", command[3])
+        invocation = json.loads(h.run.call_args.kwargs["data"])
+        self.assertEqual(invocation["upgrade"], args)
+        self.assertEqual(invocation["bootstrap"], [
+            "install", "kars", "/reviewed/source/deploy/helm/kars",
+            "--kube-context", "kind-kars-e2e", "--namespace", "kars-system"])
+        script = command[3]
+        self.assertLess(script.index("renderCoreSchemaChart(execa, invocation.bootstrap)"),
+                        script.index("planMonitoringSchemas(run, documents)"))
+        self.assertLess(script.index("await apply()"),
+                        script.index("renderCoreSchemaChart(execa, invocation.upgrade)"))
+        self.assertIn("monitoringSchemaFingerprint(await target.serverRender())", script)
+        self.assertNotIn("planCoreHelmSchemas", script)
+        self.assertNotIn("prepareCoreHelmSchemas", script)
+        self.assertNotIn("--disable-openapi-validation", script)
+        self.assertNotIn("--skip-schema-validation", script)
         for count, published in ((0, True), (True, True), ("10", True), (10, False)):
             h.run.return_value = json.dumps({"monitoringSchemas": count, "published": published})
             with self.subTest(count=count, published=published), self.assertRaises(AssertionError):

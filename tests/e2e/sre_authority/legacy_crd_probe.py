@@ -47,7 +47,11 @@ def preview_registration_identity(h, obj):
 
 
 def prepare_monitoring_dependencies(h, helm_args):
-    # Reuse the installer's separate dependency lifecycle, not the Kars CRD migration.
+    # The historical chart predates monitoring. Plan its static dependency schemas
+    # from the current cold chart, before the authority-stage target needs live
+    # SRE lookups and Helm's server resource mapping. Only dependency CRDs write.
+    bootstrap = ["install", "kars", str(h.root / "deploy/helm/kars"),
+                 "--kube-context", CONTEXT, "--namespace", SYSTEM]
     script = """
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
@@ -57,16 +61,18 @@ const { execa } = await import(require.resolve('execa'));
 const library = name => import(pathToFileURL(process.cwd() + '/cli/dist/lib/' + name + '.js').href);
 const { renderCoreSchemaChart } = await library('core-helm-schemas');
 const { isMonitoringCrd, monitoringSchemaFingerprint, planMonitoringSchemas } = await library('monitoring-schemas');
-const { run, documents, serverRender } = await renderCoreSchemaChart(execa, JSON.parse(readFileSync(0, 'utf8')));
+const invocation = JSON.parse(readFileSync(0, 'utf8'));
+const { run, documents } = await renderCoreSchemaChart(execa, invocation.bootstrap);
 const apply = await planMonitoringSchemas(run, documents);
 await apply();
-if (monitoringSchemaFingerprint(await serverRender()) !== monitoringSchemaFingerprint(documents)) {
+const target = await renderCoreSchemaChart(execa, invocation.upgrade);
+if (monitoringSchemaFingerprint(await target.serverRender()) !== monitoringSchemaFingerprint(documents)) {
   throw new Error('Monitoring dependency changed after its schema plan');
 }
 console.log(JSON.stringify({ monitoringSchemas: documents.filter(isMonitoringCrd).length, published: true }));
 """
     result = json.loads(h.run(["node", "--input-type=module", "-e", script],
-                              data=json.dumps(helm_args), timeout=120))
+                              data=json.dumps({"bootstrap": bootstrap, "upgrade": helm_args}), timeout=120))
     require(result.get("published") is True and type(result.get("monitoringSchemas")) is int
             and result["monitoringSchemas"] > 0,
             "Historical upgrade must publish its enabled monitoring dependency schemas")
