@@ -326,7 +326,6 @@ The blocklist engine combines multiple layers of threat intelligence:
 |--------|-------------|-----------------|
 | **Seed file** | Curated domain list loaded from ConfigMap at startup | On pod restart |
 | **OISD** | Community-maintained blocklist (50k+ domains) | Every 6 hours |
-| **URLhaus** | abuse.ch malware URL database (hostfile format) | Every 6 hours |
 | **High-risk TLDs** | `.tk`, `.ml`, `.ga`, `.cf`, `.gq`, `.top`, `.buzz`, `.surf`, `.rest`, `.onion` | Static |
 | **Bare IP blocking** | URLs with IP addresses instead of domains | Static |
 
@@ -342,7 +341,7 @@ The blocklist stays current through multiple refresh mechanisms:
 
 | Mechanism | Frequency | Source |
 |-----------|-----------|--------|
-| Router background task | Every 6 hours | Fetches latest feeds from [OISD](https://oisd.nl/) and [URLhaus](https://urlhaus.abuse.ch/) |
+| Router background task | Every 6 hours | Fetches the latest [OISD](https://oisd.nl/) list |
 | K8s CronJob | Every 6 hours | Updates the ConfigMap mounted at `/etc/kars/blocklist/domains.txt` |
 | GitHub Actions CI | Daily | Refreshes the seed file in the repository (≤ 24h old) |
 

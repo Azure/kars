@@ -7,7 +7,7 @@
 //! (malware C2, phishing, cryptojacking, etc.). It combines:
 //!
 //! - **Seed file**: loaded from ConfigMap at startup (always available, even offline)
-//! - **Live feeds**: refreshed in background from OISD and URLhaus on a timer
+//! - **Live feeds**: refreshed in background from OISD on a timer
 //! - **High-risk TLDs**: blocked unconditionally (.tk, .ml, .ga, .cf, .gq — free TLDs
 //!   abused by >80% of phishing campaigns per APWG data)
 //! - **IP-direct blocking**: bare IP addresses in URLs are suspicious and blocked
@@ -36,9 +36,8 @@ const DEFAULT_REFRESH_SECS: u64 = 6 * 3600;
 /// Max domains to load per feed (prevents memory exhaustion from malformed feeds).
 const MAX_DOMAINS_PER_FEED: usize = 500_000;
 
-/// Well-known threat intelligence feed URLs.
+/// Well-known threat intelligence feed URL.
 const OISD_SMALL_URL: &str = "https://small.oisd.nl/domainswild";
-const URLHAUS_URL: &str = "https://urlhaus.abuse.ch/downloads/hostfile/";
 
 /// Thread-safe blocklist that can be shared across handlers and updated in background.
 #[derive(Clone)]
@@ -168,7 +167,7 @@ impl Blocklist {
     }
 
     /// Start the background refresh task. Call once at startup.
-    /// Fetches from OISD + URLhaus every `refresh_interval` seconds.
+    /// Fetches from OISD every `refresh_interval` seconds.
     pub fn start_refresh_task(
         &self,
         client: reqwest::Client,
@@ -218,17 +217,6 @@ impl Blocklist {
                                 tracing::warn!(error = %e, "Blocklist: OISD fetch failed — keeping existing");
                             }
                         }
-                    }
-                }
-
-                // Fetch URLhaus (hostfile format: "127.0.0.1 domain")
-                match fetch_feed(&client, URLHAUS_URL).await {
-                    Ok(content) => {
-                        let count = parse_hostfile(&content, &mut new_domains);
-                        tracing::info!(count, "Blocklist: loaded URLhaus feed");
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Blocklist: URLhaus fetch failed — keeping existing");
                     }
                 }
 
@@ -432,6 +420,7 @@ fn parse_domain_list(content: &str, dest: &mut HashSet<String>) -> usize {
 }
 
 /// Parse hostfile format ("127.0.0.1 domain" or "0.0.0.0 domain").
+#[allow(dead_code)] // no built-in hostfile feed since URLhaus was retired
 fn parse_hostfile(content: &str, dest: &mut HashSet<String>) -> usize {
     let mut count = 0;
     for line in content.lines() {
