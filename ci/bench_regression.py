@@ -2,7 +2,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-"""Compare same-runner Criterion bencher logs using the trusted base's policy.
+"""Compare full-precision Criterion estimates using the trusted base's policy.
 
 Committed medians remain historical evidence, not cross-machine CI ceilings.
 Identity resolution and harness checks run before either revision is compiled.
@@ -10,6 +10,7 @@ Only Python's standard library is required.
 """
 
 import json
+import math
 import os
 import re
 import subprocess
@@ -17,7 +18,6 @@ import sys
 import tomllib
 from pathlib import Path
 
-LINE_RE = re.compile(r"^test\s+(\S+)\s+\.\.\.\s+bench:\s+([\d,]+)\s+ns/iter")
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 
 
@@ -78,20 +78,22 @@ def check_harness(base: Path, baseline: str) -> None:
         raise ValueError("Criterion harness changed; establish comparable harnesses before gating")
 
 
-def parse_bencher(text: str) -> dict[str, int]:
-    out: dict[str, int] = {}
-    for line in text.splitlines():
-        m = LINE_RE.match(line.strip())
-        if not m:
-            continue
-        name = m.group(1)
+def read_estimates(directory: Path) -> dict[str, float]:
+    out: dict[str, float] = {}
+    if not directory.is_dir():
+        raise ValueError(f"Criterion output directory is unavailable: {directory}")
+    for benchmark in sorted(directory.glob("**/new/benchmark.json")):
+        name = json.loads(benchmark.read_text())["full_id"]
+        if not isinstance(name, str) or not name:
+            raise ValueError("Criterion benchmark must have a nonempty full_id")
         if name in out:
             raise ValueError(f"duplicate measurement: {name}")
-        out[name] = int(m.group(2).replace(",", ""))
+        estimates = json.loads(benchmark.with_name("estimates.json").read_text())
+        out[name] = estimates["median"]["point_estimate"]
     return out
 
 
-def compare(policy: dict, baseline: dict[str, int], measured: dict[str, int]) -> int:
+def compare(policy: dict, baseline: dict[str, float], measured: dict[str, float]) -> int:
     groups = policy["groups"]
     threshold_pct = policy["_threshold_pct"]
     if not isinstance(groups, dict) or not groups or threshold_pct != 25:
@@ -99,8 +101,9 @@ def compare(policy: dict, baseline: dict[str, int], measured: dict[str, int]) ->
     for label, values in (("baseline", baseline), ("candidate", measured)):
         if set(values) != set(groups):
             raise ValueError(f"{label} measurements do not exactly match the baseline inventory")
-        if any(value <= 0 for value in values.values()):
-            raise ValueError(f"{label} measurements must be positive")
+        if any(type(value) not in (int, float) or not math.isfinite(value) or value <= 0
+               for value in values.values()):
+            raise ValueError(f"{label} measurements must be finite positive numbers")
     failures = []
     for name in groups:
         actual = measured[name]
@@ -108,7 +111,7 @@ def compare(policy: dict, baseline: dict[str, int], measured: dict[str, int]) ->
         ceiling = reference * 1.25
         regressed = actual * 100 > reference * (100 + threshold_pct)
         status = "REGRESSED" if regressed else "OK"
-        print(f"  {status:10s} {name:50s} {actual:8d}ns  "
+        print(f"  {status:10s} {name:50s} {actual:10.6g}ns  "
               f"(same-run baseline {reference}ns, ceiling {ceiling:g}ns)")
         if regressed:
             failures.append(name)
@@ -132,10 +135,9 @@ def main(argv: list[str]) -> int:
             check_harness(Path(argv[2]), argv[3])
             return 0
         if len(argv) != 4:
-            raise ValueError("usage: bench_regression.py <base-policy.json> <base.txt> <candidate.txt>")
+            raise ValueError("usage: bench_regression.py <base-policy.json> <base-criterion-dir> <candidate-criterion-dir>")
         return compare(json.loads(Path(argv[1]).read_text()),
-                       parse_bencher(Path(argv[2]).read_text()),
-                       parse_bencher(Path(argv[3]).read_text()))
+                       read_estimates(Path(argv[2])), read_estimates(Path(argv[3])))
     except (ValueError, KeyError, TypeError, OSError, subprocess.CalledProcessError) as error:
         print(f"Bench comparison unavailable: {error}", file=sys.stderr)
         return 2

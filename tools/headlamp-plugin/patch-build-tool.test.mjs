@@ -9,6 +9,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { patchPluginFixtures } from "./patch-build-tool.mjs";
 import "./checker/checks.node.mjs";
+import "./build-tool/checks.node.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const oldSum = `github.com/rabbitmq/amqp091-go v1.3.4 h1:tXuIslN1nhDqs2t6Jrz3BAoqvt4qIZzxvdbdcxWtHYU=

@@ -81,7 +81,27 @@ including actual child termination and private-output rejection. The first new
 CLI assertion incorrectly expected Helm3 `--wait` from the existing Helm4
 fixture; it was corrected to require `--wait=legacy`, with the original 8-minute
 Helm timeout unchanged. The failed local test receipt is retained. New diagnostic
-regressions are included in the hosted public-schema privacy job.
+regressions are included in the hosted public-schema privacy job. The published
+`7705a170` successor passed 293 selected frozen-source tests (188 Python, 26 Node,
+79 CLI), static gates, whole-workspace formatting, controlled secret scans and
+independent eight-path review before normal fast-forward publication.
+
+Later retained predecessor results: all three cold API installs passed, while
+the native runtime job was cancelled by the existing successor concurrency
+policy after execution began. Its initial Kind Ready warning resolved after
+Cilium installation; both nodes became Ready. This is not evidence that the
+controller crash is fixed. Let the successor's native run terminate before
+another publication, rather than repeatedly cancelling qualification.
+
+Headlamp reached all-severity scanning. Its immutable 266,697-byte artifact
+`13423296080` (SHA256
+`8c034bbc0a530db02c6f3304e5f19c7c509b35a7456d17a68f3f3177ff92bc38`) contains
+LOW `CVE-2025-14505` for plugin dependency `elliptic` 6.6.1 and UNKNOWN
+`GO-2026-5932` for image dependency `golang.org/x/crypto/openpgp`
+`v0.1.0-deprecated`. No finding was suppressed or counted as cleared. The
+successor's Cosign job separately failed its bootstrap download with curl exit
+22, before installation or verification; this does not establish a signature
+failure or justify bypassing verification.
 
 ## Verification
 
@@ -405,6 +425,130 @@ remaining phase deadline; the log alone does not identify which expired.
 Ready SRE pods do not establish stage completion. No timeout has been enlarged
 and no migration gate has been bypassed; the stage failure still needs repair
 and fresh hosted execution.
+
+## Follow-up: Responses must authorize the deployment actually sent
+
+Alert1084's Azure/OpenAI excessive-depth parser differential remains unproven.
+A separate concrete MEDIUM authorization defect (static-review confidence 9/10)
+requires only ordinary shallow JSON: an omitted model was authorized as
+`inference:responses:` under a wildcard allow, then forwarding inserted the
+configured deployment despite an exact deny on that deployment. Explicitly
+requesting the same deployment was denied. Policy primary overrides and
+fallbacks also authorized one model before sending another. Azure receives a
+normal populated model field; no downstream parser permissiveness is assumed.
+
+The prepared repair validates an object body and any provided model, preserves
+explicit caller-model denials, and checks each actual deployment immediately
+before rewriting, admission, authentication or dispatch. It reuses the existing
+streaming failover loop, including health selection and the all-unhealthy/default
+safety nets. A typed policy denial returns HTTP403 without falling through to
+another deployment. An unused denied fallback does not prevent an allowed
+primary from succeeding. Allow-audit records name the authorized attempted
+model, rather than a potentially different default. Both runtimes continue
+using the same router implementation.
+
+Six new regression tests exercise the actual route, real restrictive Governance
+rules, capture-only Azure endpoints and the existing lifetime ledger fixture.
+They cover absent, finite and record-only admission; explicit/default/override
+and fallback denials; malformed bodies/models; allowed defaults and failover;
+unused denied fallbacks; and backend-error/approval failure. Positive controls
+require actual local dispatch and settled usage. `rustfmt --edition 2024
+--config skip_children=true --check` passed for the changed Rust paths. A bounded
+independent static review found no significant defects. Compilation and test
+execution remain pending on GitHub; this is not a verified fix or cleared alert.
+
+The Headlamp successor also prepares removal of the unused build-tool crypto
+chain responsible for LOW elliptic CVE-2025-14505, without removing Storybook or
+TypeScript checking. Its attributable deterministic patch retains real required
+process/buffer/stream implementations. Helm3.21.4 replaces deprecated OpenPGP
+with ProtonMail; CIRCL1.6.3 and explicit deprecated-import/provenance checks are
+included. The worker reports 32 focused tests passed, no skips, reproducibility
+and integrity-negative controls passed. Clean installation, compiler/Storybook/
+Vite/backend builds, compatibility and all-severity image scans remain hosted
+requirements, not outcomes inferred from lockfile changes.
+
+The frozen unpublished `d5790cec` candidate passed 60 Python, 32 Node and two
+selected CLI tests (64 CLI cases deliberately outside that selector), formatting
+and source/delta scans. It failed first-party README/legal archive coverage and
+an expanded build-tool archive scan: one Kubernetes Secret-manifest finding in
+a KEDA example, among 1,618 expanded files. The candidate and failed receipts
+remain retained; no scanner suppression or publication is authorized by the
+passing tests. Independent review verified all 3,226 frozen hashes and the
+20-path delta, reproduced the copyright blockers, and found no additional
+high-confidence exploitable source defect. This is not human approval.
+
+The packaging worker subsequently verified the values as public documentation
+placeholders, not evidence of live credentials. Applying those examples would
+nevertheless create Secrets containing the defaults. The prepared repair removes
+only those two embedded Secret documents, preserving both TriggerAuthentication
+resources, all workloads and every archive file. A first-party guide provisions
+the same Secret names and keys from private credential files. The worker reports
+17 passing tests with no skips, deterministic reproduction and upstream comparison;
+the lock changes only the archive integrity. The new 1,619-file archive requires
+a fresh expanded scan and exact frozen review; live KEDA acceptance is pending.
+Precise legal/archive coverage and its byte-preservation/neighbor regressions
+pass all 40 copyright tests. The unchanged checker archive independently passed
+its 171-file expanded scan and detected archive canary.
+
+## Follow-up: terminal hosted acceptance and measurement precision
+
+H22 native run `42044650861` and CI run `42044650755` completed with failures.
+All three cold API/admission installs, Rust build/tests and chaos tests passed.
+Native Team rebind did not reach current reattested credentials/resumed execution;
+owned-Team cleanup and the subsequent private observer also failed. Those runtime
+failures remain release blockers, not successful acceptance inferred from builds.
+Cosign stopped downloading its bootstrap binary, before signature verification.
+The Headlamp all-severity image gate failed; its prepared dependency repair still
+requires hosted validation.
+
+The observer failure is independent of the earlier Team failure: late enrollment
+rejected the controller's legitimate Task admin Secret projection because it
+included `config.json` alongside `control-token`. The repair reuses the existing
+late-enrollment state machine, validates the exact Task TLS projection and Secret
+key set, checks service identity, certificate signature/validity and key match,
+and requires both token and TLS public-key rotation after retirement. It retains
+only hashes and preserves legacy non-Task token-only enrollment. The three focused
+CLI suites pass 249 tests, with typechecking and focused lint also passing; actual
+hosted observer re-enrollment remains unverified.
+
+The Team failure snapshot shows a controller stack overflow after reattestation,
+but no overflowing frame. Cleanup evidence shows the Team workload removed but
+omits Namespace conditions and finalizers, so the exact retirement blocker is not
+established. Neither a timeout increase nor a finalizer/authorization bypass is a
+repair. These two failures remain unresolved pending safe diagnostic evidence and
+fresh hosted runtime execution. Initial and projection-recheck credential reads now
+share the existing closed, redacted diagnostic categories. The maintained failed-case
+capture records bounded Namespace lifecycle conditions and known finalizer metadata
+even after the Sandbox disappears, without Secret material, arbitrary messages or
+unknown finalizer values. Eighteen focused Python tests pass; the added Rust diagnostic
+regression awaits hosted compilation. These changes do not fix or localize the overflow.
+
+The E2E run stopped at Python preflight discovery: the new diagnostics test used
+package-relative imports while the maintained runner discovers top-level test
+modules. Using the existing absolute `sre_authority` imports repairs that exact
+entrypoint; its unchanged discovery command now passes all 201 tests locally.
+This is preflight coverage, not a completed Kind journey.
+
+Both router benchmark logs reported `route_lookup` as zero integer nanoseconds.
+Criterion's text representation loses subnanosecond precision. The repair reads
+raw median point estimates and full benchmark identities from Criterion JSON,
+with separate fresh `CRITERION_HOME` directories for each revision/component.
+It retains raw estimates/samples and logs, keeps the trusted base's exact inventory
+and 25% ceiling, and rejects nonfinite, nonnumeric, nonpositive, duplicate, missing
+or extra measurements. No clamping, floor, omission or threshold increase is used.
+Twenty-two focused tests pass, including real-file CLI comparisons, subnanosecond
+threshold boundaries, missing/corrupt evidence and cargo pipeline failure propagation.
+Hosted measurement is still required; the original failed logs are not rewritten.
+
+The unpublished H24 `6d67370b` review verified 3,227 frozen files and found no
+introduced source blocker. Its 97 selected local tests and static gates passed.
+Raw strict scan receipts remain failed: source 147 baseline/148 candidate,
+expanded build-tool archive four, outgoing patch one and commit one. Exact
+independent semantic review verified all new occurrences as two public whole-file
+integrity hashes, bound to original upstream bytes and the private-file credential
+guide. No scanner configuration, metadata names or raw results changed, and inherited
+findings were not cleared. Subsequent terminal-run repairs require a fresh frozen
+candidate and review; H24 evidence does not qualify changed successor bytes.
 
 ## Verdict
 

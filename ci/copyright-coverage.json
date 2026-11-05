@@ -43,6 +43,16 @@
     }
   },
   "files": {
+    "tools/headlamp-plugin/build-tool/LICENSE.upstream": {
+      "category": "legal",
+      "reason": "Original Headlamp build-tool distribution license; preserve upstream legal text without adding a first-party source header.",
+      "notice": "NOTICE"
+    },
+    "tools/headlamp-plugin/build-tool/headlamp-plugin-0.13.1-kars.tgz": {
+      "category": "third-party",
+      "reason": "Deterministic upstream build-tool archive with attributable Kars dependency repairs, bound by upstream.json and the npm lock; preserve packaged upstream notices and separate Kars integration ownership.",
+      "notice": "NOTICE"
+    },
     "tools/headlamp-plugin/checker/LICENSE": {
       "category": "legal",
       "reason": "MIT license for the Kars checker integration; retain legal text rather than prepending a source header. The patched package separately retains the upstream checker license.",

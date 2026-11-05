@@ -8,6 +8,7 @@ import {
   type Execute, type Json, type NamespaceReview, type PrivateActivation, type ReviewedObject,
 } from "./private-activation.js";
 import { replicaIntent } from "./private-activation-retirement.js";
+import { controlTlsMaterial, type ControlTlsMaterial } from "./private-activation-control-tls.js";
 import { PrivateCommandFailure, scopedCommandFailure, type PrivateCommandPhase } from "./private-activation-command-diagnostics.js";
 
 const HISTORY = "kars.azure.com/private-root-retirement";
@@ -28,7 +29,13 @@ interface Runtime {
   task?: { object: ReviewedObject; spec: string; generation: number; authorization: string };
 }
 interface RuntimeSnapshot { runtime: Runtime; sandbox: Json; task?: Json }
-interface Material { object: ReviewedObject; key: string }
+interface Material { object: ReviewedObject; key: string; tls?: ControlTlsMaterial }
+function sameKeys(left: Material, right: Material): boolean {
+  return left.key === right.key && canonical(left.tls ?? null) === canonical(right.tls ?? null);
+}
+function rotatedTls(left: Material, right: Material): boolean {
+  return left.tls ? !!right.tls && left.tls.key !== right.tls.key : !right.tls;
+}
 interface Receipt {
   version: 4;
   root: string;
@@ -137,6 +144,13 @@ function receipt(namespace: unknown): Receipt | undefined {
       || at(value.qualified, "material", "object", "uid") !== at(value.baseline, "object", "uid")) throw new Error(failure);
   }
   const result = value as unknown as Receipt;
+  for (const material of [result.baseline, ...(result.qualified ? [result.qualified.material] : [])]) {
+    if (material.tls !== undefined) {
+      if (!runtime.task || canonical(Object.keys(record(material.tls)).sort()) !== canonical(["configuration", "key"])) throw new Error(failure);
+      hash(material.tls.configuration); hash(material.tls.key);
+    }
+  }
+  if (result.qualified && !rotatedTls(result.baseline, result.qualified.material)) throw new Error(failure);
   if (encoded(result) !== raw) throw new Error(failure);
   return result;
 }
@@ -268,27 +282,39 @@ async function materialInventory(execute: Execute, scope: NamespaceReview, runti
   if (!admin) throw new Error("Late private runtime requires its existing controller-owned admin credential; missing material was not adopted");
   return admin;
 }
-async function material(execute: Execute, scope: NamespaceReview, runtime: Runtime): Promise<Material> {
+async function material(execute: Execute, scope: NamespaceReview, runtime: Runtime, deployment: unknown): Promise<Material> {
   const secret = await read(execute, "secret", ADMIN, scope.namespace.name);
   const object = ownedMaterial(secret, scope, runtime);
   const data = record(secret.data);
   const token = typeof data["control-token"] === "string" ? Buffer.from(data["control-token"], "base64") : Buffer.alloc(0);
-  if (secret.type !== "Opaque" || Object.keys(data).join(",") !== "control-token"
-    || token.length !== 64 || token.toString("base64") !== data["control-token"]
+  const volume = items(at(template(deployment), "spec", "volumes")).find(v => at(v, "secret", "secretName") === ADMIN);
+  const tls = items(at(volume, "secret", "items")).some(item => at(item, "key") === "config.json");
+  if (secret.type !== "Opaque" || canonical(Object.keys(data).sort()) !== canonical(tls ? ["config.json", "control-token"] : ["control-token"])
+    || (tls && !runtime.task) || token.length !== 64 || token.toString("base64") !== data["control-token"]
     || !/^[a-zA-Z0-9]{64}$/.test(token.toString("utf8"))) {
     throw new Error("Customized or missing late private credential keys require explicit operator recovery");
   }
-  return { object, key: digest(token.toString("base64")) };
+  const expectedIdentity = runtime.task ? {
+    managed: true, sandbox: { namespace: runtime.workspace, name: runtime.sandbox.name, uid: runtime.sandbox.uid },
+    namespace_uid: scope.namespace.uid,
+    task: { namespace: runtime.workspace, name: runtime.task.object.name, uid: runtime.task.object.uid },
+    task_authorization: runtime.task.authorization, task_generation: runtime.task.generation,
+  } : undefined;
+  return { object, key: digest(token.toString("base64")),
+    ...(tls ? { tls: controlTlsMaterial(data["config.json"], deployment, expectedIdentity) } : {}) };
 }
 
-function supportedTemplate(deployment: unknown, scope: NamespaceReview, activation: PrivateActivation): void {
+function supportedTemplate(deployment: unknown, scope: NamespaceReview, activation: PrivateActivation, runtime: Runtime): void {
   const current = structuredClone(record(deployment));
   const pod = record(template(current).spec);
   let admin = false;
   const removed = new Set<string>();
   pod.volumes = items(pod.volumes ?? []).filter(volume => {
     if (at(volume, "secret", "secretName") === ADMIN) {
-      if (canonical(at(volume, "secret", "items")) !== canonical([{ key: "control-token", path: "control-token" }])
+      const tokenItems = [{ key: "control-token", path: "control-token" }];
+      const selected = canonical(at(volume, "secret", "items"));
+      if ((selected !== canonical(tokenItems) && (!runtime.task
+        || selected !== canonical([...tokenItems, { key: "config.json", path: "config.json" }])))
         || at(volume, "secret", "optional") === true || admin
         || at(volume, "name") !== "governed-services-control") throw new Error(failure);
       admin = true;
@@ -372,7 +398,7 @@ async function current(
       throw new Error(failure);
     }
   }
-  supportedTemplate(deployment, scope, activation);
+  supportedTemplate(deployment, scope, activation, runtime);
   const secret = await materialInventory(execute, scope, runtime);
   if (state && secret.uid !== state.baseline.object.uid) throw new Error(failure);
   if (state?.qualified && canonical(secret) !== canonical(state.qualified.material.object)) throw new Error(failure);
@@ -430,7 +456,7 @@ export async function captureLateWriterScope(execute: Execute, activation: Priva
   const snapshot = live.snapshot;
   if (!snapshot.task || !at(snapshot.task, "spec", "blueprint", "credentialBindings")) return undefined;
   return { scope: structuredClone(scope), namespace: live.namespace, deployment: live.deployment, pods: live.pods,
-    sandbox: snapshot.sandbox, task: snapshot.task, admin: await material(execute, scope, live.runtime) };
+    sandbox: snapshot.sandbox, task: snapshot.task, admin: await material(execute, scope, live.runtime, live.deployment) };
 }
 
 export async function stageLateScope(
@@ -458,7 +484,7 @@ export async function stageLateScope(
     state = next;
   };
   if (!state) {
-    const baseline = await material(execute, scope, live.runtime);
+    const baseline = await material(execute, scope, live.runtime, live.deployment);
     await save({ version: 4, root, binding: binding(scope), attempt: randomBytes(32).toString("hex"), phase: "Pausing",
       runtime: live.runtime, deployment: reviewed(live.deployment), structure: structure(live.deployment),
       replicas: replicaIntent(live.deployment), captured: live.pods.map(p => reviewed(p, true).uid).sort(), baseline },
@@ -474,7 +500,7 @@ export async function stageLateScope(
       if (live.runtime.suspended === true) break;
       if (conflict) {
         if (live.runtime.sandbox.resourceVersion === conflict.resourceVersion) throw conflict.error;
-        if ((await material(execute, scope, live.runtime)).key !== state.baseline.key) {
+        if (!sameKeys(await material(execute, scope, live.runtime, live.deployment), state.baseline)) {
           throw new Error("Late private key changed before retirement; no pre-retirement rotation was qualified");
         }
       }
@@ -509,7 +535,7 @@ export async function stageLateScope(
       if (Date.now() >= deadline) throw new Error("Late private Pods, including terminating UIDs, remain; runtime suspension and recovery were preserved");
       await new Promise(resolve => setTimeout(resolve, 500));
     }
-    if ((await material(execute, scope, live.runtime)).key !== state.baseline.key) throw new Error("Late private key changed before retirement; no pre-retirement rotation was qualified");
+    if (!sameKeys(await material(execute, scope, live.runtime, live.deployment), state.baseline)) throw new Error("Late private key changed before retirement; no pre-retirement rotation was qualified");
     await save({ ...state, phase: "Retired" });
   }
   if (state.phase === "Retired") {
@@ -531,7 +557,7 @@ export async function stageLateScope(
   if (state.phase === "Rotating") {
     for (;;) {
       live = await current(execute, activation, scope, root, state);
-      const fresh = await material(execute, scope, live.runtime);
+      const fresh = await material(execute, scope, live.runtime, live.deployment);
       const metadata = await secretMetadata(execute, scope, ADMIN);
       const version = `${fresh.object.uid}:${fresh.object.resourceVersion}`;
       if (fresh.object.uid !== state.baseline.object.uid) throw new Error(failure);
@@ -539,7 +565,8 @@ export async function stageLateScope(
         && at(metadata, "metadata", "annotations", "kars.azure.com/services-credential-retired") === undefined
         && at(template(live.deployment), "metadata", "annotations", `${P}epoch`) === state.epoch
         && at(template(live.deployment), "metadata", "annotations", VERSION) === version) {
-        if (fresh.key === state.baseline.key || fresh.object.resourceVersion === state.baseline.object.resourceVersion) {
+        if (fresh.key === state.baseline.key || !rotatedTls(state.baseline, fresh)
+          || fresh.object.resourceVersion === state.baseline.object.resourceVersion) {
           throw new Error("Late private authentication key was not rotated; epoch/version stamps alone cannot qualify");
         }
         scope.consumers[0]!.templateDigest = templateDigest(live.deployment);
@@ -554,7 +581,7 @@ export async function stageLateScope(
   }
   if (state.phase === "Restoring") {
     live = await current(execute, activation, scope, root, state);
-    if (canonical(await material(execute, scope, live.runtime)) !== canonical(state.qualified!.material)) throw new Error(failure);
+    if (canonical(await material(execute, scope, live.runtime, live.deployment)) !== canonical(state.qualified!.material)) throw new Error(failure);
     scope.consumers[0]!.templateDigest = state.qualified!.template;
     if (live.runtime.suspended !== state.runtime.suspended) {
       await assertRoot();

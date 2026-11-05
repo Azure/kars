@@ -14,7 +14,7 @@ from api_outcome_diagnostics import collect as api_outcome_diagnostics
 from boot import bridge_connection, install_bridge, install_core
 from controller_failure_diagnostics import collect as controller_failure_diagnostics
 from credential_cases import CredentialCases
-from credential_diagnostics import condition_category, runtime_scope
+from credential_diagnostics import condition_category, namespace_retirement, runtime_scope
 from lifecycle_cases import LifecycleCases
 from native_api import CORE, STATE, Failure, Setup, command, core, require, scheduling_detail, status_detail
 from observation_cases import ObservationCases
@@ -26,7 +26,8 @@ from template_diagnostics import collect as template_diagnostics
 
 
 def diagnostics(setup):
-    result = {"controllerProcess": controller_failure_diagnostics(setup)}
+    result = {"controllerProcess": controller_failure_diagnostics(setup),
+              "namespaces": namespace_retirement(setup)}
     for label, path in [
         ("pods", "/api/v1/pods"),
         ("grants", "/apis/kars.azure.com/v1alpha1/karscredentialgrants"),

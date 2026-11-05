@@ -81,16 +81,23 @@ bases (including divergent force pushes) fail closed. There is no fallback to
 CI calls:
 
 ```bash
-python3 ci/bench_regression.py <base-policy.json> <base-bencher.txt> <candidate-bencher.txt>
+python3 ci/bench_regression.py <base-policy.json> <base-criterion-dir> <candidate-criterion-dir>
 ```
 
 The base commit's `benches/baselines.json` supplies the required benchmark names
 and unchanged 25% threshold. Its historical timing values remain untouched and
-are **not** rewritten or used as cross-machine ceilings. Missing, duplicate,
-extra or nonpositive measurements fail closed. Compilation and pipeline failures
+are **not** rewritten or used as cross-machine ceilings. Each revision/component
+writes to its own fresh `CRITERION_HOME` under `bench-evidence/`, separate from
+restored build caches. The gate reads `new/benchmark.json` identities and full-precision
+nanosecond medians from `new/estimates.json`. Bencher text remains diagnostic only:
+its integer nanosecond formatting truncates subnanosecond operations to zero.
+The gate does not round, clamp, omit fast operations, or change the 25% threshold.
+Missing, duplicate, extra, nonnumeric, nonfinite or nonpositive measurements fail
+closed. Compilation and pipeline failures
 also fail the job. Both comparison steps run after successful measurements even
 when one reports a regression. The `bench-comparison-<run>-<attempt>` artifact
-retains logs, policies, SHAs, compiler/profile and CPU details, including failures.
+retains raw Criterion estimates/samples, logs, policies, SHAs, compiler/profile
+and CPU details, including failures.
 
 These are synthetic microbenchmarks, not production reconciler latency or router
 p99 measurements, and do not establish customer acceptance.

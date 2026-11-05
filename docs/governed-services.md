@@ -27,6 +27,20 @@ reported stage. Raw command errors, tokens, identities, scope IDs and response
 bodies are not emitted. The original failure and owned port-forward/file cleanup
 remain mandatory; these diagnostics do not qualify the failing operation.
 
+Native credential acceptance also records failure-only Namespace retirement
+metadata, including orphaned `kars-native-*` namespaces after their Sandbox has
+been removed. The bounded snapshot retains Namespace name/UID, deletion state,
+known lifecycle conditions and finalizers; unknown finalizers are counted, not
+printed. Condition messages and API bodies are never retained. Explicit
+unavailable/truncated markers prevent interpreting incomplete diagnostics as
+successful cleanup. Governed credential projection reads and pre-write rechecks
+use the same closed error-category/HTTP-status classifier, including Task owner
+and recovery rejection categories. Neither diagnostic changes acceptance or
+finalizer behavior. Existing controller process capture retains checked-in panic
+source coordinates and fixed stack-overflow signatures, not compiled stack
+frames; a stack-overflow abort without a panic location still requires hosted
+investigation and is not localized by enabling ordinary panic backtraces.
+
 ## Identity and operator authentication
 
 Each router has a unique process-instance scope. On Kubernetes the controller
@@ -79,8 +93,13 @@ runtime projection before the Deployment is created. New Hermes and OpenClaw
 Pods therefore start with that version instead of triggering a false stale-cache
 drain when memory configuration is first added.
 Admin Secrets without memory configuration retain UID/resourceVersion versions,
-including the token-only late-enrollment receipt protocol. Other credential
-purposes retain their existing version semantics.
+including late-enrollment receipts. Late enrollment accepts the controller's
+Task-bound `control-token` plus `config.json` TLS transport, as well as existing
+token-only runtimes. Before retiring Pods it validates the exact Task identity,
+certificate chain, hostname, expiry and matching private key. Qualification
+requires both the token and TLS key to rotate under the same Secret UID; receipts
+retain only material hashes, never tokens or PEMs. Other credential purposes
+retain their existing version semantics.
 The controller does not report its credential transition complete while old
 version or mismatched verified-epoch Pods remain, including terminating Pods. Loss of the checked privacy
 proof quarantines the owned credential and scales only a proven owned consumer

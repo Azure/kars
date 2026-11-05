@@ -245,10 +245,7 @@ async fn read_source(
     {
         let source = crate::credential_grants::sources::for_sandbox(client, sandbox)
             .await
-            .map_err(|reason| {
-                let (category, code) = diagnostics::classify(&reason);
-                Error::Governed { category, code }
-            })?;
+            .map_err(diagnostics::governed)?;
         if sandbox
             .spec
             .upstream_compatibility
@@ -365,7 +362,7 @@ async fn inputs_current(
     if annotation(&source.metadata, PURPOSE) == Some(crate::credential_grant::BUNDLE_PURPOSE) {
         let current = crate::credential_grants::sources::for_sandbox(client, sandbox)
             .await
-            .map_err(|_| Error::Invalid("governed credential inputs are no longer authorized"))?;
+            .map_err(diagnostics::governed)?;
         if identity(&current.metadata)? != identity(&source.metadata)? {
             return Err(Error::Invalid(
                 "governed credential bundle changed before projection write",

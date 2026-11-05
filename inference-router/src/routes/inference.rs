@@ -257,37 +257,42 @@ async fn responses(
     // emitted from this handler can carry `inference_policy_digest`.
     let policy = crate::inference_policy_loader::current_snapshot(&state.inference_policy).await;
 
-    // AGT policy check via the four-seam PolicyDecisionProvider.
-    {
-        let model = serde_json::from_slice::<serde_json::Value>(&body)
-            .ok()
-            .and_then(|v| v.get("model")?.as_str().map(String::from))
-            .unwrap_or_default();
-        let action = format!("inference:responses:{model}");
-        if let super::inference_policy::InferenceDecision::Deny(reason) =
-            super::inference_policy::check(&state, sandbox_name, &action).await
-        {
-            tracing::warn!(
-                target: "inference.audit",
-                sandbox = %sandbox_name,
-                %reason,
-                inference_policy_digest = %policy.digest,
-                decision = "deny",
-                gate = "agt_policy",
-                "AGT policy DENIED responses inference"
-            );
-            return (
-                StatusCode::FORBIDDEN,
-                Json(serde_json::json!({
-                    "error": {
-                        "message": format!("Blocked by governance policy: {reason}"),
-                        "type": "policy_violation",
-                        "code": "policy_denied"
-                    }
-                })),
+    let request = match serde_json::from_slice::<serde_json::Value>(&body) {
+        Ok(value) if value.is_object() => value,
+        _ => {
+            return errors::openai_coded(
+                StatusCode::BAD_REQUEST,
+                "Request must be a JSON object within router parsing limits",
+                "invalid_request_error",
+                "invalid_json",
             )
-                .into_response();
+            .into_response();
         }
+    };
+    let requested_model = match request.get("model") {
+        None => None,
+        Some(serde_json::Value::String(model)) if !model.trim().is_empty() => Some(model.as_str()),
+        Some(_) => {
+            return errors::openai_coded(
+                StatusCode::BAD_REQUEST,
+                "model must be a nonblank string when provided",
+                "invalid_request_error",
+                "invalid_model",
+            )
+            .into_response();
+        }
+    };
+    // Retain explicit caller-model denials even when routing replaces that model.
+    if let Some(model) = requested_model
+        && let Err(denied) = super::inference_policy::require(
+            &state,
+            sandbox_name,
+            &format!("inference:responses:{model}"),
+            &policy.digest,
+        )
+        .await
+    {
+        return denied.into_response();
     }
 
     // Budget check — daily/monthly limits sourced from the loaded
@@ -331,16 +336,6 @@ async fn responses(
     // (`build_candidates` starts with `primary.deployment` and walks
     // outward), so this single call subsumes the override + the
     // retry loop in one place.
-    tracing::info!(
-        target: "inference.audit",
-        sandbox = %sandbox_name,
-        model = %upstream.deployment,
-        inference_policy_digest = %policy.digest,
-        decision = "allow",
-        gate = "forward",
-        "Responses API request"
-    );
-
     // Always stream /v1/responses end-to-end. Hermes (and the openai
     // Python SDK in general) defaults to `responses.create(stream=True)`
     // for this endpoint — the SDK then expects an SSE `text/event-stream`
@@ -351,7 +346,9 @@ async fn responses(
     // the byte stream to flow through unchanged.
     use axum::body::Body;
     use futures::TryStreamExt;
-    match crate::failover::forward_stream_with_failover(
+    let authorization_state = &state;
+    let digest = policy.digest.as_str();
+    match crate::failover::forward_stream_with_authorization(
         state.auth.clone(),
         Some(state.copilot.clone()),
         state.client.clone(),
@@ -362,6 +359,27 @@ async fn responses(
         "responses",
         headers.clone(),
         body,
+        |candidate| async move {
+            if requested_model != Some(candidate.deployment.as_str()) {
+                super::inference_policy::require(
+                    authorization_state,
+                    sandbox_name,
+                    &format!("inference:responses:{}", candidate.deployment),
+                    digest,
+                )
+                .await?;
+            }
+            tracing::info!(
+                target: "inference.audit",
+                sandbox = %sandbox_name,
+                model = %candidate.deployment,
+                inference_policy_digest = digest,
+                decision = "allow",
+                gate = "forward",
+                "Responses API request"
+            );
+            Ok(())
+        },
     )
     .await
     {
@@ -383,6 +401,9 @@ async fn responses(
             response
         }
         Err(e) => {
+            if let Some(denied) = e.downcast_ref::<super::inference_policy::InferenceDenied>() {
+                return denied.clone().into_response();
+            }
             tracing::error!(sandbox = %sandbox_name, "Responses proxy error: {e:#}");
             if let Some(response) = crate::inference_budget::response::denial(&e) {
                 return response;

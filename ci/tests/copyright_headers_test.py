@@ -626,8 +626,22 @@ class HeaderTests(unittest.TestCase):
             self.assertEqual(result["status"], "covered-without-header")
             self.assertEqual(path.read_bytes(), body)
 
+    def test_build_tool_legal_coverage_preserves_bytes_without_exempting_neighbors(self):
+        name = "tools/headlamp-plugin/build-tool/LICENSE.upstream"
+        body = b"Original upstream legal text\n"
+        path = self.write(name, body)
+        result, = headers.process(self.root, [name], self.policy, apply=True)
+        self.assertEqual(result["category"], "legal")
+        self.assertEqual(result["status"], "covered-without-header")
+        self.assertEqual(path.read_bytes(), body)
+        with self.assertRaises(headers.CoverageError):
+            headers.classification("tools/headlamp-plugin/build-tool/unreviewed.upstream", self.policy)
+        for suffix in ("prepare.py", "checks.node.mjs", "README.md"):
+            self.assertEqual(headers.classification("tools/headlamp-plugin/build-tool/" + suffix, self.policy)["category"], "header")
+
     def test_packaged_upstream_inputs_have_only_exact_coverage(self):
         names = (
+            "tools/headlamp-plugin/build-tool/headlamp-plugin-0.13.1-kars.tgz",
             "bridge/idp/patches/0001-refresh-storage-deadlock.patch",
             "deploy/helm/kars/charts/kube-prometheus-stack-85.3.3.tgz",
             "runtimes/wheels/amd64/agent_control_specification-0.4.0b0-cp311-abi3-linux_x86_64.whl",

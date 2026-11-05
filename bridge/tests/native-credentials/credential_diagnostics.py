@@ -42,6 +42,69 @@ def condition_category(message):
     return CATEGORIES.get(message, "unclassified")
 
 
+NAMESPACE_CONDITIONS = {
+    "NamespaceDeletionDiscoveryFailure": {"DiscoveryFailed", "ResourcesDiscovered"},
+    "NamespaceDeletionGroupVersionParsingFailure": {"GroupVersionParsingFailed", "ParsedGroupVersions"},
+    "NamespaceDeletionContentFailure": {"ContentDeletionFailed", "ContentDeleted"},
+    "NamespaceContentRemaining": {"SomeResourcesRemain", "ContentRemoved"},
+    "NamespaceFinalizersRemaining": {"SomeFinalizersRemain", "ContentHasNoFinalizers"},
+}
+NAMESPACE_FINALIZERS = {"kubernetes", "kars.azure.com/namespace-cleanup"}
+
+
+def namespace_finalizers(values):
+    if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
+        raise TypeError("Malformed finalizer metadata")
+    return {"known": sorted(set(values) & NAMESPACE_FINALIZERS),
+            "otherCount": sum(value not in NAMESPACE_FINALIZERS for value in values)}
+
+
+def namespace_retirement(setup):
+    """Failure-only lifecycle facts, including orphaned native runtime namespaces."""
+    try:
+        objects = setup.admin.get("/api/v1/namespaces")["items"]
+        if not isinstance(objects, list):
+            raise TypeError("Malformed namespace list")
+        selected = []
+        for item in objects:
+            meta = item["metadata"]
+            name = meta["name"]
+            annotations = meta.get("annotations") or {}
+            if name.startswith("kars-native-") or "kars.azure.com/sandbox-name" in annotations:
+                selected.append(item)
+        selected.sort(key=lambda item: item["metadata"]["name"])
+        namespaces = []
+        for item in selected[:64]:
+            meta = item["metadata"]
+            if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", meta["name"]) or not re.fullmatch(
+                r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}", meta["uid"],
+            ):
+                raise TypeError("Malformed namespace identity")
+            status = item.get("status") or {}
+            conditions = status.get("conditions") or []
+            phase = status.get("phase")
+            namespaces.append({
+                "name": meta["name"], "uid": meta["uid"],
+                "deleting": meta.get("deletionTimestamp") is not None,
+                "phase": phase if phase in ("Active", "Terminating") else "OtherOrAbsent",
+                "metadataFinalizers": namespace_finalizers(meta.get("finalizers", [])),
+                "specFinalizers": namespace_finalizers((item.get("spec") or {}).get("finalizers", [])),
+                "conditions": [{
+                    "type": condition["type"] if condition.get("type") in NAMESPACE_CONDITIONS else "OtherOrAbsent",
+                    "status": condition["status"] if condition.get("status") in ("True", "False", "Unknown") else "OtherOrAbsent",
+                    "reason": condition["reason"] if condition.get("reason") in NAMESPACE_CONDITIONS.get(
+                        condition.get("type"), set()) else "OtherOrAbsent",
+                } for condition in conditions[:16]],
+                "conditionsTruncated": len(conditions) > 16,
+            })
+        return {"available": True, "diagnosticOnly": True, "namespaces": namespaces,
+                "truncated": len(selected) > 64}
+    except (KeyError, TypeError, AttributeError):
+        return {"available": False, "diagnosticOnly": True, "category": "malformed-metadata"}
+    except Exception:
+        return {"available": False, "diagnosticOnly": True, "category": "api-unavailable"}
+
+
 def runtime_scope(setup, sandbox):
     try:
         meta = sandbox["metadata"]

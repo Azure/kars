@@ -29,6 +29,9 @@ mod denial_tests;
 #[path = "content_filter_tests.rs"]
 mod content_filter_tests;
 
+#[path = "responses_policy_tests.rs"]
+mod responses_policy_tests;
+
 #[tokio::test]
 async fn responses_contract_routing_matches_current_exact_route_without_reserving() {
     for operation in [Operation::ChatCompletions, Operation::Responses] {

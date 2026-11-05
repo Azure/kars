@@ -1134,6 +1134,8 @@ jobs:
                 crate=inference-router
               fi
               cp "$source/$crate/benches/baselines.json" "bench-evidence/$revision-$component-policy.json"
+              export CRITERION_HOME="$GITHUB_WORKSPACE/bench-evidence/$revision-$component-criterion"
+              mkdir "$CRITERION_HOME"
               (cd "$source" && cargo bench --locked --package "$package" --bench "$bench" \
                 --config 'profile.bench.package.kars-controller.codegen-units=16' \
                 -- --save-baseline "$revision" --output-format bencher) 2>&1 \
@@ -1146,7 +1148,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 ci/bench_regression.py bench-evidence/baseline-controller-policy.json \
-            bench-evidence/baseline-controller.txt bench-evidence/candidate-controller.txt \
+            bench-evidence/baseline-controller-criterion bench-evidence/candidate-controller-criterion \
             2>&1 | tee bench-evidence/comparison-controller.txt
       - name: Compare router on the same runner
         if: ${{ !cancelled() && steps.measure.outcome == 'success' }}
@@ -1154,7 +1156,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 ci/bench_regression.py bench-evidence/baseline-router-policy.json \
-            bench-evidence/baseline-router.txt bench-evidence/candidate-router.txt \
+            bench-evidence/baseline-router-criterion bench-evidence/candidate-router-criterion \
             2>&1 | tee bench-evidence/comparison-router.txt
       - name: Retain benchmark evidence, including failures
         if: always()

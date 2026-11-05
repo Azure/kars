@@ -8,6 +8,7 @@ import io
 import json
 from pathlib import Path
 import subprocess
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -153,7 +154,8 @@ class ComparisonTests(unittest.TestCase):
     def test_no_measurements_missing_extra_and_nonpositive_fail_closed(self):
         valid = {"group/bench": 100}
         for invalid in ({}, {"other": 100}, {**valid, "extra": 100},
-                        {"group/bench": 0}, {"group/bench": -1}):
+                        *({"group/bench": value} for value in
+                          (0, -1, True, None, "1", float("nan"), float("inf"), float("-inf")))):
             for baseline, candidate in ((valid, invalid), (invalid, valid)):
                 with self.subTest(baseline=baseline, candidate=candidate), self.assertRaises(ValueError):
                     self.compare(baseline, candidate)
@@ -164,25 +166,68 @@ class ComparisonTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.compare({"group/bench": 100}, {"group/bench": 100}, policy)
 
-    def test_parse_bencher_and_duplicates(self):
-        line = "test group/bench ... bench:       4,615 ns/iter (+/- 21)"
-        self.assertEqual(gate.parse_bencher("compiler output\n" + line), {"group/bench": 4615})
-        with self.assertRaises(ValueError):
-            gate.parse_bencher(line + "\n" + line)
+    def test_subnanosecond_measurements_keep_the_same_threshold(self):
+        self.assertEqual(self.compare({"group/bench": 0.4}, {"group/bench": 0.5}), 0)
+        self.assertEqual(self.compare({"group/bench": 0.4}, {"group/bench": 0.501}), 1)
+
+    def write_estimate(self, directory, name="group/bench", value=0.456789):
+        directory.mkdir(parents=True)
+        (directory / "benchmark.json").write_text(json.dumps({"full_id": name}))
+        (directory / "estimates.json").write_text(json.dumps({
+            "median": {"point_estimate": value}, "mean": {"point_estimate": 99}}))
+
+    def test_reads_full_precision_medians_and_ignores_saved_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.write_estimate(root / "group/bench/new")
+            self.write_estimate(root / "group/bench/baseline", value=99)
+            self.assertEqual(gate.read_estimates(root), {"group/bench": 0.456789})
+            self.write_estimate(root / "duplicate/new")
+            with self.assertRaisesRegex(ValueError, "duplicate measurement"):
+                gate.read_estimates(root)
+
+    def test_missing_malformed_and_empty_estimates_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with self.assertRaises(ValueError):
+                gate.read_estimates(root / "missing")
+            with self.assertRaises(ValueError):
+                self.compare(gate.read_estimates(root), {"group/bench": 1})
+            current = root / "group/bench/new"
+            self.write_estimate(current)
+            for bad in ({}, {"median": {}}, {"median": {"point_estimate": "0.5"}}):
+                (current / "estimates.json").write_text(json.dumps(bad))
+                with self.assertRaises((ValueError, KeyError)):
+                    self.compare(gate.read_estimates(root), {"group/bench": 1})
+            (current / "estimates.json").unlink()
+            with self.assertRaises(OSError):
+                gate.read_estimates(root)
 
     def test_cli_returns_regression_and_invalid_input_failures(self):
-        line = "test group/bench ... bench: {} ns/iter (+/- 1)"
-        for candidate, expected in ((125, 0), (126, 1)):
-            with patch.object(Path, "read_text", side_effect=[json.dumps(POLICY), line.format(100),
-                                                            line.format(candidate)]), \
-                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                self.assertEqual(gate.main(["bench_regression.py", "policy", "base", "candidate"]), expected)
+        for candidate, expected in ((0.5, 0), (0.501, 1)):
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "policy.json").write_text(json.dumps(POLICY))
+                self.write_estimate(root / "base/group/bench/new", value=0.4)
+                self.write_estimate(root / "candidate/group/bench/new", value=candidate)
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(gate.main(["bench_regression.py", str(root / "policy.json"),
+                                               str(root / "base"), str(root / "candidate")]), expected)
         for error in (OSError("missing log"), ValueError("malformed policy")):
             with patch.object(Path, "read_text", side_effect=error), contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(gate.main(["bench_regression.py", "policy", "base", "candidate"]), 2)
         with patch.object(gate, "check_harness", side_effect=subprocess.CalledProcessError(128, ["git"])), \
                 contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(gate.main(["bench_regression.py", "--check-harness", "base", BASE]), 2)
+
+    def test_workflow_isolates_and_retains_full_precision_outputs(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        self.assertIn('export CRITERION_HOME="$GITHUB_WORKSPACE/bench-evidence/$revision-$component-criterion"', workflow)
+        self.assertIn('mkdir "$CRITERION_HOME"', workflow)
+        self.assertNotIn('mkdir -p "$CRITERION_HOME"', workflow)
+        for component in ("controller", "router"):
+            self.assertIn(f"bench-evidence/baseline-{component}-criterion bench-evidence/candidate-{component}-criterion", workflow)
+        self.assertIn("path: bench-evidence/", workflow)
 
     def test_hosted_measurement_pipeline_propagates_cargo_failure(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()

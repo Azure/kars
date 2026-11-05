@@ -35,13 +35,18 @@ go mod edit \
     -require=golang.org/x/net@v0.62.0 \
     -require=golang.org/x/text@v0.39.0 \
     -require=google.golang.org/grpc@v1.83.2 \
-    -require=helm.sh/helm/v3@v3.20.2 \
+    -require=helm.sh/helm/v3@v3.21.4 \
     -require=oras.land/oras-go/v2@v2.6.2
+go list -mod=mod -deps ./cmd/ > "$build/headlamp.deps.txt"
+if grep -Eq '^golang.org/x/crypto/openpgp(/|$)' "$build/headlamp.deps.txt"; then
+    echo "Deprecated OpenPGP remains in the Headlamp server dependency graph" >&2
+    exit 1
+fi
 go build -mod=mod -trimpath -buildvcs=false -p=2 \
     -ldflags="-s -w -X github.com/kubernetes-sigs/headlamp/backend/pkg/kubeconfig.Version=0.41.0" \
     -o "$build/headlamp-server" ./cmd/
 test "$("$build/headlamp-server" -version)" = "Headlamp 0.41.0 (linux/$(go env GOARCH))"
-go test -mod=mod -p=2 ./cmd ./pkg/config ./pkg/plugins ./pkg/kubeconfig ./pkg/helm ./pkg/telemetry
+go test -mod=mod -p=2 ./cmd ./pkg/config ./pkg/plugins ./pkg/kubeconfig ./pkg/helm ./pkg/telemetry helm.sh/helm/v3/pkg/provenance
 cp go.mod "$build/headlamp.go.mod"
 cp go.sum "$build/headlamp.go.sum"
 chmod 0555 "$build/headlamp-server"

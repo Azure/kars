@@ -1,0 +1,25 @@
+{
+  "name": "@kinvolk/headlamp-plugin",
+  "version": "0.13.1",
+  "url": "https://registry.npmjs.org/@kinvolk/headlamp-plugin/-/headlamp-plugin-0.13.1.tgz",
+  "integrity": "sha512-aoAGs5w8HIS43p3YBcjzkIWZZlh18b/e02d+r/rr6+99vc48vOd9tKAIBZMVg4j+cVzbPtL1+t1tDE/UdeHcWQ==",
+  "license": "Apache-2.0",
+  "replacements": {
+    "@rollup/plugin-inject": "5.0.5",
+    "buffer": "6.0.3",
+    "process": "0.11.10",
+    "stream-browserify": "3.0.0"
+  },
+  "sourceHashes": {
+    "package.json": "d6f1d6d9a901367a754e1f39b9970e7763ad47a581576dc0ae497d18ed3e6728",
+    "config/vite.config.mjs": "94979dfd2d1c5ab73cf33eb88f2d63a09bbd1378854562931a4cbf8e4fa751f3",
+    "bin/headlamp-plugin.js": "c6b5fcee7d0c6ab068636bc3a641039e4605cfe64557b11630622435998c08b2",
+    "config/.storybook/main.js": "1abeef770866a51f1811bdf9ca12b2f2d989daa39891091be6f77056ba3862b7",
+    "official-plugins/keda/test-files/deploy/authentication.yaml": "4fe94dccee740e8e5faadabe9ab930f010118b0469bce18da6b3de6cff504b4a"
+  },
+  "existingRequirements": {
+    "process": "^0.11.10"
+  },
+  "licenseUrl": "https://raw.githubusercontent.com/kubernetes-sigs/headlamp/066c5be9deb14b12bcef3485b531c64a84a2a219/LICENSE",
+  "licenseSha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+}

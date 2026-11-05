@@ -69,6 +69,50 @@ pub async fn check(state: &AppState, sandbox: &str, action: &str) -> InferenceDe
     }
 }
 
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("{0}")]
+pub(crate) struct InferenceDenied(String);
+
+impl axum::response::IntoResponse for InferenceDenied {
+    fn into_response(self) -> axum::response::Response {
+        (
+            axum::http::StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({
+                "error": {
+                    "message": format!("Blocked by governance policy: {}", self.0),
+                    "type": "policy_violation",
+                    "code": "policy_denied"
+                }
+            })),
+        )
+            .into_response()
+    }
+}
+
+pub(crate) async fn require(
+    state: &AppState,
+    sandbox: &str,
+    action: &str,
+    digest: &str,
+) -> Result<(), InferenceDenied> {
+    match check(state, sandbox, action).await {
+        InferenceDecision::Allow => Ok(()),
+        InferenceDecision::Deny(reason) => {
+            tracing::warn!(
+                target: "inference.audit",
+                sandbox,
+                action,
+                %reason,
+                inference_policy_digest = digest,
+                decision = "deny",
+                gate = "agt_policy",
+                "AGT policy DENIED inference"
+            );
+            Err(InferenceDenied(reason))
+        }
+    }
+}
+
 /// Map a [`PolicyError`] to a short reason string surfaced to the
 /// client. We deliberately do **not** echo the upstream error text —
 /// the message goes into a 403 response body and could leak

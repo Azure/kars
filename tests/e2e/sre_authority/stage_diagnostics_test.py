@@ -11,8 +11,8 @@ import types
 import unittest
 from unittest.mock import patch
 
-from .common import Harness
-from .stage_diagnostics import STAGES, collect_stage_workloads, last_stage, pod_facts
+from sre_authority.common import Harness
+from sre_authority.stage_diagnostics import STAGES, collect_stage_workloads, last_stage, pod_facts
 
 
 class StageDiagnosticsTests(unittest.TestCase):

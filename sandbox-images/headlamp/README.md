@@ -222,18 +222,19 @@ because they appeared in a scan. `build-backend.sh` now requests:
 | --- | --- | --- |
 | containerd 1.7.33 | CVE-2026-53493, CVE-2026-53495, CVE-2026-95838 | 1.7.36 |
 | OTLP trace, gRPC and HTTP exporters 1.42.0; OTel SDK 1.44.0 | CVE-2026-81870; HTTP also CVE-2026-39882 | All four modules 1.45.0 |
-| x/crypto 0.57.0 | GO-2026-5932 (UNKNOWN) | 0.58.1-0.20261009181718-2f1f834330b2 |
+| x/crypto/openpgp 0.1.0-deprecated (H21) | GO-2026-5932 (UNKNOWN) | Helm 3.21.4 → ProtonMail/go-crypto 1.4.1 |
 | x/net 0.60.0 | CVE-2026-78661, CVE-2026-97045 (UNKNOWN) | 0.62.0 |
-| Helm 3.18.5 | CVE-2026-35206 | 3.20.2 |
+| Helm 3.18.5 | CVE-2026-35206 | 3.21.4 (also repairs the H21 OpenPGP consumer) |
 
-These module versions were verified against the public Go proxy. The crypto
-pseudo-version is the published advisory fix, not a fabricated release. Their
-Go requirements fit the existing 1.27.3 builder. Helm's upgrade also raises the
-Kubernetes client module floor from 0.33 to 0.35: that compatibility change must
-pass the hosted build/tests, not be inferred from version ordering. The maintained
-backend test command now includes `./pkg/helm ./pkg/telemetry` alongside its
-existing packages. Go's normal minimum-version selection and checksum verification
-remain enabled; no replacement module or compatibility stub is introduced.
+These module versions were verified against the public Go proxy. The main
+x/crypto pseudo-version remains pinned, but did not fix the separately versioned
+deprecated OpenPGP package (see H21 below). The selected modules' Go requirements
+fit the existing 1.27.3 builder. Helm 3.21.4 raises the Kubernetes client module
+floor to 0.36.2 (H21 used 0.35): this compatibility change must pass hosted
+build/tests, not be inferred from version ordering. The maintained backend test
+command includes `./pkg/helm ./pkg/telemetry helm.sh/helm/v3/pkg/provenance`
+alongside its existing packages. Go's normal minimum-version selection and checksum
+verification remain enabled; no replacement module or compatibility stub is introduced.
 
 ### Plugin build tool: patch actual retained Go examples
 
@@ -275,6 +276,55 @@ local archive is copied before the plugin stage's `npm ci`. This build-only path
 is not copied into the shipping image and remains subject to all-dev/all-severity
 scans. Packaged constructor and merge tests pass locally; clean hosted installation,
 TypeScript/Storybook compilation, fresh scans and browser acceptance remain required.
+
+### H21 OpenPGP and plugin polyfill follow-up
+
+The retained H21 artifact (SHA-256
+`8c034bbc0a530db02c6f3304e5f19c7c509b35a7456d17a68f3f3177ff92bc38`)
+reported two remaining findings. Its plugin lock reported **CVE-2025-14505,
+LOW, elliptic 6.6.1**, without a fixed release. The actual configured browser
+polyfills are only process/buffer/stream. The
+[attributable build-tool patch](../../tools/headlamp-plugin/build-tool/README.md)
+removes the unneeded crypto dependency graph using the existing canonical frontend
+polyfill implementation. The CLI, Storybook, TypeScript checks and RabbitMQ example
+repair remain. This is build-tool code, not a node_modules tree shipped in AL3.
+
+The **shipping** `headlamp/headlamp-server` binary reported **GO-2026-5932,
+UNKNOWN, golang.org/x/crypto/openpgp v0.1.0-deprecated**, with no fixed release.
+H21 logs show Go fetching that separate deprecated module after the main x/crypto
+upgrade. Headlamp's real Helm chart operations reach Helm's chart downloader and
+`pkg/provenance`; Helm 3.20.2 still imports the old openpgp, clearsign and packet
+packages. Removing provenance/signature verification would break real behavior.
+
+Helm **3.21.4** is the earliest inspected 3.21 patch with the maintained upstream
+ProtonMail migration (3.21.0–3.21.3 still import the deprecated package). Its
+immutable upstream commit is `813176c51bb5c181dbbd7901298ddcc104cd3417` and its
+module requires `github.com/ProtonMail/go-crypto v1.4.1`, Go 1.26, and Kubernetes
+clients 0.36.2. Inspection of the complete 1.4 MB upstream module found no old
+OpenPGP imports in Go files. Signing, verification, error paths and mixed-keyring
+RSA tests remain upstream. The public OSV version query returned no advisories
+for ProtonMail/go-crypto 1.4.1. Its own lower CIRCL requirement (1.6.2) is affected
+by GO-2026-4550 / GHSA-q9hv-hpm4-hj6x, but the selected Helm module explicitly
+requires **CIRCL 1.6.3**, the published fix, so normal Go minimum-version selection
+already avoids it. The OSV query for 1.6.3 returned no advisories. These metadata
+checks are not replacements for the hosted image scan.
+
+`build-backend.sh` now selects this upstream Helm release, rejects any deprecated
+OpenPGP import in `go list -deps ./cmd/` before building, and runs the real upstream
+`helm.sh/helm/v3/pkg/provenance` tests alongside existing Headlamp tests. It writes
+`headlamp.deps.txt` to the build directory for optional retention. No import alias,
+module replacement, fake version, cryptographic stub, skipped signature check,
+scanner ignore or production-security bypass is used.
+
+Local verification: **32 focused Node tests passed, zero skipped**, including the
+actual patched Vite configuration import, real canonical Rollup/package behavior,
+existing checker constructor/merge regressions and example patch tests. See the
+build-tool README for the exact archive-mode command and reproduction contract.
+No Go compilation, full npm install, container, image build or browser acceptance
+was performed locally. **Helm/Kubernetes compatibility, real signing tests,
+clean installation, plugin/Storybook/compiler builds, all-severity scans and fresh
+browser journeys still require hosted proof.** The prior H21 clean frontend
+reports do not establish acceptance of this new candidate.
 
 ### Coverage gap and remaining qualification
 

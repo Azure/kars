@@ -29,6 +29,7 @@ ARG NPM_CONFIG_REGISTRY=https://registry.npmjs.org
 WORKDIR /build
 COPY tools/headlamp-plugin/package.json tools/headlamp-plugin/package-lock.json tools/headlamp-plugin/patch-build-tool.mjs ./
 COPY tools/headlamp-plugin/checker/fork-ts-checker-webpack-plugin-8.0.0-kars.tgz ./checker/
+COPY tools/headlamp-plugin/build-tool/headlamp-plugin-0.13.1-kars.tgz ./build-tool/
 RUN npm ci --no-audit --no-fund --registry="${NPM_CONFIG_REGISTRY}"
 COPY tools/headlamp-plugin/tsconfig.json ./
 COPY tools/headlamp-plugin/src ./src
@@ -47,7 +48,7 @@ COPY LICENSE /usr/share/licenses/kars/LICENSE
 ADD --chmod=0444 --checksum=sha256:cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30 https://raw.githubusercontent.com/kubernetes-sigs/headlamp/v0.41.0/LICENSE /usr/share/licenses/headlamp/LICENSE
 LABEL org.opencontainers.image.title="Kars Headlamp" \
       org.opencontainers.image.description="Headlamp v0.41.0 and the Kars plugin on Azure Linux 3 distroless" \
-      org.kars.headlamp.backend-patch="go1.27.3-dependencies.4-static-cache.1-oidc-navigation.1" \
+      org.kars.headlamp.backend-patch="go1.27.3-dependencies.5-static-cache.1-oidc-navigation.1" \
       org.kars.headlamp.frontend-patch="npm-runtime-dependencies.3" \
       org.opencontainers.image.source="https://github.com/Azure/kars" \
       org.opencontainers.image.licenses="Apache-2.0 AND MIT"
