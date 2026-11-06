@@ -218,23 +218,6 @@ async fn reconcile_inner(
         }
     };
 
-    // The label selects SRE behavior, but never grants it. The cluster-scoped
-    // registration and live UID/namespace checks below authorize that behavior.
-    let is_sre_sandbox = sandbox
-        .metadata
-        .labels
-        .as_ref()
-        .and_then(|l| l.get("kars.azure.com/role"))
-        .map(|v| v == "sre")
-        .unwrap_or(false);
-
-    // The router's apiserver egress uses the cluster's own Service address.
-    let apiserver_ip =
-        std::env::var("KUBERNETES_SERVICE_HOST").unwrap_or_else(|_| "10.96.0.1".to_string());
-    let apiserver_port = std::env::var("KUBERNETES_SERVICE_PORT_HTTPS")
-        .or_else(|_| std::env::var("KUBERNETES_SERVICE_PORT"))
-        .unwrap_or_else(|_| "443".to_string());
-
     tracing::info!("Reconciling KarsSandbox {name}");
 
     // ── Finalizer: cascading namespace deletion ──────────────────────────
@@ -371,6 +354,67 @@ async fn reconcile_inner(
         &ctx.sandbox_image,
     )
     .await?;
+
+    // Keep the namespace lock through provisioning, but not its large state machine
+    // in this preflight/error poll frame. The factory also isolates construction.
+    reconcile_provisioning(
+        sandbox,
+        ctx,
+        owned_namespace,
+        witness_pending,
+        sre_projection,
+        credentials,
+    )
+    .await
+}
+
+fn reconcile_provisioning(
+    sandbox: Arc<KarsSandbox>,
+    ctx: Arc<Context>,
+    owned_namespace: Option<Namespace>,
+    witness_pending: bool,
+    sre_projection: Option<crate::sre_authority::pod::Projection>,
+    credentials: credential_sources::Mode,
+) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<Action, ReconcileError>> + Send>> {
+    Box::pin(reconcile_provisioning_inner(
+        sandbox,
+        ctx,
+        owned_namespace,
+        witness_pending,
+        sre_projection,
+        credentials,
+    ))
+}
+
+async fn reconcile_provisioning_inner(
+    sandbox: Arc<KarsSandbox>,
+    ctx: Arc<Context>,
+    owned_namespace: Option<Namespace>,
+    witness_pending: bool,
+    sre_projection: Option<crate::sre_authority::pod::Projection>,
+    credentials: credential_sources::Mode,
+) -> Result<Action, ReconcileError> {
+    let name = sandbox.name_any();
+    let sandbox_ns = format!("kars-{name}");
+    let client = &ctx.client;
+
+    // The label selects SRE behavior, but never grants it. The cluster-scoped
+    // registration and live UID/namespace checks above authorize that behavior.
+    let is_sre_sandbox = sandbox
+        .metadata
+        .labels
+        .as_ref()
+        .and_then(|l| l.get("kars.azure.com/role"))
+        .map(|v| v == "sre")
+        .unwrap_or(false);
+
+    // The router's apiserver egress uses the cluster's own Service address.
+    let apiserver_ip =
+        std::env::var("KUBERNETES_SERVICE_HOST").unwrap_or_else(|_| "10.96.0.1".to_string());
+    let apiserver_port = std::env::var("KUBERNETES_SERVICE_PORT_HTTPS")
+        .or_else(|_| std::env::var("KUBERNETES_SERVICE_PORT"))
+        .unwrap_or_else(|_| "443".to_string());
+
     let skill_catalog = match skills::project(
         client,
         &sandbox,

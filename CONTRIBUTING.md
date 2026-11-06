@@ -195,6 +195,9 @@ Nothing is published to a registry by these preparation steps.
 
 Only the disposable `kars-e2e` fixture uses `Never` pull policies, carried from
 historical Helm installation through authority staging and the final upgrade.
+The final staged upgrade resets chart defaults then reuses the saved release
+values before applying explicit fixture overrides, preserving its installed SRE
+provider/model and reviewed authority configuration.
 Production image references, `Always` policies and migration deadlines are
 unchanged. The full historical journey explicitly requires the generated
 `.e2e-addon-values.json`; missing values fail before installation. Preparation

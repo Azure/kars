@@ -98,6 +98,28 @@ pub(crate) async fn reconcile_rebind_projection_failure(client: Client, sandbox:
     let mut ctx = context(client);
     Arc::get_mut(&mut ctx).unwrap().sandbox_image = "openclaw-sandbox:latest".into();
     let sandbox = Arc::new(sandbox);
+    fn future_size<F: std::future::Future>(_: impl FnOnce() -> F) -> usize {
+        std::mem::size_of::<F>()
+    }
+    let preflight_size =
+        future_size(|| crate::reconciler::reconcile_inner(sandbox.clone(), ctx.clone()));
+    let provisioning_size = future_size(|| {
+        crate::reconciler::reconcile_provisioning(
+            sandbox.clone(),
+            ctx.clone(),
+            None,
+            false,
+            None,
+            crate::reconciler::credential_sources::Mode::Legacy,
+        )
+    });
+    assert!(
+        provisioning_size <= 1024,
+        "provisioning handle embeds {provisioning_size} bytes"
+    );
+    eprintln!(
+        "native-rebind-regression: sandbox-future-bytes preflight={preflight_size} provisioning-handle={provisioning_size}"
+    );
     let future = reconcile(sandbox.clone(), ctx.clone());
     let measured = crate::metrics::observe_reconcile("KarsSandbox", future);
     eprintln!("native-rebind-regression: sandbox-parent-poll");

@@ -196,8 +196,9 @@ install_crds() {
     if [ "$SRE_LEGACY_PREPARED" = "1" ]; then
         # Legacy fixtures predate the new admission policies. Explicit CLI
         # authority staging already installed those APIs with controller=0;
-        # start the qualified controller while retaining the reviewed shapes.
-        extra_set_args+=(--set sre.enabled=true --set sre.authorityStage=true
+        # start the qualified controller while retaining the reviewed shapes
+        # and saved SRE provider/model instead of resetting them with --set.
+        extra_set_args+=(--reset-then-reuse-values --set sre.enabled=true --set sre.authorityStage=true
             --set-string runtimes.hermes.image=kars-sandbox-e2e:dev)
         # Consumer policy acknowledgements cannot become Ready before explicit
         # enrollment below. Wait for built-ins here; migration remains fatal.

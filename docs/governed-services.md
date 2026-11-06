@@ -75,7 +75,14 @@ with injected Sandbox resourceVersion drift. It checks the exact rejection,
 error-policy retry, workload pause, projection revocation and unchanged owned
 identities before retrying direct projection. Successful parent reconciliation
 beyond credential projection and live watcher concurrency remain outside this
-regression. No worker stacks, readiness deadlines or security policies change.
+regression. H29 reproduced a default-worker stack overflow after
+`sandbox-parent-poll`, before `sandbox-parent-returned`. The parent now keeps
+post-credential provisioning behind a boxed continuation constructed by a
+separate synchronous factory. Credential rejection therefore does not construct
+that continuation, while successful provisioning retains the parent's Namespace
+lock and authorized inputs. The same hosted regression must prove the repair;
+fixed numeric future-size output measures layout, not the overflowing instruction.
+No worker stacks, readiness deadlines or security policies change.
 Target-recheck diagnostics distinguish bundle reference, Task authority,
 metadata/spec, execution-transition and materialized-caller rejection from the
 strict pre-write target UID/resourceVersion fence. Late-private controller

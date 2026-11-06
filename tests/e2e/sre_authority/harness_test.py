@@ -524,6 +524,40 @@ class HarnessTests(unittest.TestCase):
         from sre_authority.common import POLICIES
         self.assertIn("no-legacy-tokens", POLICIES)
 
+    def test_final_upgrade_preserves_saved_values_only_for_prepared_legacy_release(self):
+        root = Path(__file__).resolve().parents[3]
+        source = (root / "tests/e2e/run.sh").read_text()
+        install = "install_crds() {" + source.split("install_crds() {", 1)[1].split("\nteardown()", 1)[0]
+        script = '''
+set -eu
+ROOT_DIR="$1"
+SRE_LEGACY_PREPARED="$2"
+source "$ROOT_DIR/tests/e2e/sre-authority.sh"
+info() { :; }
+helm() {
+    if [ "$1" = version ]; then printf '%s\\n' "$HELM_VERSION";
+    else printf '%s\\0' "$@"; fi
+}
+''' + install + '\nHELM_VERSION="$3"; install_crds\n'
+        for prepared in ("0", "1"):
+            for version, wait in (("v3.16.4", "--wait"), ("v4.2.4", "--wait=legacy")):
+                with self.subTest(prepared=prepared, version=version):
+                    result = subprocess.run(
+                        ["bash", "-c", script, "saved-helm-values-test", str(root), prepared, version],
+                        capture_output=True, check=True, timeout=5)
+                    args = result.stdout.decode().rstrip("\0").split("\0")
+                    self.assertEqual(args[:3], ["upgrade", "--install", "kars"])
+                    self.assertEqual(args.count("--reset-then-reuse-values"), int(prepared))
+                    self.assertNotIn("--reset-values", args)
+                    self.assertNotIn("--reuse-values", args)
+                    self.assertNotIn("sre.enabled=false", args)
+                    self.assertEqual("sre.authorityStage=true" in args, prepared == "1")
+                    self.assertIn(wait if prepared == "1" else "--wait", args)
+                    self.assertEqual(args[args.index("--timeout") + 1], "5m")
+                    self.assertEqual(args[args.index("--values") + 1], str(root / ".e2e-addon-values.json"))
+                    self.assertIn("controller.replicas=1", args)
+                    self.assertIn("inferenceRouter.image.pullPolicy=Never", args)
+
     def test_staged_setup_waits_for_builtins_without_skipping_migration_readiness(self):
         root = Path(__file__).resolve().parents[3]
         helper = root / "tests/e2e/sre-authority.sh"

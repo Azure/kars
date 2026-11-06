@@ -75,6 +75,40 @@ class NativeProfileRegressionTests(unittest.TestCase):
         self.assertLess(helper.index("measured.await"), offsets[1])
         self.assertLess(helper.index("error_policy(sandbox"), offsets[2])
 
+    def test_provisioning_constructor_is_outside_parent_error_poll(self):
+        source = (ROOT / "controller/src/reconciler/mod.rs").read_text()
+        parent = source.split("async fn reconcile_inner(", 1)[1].split("\nfn reconcile_provisioning(", 1)[0]
+        factory = source.split("\nfn reconcile_provisioning(", 1)[1].split("\nasync fn reconcile_provisioning_inner(", 1)[0]
+        provisioning = source.split("\nasync fn reconcile_provisioning_inner(", 1)[1].split("\n/// How long to wait", 1)[0]
+        self.assertIn("let _namespace_lock = namespace_ownership::lock(&name).await;", parent)
+        self.assertIn("namespace_ownership::ensure(client, &sandbox).await", parent)
+        self.assertIn("crate::sre_authority::pod::authorize(", parent)
+        self.assertIn("let credentials = credential_sources::reconcile(", parent)
+        self.assertIn(".await?;\n\n    // Keep the namespace lock through provisioning", parent)
+        self.assertLess(parent.index("credential_sources::reconcile("), parent.index("\n    reconcile_provisioning("))
+        self.assertNotIn("drop(_namespace_lock)", parent)
+        self.assertNotIn("skills::project(", parent)
+        self.assertNotIn("Box::pin(reconcile_provisioning_inner(", parent)
+        self.assertIn("std::pin::Pin<Box<impl std::future::Future<Output = Result<Action, ReconcileError>> + Send>>", factory)
+        self.assertIn("Box::pin(reconcile_provisioning_inner(", factory)
+        self.assertNotIn(".await", factory)
+        for argument in ("sandbox", "ctx", "owned_namespace", "witness_pending", "sre_projection", "credentials"):
+            self.assertIn("        " + argument + ",", parent)
+            self.assertIn("        " + argument + ",", factory)
+        self.assertIn("let skill_catalog = match skills::project(", provisioning)
+        self.assertIn("credential_sources::refresh_interval(&sandbox)", provisioning)
+        self.assertNotIn("namespace_ownership::lock(", provisioning)
+
+    def test_parent_probe_measures_future_types_without_constructing_continuation(self):
+        source = (ROOT / "controller/src/reconciler/namespace_ownership_finalization_tests.rs").read_text()
+        helper = source.split("pub(crate) async fn reconcile_rebind_projection_failure(", 1)[1].split("\nfn memory_account_path", 1)[0]
+        self.assertIn("fn future_size<F: std::future::Future>(_: impl FnOnce() -> F) -> usize", helper)
+        self.assertIn("std::mem::size_of::<F>()", helper)
+        self.assertIn("let provisioning_size = future_size(|| {", helper)
+        self.assertIn("crate::reconciler::reconcile_provisioning(", helper)
+        self.assertIn("provisioning_size <= 1024", helper)
+        self.assertLess(helper.index("sandbox-future-bytes"), helper.index("sandbox-parent-poll"))
+
     def test_parent_probe_is_registered_only_for_tests(self):
         source = (ROOT / "controller/src/reconciler/namespace_ownership.rs").read_text()
         self.assertIn('#[cfg(test)]\n#[path = "namespace_ownership_finalization_tests.rs"]\npub(crate) mod finalization_tests;', source)
