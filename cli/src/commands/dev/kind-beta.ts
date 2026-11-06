@@ -9,6 +9,8 @@ import * as path from "node:path";
 import { execa } from "execa";
 import { parse, parseAllDocuments, stringify } from "yaml";
 import { requireBundledAsset } from "../../lib/repo-assets.js";
+import { kindBetaKubeletTrust } from "../../lib/kind-kubelet-trust.js";
+export { kindBetaKubeletTrust } from "../../lib/kind-kubelet-trust.js";
 import type { ensureCluster, installLocalCoreChart } from "./local-k8s.js";
 import { prepareKindBetaInference } from "./kind-beta-inference.js";
 
@@ -241,34 +243,6 @@ export function kindBetaApiDestinations(service: ObjectMap, slices: ObjectMap) {
   }
   if (destinations.size > 8) throw new Error("Too many Kubernetes API destinations for the maintained schema hook");
   return [...destinations.values()];
-}
-
-export function kindBetaKubeletTrust(cluster: string, node: ObjectMap, container: ObjectMap, pem: string, now = Date.now()) {
-  const hostname = `${cluster}-control-plane`;
-  const addresses = node.status?.addresses ?? [];
-  const ips = addresses.filter((address: ObjectMap) => address.type === "InternalIP");
-  const names = addresses.filter((address: ObjectMap) => address.type === "Hostname");
-  if (node.metadata?.name !== hostname || !node.metadata?.uid || ips.length !== 1 || !isIPv4(ips[0].address)
-    || names.length !== 1 || names[0].address !== hostname
-    || container.Name?.replace(/^\//, "") !== hostname || container.State?.Running !== true
-    || container.Config?.Labels?.["io.x-k8s.kind.cluster"] !== cluster
-    || container.Config?.Labels?.["io.x-k8s.kind.role"] !== "control-plane"
-    || !Object.values(container.NetworkSettings?.Networks ?? {}).some((network: any) => network.IPAddress === ips[0].address)) {
-    throw new Error("Kind kubelet trust requires the owned control-plane container and matching node address");
-  }
-  const blocks = pem.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g) ?? [];
-  if (pem.length > 65536 || blocks.length !== 2 || blocks.reduce((rest, cert) => rest.replace(cert, ""), pem).trim()) {
-    throw new Error("Kind kubelet trust requires the public serving certificate and its CA only");
-  }
-  const [leaf, ca] = blocks.map(cert => new X509Certificate(cert));
-  if (leaf.ca || !ca.ca || !leaf.checkIssued(ca) || !leaf.verify(ca.publicKey)
-    || !ca.checkIssued(ca) || !ca.verify(ca.publicKey)
-    || leaf.checkHost(hostname, { subject: "never", wildcards: false }) !== hostname
-    || [leaf, ca].some(cert => now < Date.parse(cert.validFrom) || now >= Date.parse(cert.validTo))) {
-    throw new Error("Kind kubelet certificate chain, hostname or validity does not match this installation");
-  }
-  return { hostAliases: [{ ip: ips[0].address, hostnames: [hostname] }],
-    kubelet: { insecureTLS: false, preferredAddressTypes: ["Hostname"], caBundle: ca.toString() } };
 }
 
 export async function installKindBeta(plan: KindBetaPlan, tools: BetaTools, hooks: Hooks, execute: BetaExecute, directory: string) {

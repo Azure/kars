@@ -49,6 +49,12 @@ The Native runtime lane builds the maintained Azure Linux 3 metrics-server recip
 from its exact Core checkout and loads it into all Kind nodes before bootstrap.
 Only the Native fixture selects that local image with `pullPolicy: Never`; the
 Metrics API remains enabled with the chart's serving and kubelet TLS validation.
+Before Helm installation, Native verifies both owned Kind nodes' public kubelet
+certificate chains using the shared CLI verifier, then configures their trusted
+CA bundle, hostname addresses and host aliases. Node/container identities are
+rechecked after certificate collection; an unexpected node, changed identity or
+invalid certificate stops installation. Private keys are never read. This fixes
+the Kind IP-SAN mismatch without insecure TLS or changing production defaults.
 Bootstrap currently waits for the controller, not Metrics API readiness: loading
 an image is not proof of working discovery or successful Namespace retirement.
 Failure capture reuses the controller's Namespace/ServiceAccount/Deployment/
@@ -62,9 +68,14 @@ The Native lane also runs the existing default-worker Team rebind/projection
 regression after the runtime journey, including when that journey fails, using
 the same unoptimized Cargo profile as its controller binary. The regression is
 mandatory and does not replace live acceptance. Its fixed phase markers can
-localize a test failure, not establish the live overflowing frame: it covers
-Task reconciliation and direct Sandbox projection, not the full parent Sandbox
-poll path. No worker stacks, readiness deadlines or security policies change.
+localize a test failure, not establish the live overflowing frame. After Task
+reattestation/resume, the same fixture now polls the real parent Sandbox reconciler
+through its metrics wrapper, Namespace ownership and credential rejection path
+with injected Sandbox resourceVersion drift. It checks the exact rejection,
+error-policy retry, workload pause, projection revocation and unchanged owned
+identities before retrying direct projection. Successful parent reconciliation
+beyond credential projection and live watcher concurrency remain outside this
+regression. No worker stacks, readiness deadlines or security policies change.
 Target-recheck diagnostics distinguish bundle reference, Task authority,
 metadata/spec, execution-transition and materialized-caller rejection from the
 strict pre-write target UID/resourceVersion fence. Late-private controller

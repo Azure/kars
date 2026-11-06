@@ -94,6 +94,27 @@ fn context(client: Client) -> Arc<Context> {
     })
 }
 
+pub(crate) async fn reconcile_rebind_projection_failure(client: Client, sandbox: KarsSandbox) {
+    let mut ctx = context(client);
+    Arc::get_mut(&mut ctx).unwrap().sandbox_image = "openclaw-sandbox:latest".into();
+    let sandbox = Arc::new(sandbox);
+    let future = reconcile(sandbox.clone(), ctx.clone());
+    let measured = crate::metrics::observe_reconcile("KarsSandbox", future);
+    eprintln!("native-rebind-regression: sandbox-parent-poll");
+    let error = measured.await.unwrap_err();
+    eprintln!("native-rebind-regression: sandbox-parent-returned");
+    assert!(matches!(
+        &error,
+        crate::reconciler::ReconcileError::Credentials(
+            crate::reconciler::credential_sources::Error::Invalid(
+                "Sandbox identity/reference changed"
+            )
+        )
+    ));
+    assert_ne!(error_policy(sandbox, &error, ctx), Action::await_change());
+    eprintln!("native-rebind-regression: sandbox-parent-error-policy");
+}
+
 fn memory_account_path(sandbox_uid: &str) -> String {
     format!(
         "/api/v1/namespaces/kars-memory-system/serviceaccounts/kars-memory-{}",

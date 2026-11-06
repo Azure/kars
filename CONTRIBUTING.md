@@ -197,7 +197,12 @@ Only the disposable `kars-e2e` fixture uses `Never` pull policies, carried from
 historical Helm installation through authority staging and the final upgrade.
 Production image references, `Always` policies and migration deadlines are
 unchanged. The full historical journey explicitly requires the generated
-`.e2e-addon-values.json`; missing values fail before installation. The standalone
+`.e2e-addon-values.json`; missing values fail before installation. Preparation
+also verifies each fresh control-plane and worker Node against its owned Kind
+container and public kubelet certificate chain using the customer installer's
+shared verifier. The generated values carry both CAs and hostname mappings into
+metrics-server; no private keys are read and kubelet TLS verification stays on.
+Changed, foreign or missing nodes fail before those values are written. The standalone
 SRE schema job does not execute add-ons or consume that file: its historical
 install retains the archived defaults and its current upgrade is a server dry-run.
 Without `KARS_E2E_PREBUILT_ADDONS=1`, the harness builds these add-ons
@@ -205,7 +210,7 @@ locally; prefer hosted CI for these heavy builds. A built CLI and Helm are neede
 for the lightweight preparation/rendering regressions:
 
 ```bash
-node --test tests/e2e/addon-images.test.mjs tests/e2e/addon-chart.test.mjs
+node --test tests/e2e/addon-images.test.mjs tests/e2e/addon-chart.test.mjs tests/e2e/addon-kubelet-trust.test.mjs
 ```
 
 This infrastructure fixture still uses its existing sandbox stand-in; passing it

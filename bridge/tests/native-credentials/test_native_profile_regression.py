@@ -38,6 +38,47 @@ class NativeProfileRegressionTests(unittest.TestCase):
         for phase in ("resumed-projection", "projection-rv-drift-cleanup", "projection-retry", "projection-complete"):
             self.assertIn("native-rebind-regression: " + phase, source)
 
+    def test_rebound_fixture_routes_rv_drift_through_parent_before_retry(self):
+        source = (ROOT / "controller/src/kars_task_rebind/tests.rs").read_text()
+        branch = source.split('eprintln!("native-rebind-regression: projection-rv-drift-cleanup");', 1)[1]
+        branch = branch.split('eprintln!("native-rebind-regression: projection-retry");', 1)[0]
+        self.assertIn("namespace_ownership::finalization_tests::reconcile_rebind_projection_failure(", branch)
+        self.assertIn("ctx.client.clone(),", branch)
+        self.assertIn("sandbox.clone(),", branch)
+        self.assertNotIn("credential_sources::reconcile(", branch)
+        self.assertIn('("GET", SANDBOX)', branch)
+        self.assertIn('("GET", RUNTIME)', branch)
+        self.assertIn("namespace_ownership::FINALIZER", branch)
+        self.assertIn("assert!(!s.drift_sandbox_on_deployment_read)", branch)
+        self.assertIn('format!("{SANDBOX}/status")', branch)
+        self.assertIn('method != "DELETE"', branch)
+        self.assertIn('assert_eq!(s.objects[DEPLOYMENT]["spec"]["replicas"], 0)', branch)
+        self.assertIn('s.objects[projection]["data"]', branch)
+        self.assertIn("data.is_empty()", branch)
+
+    def test_parent_probe_reuses_real_reconcile_metrics_and_error_policy(self):
+        source = (ROOT / "controller/src/reconciler/namespace_ownership_finalization_tests.rs").read_text()
+        helper = source.split("pub(crate) async fn reconcile_rebind_projection_failure(", 1)[1].split("\nfn memory_account_path", 1)[0]
+        self.assertIn("let mut ctx = context(client);", helper)
+        self.assertIn("let future = reconcile(sandbox.clone(), ctx.clone());", helper)
+        self.assertIn('crate::metrics::observe_reconcile("KarsSandbox", future)', helper)
+        self.assertIn("let error = measured.await.unwrap_err();", helper)
+        self.assertIn("crate::reconciler::ReconcileError::Credentials(", helper)
+        self.assertIn('"Sandbox identity/reference changed"', helper)
+        self.assertIn("error_policy(sandbox, &error, ctx)", helper)
+        for forbidden in ("Box::pin", "tokio::spawn", "spawn_blocking", "stack_size", "timeout(", "set_var", "catch_unwind"):
+            self.assertNotIn(forbidden, helper)
+        phases = ("sandbox-parent-poll", "sandbox-parent-returned", "sandbox-parent-error-policy")
+        offsets = [helper.index("native-rebind-regression: " + phase) for phase in phases]
+        self.assertEqual(offsets, sorted(offsets))
+        self.assertLess(offsets[0], helper.index("measured.await"))
+        self.assertLess(helper.index("measured.await"), offsets[1])
+        self.assertLess(helper.index("error_policy(sandbox"), offsets[2])
+
+    def test_parent_probe_is_registered_only_for_tests(self):
+        source = (ROOT / "controller/src/reconciler/namespace_ownership.rs").read_text()
+        self.assertIn('#[cfg(test)]\n#[path = "namespace_ownership_finalization_tests.rs"]\npub(crate) mod finalization_tests;', source)
+
 
 if __name__ == "__main__":
     unittest.main()

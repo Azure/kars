@@ -19,6 +19,7 @@ from schema_preparation import prepare_schemas
 
 
 def install_core(setup):
+    metrics_trust = json.loads(command("node", "tests/native-credentials/metrics-trust.mjs"))
     namespace = setup.namespace(CORE)
     setup.admin.patch(f"/api/v1/namespaces/{CORE}", {
         "metadata": {"labels": {"app.kubernetes.io/managed-by": "Helm"},
@@ -41,6 +42,7 @@ def install_core(setup):
         },
         "inferenceRouter": {"image": loaded_image("kars-native-router")},
         "metricsServer": {
+            **metrics_trust,
             "enabled": True,
             "image": {"repository": "docker.io/library/kars-native-metrics-server",
                       "tag": "latest", "pullPolicy": "Never"},

@@ -412,8 +412,8 @@ async fn full_task_credential_rebind() {
             serde_json::from_value(s.objects[DEPLOYMENT].clone()).unwrap(),
         )
     };
-    // Exercise the independently watched Sandbox path on the same default worker:
-    // TaskConsumer bundle lookup, projection anchor, stale-RV cleanup, then retry.
+    // Keep successful projection as the control, then poll the actual parent Sandbox
+    // reconciler through namespace ownership and stale-RV cleanup on this worker.
     let projection = "/api/v1/namespaces/kars-run/secrets/run-credential-projection";
     eprintln!("native-rebind-regression: resumed-projection");
     crate::reconciler::credential_sources::reconcile(
@@ -431,20 +431,30 @@ async fn full_task_credential_rebind() {
     );
     state.lock().unwrap().drift_sandbox_on_deployment_read = true;
     eprintln!("native-rebind-regression: projection-rv-drift-cleanup");
-    let error = crate::reconciler::credential_sources::reconcile(
-        &ctx.client,
-        &sandbox,
-        Some(&namespace),
-        "openclaw-sandbox:latest",
+    let parent_call_start = state.lock().unwrap().calls.len();
+    crate::reconciler::namespace_ownership::finalization_tests::reconcile_rebind_projection_failure(
+        ctx.client.clone(),
+        sandbox.clone(),
     )
-    .await
-    .unwrap_err();
-    assert!(matches!(
-        error,
-        crate::reconciler::credential_sources::Error::Invalid("Sandbox identity/reference changed")
-    ));
+    .await;
     {
         let s = state.lock().unwrap();
+        let calls = &s.calls[parent_call_start..];
+        assert_eq!((&calls[0].0[..], &calls[0].1[..]), ("GET", SANDBOX));
+        assert_eq!((&calls[1].0[..], &calls[1].1[..]), ("GET", RUNTIME));
+        assert!(
+            s.objects[SANDBOX]["metadata"]["finalizers"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(crate::reconciler::namespace_ownership::FINALIZER))
+        );
+        assert!(!s.drift_sandbox_on_deployment_read);
+        assert!(
+            calls
+                .iter()
+                .any(|(method, path, _)| method == "PATCH" && path == &format!("{SANDBOX}/status"))
+        );
+        assert!(calls.iter().all(|(method, _, _)| method != "DELETE"));
         assert_eq!(s.objects[DEPLOYMENT]["spec"]["replicas"], 0);
         assert!(
             s.objects[projection]["data"]

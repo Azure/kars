@@ -623,4 +623,4 @@ mod tests;
 
 #[cfg(test)]
 #[path = "namespace_ownership_finalization_tests.rs"]
-mod finalization_tests;
+pub(crate) mod finalization_tests;
