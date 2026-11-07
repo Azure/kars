@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import struct
+import sys
 import runpy
 import re
 import tempfile
@@ -116,6 +117,13 @@ class ComputationTests(unittest.TestCase):
 
 
 class RuntimeTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        process_health = patch.object(witness, "PROCESS_HEALTH", Path(directory.name) / "process-health")
+        process_health.start()
+        self.addCleanup(process_health.stop)
+
     def test_core_owner_is_explicit_and_cannot_adopt_standalone_objects(self):
         for release in ("kars", witness.RELEASE):
             api = Api()
@@ -227,6 +235,57 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(result["coverage"], "partial")
             self.assertTrue(witness.HEALTH.exists())
 
+    def test_capture_rejects_unbounded_or_selector_injection_before_spawn(self):
+        with patch.object(witness.subprocess, "Popen") as spawn:
+            for invalid in [[], ["*"], ["!node-1"], ["node-1,node-2"], ["node-1", "node-1"], [None]]:
+                with self.subTest(nodes=invalid), self.assertRaisesRegex(witness.WitnessError, "scope_invalid"):
+                    witness.capture("image", 1, invalid, ["kars-demo"])
+            for invalid in [[], ["*"], ["!kars-demo"], ["kars-demo,kars-other"], ["kube-system"],
+                            ["kars-demo", "kars-demo"], [" kars-demo"], [None]]:
+                with self.subTest(namespaces=invalid), self.assertRaisesRegex(witness.WitnessError, "scope_invalid"):
+                    witness.capture("image", 1, ["node-1"], invalid)
+            spawn.assert_not_called()
+
+    def test_configured_node_scope_is_enforced_before_capture(self):
+        config = {"window_seconds": 15, "sandboxes": ["demo"], "dns_image": "dns", "tcp_image": "tcp"}
+        with patch.object(witness, "capture", return_value=[]) as capture:
+            for nodes in [[], ["other"], ["node-1", "other"], ["node-1", "node-1"]]:
+                with self.subTest(nodes=nodes), self.assertRaisesRegex(witness.WitnessError, "outside_configured_scope"):
+                    witness.sample(Api(), dict(config, nodes=nodes))
+            capture.assert_not_called()
+            result = witness.sample(Api(), dict(config, nodes=["node-1"]))
+            self.assertEqual(result["nodes_targeted"], ["node-1"])
+            self.assertEqual(capture.call_count, 2)
+            for call in capture.call_args_list:
+                self.assertEqual(call.args[2:], (["node-1"], ["kars-demo"]))
+
+    def test_cold_baseline_is_process_ready_but_not_qualified_and_publication_fenced(self):
+        api = Api()
+        publisher = witness.Publisher(api)
+        config = {"window_seconds": 15, "sandboxes": ["demo"], "dns_image": "dns", "tcp_image": "tcp"}
+        with tempfile.TemporaryDirectory() as directory, patch.object(witness, "HEALTH", Path(directory) / "health"):
+            with patch.object(witness, "declarations", side_effect=witness.WitnessError("api_http_404")), patch.object(witness, "capture") as capture:
+                report = witness.run_cycle(api, publisher, config, 1, "a" * 64)
+                capture.assert_not_called()
+            self.assertEqual((report["status"], report["coverage"], report["sandboxes"]), ("unavailable", "partial", []))
+            with patch.object(witness.sys, "argv", ["witness", "--process-health"]):
+                witness.main()
+                witness.PROCESS_HEALTH.write_text(str(witness.time.time() - witness.MAX_AGE - 1))
+                with self.assertRaisesRegex(witness.WitnessError, "stale"):
+                    witness.main()
+            with patch.object(witness.sys, "argv", ["witness", "--health"]):
+                with self.assertRaisesRegex(witness.WitnessError, "no_successful_publication"):
+                    witness.main()
+            with patch.object(witness, "capture", return_value=[]):
+                witness.run_cycle(api, publisher, config, 1, "a" * 64)
+                self.assertTrue(witness.HEALTH.exists())
+                self.assertTrue(witness.PROCESS_HEALTH.exists())
+                api.cm["metadata"]["uid"] = "replacement"
+                with self.assertRaisesRegex(witness.WitnessError, "uid_conflict"):
+                    witness.run_cycle(api, publisher, config, 1, "a" * 64)
+            self.assertFalse(witness.HEALTH.exists())
+            self.assertFalse(witness.PROCESS_HEALTH.exists())
+
     def test_host_btf_is_actually_read_and_validated(self):
         with tempfile.TemporaryDirectory() as directory:
             btf = Path(directory) / "vmlinux"
@@ -241,30 +300,38 @@ class RuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             executable = Path(directory) / "kubectl-gadget"
             executable.write_text(
-                "#!/usr/bin/env python3\nimport json,os,sys,time\n"
+                "import json,os,sys,time\n"
                 "assert '--gadget-namespace' in sys.argv and 'kars-witness-gadget' in sys.argv\n"
                 "assert '--node' in sys.argv and '--detach' not in sys.argv\n"
+                "assert '--all-namespaces' not in sys.argv\n"
+                "assert sys.argv[sys.argv.index('--namespace')+1]=='kars-demo,kars-other'\n"
                 "mode=os.environ['FAKE_MODE']\n"
                 "if mode=='timeout': time.sleep(10)\n"
                 "if mode=='error': sys.exit(2)\n"
                 "if mode=='warn': print('level=warning messages dropped',file=sys.stderr)\n"
                 "print('bad json' if mode=='json' else ('x'*1024 if mode=='limit' else json.dumps({})))\n"
             )
-            executable.chmod(0o755)
-            with patch.dict(os.environ, {"PATH": directory + os.pathsep + os.environ["PATH"]}):
+            real_popen = witness.subprocess.Popen
+
+            def run_fixture(command, **kwargs):
+                self.assertEqual(command[0], "kubectl-gadget")
+                # Use the actual interpreter on distroless images with no env utility or executable /tmp.
+                return real_popen([sys.executable, str(executable), *command[1:]], **kwargs)
+
+            with patch.object(witness.subprocess, "Popen", side_effect=run_fixture):
                 for mode in ["error", "warn", "json", "limit"]:
                     with patch.dict(os.environ, {"FAKE_MODE": mode}), patch.object(witness, "MAX_OUTPUT", 128):
                         with self.assertRaises(witness.WitnessError):
-                            witness.capture("verified-image", 0, ["node-1"])
+                            witness.capture("verified-image", 0, ["node-1"], ["kars-demo", "kars-other"])
                 with patch.dict(os.environ, {"FAKE_MODE": "ok"}):
-                    self.assertEqual(witness.capture("verified-image", 0, ["node-1"]), [{}])
+                    self.assertEqual(witness.capture("verified-image", 0, ["node-1"], ["kars-demo", "kars-other"]), [{}])
                     with self.assertRaisesRegex(witness.WitnessError, "ended_early"):
-                        witness.capture("verified-image", 5, ["node-1"])
+                        witness.capture("verified-image", 5, ["node-1"], ["kars-demo", "kars-other"])
                 with patch.dict(os.environ, {"FAKE_MODE": "timeout"}), patch.object(
                     witness.time, "monotonic", side_effect=[0, 46]
                 ):
                     with self.assertRaisesRegex(witness.WitnessError, "capture_timeout"):
-                        witness.capture("verified-image", 0, ["node-1"])
+                        witness.capture("verified-image", 0, ["node-1"], ["kars-demo", "kars-other"])
 
     def test_image_build_requires_provenance_and_verifies_source_before_extracting(self):
         script = runpy.run_path(str(Path(__file__).with_name("build-runtime.py")))
@@ -291,11 +358,27 @@ class RuntimeTests(unittest.TestCase):
                 with self.assertRaises(SystemExit):
                     script["configuration"]()
 
+    def test_lifecycle_repair_refuses_unreviewed_upstream_source(self):
+        script = runpy.run_path(str(Path(__file__).with_name("build-runtime.py")))
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            target = source / "pkg/operators/kubemanager/kubemanager.go"
+            target.parent.mkdir(parents=True)
+            original = b"package kubemanager\n"
+            target.write_bytes(original)
+            with self.assertRaisesRegex(SystemExit, "unexpected KubeManager source"):
+                script["repair_kubemanager_lifecycle"](source)
+            self.assertEqual(target.read_bytes(), original)
+
     def test_client_build_uses_reviewed_locks_and_upstream_signature_tests(self):
         script = Path(__file__).with_name("build-runtime.py").read_text()
         self.assertIn('"-mod=readonly"', script)
         self.assertIn('"./cmd/kubectl-gadget", "./pkg/oci"', script)
         self.assertIn('"./gadget-container/gadgettracermanager", "./pkg/gadget-service/api-helpers"', script)
+        self.assertIn('"./kars-health", "./kars-lifecycle"', script)
+        self.assertIn('runtime_patches = [repair_kubemanager_lifecycle(source)]', script)
+        self.assertIn('runtime_patches=runtime_patches', script)
+        self.assertIn('"kars-witness-health.buildinfo"', script)
         self.assertIn('subprocess.run([str(daemon), "-h"], env=env, check=True)', script)
         self.assertIn('source.extractall(unpacked, filter="data")', script)
         self.assertIn('raise SystemExit(f"reviewed client.{name} changed during build")', script)
@@ -314,7 +397,10 @@ class RuntimeTests(unittest.TestCase):
             build = Path(directory)
             for name in ("kubectl-gadget", "build.json", "witness.py", "kubectl-gadget.buildinfo",
                          "gadgettracermanager", "gadgettracermanager.buildinfo",
-                         "client.go.mod", "client.go.sum", "LICENSE", "THIRD_PARTY_NOTICES.md"):
+                         "kars-witness-health", "kars-witness-health.buildinfo",
+                         "client.go.mod", "client.go.sum", "LICENSE", "THIRD_PARTY_NOTICES.md",
+                         "build-runtime.py", "lifecycle/kubemanager_test.go"):
+                (build / name).parent.mkdir(parents=True, exist_ok=True)
                 (build / name).write_text(name)
             mask = os.umask(0o077)
             try:
@@ -326,7 +412,7 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual((root / "usr/bin/gadgettracermanager").read_text(),
                              "gadgettracermanager")
             for path in [root, *root.rglob("*")]:
-                expected = 0o755 if path.is_dir() else 0o555 if path.name in ("kubectl-gadget", "gadgettracermanager") else 0o444
+                expected = 0o755 if path.is_dir() else 0o555 if path.name in ("kubectl-gadget", "gadgettracermanager", "kars-witness-health") else 0o444
                 self.assertEqual(path.stat().st_mode & 0o777, expected, str(path))
             self.assertEqual((root / "opt/witness/witness.py").read_text(), "witness.py")
             self.assertEqual((root / "usr/share/licenses/inspektor-gadget/NOTICE").read_text(),
@@ -344,10 +430,15 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("COPY --from=toolchain /usr/local/go /usr/local/go", dockerfile)
         self.assertNotRegex(dockerfile.split("FROM ${PYTHON_BUILD_BASE}", 1)[0], r"(?m)^RUN ")
         self.assertIn("RUN python3 /build/build-runtime.py /build", dockerfile)
+        trust_install = "RUN tdnf install -y ca-certificates && tdnf clean all"
+        self.assertIn(trust_install, dockerfile)
+        self.assertLess(dockerfile.index(trust_install), dockerfile.index("RUN python3 /build/build-runtime.py /build"))
         self.assertIn("ADD --checksum=sha256:934060feae4ecab32644704c4e272e06b7c0da5a4f67429ba04b0113751946e4", dockerfile)
         runtime = dockerfile.split("FROM ${PYTHON_BASE}\n", 1)[1]
         self.assertNotRegex(runtime, r"(?m)^RUN ")
         self.assertIn("COPY --from=client /build/runtime-root/ /", runtime)
+        self.assertIn("COPY --from=client /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem /etc/ssl/certs/ca-certificates.crt", runtime)
+        self.assertIn("SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt", runtime)
         self.assertNotIn("--chmod=", runtime)
         self.assertIn("USER 10001:10001", runtime)
         self.assertIn('ENTRYPOINT ["/usr/bin/python3", "/opt/witness/witness.py"]', runtime)

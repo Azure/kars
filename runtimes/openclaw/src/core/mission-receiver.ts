@@ -15,7 +15,7 @@ export interface MissionReceiverOptions {
   expectedContract?: MissionContract;
   admission: MissionAdmission;
   authorize: (assignment: MissionAssignment) => Promise<boolean>;
-  execute: (content: string, progress: (evidence: TaskExecutionEvidence, routerObservations?: string) => void, artifactsEnabled: boolean, reviewedPhase?: FilesystemPhase, inputArtifacts?: readonly MissionInput[], liveActivityEnabled?: boolean, requiredOutputs?: readonly string[]) => Promise<TaskExecutionEvidence & Pick<MissionReply, "artifacts"> & { output: string }>;
+  execute: (content: string, progress: (evidence: TaskExecutionEvidence, routerObservations?: string) => void, artifactsEnabled: boolean, reviewedPhase?: FilesystemPhase, inputArtifacts?: readonly MissionInput[], liveActivityEnabled?: boolean, requiredOutputs?: readonly string[], assignment?: MissionAssignment) => Promise<TaskExecutionEvidence & Pick<MissionReply, "artifacts"> & { output: string }>;
   send: (to: string, reply: MissionReply) => Promise<unknown>;
   warn: (message: string) => void;
   bootId?: string;
@@ -40,6 +40,7 @@ interface Execution {
   digest: string;
   assignment: MissionAssignment;
   reply?: MissionReply;
+  inbox: WeakSet<object>;
 }
 
 /** One receiver per existing mesh singleton; it never creates another SDK client. */
@@ -81,6 +82,7 @@ export class MissionReceiver {
         ...(message.reviewedPhase ? { reviewedPhase: message.reviewedPhase, phaseDigest: message.phaseDigest } : {}),
         ...(message.inputDigest ? { inputDigest: message.inputDigest } : {}),
         ...(message.requiredOutputs ? { requiredOutputs: message.requiredOutputs } : {}),
+        ...(message.peerContext ? { peerContext: message.peerContext } : {}),
         ...(message.activityFormat ? { activityFormat: message.activityFormat } : {}),
       });
       if (ready?.type === "mission:reply") await this.send(ready);
@@ -100,10 +102,31 @@ export class MissionReceiver {
       return true;
     }
     this.active = message.runNonce;
-    const execution = { digest, assignment: message };
+    const execution = { digest, assignment: message, inbox: new WeakSet<object>() };
     this.executions.set(message.runNonce, execution);
     void this.run(execution).catch(() => this.options.warn("Mission receiver failed before handback"));
     return true;
+  }
+
+  assertActiveAssignment(assignment: MissionAssignment): void {
+    const execution = this.executions.get(assignment.runNonce);
+    if (this.active !== assignment.runNonce || execution?.assignment !== assignment
+      || !["accepted", "running"].includes(execution.reply?.status ?? "")) throw new Error("Native peer assignment authority is stale");
+  }
+
+  peerInbox(assignment: MissionAssignment): WeakSet<object> {
+    this.assertActiveAssignment(assignment);
+    return this.executions.get(assignment.runNonce)!.inbox;
+  }
+
+  capturePeerIngress(): ((entry: object) => void) | undefined {
+    const execution = this.active ? this.executions.get(this.active) : undefined;
+    if (!execution) return undefined;
+    try { this.assertActiveAssignment(execution.assignment); } catch { return undefined; }
+    return entry => {
+      this.assertActiveAssignment(execution.assignment);
+      execution.inbox.add(entry);
+    };
   }
 
   private reply(assignment: MissionAssignment, status: MissionReply["status"], extra: Partial<MissionReply> = {}): MissionReply {
@@ -117,6 +140,7 @@ export class MissionReceiver {
       ...(assignment.reviewedPhase ? { reviewedPhase: assignment.reviewedPhase, phaseDigest: assignment.phaseDigest } : {}),
       ...(assignment.inputDigest ? { inputDigest: assignment.inputDigest } : {}),
       ...(assignment.requiredOutputs ? { requiredOutputs: assignment.requiredOutputs } : {}),
+      ...(assignment.peerContext ? { peerContext: assignment.peerContext } : {}),
       ...extra,
     };
   }
@@ -149,7 +173,8 @@ export class MissionReceiver {
       const required = this.options.expectedContract.requiredOutputs;
       const result = await this.options.execute(execution.assignment.content, (evidence, routerObservations) => {
         try {
-          if (finished || progressError || progressCount >= 126) throw new Error("Mission progress is closed or exceeds the journal bound");
+          if (progressError) throw progressError;
+          if (finished || progressCount >= 126) throw new Error("Mission progress is closed or exceeds the journal bound");
           const progress = parseMissionMessage({ ...validateEvidence(evidence, "running"),
             ...(routerObservations !== undefined || latestObservations !== undefined
               ? { routerObservations: routerObservations ?? latestObservations } : {}) });
@@ -163,7 +188,7 @@ export class MissionReceiver {
           throw progressError;
         }
       }, execution.assignment.artifactFormat === "text-v1", this.options.expectedContract.reviewedPhase, execution.assignment.inputArtifacts,
-      execution.assignment.activityFormat === "router-observations-v1", required);
+      execution.assignment.activityFormat === "router-observations-v1", required, execution.assignment);
       finished = true;
       if (progressError) throw progressError;
       const descriptors = Object.getOwnPropertyDescriptors(result);
@@ -178,7 +203,7 @@ export class MissionReceiver {
         throw new TaskExecutionError("Invalid or unnegotiated mission artifacts", latest!);
       }
       if (required?.some(name => !Object.hasOwn(result.artifacts ?? {}, name))) {
-        throw new TaskExecutionError("Missing required named mission output", latest!);
+        throw new TaskExecutionError("Missing required named mission output", latest!, undefined, result.output);
       }
       const reply = parseMissionMessage(this.reply(execution.assignment, "succeeded", {
         output: result.output, ...(result.artifacts ? { artifacts: result.artifacts } : {}), evidence: latest,
@@ -195,7 +220,10 @@ export class MissionReceiver {
       if (!measuredFailure && latest) latest = { ...latest, usage: null };
       const failed = parseMissionMessage(this.reply(execution.assignment, "failed", {
         error: error instanceof Error ? error.message.slice(0, 2048) : "Mission execution failed",
+        ...(measuredFailure && error instanceof TaskExecutionError && error.output ? { output: error.output } : {}),
+        ...(measuredFailure && error instanceof TaskExecutionError && error.artifacts ? { artifacts: error.artifacts } : {}),
         ...(latest ? { evidence: latest } : {}),
+        ...(latestObservations !== undefined ? { routerObservations: latestObservations } : {}),
       }));
       if (!failed || failed.type !== "mission:reply") throw new Error("Invalid bounded mission failure");
       execution.reply = failed;

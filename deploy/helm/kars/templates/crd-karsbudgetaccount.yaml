@@ -56,7 +56,7 @@ spec:
                   type: object
                   required: [kind, resource, workspaceUid, clusterUid]
                   properties:
-                    kind: {type: string, enum: [KarsTask, KarsTeam]}
+                    kind: {type: string, enum: [KarsTask, KarsTeam, KarsSandbox]}
                     workspaceUid: {type: string, minLength: 1, maxLength: 128}
                     clusterUid: {type: string, minLength: 1, maxLength: 128}
                     resource:
@@ -87,6 +87,13 @@ spec:
                   type: integer
                   format: int64
                   nullable: true
+                effectiveLimits:
+                  type: object
+                  nullable: true
+                  description: "Recorded additive lifetime ceiling; live operator authorization is still required. spec.limits remains the original grant."
+                  properties:
+                    tokens: {type: integer, format: int64, minimum: 0}
+                    usdMicros: {type: integer, format: int64, minimum: 0}
                 conditions:
                   type: array
                   x-kubernetes-list-type: map

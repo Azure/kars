@@ -10,15 +10,16 @@ pub struct Fence {
 }
 
 impl Fence {
-    pub async fn check(&self, host: &str) -> Result<(), String> {
+    /// Reject model destinations; return whether the catalog also classifies this host.
+    /// The caller must still enforce reviewed egress authority and threat protections.
+    pub async fn check(&self, host: &str) -> Result<bool, String> {
         let catalog = self.client.catalog().await.map_err(|_| {
             "Governed inference budget unavailable; mediated egress is closed".to_owned()
         })?;
-        if catalog.allows_mediated_non_inference(host, &self.model_hosts) {
-            Ok(())
-        } else {
-            Err("Governed inference requires a brokered model route; this destination is not an operator-declared non-inference exclusion".into())
+        if catalog.requires_brokered_inference(host, &self.model_hosts) {
+            return Err("Governed inference requires a brokered model route".into());
         }
+        Ok(catalog.allows_mediated_non_inference(host, &self.model_hosts))
     }
 }
 

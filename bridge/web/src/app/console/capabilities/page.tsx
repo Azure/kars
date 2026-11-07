@@ -22,6 +22,7 @@ import { McpProfiles } from "../mcp-profiles";
 import { McpCatalog } from "../mcp-catalog";
 import { McpServerEditor } from "../mcp-server-editor";
 import { mcpStatus } from "../mcp-status";
+import { McpStatusDetails } from "../mcp-status-details";
 import { Icon } from "@/components/icon";
 import { ConsoleLoadError } from "@/components/console-load-error";
 import { LiveRefresh } from "@/components/live-refresh";
@@ -52,7 +53,7 @@ export default async function CapabilitiesPage() {
 
       <Section
         title="Skills"
-        subtitle="Versioned instructions and assets for missions and teams. Inspect the content and approve independently; approval is not a malware scan or cryptographic attestation."
+        subtitle="Versioned instructions and assets for missions and teams. Inspect the content before approval; administrators may approve their own submissions. Approval is not a malware scan or cryptographic attestation."
       >
         <div className="mb-3">
           <SkillComposer toolPolicies={options?.tool_policies ?? []} submit={submitSkillConsoleAction} />
@@ -154,6 +155,7 @@ export default async function CapabilitiesPage() {
           </ol>
         </details>
         <div className="mb-3"><McpCatalog servers={mcp} /></div>
+        {mcp.length > 0 && <p className="mb-3 text-xs text-foreground-muted">Service status refreshes automatically while this page is visible. You can continue working; no manual reload is needed.</p>}
         {mcp.length === 0 ? (
           <HonestState
             variant="empty"
@@ -189,10 +191,7 @@ export default async function CapabilitiesPage() {
                   <p className="mt-1 truncate font-mono text-xs text-foreground-muted">
                     {m.workload_ref ? `workload reference ${m.workload_ref}` : (m.endpoint ?? m.url ?? "endpoint pending")}
                   </p>
-                  <p className="mt-1 text-xs text-foreground-muted">
-                    {readiness.reason && <span className="font-medium">{readiness.reason}: </span>}
-                    {readiness.detail}
-                  </p>
+                  <McpStatusDetails server={m} />
                   {readiness.ready && m.discovered_tools.length > 0 && (
                     <p className="mt-1 text-[11px] text-foreground-muted">
                       {m.discovered_tools.length} tools verified

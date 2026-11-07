@@ -108,8 +108,12 @@ rules:
     verbs: ["get", "update"]
   - apiGroups: ["kars.azure.com"]
     resources: ["karssandboxes"]
+    {{- if eq .Values.scope "all" }}
+    verbs: ["get", "list"]
+    {{- else }}
     resourceNames: {{ .Values.sandboxes | toJson }}
     verbs: ["get"]
+    {{- end }}
 {{- range $name := .Values.sandboxes }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1

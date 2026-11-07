@@ -24,7 +24,7 @@ async function setup() {
   const execute: Execute = async (args, input) => {
     calls.push(args);
     if (args[0] === "apply") {
-      expect(args).toEqual(["apply", "--server-side", "--dry-run=server", "--field-manager=helm", "-f", "-", "-o", "json"]);
+      expect(args).toEqual(["apply", "--server-side", "--dry-run=server", "--force-conflicts", "--field-manager=helm", "-f", "-", "-o", "json"]);
       return input!;
     }
     if (args[0] === "get" && args[1] === "namespaces") {
@@ -43,6 +43,31 @@ async function setup() {
 }
 
 describe("read-only private root migration review", () => {
+  it("projects a recovered image owned by kubectl-patch without transferring live ownership", async () => {
+    const f = await setup();
+    f.root.metadata.managedFields = [{
+      manager: "kubectl-patch", operation: "Update", apiVersion: "apps/v1", fieldsType: "FieldsV1",
+      fieldsV1: { "f:spec": { "f:template": { "f:spec": { "f:containers": {
+        'k:{"name":"controller"}': { "f:image": {} },
+      } } } } },
+    }];
+    const before = canonical([...f.objects.entries()]);
+    const run: Execute = async (args, input) => {
+      if (args[0] === "apply" && !args.includes("--force-conflicts")) {
+        throw new Error('Apply conflict with "kubectl-patch": .spec.template.spec.containers[name="controller"].image');
+      }
+      if (args.includes("--force-conflicts")) {
+        expect(args).toContain("--server-side");
+        expect(args).toContain("--dry-run=server");
+      }
+      return f.execute(args, input);
+    };
+    await previewPrivateRootMigration(run, "core", "kars", [f.rendered]);
+    expect(canonical([...f.objects.entries()])).toBe(before);
+    expect(f.reviewCalls.every(args => ["get", "auth"].includes(args[0]!)
+      || (args[0] === "apply" && args.includes("--dry-run=server")))).toBe(true);
+  });
+
   it("binds a sealed root, grant identities and the exact rendered documents without a write", async () => {
     const f = await setup();
     const before = canonical([...f.objects.entries()]);
@@ -111,12 +136,28 @@ describe("read-only private root migration review", () => {
     },
   );
 
-  it.each(["namespace", "grant", "root"])("rejects a concurrent %s change during projection", async fault => {
+  it("allows namespace version-only churn during projection without changing its authority binding", async () => {
+    const f = await setup();
+    const before = await previewPrivateRootMigration(f.execute, "core", "kars", [f.rendered]);
+    const execute: Execute = async (args, input) => {
+      const result = await f.execute(args, input);
+      if (args[0] === "apply") f.namespace("work").metadata.resourceVersion = "999";
+      return result;
+    };
+    const after = await previewPrivateRootMigration(execute, "core", "kars", [f.rendered]);
+    expect(after.inventoryDigest).toBe(before.inventoryDigest);
+  });
+
+  it.each(["namespace", "namespace-label", "namespace-finalizer", "namespace-spec", "namespace-owner", "grant", "root"])("rejects a concurrent %s change during projection", async fault => {
     const f = await setup();
     const execute: Execute = async (args, input) => {
       const result = await f.execute(args, input);
       if (args[0] === "apply") {
-        if (fault === "namespace") f.namespace("work").metadata.resourceVersion = "999";
+        if (fault === "namespace") f.namespace("work").metadata.annotations["operator.example/review"] = "changed";
+        if (fault === "namespace-label") f.namespace("work").metadata.labels = { changed: "true" };
+        if (fault === "namespace-finalizer") f.namespace("work").metadata.finalizers = ["operator.example/hold"];
+        if (fault === "namespace-spec") f.namespace("work").spec = { finalizers: ["operator.example/hold"] };
+        if (fault === "namespace-owner") f.namespace("work").metadata.ownerReferences = [{ uid: "other" }];
         if (fault === "grant") f.grant().spec.agentKeys = ["NEW_TOKEN"];
         if (fault === "root") f.root.spec.replicas = 3;
       }

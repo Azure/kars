@@ -14,7 +14,7 @@
  * Foundry discovery never blocks plugin startup.
  */
 
-import { resolveMemoryStoreName, resolveMemoryScope } from "./memory-binding.js";
+import { callFoundryMemory } from "./foundry-memory.js";
 
 export interface FoundryDeployment {
   id: string;
@@ -46,8 +46,6 @@ export type FoundryRouterCall = (
   extraHeaders?: Record<string, string>,
 ) => Promise<any>;
 
-export type FoundryEnsureMemoryStore = (store: string) => Promise<void>;
-
 export interface FoundryLog {
   info: (m: string) => void;
   warn: (m: string) => void;
@@ -64,8 +62,8 @@ export interface FoundryLog {
  */
 export async function discoverFoundryProject(
   routerCall: FoundryRouterCall,
-  ensureMemoryStore: FoundryEnsureMemoryStore,
   log: FoundryLog,
+  memoryCall = callFoundryMemory,
 ): Promise<FoundryProjectInfo> {
   const apiVer = "api-version=2025-11-15-preview";
   const endpoint = process.env.FOUNDRY_PROJECT_ENDPOINT || process.env.AZURE_OPENAI_ENDPOINT || "";
@@ -290,29 +288,12 @@ export async function discoverFoundryProject(
 
     // Recall prior context from Foundry memory store on startup
     try {
-      const agentName = process.env.SANDBOX_NAME || process.env.HOSTNAME || "default";
-      const store = resolveMemoryStoreName(agentName);
-      const scope = resolveMemoryScope(agentName);
-      // Ensure store exists before searching (avoids 404 on first boot)
-      await ensureMemoryStore(store);
-
-      // First: get static memories (user profile) — scope only, no items
-      const staticResult = await routerCall(
-        "POST",
-        `/memory_stores/${store}:search_memories?api-version=2025-11-15-preview`,
-        { scope },
-      ).catch(() => null);
-
-      // Then: get contextual memories — scope + items
-      const contextResult = await routerCall(
-        "POST",
-        `/memory_stores/${store}:search_memories?api-version=2025-11-15-preview`,
-        {
-          scope,
-          items: [{ type: "message", role: "user", content: [{ type: "input_text", text: "key facts, user preferences, prior context, recent work, handoff history" }] }],
-          options: { max_memories: 10 },
-        },
-      ).catch(() => null);
+      const staticResult = await memoryCall({ operation: "search" }).catch(() => null);
+      const contextResult = await memoryCall({
+        operation: "search",
+        text: "key facts, user preferences, prior context, recent work, handoff history",
+        top_k: 10,
+      }).catch(() => null);
 
       // Merge unique memories from both results
       const seen = new Set<string>();

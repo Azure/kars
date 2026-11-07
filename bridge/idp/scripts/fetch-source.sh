@@ -16,3 +16,4 @@ for file in go.mod go.sum api/v2/go.mod api/v2/go.sum; do
     cp "$file" "/packaging/upstream/$file.snapshot"
 done
 sh /packaging/scripts/apply-source-patches.sh
+sh /packaging/scripts/verify-source-toolchain.sh "$GO_VERSION" go.mod api/v2/go.mod

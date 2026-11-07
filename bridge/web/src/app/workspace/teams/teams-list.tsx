@@ -3,7 +3,7 @@
 
 "use client";
 
-import Link from "next/link";
+import Link from "@/components/navigation-link";
 import { useMemo, useState } from "react";
 import { TeamTiming } from "@/components/team-timing";
 import { formatWarmIdle } from "@/lib/format";
@@ -28,7 +28,7 @@ function PhaseDot({ team }: { team: TeamSummary }) {
   const label = team.phase === "Degraded"
     ? "Degraded"
     : team.paused
-    ? "Hibernating"
+    ? "Scheduling paused"
     : awaitingReview
       ? "Awaiting review"
     : unhealthy

@@ -148,6 +148,17 @@ build_sandbox_stub() {
     die "failed to build the sandbox stub image after 3 attempts"
 }
 
+prepare_addon_images() {
+    info "Preparing same-source AL3 images for enabled chart add-ons"
+    (
+        cd "$ROOT_DIR"
+        if [ "${KARS_E2E_PREBUILT_ADDONS:-0}" != "1" ]; then
+            node tests/e2e/addon-images.mjs build
+        fi
+        node tests/e2e/addon-images.mjs load
+    )
+}
+
 install_crds() {
     info "Installing Helm chart (CRDs + RBAC only)"
     # E2E always runs against a single-node Kind cluster. Multi-replica
@@ -161,6 +172,7 @@ install_crds() {
     local disable_le="${KARS_E2E_DISABLE_LEADER_ELECTION:-1}"
     local helm_wait_arg=--wait
     local extra_set_args=(
+        --values "$ROOT_DIR/.e2e-addon-values.json"
         --set-string "managedMcp.everythingImage=kars-mcp-everything:e2e"
         --set "controller.replicas=${replicas}"
         --set "inferenceRouter.replicas=${replicas}"
@@ -184,8 +196,9 @@ install_crds() {
     if [ "$SRE_LEGACY_PREPARED" = "1" ]; then
         # Legacy fixtures predate the new admission policies. Explicit CLI
         # authority staging already installed those APIs with controller=0;
-        # start the qualified controller while retaining the reviewed shapes.
-        extra_set_args+=(--set sre.enabled=true --set sre.authorityStage=true
+        # start the qualified controller while retaining the reviewed shapes
+        # and saved SRE provider/model instead of resetting them with --set.
+        extra_set_args+=(--reset-then-reuse-values --set sre.enabled=true --set sre.authorityStage=true
             --set-string runtimes.hermes.image=kars-sandbox-e2e:dev)
         # Consumer policy acknowledgements cannot become Ready before explicit
         # enrollment below. Wait for built-ins here; migration remains fatal.
@@ -3085,6 +3098,7 @@ main() {
     # Validate the public cluster API before any Rust images or private fixtures.
     PYTHONDONTWRITEBYTECODE=1 python3 "$SCRIPT_DIR/sre_authority/registration_schema.py"
     build_images
+    prepare_addon_images
     prepare_managed_mcp
     prepare_sre_authority_legacy
     install_crds

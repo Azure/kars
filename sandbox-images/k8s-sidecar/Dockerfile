@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-FROM mcr.microsoft.com/azurelinux/base/python:3.12@sha256:d1a693353b7db0383e66a61416a049f617fdfb89435dcaac543749fb4f14950a AS build
+FROM mcr.microsoft.com/azurelinux/base/python:3.12@sha256:71a1f5a1821f4c56e45aff52e792ed6c0500631e201cfc140c4c9d22886b29f9 AS build
 ARG PIP_INDEX_URL=https://pypi.org/simple
 ENV PYTHONDONTWRITEBYTECODE=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 WORKDIR /build
@@ -10,7 +10,7 @@ COPY sandbox-images/k8s-sidecar/requirements.lock /build/
 COPY sandbox-images/k8s-sidecar/build.py /usr/local/bin/build-sidecar.py
 RUN python3 /usr/local/bin/build-sidecar.py /build
 
-FROM mcr.microsoft.com/azurelinux/distroless/python:3.12@sha256:88eb935992271c4ab82773efbb34290e7448c9df778c9505d0e5b184ec25d07e AS runtime
+FROM mcr.microsoft.com/azurelinux/distroless/python:3.12@sha256:10bcfa3c563fd05f9b11495551bd36bfe919b4a2f32b68388e1c393bbeea64ac AS runtime
 COPY --from=build /build/sidecar/ /opt/sidecar/
 COPY --from=build /build/licenses/ /usr/share/licenses/k8s-sidecar/
 LABEL org.opencontainers.image.version="2.7.3" \

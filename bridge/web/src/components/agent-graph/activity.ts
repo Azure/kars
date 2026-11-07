@@ -3,7 +3,7 @@
 
 import type { ActivityEvent } from "@/lib/types";
 import type { AgentAction, AgentExecution, ToolEvent } from "./types";
-import { routerObservationKey, toolResultSummary, type BoundRouterActivity } from "@/lib/router-activity";
+import { routerObservationKey, routerOperationSummary, toolResultSummary, toolArgumentPreview, toolReportingLabel, type BoundRouterActivity } from "@/lib/router-activity";
 
 export function actionRound(action: AgentAction): number {
   return action.source === "legacy" ? action.round + 1 : action.round;
@@ -14,14 +14,17 @@ export function actionsFromRouter({ producer, observations }: BoundRouterActivit
   return observations.trace.events.map(event => ({
     id: routerObservationKey(producer, event),
     human: event.kind === "round" ? `Router response · round ${event.round}`
-      : `${event.kind === "tool_proposed" ? "Model proposed" : "Harness reported"}: ${event.name}`,
+      : `${event.kind === "tool_proposed" ? "Model proposed" : event.kind === "router_operation" ? "Router observed" : "Harness reported"}: ${event.name}`,
     raw: event.kind === "round" ? "router.response" : event.name,
     args: event.kind === "round" ? `${event.tool_calls_observed} tool proposals observed`
-      : `Call: ${event.call_id}. Raw arguments excluded from telemetry.`,
+      : `Call: ${event.call_id}. ${toolArgumentPreview(event, observations.trace.events)}`,
     result: event.kind === "round"
       ? `HTTP ${event.http_status ?? "unavailable"}; ${event.outcome}; ${event.model ?? "model unavailable"}; tokens: ${event.usage?.total_tokens ?? "unavailable"} (${event.usage_state})`
       : event.kind === "tool_proposed" ? "Proposal only; execution not established"
-        : `Reported in router round ${event.reported_in_round}; outcome ${event.ok === null ? "unavailable" : event.ok ? "success" : "failure"}. ${toolResultSummary(event.result_summary)}`,
+        : event.kind === "router_operation" ? routerOperationSummary(event)
+        : `${toolReportingLabel(event)}; outcome ${event.ok === null ? "unavailable" : event.ok ? "success" : "failure"}. ${toolResultSummary(event.result_summary)}`,
+    destinations: event.kind === "router_operation" && event.destination_host
+      ? [`${event.destination_host}:${event.destination_port}`] : [],
     ok: event.kind === "tool_result" ? event.ok : null,
     round: event.round,
     ms: event.kind === "tool_proposed" ? null : event.ms ?? null,
@@ -121,6 +124,7 @@ export function actionFromEvent(event: ActivityEvent, index: number): AgentActio
       raw: "model.round",
       args: `${event.tool_calls} tool call${event.tool_calls === 1 ? "" : "s"} requested`,
       result: `${event.finish_reason || "unknown finish"}; ${event.total_tokens.toLocaleString("en-US")} tokens`,
+      destinations: [],
       ok: null,
       round: event.round,
       ms: event.ms,
@@ -136,6 +140,7 @@ export function actionFromEvent(event: ActivityEvent, index: number): AgentActio
     raw: event.name,
     args: event.args_preview,
     result: event.result_preview,
+    destinations: destinationsFrom(event),
     ok: event.ok,
     round: event.round,
     ms: event.ms,
@@ -169,6 +174,11 @@ export function exactActionQuery(agent: AgentExecution, action: AgentAction): st
   if (action.seq != null) parameters.set("seq", String(action.seq));
   if (action.agentInstance) parameters.set("instance", action.agentInstance);
   return `action:${parameters.toString()}`;
+}
+
+export function exactDestinationsQuery(agent: AgentExecution, destinations: string[]): string {
+  const actions = agent.actions.filter(action => action.destinations.some(destination => destinations.includes(destination)));
+  return agent.traceQuery.startsWith("observations:") ? observationQuery(actions) : exactActionsQuery(agent, actions);
 }
 
 export function exactActionsQuery(agent: AgentExecution, actions: AgentAction[]): string {

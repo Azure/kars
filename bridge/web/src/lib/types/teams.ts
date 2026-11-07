@@ -10,7 +10,15 @@ import type { PullRequestRef } from "./workspace";
 // cadence loop that mints task-force work autonomously. Distinct from a Mission
 // (a finite task force). Mirrors the BFF Teams DTOs.
 
+export interface TeamQualification {
+  state: "pending" | "blocked" | "requested" | "running" | "awaiting_evidence";
+  note: string;
+  expires_at: string | null;
+  item_id: string | null;
+}
+
 export interface TeamSummary {
+  qualification?: TeamQualification | null;
   name: string;
   display_name: string | null;
   charter: string;
@@ -39,7 +47,14 @@ export interface TeamSummary {
   retained_failed: number;
 }
 
+export interface TeamRoleResources {
+  memory?: string | null;
+  mcp_servers: string[];
+  egress: { host: string; port?: number | null }[];
+}
+
 export interface TeamRole {
+  resources?: TeamRoleResources | null;
   name: string;
   system_prompt: string | null;
   tier: number | null;
@@ -57,8 +72,30 @@ export interface LedgerEvent {
   tokens: number | null;
 }
 
+export interface TeamBudgetAmounts {
+  tokens: string;
+  usd_micros: string;
+}
+
+export type TeamBudgetStatus =
+  | { state: "unavailable"; reason: string }
+  | {
+      state: "available";
+      observed_at: string;
+      account_phase: string;
+      unbounded_tokens: boolean;
+      effective_tokens: string | null;
+      effective_usd_micros: string | null;
+      settled: TeamBudgetAmounts;
+      reserved: TeamBudgetAmounts;
+      uncertain: TeamBudgetAmounts;
+      price_coverage_complete: boolean;
+    };
+
 export interface TeamDetail {
+  qualification?: TeamQualification | null;
   name: string;
+  uid: string;
   display_name: string | null;
   charter: string;
   phase: string;
@@ -68,6 +105,8 @@ export interface TeamDetail {
   authority_ceiling: number;
   delegation_depth: number;
   budget: Budget | null;
+  /** Absent on older BFF versions; never interpret absence as zero or unlimited. */
+  budget_status?: TeamBudgetStatus;
   paused: boolean;
   every_minutes: number | null;
   lifecycle_mode: TeamLifecycleMode;
@@ -87,7 +126,8 @@ export interface TeamDetail {
   detail: string | null;
   health: string | null;
   runs_succeeded: number;
-  tokens_spent_total: number;
+  tokens_spent_total: number | null;
+  tokens_spent_scope: "GovernedInferenceLifetime" | "RetainedRootSynthesis";
   commons_entry_count: number;
   last_success_at: string | null;
   created_at: string | null;
@@ -338,7 +378,8 @@ export interface Digest {
   summary: string;
   runs_generated: number;
   runs_delivered: number;
-  tokens_spent: number;
+  tokens_spent: number | null;
+  tokens_spent_scope: TeamDetail["tokens_spent_scope"] | null;
   knowledge_entries: number;
   channel: string | null;
   gated: boolean;

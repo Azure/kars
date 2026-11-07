@@ -9,7 +9,11 @@
 //!
 //! Each emitted [`crate::kars_receipt::KarsReceipt`] is entered into an
 //! append-only, hash-chained log starting in the `kars-receipt-log` ConfigMap
-//! and continuing in bounded, numbered segments. Every entry binds the receipt's signed-payload digest to the
+//! and continuing in bounded, numbered segments. Reads discover segment metadata
+//! and retrieve only segment payloads at that exact API snapshot revision; they
+//! do not repeatedly download unrelated namespace ConfigMaps. Expired or mixed
+//! snapshots fail closed without appending or resetting history.
+//! Every entry binds the receipt's signed-payload digest to the
 //! previous entry's hash, so the **set** of receipts becomes tamper-evident:
 //! deleting or altering any one receipt (or reordering them) breaks the chain
 //! at that point, which a verifier detects — something a per-receipt signature
@@ -198,7 +202,7 @@ pub async fn publish_checkpoint(
     };
 
     let cms: Api<ConfigMap> = Api::namespaced(client.clone(), &receipt_namespace());
-    let cm: ConfigMap = serde_json::from_value(serde_json::json!({
+    let mut cm: ConfigMap = serde_json::from_value(serde_json::json!({
         "apiVersion": "v1",
         "kind": "ConfigMap",
         "metadata": {
@@ -215,9 +219,25 @@ pub async fn publish_checkpoint(
             "keyId": checkpoint.key_id,
             "signature": checkpoint.signature,
             "note": note,
-            "publishedAt": chrono::Utc::now().to_rfc3339(),
         },
     }))?;
+    let existing = cms
+        .get_opt(CHECKPOINT_CONFIGMAP_NAME)
+        .await
+        .context("reading receipt checkpoint before publication")?;
+    let data = cm.data.as_mut().expect("checkpoint data constructed above");
+    let published_at = existing
+        .as_ref()
+        .and_then(|current| current.data.as_ref())
+        .filter(|current| {
+            data.iter()
+                .all(|(key, value)| current.get(key) == Some(value))
+        })
+        .and_then(|current| current.get("publishedAt"))
+        .filter(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).is_ok())
+        .cloned()
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+    data.insert("publishedAt".into(), published_at);
     cms.patch(
         CHECKPOINT_CONFIGMAP_NAME,
         &kube::api::PatchParams::apply(CHECKPOINT_FIELD_MANAGER).force(),
@@ -232,6 +252,114 @@ pub async fn publish_checkpoint(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn checkpoint_republication_preserves_time_and_repairs_changed_or_missing_heads() {
+        use std::sync::{Arc, Mutex};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
+        let endpoint = format!(
+            "/api/v1/namespaces/{}/configmaps/{CHECKPOINT_CONFIGMAP_NAME}",
+            receipt_namespace()
+        );
+        let stored = Arc::new(Mutex::new(None::<serde_json::Value>));
+        let read_store = stored.clone();
+        Mock::given(method("GET"))
+            .and(path(endpoint.clone()))
+            .respond_with(
+                move |_: &wiremock::Request| match read_store.lock().unwrap().as_ref() {
+                    Some(current) => ResponseTemplate::new(200).set_body_json(current),
+                    None => ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                        "status": "Failure", "code": 404, "reason": "NotFound", "message": "missing",
+                    })),
+                },
+            )
+            .expect(8)
+            .mount(&server)
+            .await;
+        let write_store = stored.clone();
+        Mock::given(method("PATCH"))
+            .and(path(endpoint.clone()))
+            .respond_with(move |request: &wiremock::Request| {
+                let body = request.body_json::<serde_json::Value>().unwrap();
+                *write_store.lock().unwrap() = Some(body.clone());
+                ResponseTemplate::new(200).set_body_json(body)
+            })
+            .expect(8)
+            .mount(&server)
+            .await;
+        let signer = crate::providers::signing::ReceiptSigner::from_bytes(&[7; 32]);
+        let rotated = crate::providers::signing::ReceiptSigner::from_bytes(&[8; 32]);
+        let old_time = "2020-01-01T00:00:00Z";
+        for step in 0..8 {
+            {
+                let mut current = stored.lock().unwrap();
+                if let Some(map) = current.as_mut() {
+                    map["data"]["publishedAt"] = serde_json::json!(old_time);
+                    match step {
+                        2 => {
+                            map["data"].as_object_mut().unwrap().remove("publishedAt");
+                        }
+                        3 => map["data"]["signature"] = serde_json::json!("corrupt"),
+                        6 => map["data"]["publishedAt"] = serde_json::json!("invalid"),
+                        _ => {}
+                    }
+                }
+                if step == 7 {
+                    *current = None;
+                }
+            }
+            let key = if step >= 5 { &rotated } else { &signer };
+            let chain = chain_of(if step >= 4 { 4 } else { 3 });
+            let checkpoint = publish_checkpoint(&client, key, &chain).await.unwrap();
+            let current = stored.lock().unwrap();
+            let data = &current.as_ref().unwrap()["data"];
+            assert_eq!(data["rootHash"], checkpoint.root_hash);
+            assert_eq!(data["signature"], checkpoint.signature);
+            assert_eq!(data["keyId"], key.key_id);
+            let timestamp = data["publishedAt"].as_str().unwrap();
+            assert!(chrono::DateTime::parse_from_rfc3339(timestamp).is_ok());
+            assert_eq!(timestamp == old_time, step == 1, "step {step}");
+        }
+        server.verify().await;
+        server.reset().await;
+        Mock::given(method("GET"))
+            .and(path(endpoint.clone()))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "status": "Failure", "code": 403, "reason": "Forbidden", "message": "denied",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let error = publish_checkpoint(&client, &signer, &chain_of(3))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("reading receipt checkpoint"));
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        server.verify().await;
+        server.reset().await;
+        Mock::given(method("GET"))
+            .and(path(endpoint.clone()))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "status": "Failure", "code": 404, "reason": "NotFound", "message": "missing",
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path(endpoint))
+            .respond_with(ResponseTemplate::new(503).set_body_json(serde_json::json!({
+                "status": "Failure", "code": 503, "reason": "ServiceUnavailable", "message": "retry",
+            })))
+            .mount(&server)
+            .await;
+        let error = publish_checkpoint(&client, &signer, &chain_of(3))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("publishing receipt checkpoint"));
+    }
 
     fn chain_of(n: u64) -> Vec<InclusionEntry> {
         let mut chain: Vec<InclusionEntry> = Vec::new();

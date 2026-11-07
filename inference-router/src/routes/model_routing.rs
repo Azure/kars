@@ -32,6 +32,51 @@ pub(super) fn model_capability_key(upstream: &UpstreamConfig) -> String {
     .expect("provider capability key always serializes")
 }
 
+fn is_non_model_parameter_error(error: &serde_json::Value) -> bool {
+    match error.get("param") {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::String(param)) => {
+            !param.is_empty() && !matches!(param.as_str(), "model" | "deployment")
+        }
+        Some(_) => true,
+    }
+}
+
+fn corrected_output_limit_request(
+    status: StatusCode,
+    response: &[u8],
+    body: &[u8],
+) -> Option<Bytes> {
+    if status != StatusCode::BAD_REQUEST {
+        return None;
+    }
+    let response: serde_json::Value = serde_json::from_slice(response).ok()?;
+    let error = response.get("error").unwrap_or(&response);
+    if error.get("param")?.as_str()? != "max_tokens" {
+        return None;
+    }
+    let message = error.get("message")?.as_str()?.to_ascii_lowercase();
+    if ![
+        "use 'max_completion_tokens' instead",
+        "use \"max_completion_tokens\" instead",
+        "use `max_completion_tokens` instead",
+        "use max_completion_tokens instead",
+    ]
+    .iter()
+    .any(|guidance| message.contains(guidance))
+    {
+        return None;
+    }
+    let mut request: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let object = request.as_object_mut()?;
+    if object.contains_key("max_completion_tokens") || object.get("max_tokens")?.as_u64()? == 0 {
+        return None;
+    }
+    let limit = object.remove("max_tokens")?;
+    object.insert("max_completion_tokens".into(), limit);
+    serde_json::to_vec(&request).ok().map(Bytes::from)
+}
+
 pub(super) fn is_responses_only_error(body: &[u8]) -> bool {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
         return false;
@@ -46,6 +91,15 @@ pub(super) fn is_responses_only_error(body: &[u8]) -> bool {
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
+    if message.contains("not supported")
+        && message.contains("/chat/completions")
+        && message.contains("use /v1/responses")
+    {
+        return true;
+    }
+    if is_non_model_parameter_error(error) {
+        return false;
+    }
     code.eq_ignore_ascii_case("unsupported_api_for_model")
         || message.contains("not accessible via the /chat/completions endpoint")
         || (message.contains("unsupported")
@@ -62,6 +116,9 @@ fn is_model_unavailable_error(status: StatusCode, body: &[u8]) -> bool {
         return false;
     };
     let error = value.get("error").unwrap_or(&value);
+    if is_non_model_parameter_error(error) {
+        return false;
+    }
     let code = error
         .get("code")
         .and_then(|v| v.as_str())
@@ -259,6 +316,26 @@ pub(super) async fn forward_chat(
         .await
     };
     if let Ok((status, _, response, selected)) = &result
+        && let Some(corrected) = corrected_output_limit_request(
+            *status,
+            response,
+            &override_model_in_body(&body, &selected.deployment),
+        )
+    {
+        return proxy::forward(
+            &state.auth,
+            Some(&state.copilot),
+            &state.client,
+            selected,
+            Method::POST,
+            "chat/completions",
+            headers,
+            corrected,
+        )
+        .await
+        .map(|(status, headers, bytes)| (status, headers, bytes, selected.clone()));
+    }
+    if let Ok((status, _, response, selected)) = &result
         && is_model_unavailable_error(*status, response)
         && !fallback.deployment.is_empty()
         && model_capability_key(selected) != model_capability_key(&fallback)
@@ -326,6 +403,23 @@ pub(super) async fn forward_stream_chat(
             Ok(bytes)
         })
         .await?;
+    if let Some(corrected) = corrected_output_limit_request(
+        status,
+        &bytes,
+        &override_model_in_body(&body, &selected.deployment),
+    ) {
+        return proxy::forward_stream(
+            state.auth.clone(),
+            Some(state.copilot.clone()),
+            state.client.clone(),
+            selected.clone(),
+            "chat/completions",
+            headers,
+            corrected,
+        )
+        .await
+        .map(|(status, headers, stream)| (status, headers, stream, selected));
+    }
     if is_model_unavailable_error(status, &bytes)
         && !fallback.deployment.is_empty()
         && model_capability_key(&selected) != model_capability_key(&fallback)
@@ -369,7 +463,7 @@ pub(super) mod tests {
         matchers::{body_partial_json, header, path},
     };
 
-    pub(in crate::routes) fn test_state(config: crate::config::Config) -> AppState {
+    pub(crate) fn test_state(config: crate::config::Config) -> AppState {
         let policy_status = Arc::new(crate::policy_status::PolicyStatusRegistry::new());
         let governance = Arc::new(crate::governance::Governance::new_with_status(
             "test",
@@ -403,6 +497,7 @@ pub(super) mod tests {
             policy_status,
             inference_policy: crate::inference_policy_loader::empty_handle(),
             memory_binding: crate::memory_binding_loader::empty_handle(),
+            memory_updates: Default::default(),
             egress_allowlist: crate::egress_allowlist_loader::empty_handle(),
             deployment_health: Arc::new(crate::deployment_health::DeploymentHealthRegistry::new()),
         }
@@ -561,6 +656,29 @@ pub(super) mod tests {
         assert!(!is_responses_only_error(
             br#"{"error":{"message":"unsupported tool argument"}}"#
         ));
+    }
+
+    #[test]
+    fn foundry_request_incompatibility_is_not_model_unavailability() {
+        for model in ["gpt-6.1-sol", "model gpt-6.1-sol"] {
+            let message = format!(
+                "Function tools with reasoning_effort are not supported for {model} in /v1/chat/completions. Use /v1/responses or reasoning_effort='none'."
+            );
+            for code in [serde_json::Value::Null, json!("unsupported_parameter")] {
+                let body =
+                    serde_json::to_vec(&json!({"error":{"code":code,"message":message}})).unwrap();
+                assert!(is_responses_only_error(&body));
+                assert!(!is_model_unavailable_error(StatusCode::BAD_REQUEST, &body));
+            }
+        }
+        for message in [
+            "Function tools are not supported in /v1/chat/completions.",
+            "Invalid tool arguments; use /v1/responses.",
+            "Model not found; use another deployment.",
+        ] {
+            let body = serde_json::to_vec(&json!({"error":{"message":message}})).unwrap();
+            assert!(!is_responses_only_error(&body));
+        }
     }
 
     #[test]

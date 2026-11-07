@@ -1,0 +1,35 @@
+{
+  "version": 4,
+  "reviewedPhase": {
+    "name": "fetch-pricing-docs",
+    "objective": "Read reviewed public pricing and write a cited handoff.",
+    "capabilities": [
+      "filesystem-read",
+      "filesystem-write",
+      "network"
+    ],
+    "requiredToolCalls": [
+      {
+        "name": "http_fetch",
+        "arguments": {
+          "method": "GET",
+          "url": "https://www.example.com/pricing/"
+        }
+      },
+      {
+        "name": "http_fetch",
+        "arguments": {
+          "method": "GET",
+          "url": "https://www.example.org/pricing/"
+        }
+      }
+    ],
+    "minToolCalls": 3,
+    "maxToolCalls": 8,
+    "freshContext": true
+  },
+  "phaseDigest": "sha256:7a36a0d641dd48ce8d87b0b7243a8116509e37102d7f2dc8f82312388052010e",
+  "requiredOutputs": [
+    "handoff.md"
+  ]
+}

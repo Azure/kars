@@ -12,8 +12,17 @@ meta.helm.sh/release-name: {{ .Release.Name | quote }}
 meta.helm.sh/release-namespace: {{ .Release.Namespace | quote }}
 {{- end -}}
 
+{{- define "witness.gadgetGoMemoryLimit" -}}768MiB{{- end -}}
+{{- define "witness.gadgetCpuLimit" -}}1{{- end -}}
+
+{{- define "witness.kindBeta" -}}
+{{- eq (get (.Values.global | default dict) "installationProfile") "kind-beta" -}}
+{{- end -}}
+
 {{- define "witness.config" -}}
-{{ dict "release_name" .Release.Name "sandboxes" .Values.sandboxes "window_seconds" .Values.aggregator.windowSeconds "interval_seconds" .Values.aggregator.intervalSeconds "dns_image" .Values.gadget.dnsImage "tcp_image" .Values.gadget.tcpImage "hook_mode" (.Values.gadget.hookMode | default "fanotify+ebpf") | toJson }}
+{{- $config := dict "release_name" .Release.Name "scope" .Values.scope "sandboxes" .Values.sandboxes "window_seconds" .Values.aggregator.windowSeconds "interval_seconds" .Values.aggregator.intervalSeconds "dns_image" .Values.gadget.dnsImage "tcp_image" .Values.gadget.tcpImage "hook_mode" (.Values.gadget.hookMode | default "fanotify+ebpf") "gadget_go_memory_limit" (include "witness.gadgetGoMemoryLimit" .) "gadget_go_max_procs" (include "witness.gadgetCpuLimit" .) -}}
+{{- if .Values.nodes -}}{{- $_ := set $config "nodes" .Values.nodes -}}{{- end -}}
+{{- $config | toJson -}}
 {{- end -}}
 
 {{- define "witness.assertOwner" -}}

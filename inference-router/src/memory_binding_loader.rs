@@ -1,43 +1,18 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! `KarsMemory` compiled-binding loader (Slice 3a).
+//! Validated `KarsMemory` binding and authorization snapshots for MCP and REST.
 //!
-//! Reads a single JSON file from a mount directory, registers the
-//! sha256 digest with the shared `PolicyStatusRegistry` under
-//! `PolicyKind::Memory`, and caches the parsed binding so future
-//! sub-slices can plug in real consumers (`foundry.memory.*` MCP
-//! tools, Slice 3b) without re-reading the file on every request.
-//!
-//! ## Slice 3a scope (digest-echo only)
-//!
-//! Slice 3a wires the §3 "Ready ⇔ router echo" loop and nothing else:
-//! the controller publishes `karsmemory-<name>-binding.binding.json`,
-//! the router loads + sha256's the canonical bytes, the digest shows
-//! up under `GET /internal/policy-status` with `kind: Memory`, and
-//! the `kars_memory_reconciler` poller promotes `Compiled → Ready`
-//! once every referencing sandbox echoes a match.
-//!
-//! What we deliberately do **not** wire in 3a:
-//!
-//! - Foundry Memory Store auto-provisioning on first use (router-side
-//!   HEAD/POST against the upstream).
-//! - `AuthMisconfigured` condition emission on 403 from Memory Store
-//!   (project-MI vs. account-MI gotcha — see `kars-deployment`
-//!   skill notes).
-//! - Rewiring the MCP `foundry.memory.*` tools from the chart-fed
-//!   `FOUNDRY_MEMORY_STORE_ID` env to the binding lookup. Today the
-//!   binding loads and the digest echoes, but no behaviour changes.
-//!
-//! These are tracked under Slice 3b/3c.
+//! Only valid bindings publish a digest. Failed or missing required reloads
+//! revoke prior grants instead of retaining stale access or falling back.
+//! Sandboxes without a binding use their conventional private partition.
 //!
 //! ## Single-binding rule
 //!
 //! A sandbox references at most one `KarsMemory` via
 //! `KarsSandbox.spec.memoryRef`. If the mount directory accidentally
-//! contains multiple `*.json` files (e.g. during a transitional
-//! mirror update), the loader picks the first one in lexicographic
-//! order so behaviour stays deterministic.
+//! contains multiple `*.json` files, the loader rejects the ambiguous
+//! authorization instead of choosing one policy arbitrarily.
 //!
 //! ## Digest contract (DO NOT BREAK)
 //!
@@ -65,16 +40,11 @@ pub const MEMORY_BINDING_FILENAME: &str = "binding.json";
 /// `spec.memoryRef` is set).
 pub const MEMORY_BINDING_DIR_DEFAULT: &str = "/etc/kars/memory";
 
-/// Shared handle to the currently loaded `KarsMemory` binding, or
-/// `None` when no binding has been loaded (mount missing, file
-/// absent, or parse failure). Wired into `routes::AppState` so
-/// Slice 3b's MCP rewire can do a single read-lock snapshot.
-pub type LoadedMemoryBindingHandle = Arc<RwLock<Option<LoadedMemoryBinding>>>;
+/// `Ok(None)` means no optional binding; `Err` means memory is unavailable.
+/// A failed reload replaces prior authorization, including explicit shares.
+pub type LoadedMemoryBindingHandle = Arc<RwLock<Result<Option<LoadedMemoryBinding>, String>>>;
 
-/// Parsed `KarsMemory` binding cached in memory. Fields populated in
-/// 3a are the bare minimum the operator needs to debug a digest
-/// mismatch (`source_path`, `store_name`, `scope`); the full JSON
-/// stays in `raw` so 3b's MCP rewire doesn't need a new loader.
+/// Validated binding, grants, and provenance cached together.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedMemoryBinding {
     /// `sha256:<hex>` digest the router echoes via
@@ -84,13 +54,11 @@ pub struct LoadedMemoryBinding {
     /// Filesystem path the bytes came from. Surfaced in
     /// `PolicyStatusEntry.source_path` for operator debugging.
     pub source_path: String,
-    /// Upstream Foundry Memory Store name. Empty string when the
-    /// compiled binding omitted the field (the controller's
-    /// compile step always sets it, so empty here means a hand-rolled
-    /// or schema-drifted file is on the mount).
+    /// Validated upstream Foundry Memory Store name.
     pub store_name: String,
-    /// `scope` string from the binding (e.g. `agent:foo`).
+    /// Exact private partition, without normalization.
     pub scope: String,
+    pub shared_scopes: Vec<String>,
     /// Whole binding JSON, preserved verbatim for Slice 3b consumers.
     pub raw: serde_json::Value,
 }
@@ -99,7 +67,61 @@ pub struct LoadedMemoryBinding {
 /// clones into the loader + any future consumer (Slice 3b).
 #[must_use]
 pub fn empty_handle() -> LoadedMemoryBindingHandle {
-    Arc::new(RwLock::new(None))
+    Arc::new(RwLock::new(Ok(None)))
+}
+
+/// Resolve one coherent snapshot. Missing optional bindings use private conventional
+/// memory; unavailable required bindings never fall back to a different partition.
+pub async fn resolve_access(
+    handle: Option<&LoadedMemoryBindingHandle>,
+    sandbox: &str,
+    fallback_store: &str,
+) -> Result<crate::memory_access::MemoryAccess, String> {
+    if let Some(handle) = handle {
+        match &*handle.read().await {
+            Ok(Some(binding)) => {
+                let access = crate::memory_access::MemoryAccess {
+                    store_name: binding.store_name.clone(),
+                    scope: binding.scope.clone(),
+                    shared_scopes: binding.shared_scopes.clone(),
+                };
+                access.validate().map_err(String::from)?;
+                return Ok(access);
+            }
+            Err(message) => return Err(message.clone()),
+            Ok(None) => {}
+        }
+    }
+    if std::env::var("MEMORY_BINDING_REQUIRED").as_deref() == Ok("true") {
+        return Err("required memory scope binding is unavailable".into());
+    }
+    let sanitize = |value: &str| -> String {
+        value
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || "_-.%+@/".contains(c) {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect()
+    };
+    let sandbox = sanitize(sandbox.trim());
+    let scope = match std::env::var("CLUSTER_NAME")
+        .ok()
+        .filter(|c| !c.trim().is_empty())
+    {
+        Some(cluster) => format!("agent_{}_{}", sanitize(cluster.trim()), sandbox),
+        None => format!("agent_{sandbox}"),
+    };
+    let access = crate::memory_access::MemoryAccess {
+        store_name: fallback_store.to_string(),
+        scope,
+        shared_scopes: Vec::new(),
+    };
+    access.validate().map_err(String::from)?;
+    Ok(access)
 }
 
 /// Compute the canonical byte layout the controller hashes for a
@@ -179,6 +201,11 @@ pub fn load_memory_binding_from_dir(
         }
     };
     json_files.sort();
+    if json_files.len() > 1 {
+        let message = "memory scope binding is ambiguous: expected one JSON file".to_string();
+        policy_status.record_error(PolicyKind::Memory, dir, &message);
+        return LoadOutcome::Error(message);
+    }
     let Some(file) = json_files.first() else {
         tracing::debug!(dir, "KarsMemory mount is empty");
         return LoadOutcome::NoBinding;
@@ -205,21 +232,23 @@ pub fn load_memory_binding_from_dir(
         }
     };
 
-    // Defence-in-depth: the controller compiler always emits these
-    // two fields, but a hand-edited file mounted by an operator
-    // outside the controller's reconcile loop must not crash the
-    // router. Default to empty string + leave the digest echo to
-    // surface the divergence.
-    let store_name = parsed
-        .get("storeName")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let scope = parsed
-        .get("scope")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    let access = serde_json::from_value::<crate::memory_access::MemoryAccess>(parsed.clone())
+        .map_err(|error| error.to_string())
+        .and_then(|access| {
+            access
+                .validate()
+                .map(|()| access.clone())
+                .map_err(String::from)
+        });
+    let access = match access {
+        Ok(access) => access,
+        Err(message) => {
+            policy_status.record_error(PolicyKind::Memory, &file_str, &message);
+            return LoadOutcome::Error(message);
+        }
+    };
+    let store_name = access.store_name;
+    let scope = access.scope;
 
     // Digest layout matches controller `kars_memory_digest`:
     // length-prefixed (name, body) hashed with sha256.
@@ -243,6 +272,7 @@ pub fn load_memory_binding_from_dir(
         source_path: file_str,
         store_name,
         scope,
+        shared_scopes: access.shared_scopes,
         raw: parsed,
     })
 }
@@ -252,35 +282,41 @@ pub fn load_memory_binding_from_dir(
 /// mtime-poll loop. Returns the outcome so the caller can log /
 /// surface in metrics.
 ///
-/// Handle-update semantics by outcome:
-/// - [`LoadOutcome::Loaded`] → handle is overwritten with the new
-///   binding. Slice 3b consumers see the rewired `store_name` /
-///   `scope` on the very next read-lock.
-/// - [`LoadOutcome::NoBinding`] → handle is **cleared**
-///   (`*handle = None`). This is what makes hot-reload work when an
-///   operator removes `spec.memoryRef` from a `KarsSandbox`: the
-///   sandbox reconciler unmounts the ConfigMap, the watcher sees an
-///   empty dir, and the router stops claiming a binding exists.
-/// - [`LoadOutcome::Error`] → handle is **left intact**. A transient
-///   parse error during a partial mount update (controller mid-write)
-///   must not knock the data plane offline; the registry already
-///   captured the error so the §3 echo loop notices the digest is
-///   stale.
+/// Valid reloads replace the policy. Errors revoke prior grants immediately.
+/// Missing files are errors when a binding is required or was previously loaded;
+/// only a never-bound optional handle retains conventional private memory.
 pub async fn load_and_install(
     dir: &str,
     policy_status: &PolicyStatusRegistry,
     handle: &LoadedMemoryBindingHandle,
 ) -> LoadOutcome {
-    let outcome = load_memory_binding_from_dir(dir, policy_status);
-    match &outcome {
-        LoadOutcome::Loaded(binding) => {
-            *handle.write().await = Some(binding.clone());
-        }
-        LoadOutcome::NoBinding => {
-            *handle.write().await = None;
-        }
-        LoadOutcome::Error(_) => {}
+    load_and_install_required(
+        dir,
+        policy_status,
+        handle,
+        std::env::var("MEMORY_BINDING_REQUIRED").as_deref() == Ok("true"),
+    )
+    .await
+}
+
+async fn load_and_install_required(
+    dir: &str,
+    policy_status: &PolicyStatusRegistry,
+    handle: &LoadedMemoryBindingHandle,
+    required: bool,
+) -> LoadOutcome {
+    let mut outcome = load_memory_binding_from_dir(dir, policy_status);
+    let mut current = handle.write().await;
+    if matches!(outcome, LoadOutcome::NoBinding) && (required || !matches!(*current, Ok(None))) {
+        let message = "required memory scope binding is unavailable".to_string();
+        policy_status.record_error(PolicyKind::Memory, dir, &message);
+        outcome = LoadOutcome::Error(message);
     }
+    *current = match &outcome {
+        LoadOutcome::Loaded(binding) => Ok(Some(binding.clone())),
+        LoadOutcome::NoBinding => Ok(None),
+        LoadOutcome::Error(message) => Err(message.clone()),
+    };
     outcome
 }
 
@@ -405,7 +441,7 @@ mod tests {
     #[test]
     fn happy_path_registers_digest_and_caches_fields() {
         let dir = tempdir().unwrap();
-        let body = br#"{"storeName":"my-store","scope":"agent:demo","version":1}"#;
+        let body = br#"{"storeName":"my-store","scope":"agent_demo","version":1}"#;
         std::fs::write(dir.path().join("binding.json"), body).unwrap();
         let reg = PolicyStatusRegistry::new();
         let outcome = load_memory_binding_from_dir(dir.path().to_str().unwrap(), &reg);
@@ -413,7 +449,7 @@ mod tests {
             panic!("expected Loaded, got {outcome:?}");
         };
         assert_eq!(binding.store_name, "my-store");
-        assert_eq!(binding.scope, "agent:demo");
+        assert_eq!(binding.scope, "agent_demo");
         assert!(binding.digest.starts_with("sha256:"));
         let entry = reg.get(PolicyKind::Memory).unwrap();
         assert_eq!(entry.digest.as_deref(), Some(binding.digest.as_str()));
@@ -428,7 +464,7 @@ mod tests {
         // and so does the router. Any divergence here breaks the §3
         // echo loop silently.
         use sha2::{Digest, Sha256};
-        let body = br#"{"storeName":"abc"}"#;
+        let body = br#"{"storeName":"abc","scope":"agent_abc"}"#;
         let canonical = canonical_bytes_for_digest(MEMORY_BINDING_FILENAME, body);
         let raw = Sha256::digest(&canonical);
         let mut hexstr = String::with_capacity(raw.len() * 2);
@@ -450,38 +486,40 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_pick_when_multiple_json_files_present() {
+    fn ambiguous_multiple_json_bindings_are_unavailable() {
         let dir = tempdir().unwrap();
         std::fs::write(
             dir.path().join("b.json"),
-            br#"{"storeName":"b","scope":"agent:b"}"#,
+            br#"{"storeName":"b","scope":"agent_b"}"#,
         )
         .unwrap();
         std::fs::write(
             dir.path().join("a.json"),
-            br#"{"storeName":"a","scope":"agent:a"}"#,
+            br#"{"storeName":"a","scope":"agent_a"}"#,
         )
         .unwrap();
         let reg = PolicyStatusRegistry::new();
-        let LoadOutcome::Loaded(binding) =
-            load_memory_binding_from_dir(dir.path().to_str().unwrap(), &reg)
-        else {
-            panic!("expected Loaded");
-        };
-        assert_eq!(binding.store_name, "a", "should pick lexicographic first");
+        assert!(matches!(
+            load_memory_binding_from_dir(dir.path().to_str().unwrap(), &reg),
+            LoadOutcome::Error(_)
+        ));
+        assert!(reg.get(PolicyKind::Memory).unwrap().digest.is_none());
     }
 
     #[tokio::test]
     async fn load_and_install_writes_handle() {
         let dir = tempdir().unwrap();
-        let body = br#"{"storeName":"s","scope":"agent:s"}"#;
+        let body = br#"{"storeName":"s","scope":"agent_s"}"#;
         std::fs::write(dir.path().join("binding.json"), body).unwrap();
         let reg = PolicyStatusRegistry::new();
         let handle = empty_handle();
         let _ = load_and_install(dir.path().to_str().unwrap(), &reg, &handle).await;
         let snapshot = handle.read().await.clone();
-        assert!(snapshot.is_some(), "handle should be populated");
-        assert_eq!(snapshot.unwrap().store_name, "s");
+        assert!(
+            snapshot.as_ref().unwrap().is_some(),
+            "handle should be populated"
+        );
+        assert_eq!(snapshot.unwrap().unwrap().store_name, "s");
     }
 
     #[tokio::test]
@@ -492,8 +530,8 @@ mod tests {
         let handle = empty_handle();
         let _ = load_and_install(dir.path().to_str().unwrap(), &reg, &handle).await;
         assert!(
-            handle.read().await.is_none(),
-            "handle must stay empty on parse error"
+            handle.read().await.is_err(),
+            "parse error must make memory unavailable"
         );
     }
 
@@ -502,7 +540,7 @@ mod tests {
         let h = empty_handle();
         // sync read — no other writer can hold this
         let guard = h.try_read().expect("uncontended");
-        assert!(guard.is_none());
+        assert!(matches!(*guard, Ok(None)));
     }
 
     #[test]
@@ -513,14 +551,11 @@ mod tests {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("binding.json"), br#"{"version":1}"#).unwrap();
         let reg = PolicyStatusRegistry::new();
-        let LoadOutcome::Loaded(binding) =
-            load_memory_binding_from_dir(dir.path().to_str().unwrap(), &reg)
-        else {
-            panic!("expected Loaded");
-        };
-        assert_eq!(binding.store_name, "");
-        assert_eq!(binding.scope, "");
-        assert!(binding.digest.starts_with("sha256:"));
+        assert!(matches!(
+            load_memory_binding_from_dir(dir.path().to_str().unwrap(), &reg),
+            LoadOutcome::Error(_)
+        ));
+        assert!(reg.get(PolicyKind::Memory).unwrap().digest.is_none());
     }
 
     /// Hot-reload semantics (Slice 3 DoD #4): when the file disappears
@@ -531,7 +566,7 @@ mod tests {
     #[tokio::test]
     async fn load_and_install_clears_handle_on_no_binding() {
         let dir = tempdir().unwrap();
-        let body = br#"{"storeName":"alpha","scope":"agent:a"}"#;
+        let body = br#"{"storeName":"alpha","scope":"agent_a"}"#;
         std::fs::write(dir.path().join("binding.json"), body).unwrap();
         let reg = PolicyStatusRegistry::new();
         let handle = empty_handle();
@@ -541,39 +576,122 @@ mod tests {
         else {
             panic!("expected initial Loaded");
         };
-        assert!(handle.read().await.is_some(), "handle must be populated");
+        assert!(
+            handle.read().await.as_ref().unwrap().is_some(),
+            "handle must be populated"
+        );
 
         std::fs::remove_file(dir.path().join("binding.json")).unwrap();
         let outcome = load_and_install(dir.path().to_str().unwrap(), &reg, &handle).await;
-        assert!(matches!(outcome, LoadOutcome::NoBinding));
+        assert!(matches!(outcome, LoadOutcome::Error(_)));
         assert!(
-            handle.read().await.is_none(),
-            "handle must be cleared after the binding goes away"
+            handle.read().await.is_err(),
+            "missing binding must not fall back"
+        );
+        assert!(
+            resolve_access(Some(&handle), "test", "fallback")
+                .await
+                .is_err()
         );
     }
 
-    /// Transient parse errors during a partial mount update must not
-    /// knock the data plane offline; the registry already captured
-    /// the error so the §3 echo loop notices the digest is stale.
     #[tokio::test]
-    async fn load_and_install_preserves_prior_handle_on_error() {
+    async fn load_and_install_revokes_prior_handle_on_error() {
         let dir = tempdir().unwrap();
         std::fs::write(
             dir.path().join("binding.json"),
-            br#"{"storeName":"alpha","scope":"agent:a"}"#,
+            br#"{"storeName":"alpha","scope":"agent_a"}"#,
         )
         .unwrap();
         let reg = PolicyStatusRegistry::new();
         let handle = empty_handle();
 
         let _ = load_and_install(dir.path().to_str().unwrap(), &reg, &handle).await;
-        let pre = handle.read().await.clone().expect("loaded once");
+        assert!(handle.read().await.as_ref().unwrap().is_some());
 
         std::fs::write(dir.path().join("binding.json"), b"{not json").unwrap();
         let outcome = load_and_install(dir.path().to_str().unwrap(), &reg, &handle).await;
         assert!(matches!(outcome, LoadOutcome::Error(_)));
-        let post = handle.read().await.clone().expect("handle still populated");
-        assert_eq!(post.digest, pre.digest, "stale-but-live policy preserved");
+        assert!(handle.read().await.is_err());
+        assert!(
+            resolve_access(Some(&handle), "test", "fallback")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn required_memory_binding_missing_at_startup_is_unavailable() {
+        let dir = tempdir().unwrap();
+        let reg = PolicyStatusRegistry::new();
+        let handle = empty_handle();
+        assert!(matches!(
+            load_and_install_required(dir.path().to_str().unwrap(), &reg, &handle, true).await,
+            LoadOutcome::Error(_)
+        ));
+        assert!(
+            resolve_access(Some(&handle), "test", "fallback")
+                .await
+                .is_err()
+        );
+        assert!(reg.get(PolicyKind::Memory).unwrap().digest.is_none());
+    }
+
+    #[tokio::test]
+    async fn memory_binding_reload_replaces_and_revokes_shared_grants() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("binding.json");
+        let reg = PolicyStatusRegistry::new();
+        let handle = empty_handle();
+        std::fs::write(
+            &file,
+            br#"{"storeName":"bound","scope":"private","sharedScopes":["team"]}"#,
+        )
+        .unwrap();
+        load_and_install(dir.path().to_str().unwrap(), &reg, &handle).await;
+        let before = reg.get(PolicyKind::Memory).unwrap().digest;
+        assert!(
+            resolve_access(Some(&handle), "test", "fallback")
+                .await
+                .unwrap()
+                .authorize("team")
+                .is_ok()
+        );
+        std::fs::write(
+            &file,
+            br#"{"storeName":"bound","scope":"private","sharedScopes":[]}"#,
+        )
+        .unwrap();
+        load_and_install(dir.path().to_str().unwrap(), &reg, &handle).await;
+        let policy = resolve_access(Some(&handle), "test", "fallback")
+            .await
+            .unwrap();
+        assert!(policy.authorize("team").is_err());
+        assert!(policy.authorize("private").is_ok());
+        assert_ne!(before, reg.get(PolicyKind::Memory).unwrap().digest);
+    }
+
+    #[test]
+    fn invalid_memory_grants_never_register_success() {
+        let dir = tempdir().unwrap();
+        let reg = PolicyStatusRegistry::new();
+        for grants in [
+            serde_json::json!(["*"]),
+            serde_json::json!(["private"]),
+            serde_json::json!(["team", "team"]),
+            serde_json::json!(["../other"]),
+            serde_json::json!([42]),
+            serde_json::json!(null),
+        ] {
+            let body =
+                serde_json::json!({"storeName":"bound","scope":"private","sharedScopes":grants});
+            std::fs::write(dir.path().join("binding.json"), body.to_string()).unwrap();
+            assert!(matches!(
+                load_memory_binding_from_dir(dir.path().to_str().unwrap(), &reg),
+                LoadOutcome::Error(_)
+            ));
+            assert!(reg.get(PolicyKind::Memory).unwrap().digest.is_none());
+        }
     }
 
     #[test]
@@ -601,13 +719,21 @@ mod tests {
         let dir_path = dir.path().to_str().unwrap().to_string();
         std::fs::write(
             dir.path().join("binding.json"),
-            br#"{"storeName":"v1","scope":"agent:a"}"#,
+            br#"{"storeName":"v1","scope":"agent_a"}"#,
         )
         .unwrap();
         let reg = PolicyStatusRegistry::new();
         let handle = empty_handle();
         let _ = load_and_install(&dir_path, &reg, &handle).await;
-        let digest_v1 = handle.read().await.as_ref().unwrap().digest.clone();
+        let digest_v1 = handle
+            .read()
+            .await
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .digest
+            .clone();
 
         // Safety: tests run sequentially within this module; setting
         // a process-wide env var is fine because no other test in
@@ -627,13 +753,21 @@ mod tests {
         // mtime moves forward observably.
         std::fs::write(
             dir.path().join("binding.json"),
-            br#"{"storeName":"v2","scope":"agent:a"}"#,
+            br#"{"storeName":"v2","scope":"agent_a"}"#,
         )
         .unwrap();
 
         for _ in 0..40 {
             tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-            let current = handle.read().await.as_ref().unwrap().digest.clone();
+            let current = handle
+                .read()
+                .await
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .digest
+                .clone();
             if current != digest_v1 {
                 return; // success — watcher detected the change
             }

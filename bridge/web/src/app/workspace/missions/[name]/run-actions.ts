@@ -34,7 +34,7 @@ export async function replicateMissionAction(
 }
 
 /// Request a per-mission autonomy-tier promotion (§12). The controller opens a
-/// human approval and widens the envelope only on approval.
+/// human approval; only an unconsumed mission can change its envelope.
 export async function promoteMissionAction(
   _prev: ReplicateState,
   form: FormData,

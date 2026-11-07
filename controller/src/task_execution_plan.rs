@@ -4,8 +4,9 @@
 #[path = "../../shared/execution_plan.rs"]
 mod contract;
 pub use contract::{
-    ExecutionPhase, ExecutionPlan, REVIEWED_TASK_DELEGATION_DEPTH, REVIEWED_TEAM_DELEGATION_DEPTH,
-    validate_activation, validate_filesystem_execution, validate_reviewed_delegation_depth,
+    ExecutionPhase, ExecutionPlan, ExecutionRequiredToolCall, REVIEWED_TASK_DELEGATION_DEPTH,
+    REVIEWED_TEAM_DELEGATION_DEPTH, validate_activation, validate_filesystem_execution,
+    validate_retained_input_execution, validate_reviewed_delegation_depth,
 };
 
 #[cfg(test)]
@@ -15,26 +16,28 @@ pub fn schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     let name = serde_json::json!({"type":"string","minLength":1,"maxLength":48,
         "pattern":"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"});
     let objective = serde_json::json!({"type":"string","minLength":20,"maxLength":1200});
-    let capabilities = serde_json::json!({"type":"array","maxItems":7,"default":[],
-        "items":{"type":"string","enum":["filesystem-read","filesystem-write","shell","network","web-search","mcp","memory"]}});
-    let calls = serde_json::json!({"type":"integer","format":"int32","minimum":0,"maximum":32});
+    let capabilities = serde_json::json!({"type":"array","maxItems":8,"default":[],
+        "items":{"type":"string","enum":["filesystem-read","filesystem-write","shell","network","web-search","mcp","memory","github-pr","python-execute"]}});
+    let calls =
+        serde_json::json!({"type":"integer","format":"int32","minimum":0,"maximum":i32::MAX});
     let phases = serde_json::json!({"type":"array","minItems":1,"maxItems":8,"items":{
         "type":"object","required":["maxToolCalls","name","objective"],
         "properties":{
             "name":name,"objective":objective,"capabilities":capabilities,
-            "minToolCalls":{"type":"integer","format":"int32","minimum":0,"maximum":32,"default":0},
+            "minToolCalls":{"type":"integer","format":"int32","minimum":0,"maximum":i32::MAX,"default":0},
             "maxToolCalls":calls,"freshContext":{"type":"boolean","default":false},
+            "executionMode":{"type":"string","enum":["native"]},
             "requiredToolCalls":{"type":"array","maxItems":8,"items":{
                 "type":"object","required":["name"],
                 "properties":{
-                    "name":{"type":"string","enum":["github_actions_job_logs"]},
+                    "name":{"type":"string","enum":["github_actions_job_logs","http_fetch"]},
                     "arguments":{"type":"object","maxProperties":8,"default":{},
                         "additionalProperties":{"type":"string","maxLength":4096}}
                 }
             }}
         }
     }});
-    let roles = serde_json::json!({"type":"array","minItems":1,"maxItems":8,"items":{
+    let roles = serde_json::json!({"type":"array","minItems":0,"maxItems":8,"items":{
         "type":"object","required":["name","objective","phases"],
         "properties":{
             "name":name,"objective":objective,
@@ -51,7 +54,8 @@ pub fn schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
             "maxParallel":{"type":"integer","format":"int32","minimum":1,"maximum":8},
             "roles":roles,
             "synthesis":{"type":"object","required":["maxToolCalls","objective"],
-                "properties":{"objective":objective,"capabilities":capabilities,"maxToolCalls":calls}},
+                "properties":{"objective":objective,"capabilities":capabilities,"maxToolCalls":calls,
+                    "executionMode":{"type":"string","enum":["native"]}}},
             "deliverables":{"type":"array","maxItems":16,"default":[],"items":{
                 "type":"object","required":["name"],"properties":{
                     "name":{"type":"string","minLength":1,"maxLength":128,"pattern":"^[a-zA-Z0-9][a-zA-Z0-9._-]*$"},

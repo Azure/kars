@@ -215,9 +215,16 @@ async fn bounded_dispatch_inventory_recovers_from_status_resource_version_churn(
     assert_eq!(calls.load(Ordering::SeqCst), 4);
     assert_eq!(lineage.nodes[0].resource_version, "2");
     assert_eq!(lineage.nodes[0].pin.task.uid, "leaf-uid");
-    assert_eq!(lineage.nodes[0].authorization_digest, leaf.envelope_digest());
+    assert_eq!(
+        lineage.nodes[0].authorization_digest,
+        leaf.envelope_digest()
+    );
     assert!(
-        server.received_requests().await.unwrap().iter()
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
             .all(|request| request.method == "GET")
     );
 }
@@ -238,7 +245,9 @@ async fn bounded_dispatch_inventory_never_accepts_continuous_churn_or_replaced_l
                 let count = observed.fetch_add(1, Ordering::SeqCst);
                 let mut current = snapshot.clone();
                 match drift {
-                    "resourceVersion" => current.metadata.resource_version = Some(count.to_string()),
+                    "resourceVersion" => {
+                        current.metadata.resource_version = Some(count.to_string())
+                    }
                     "uid" => current.metadata.uid = Some("replacement".into()),
                     "generation" => current.metadata.generation = Some(2),
                     _ => unreachable!(),
@@ -251,7 +260,10 @@ async fn bounded_dispatch_inventory_never_accepts_continuous_churn_or_replaced_l
             resolve_with_retry(&client, &leaf, LeafReadiness::RequireReady).await,
             Err(Error::Changed)
         ));
-        assert_eq!(calls.load(Ordering::SeqCst), if drift == "resourceVersion" { 6 } else { 3 });
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            if drift == "resourceVersion" { 6 } else { 3 }
+        );
     }
 }
 
@@ -265,7 +277,13 @@ async fn dispatch_inventory_does_not_retry_governance_or_api_denial() {
         Err(Error::NotReady)
     ));
     let requests = server.received_requests().await.unwrap();
-    assert_eq!(requests.iter().filter(|request| request.url.path().ends_with("/leaf")).count(), 1);
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.url.path().ends_with("/leaf"))
+            .count(),
+        1
+    );
 
     let (server, client) = setup().await;
     let leaf = task("leaf", None, true);
@@ -282,7 +300,10 @@ async fn dispatch_inventory_does_not_retry_governance_or_api_denial() {
         .await;
     assert!(matches!(
         resolve_with_retry(&client, &leaf, LeafReadiness::RequireReady).await,
-        Err(Error::Api { code: Some(403), .. })
+        Err(Error::Api {
+            code: Some(403),
+            ..
+        })
     ));
 }
 

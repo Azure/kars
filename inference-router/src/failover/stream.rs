@@ -26,6 +26,41 @@ pub async fn forward_stream_with_failover(
     request_headers: HeaderMap,
     request_body: Bytes,
 ) -> Result<StreamingResult> {
+    forward_stream_with_authorization(
+        auth,
+        copilot,
+        client,
+        health,
+        upstream_base,
+        config,
+        snapshot,
+        path,
+        request_headers,
+        request_body,
+        |_| std::future::ready(Ok(())),
+    )
+    .await
+}
+
+/// Authorization runs for each actual attempt, including the all-unhealthy
+/// safety net, before request rewriting, admission, authentication or dispatch.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn forward_stream_with_authorization<Fut>(
+    auth: Arc<WorkloadIdentityAuth>,
+    copilot: Option<Arc<CopilotTokenCache>>,
+    client: Client,
+    health: &Arc<DeploymentHealthRegistry>,
+    upstream_base: &UpstreamConfig,
+    config: &Config,
+    snapshot: &InferencePolicySnapshot,
+    path: &str,
+    request_headers: HeaderMap,
+    request_body: Bytes,
+    authorize: impl Fn(Candidate) -> Fut,
+) -> Result<StreamingResult>
+where
+    Fut: std::future::Future<Output = Result<()>>,
+{
     let candidates = candidates_for_request(upstream_base, snapshot, &request_body);
     let mut eligible: Vec<_> = candidates
         .iter()
@@ -36,6 +71,7 @@ pub async fn forward_stream_with_failover(
     }
     let mut last_result = None;
     for candidate in eligible {
+        authorize(candidate.clone()).await?;
         let key = health_key(candidate);
         let upstream = resolve_candidate(upstream_base, config, candidate)
             .map_err(ForwardFailure::configuration)?;

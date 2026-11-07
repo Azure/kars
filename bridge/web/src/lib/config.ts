@@ -56,6 +56,11 @@ export function headlampUrl(): string | null {
   return u && u.trim().length > 0 ? u : null;
 }
 
+/** Enable only with packaged Headlamp OIDC and IdP browser-session sharing. */
+export function headlampSsoEnabled(): boolean {
+  return process.env.BRIDGE_HEADLAMP_SSO_ENABLED === "true";
+}
+
 /**
  * The FOUR role sets that partition kars Bridge, in privilege order:
  * - `user`     — the employee Workspace: start missions/teams, review, connections.

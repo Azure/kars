@@ -256,8 +256,8 @@ pub(crate) async fn retained_archive(
         .transpose()
 }
 
-/// Whole recent run bundles only; leave half the installed 64KiB input allowance
-/// for the new run's peer handoffs. Never truncate a document or its provenance.
+/// Whole recent run bundles within the existing Mission input capacity. Combined
+/// memory and new peer exports are checked again for each phase; neither is truncated.
 pub(crate) async fn prior_documents(
     client: &Client,
     team: &KarsTeam,
@@ -293,10 +293,12 @@ fn select_documents(
                 proposed.push(document);
             }
         }
-        if proposed.len() > 8 || serde_json::to_vec(&proposed)?.len() > 32768 {
+        if proposed.len() > crate::reviewed_execution::MAX_RECALL_FILES
+            || serde_json::to_vec(&proposed)?.len() > crate::reviewed_execution::MAX_INPUT_BYTES
+        {
             ensure!(
                 !result.is_empty(),
-                "latest complete Team memory exceeds the 8-file/32KiB allowance; refusing truncated recall"
+                "latest complete Team memory exceeds the 8-file/192KiB Mission input allowance; refusing truncated recall"
             );
             break;
         }
@@ -327,24 +329,44 @@ pub async fn ensure_commons(client: &Client, team: &KarsTeam) -> Result<()> {
     Ok(())
 }
 
+pub(crate) struct RunSummary<'a> {
+    pub id: &'a str,
+    pub title: &'a str,
+    pub author: &'a str,
+    pub source_task: &'a str,
+    pub content: &'a str,
+}
+
 /// Append a summary or enrich its verified archive without rewriting audited
-/// summary bytes. Returns `true` when either record was written.
+/// summary bytes or its original charter-derived title. Returns `true` when
+/// either record was written.
 pub(crate) async fn record_run(
     client: &Client,
     team: &KarsTeam,
-    id: &str,
-    title: &str,
-    author: &str,
-    source_task: &str,
-    content: &str,
+    summary: RunSummary<'_>,
     archive: Option<&RunArchive>,
 ) -> Result<bool> {
+    let RunSummary {
+        id,
+        title,
+        author,
+        source_task,
+        content,
+    } = summary;
     let identity = CommonsIdentity::for_team(team)?;
     let cms: Api<ConfigMap> = Api::namespaced(client.clone(), &identity.namespace);
     let existing = cms
         .get(&identity.name)
         .await
         .context("get commons ConfigMap for append")?;
+    identity.validate(&existing)?;
+    let index = read_index(&existing)?;
+    // Team edits must not relabel an already harvested run.
+    let title = index
+        .iter()
+        .find(|entry| entry.id == id)
+        .map(|entry| entry.title.as_str())
+        .unwrap_or(title);
     let base = prepare_entry_update(
         &identity,
         &existing,
@@ -466,17 +488,21 @@ fn prepare_entry_update(
             .as_ref()
             .and_then(|data| data.get(&content_key(id)))
             .context("commons entry content is missing")?;
-        // Old entries predate sanitization. An identical normalized retry must
-        // remain idempotent without rewriting the original audited bytes.
+        // Truncation can retain trailing whitespace that normalization removes.
+        // Accept exact stored bytes first; normalize legacy unsanitized entries
+        // only for comparison, never rewriting the original audited record.
         let normalized_prior: String = prompt::sanitize_untrusted(prior_content)
             .chars()
             .take(MAX_ENTRY_CHARS)
             .collect();
         ensure!(
-            normalized_prior == trimmed
-                && prompt::metadata(&prior.title, 160) == entry.title
-                && prompt::metadata(&prior.author, 253) == entry.author
-                && prompt::metadata(&prior.source_task, 253) == entry.source_task,
+            (prior_content == &trimmed || normalized_prior == trimmed)
+                && (prior.title == entry.title
+                    || prompt::metadata(&prior.title, 160) == entry.title)
+                && (prior.author == entry.author
+                    || prompt::metadata(&prior.author, 253) == entry.author)
+                && (prior.source_task == entry.source_task
+                    || prompt::metadata(&prior.source_task, 253) == entry.source_task),
             "commons entry ID already exists with different content or provenance"
         );
         return Ok(None);

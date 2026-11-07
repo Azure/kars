@@ -9,6 +9,7 @@ import type { DeploymentRecord } from "../lib/core-image-apply.js";
 import { releaseImagePlan } from "../lib/release.js";
 import { planSandboxImages } from "../lib/sandbox-image-apply.js";
 import { restartOwnedMetrics } from "../lib/metrics-image-apply.js";
+import { prepareCoreHelmSchemas } from "../lib/core-helm-schemas.js";
 vi.mock("../lib/core-helm-schemas.js", () => ({ prepareCoreHelmSchemas: vi.fn(async () => {}) }));
 
 const digest = `sha256:${"a".repeat(64)}`;
@@ -34,7 +35,7 @@ function getPath(object: Record<string, unknown>, path: string): string {
   return path.split(".").reduce<unknown>((current, key) => (current as Record<string, unknown>)[key], object) as string;
 }
 
-function fixture(options: { legacyCore?: boolean; mesh?: "absent" | "helm" | "external"; metrics?: "owned" | "external" | "disabled"; fail?: string; mismatch?: boolean; privateRoot?: boolean } = {}) {
+function fixture(options: { legacyCore?: boolean; mesh?: "absent" | "helm" | "external"; metrics?: "owned" | "external" | "disabled"; fail?: string; mismatch?: boolean; privateRoot?: boolean; coldSre?: boolean } = {}) {
   const values: Record<string, unknown> = {
     controller: { image: { repository: "ghcr.io/azure/kars-controller", tag: "v1.0.0", pullPolicy: "IfNotPresent" } },
     inferenceRouter: { image: { repository: "ghcr.io/azure/kars-inference-router", tag: "v1.0.0" } },
@@ -148,8 +149,14 @@ function fixture(options: { legacyCore?: boolean; mesh?: "absent" | "helm" | "ex
         if (op.path.endsWith("/imagePullPolicy")) c.imagePullPolicy = op.value as string;
       }
     }
-    if (bin === "kubectl" && args[0] === "annotate") materialize(args[2]);
+    if (bin === "kubectl" && args[0] === "annotate") throw new Error("Protected source metadata cannot be annotated");
+    if (bin === "kubectl" && args[0] === "rollout" && args[1] === "restart" && args[2] === "deployment/kars-controller") {
+      for (const cr of crs) materialize(cr.metadata.name);
+    }
     if (bin === "kubectl" && args[0] === "get") {
+      if (args[1] === "configmap" && args[2] === "kars-sre-first-install" && options.coldSre) {
+        return { stdout: JSON.stringify({ metadata: { name: args[2] }, immutable: true }) };
+      }
       if (args[1] === "apiservice") return { stdout: metricsPresent ? JSON.stringify(metricsApi) : "" };
       if (args[1] === "namespace" && options.privateRoot) return { stdout: JSON.stringify({
         kind: "Namespace", metadata: { name: "kars-system", uid: "root-ns", resourceVersion: "1",
@@ -255,6 +262,35 @@ describe("selected core push artifacts", () => {
     expect(f.calls().filter(([bin, args]) => bin === "helm" && args[0] === "upgrade")).toHaveLength(1);
   });
 
+  it("seals unchanged first-install values before updating the matching controller digest", async () => {
+    const f = fixture({ coldSre: true });
+    f.values.schemaHook = { enabled: true };
+    setPath(f.values, "controller.image.digest", `sha256:${"b".repeat(64)}`);
+    await applyPushedImages(f.execute, [pushed("controller")], "chart");
+    const upgrades = f.calls().filter(([bin, args]) => bin === "helm" && args[0] === "upgrade");
+    expect(upgrades).toHaveLength(2);
+    const adoption = upgrades[0][1];
+    expect(adoption).toContain("schemaHook.enabled=false");
+    expect(adoption.some(arg => arg.startsWith("controller.image."))).toBe(false);
+    expect(prepareCoreHelmSchemas).toHaveBeenCalledWith(f.execute, adoption);
+    const upgrade = upgrades[1][1];
+    expect(upgrade).toContain("schemaHook.enabled=false");
+    expect(upgrade).toContain(`controller.image.digest=${digest}`);
+    expect(prepareCoreHelmSchemas).toHaveBeenCalledWith(f.execute, upgrade);
+    expect(getPath(f.values, "controller.image.digest")).toBe(digest);
+    expect(f.controller.spec.template.spec.containers[0].image).toBe(reference("controller"));
+  });
+
+  it("does not change images when the guarded first-install transition fails", async () => {
+    const f = fixture({ coldSre: true, fail: "upgrade" });
+    await expect(applyPushedImages(f.execute, [pushed("controller")], "chart")).rejects.toThrow("failed upgrade");
+    const upgrades = f.calls().filter(([bin, args]) => bin === "helm" && args[0] === "upgrade");
+    expect(upgrades).toHaveLength(1);
+    expect(upgrades[0][1].some(arg => arg.startsWith("controller.image."))).toBe(false);
+    expect(f.controller.spec.template.spec.containers[0].image).toBe("ghcr.io/azure/kars-controller:v1.0.0");
+    expect(f.calls().some(([, args]) => ["patch", "rollout", "annotate"].includes(args[0]))).toBe(false);
+  });
+
   it("updates unmanaged controller image/env through version-guarded patches, without Helm", async () => {
     const f = fixture({ legacyCore: true });
     const agent = f.addSandbox("agent", "OpenClaw", "openclaw");
@@ -277,7 +313,11 @@ describe("selected core push artifacts", () => {
     expect(custom.deployment.spec.template.spec.containers[0].image).toBe("customer.example/custom:v9");
     expect(JSON.stringify(custom.cr.spec)).toBe(spec);
     if (name === "sandbox") expect(custom.deployment.spec.template.spec.initContainers![0].image).toBe(reference(name));
-    expect(f.calls().some(([, args]) => args[0] === "patch" && args.includes("karssandbox"))).toBe(false);
+    expect(f.calls().some(([, args]) => ["patch", "annotate"].includes(args[0]) && args.includes("karssandbox"))).toBe(false);
+    const restart = f.calls().findIndex(([, args]) => args[0] === "rollout" && args[1] === "restart" && args[2] === "deployment/kars-controller");
+    const verify = f.calls().findIndex(([, args]) => args[0] === "wait" && args[1] === "deployment/normal");
+    expect(restart).toBeGreaterThanOrEqual(0);
+    expect(verify).toBeGreaterThan(restart);
   });
 
   it.each(RUNTIME_IMAGE_TARGETS)("applies complete runtime mapping $name and leaves other runtimes untouched", async runtime => {

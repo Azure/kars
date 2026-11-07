@@ -9,27 +9,43 @@ import {
   BffError,
   createTeam,
   composeTeam,
+  getTeam,
+  qualifyTeam,
   putEngineeringSource,
   type CreateRole,
 } from "@/lib/bff";
 import { defaultNamespace } from "@/lib/config";
 import { parseTeamBudget } from "@/lib/team-budget";
-import type { ComposeTeamResponse, EngineeringSignal, ExecutionPlan, TeamLifecycleMode } from "@/lib/types";
+import type { ComposeTeamResponse, EngineeringSignal, ExecutionPlan } from "@/lib/types";
 
 export interface NewTeamState { error: string | null }
 
 /** Ask the orchestrator to compose an org chart from a charter (REQ: team
  *  orchestration, efficiency-driven). Falls back honestly when unavailable. */
-export async function composeTeamAction(charter: string): Promise<ComposeTeamResponse> {
+export async function composeTeamAction(charter: string, profile?: string, qualificationRun?: boolean, spending?: import("@/lib/budget-review").CompositionSpending): Promise<ComposeTeamResponse> {
   try {
-    return await composeTeam(defaultNamespace(), charter);
+    if (qualificationRun) {
+      const { currentPrincipal } = await import("@/lib/session");
+      const principal = await currentPrincipal();
+      if (!principal.roles.some((role) => role === "operator" || role === "admin")) {
+        return { available: false, reason: "Only an operator or admin may designate a qualification attempt.", proposal: null, rationale: null, source: null };
+      }
+    }
+    return await composeTeam(defaultNamespace(), charter, profile, qualificationRun, spending);
   } catch (error) {
     const timedOut = error instanceof Error && error.name === "TimeoutError";
+    const validationError = error instanceof BffError
+      && [400, 409, 422].includes(error.status)
+      && ["bad_request", "rejected", "conflict"].includes(error.code)
+      && error.message;
     return {
       available: false,
-      reason: timedOut
-        ? "The org orchestrator did not finish its bounded proposal and repair workflow within five minutes — start from the editable suggested roster below."
-        : "The org orchestrator is unavailable — start from the editable suggested roster below.",
+      reason: (error instanceof BffError && error.code === "spending_policy_unavailable" && error.message)
+        || validationError || (error instanceof BffError && error.status === 422
+        ? "The Team package has invalid fields. Review the charter and package before composing again."
+        : timedOut
+          ? "The org orchestrator did not finish its bounded proposal and repair workflow within five minutes — start from the editable suggested roster below."
+          : "The org orchestrator is unavailable — start from the editable suggested roster below."),
       proposal: null,
       rationale: null,
       source: null,
@@ -64,11 +80,11 @@ export async function createTeamAction(_p: NewTeamState, form: FormData): Promis
     return { error: "Delegation depth must be a non-negative 32-bit integer." };
   }
   const cadence = Number(form.get("cadence") ?? 0);
-  const lifecycleMode = String(form.get("lifecycle_mode") ?? "resourceOptimized") as TeamLifecycleMode;
-  const warmIdleSeconds = Math.min(
-    Number.MAX_SAFE_INTEGER,
-    Math.max(0, Number(form.get("warm_idle_seconds") ?? 900)),
-  );
+  const lifecycleMode = String(form.get("lifecycle_mode") ?? "").trim().toLowerCase();
+  const warmIdleSeconds = Number(form.get("warm_idle_seconds") ?? 0);
+  if ((lifecycleMode !== "" && lifecycleMode !== "ephemeral") || warmIdleSeconds !== 0) {
+    return { error: "Warm and always-on agent runtimes are not currently supported. Reload this form to create a durable Team with on-demand agent pods." };
+  }
   const reporting = String(form.get("reporting_to") ?? "").trim();
   const toolPolicy = String(form.get("tool_policy") ?? "").trim();
   const runtime = String(form.get("runtime") ?? "").trim();
@@ -91,9 +107,9 @@ export async function createTeamAction(_p: NewTeamState, form: FormData): Promis
     .filter(Boolean);
   const knowledgeCommons = String(form.get("knowledge_commons") ?? "").trim();
   const memory = String(form.get("memory") ?? "").trim();
-  const egressMode = String(form.get("egress_mode") ?? "learning") === "strict"
-    ? "strict"
-    : "learning";
+  if (String(form.get("egress_mode") ?? "strict").trim().toLowerCase() !== "strict") {
+    return { error: "Standing Teams use Strict egress. Review external hosts or request access during a run." };
+  }
   let egress: { host: string; port?: number }[] = [];
   try {
     egress = JSON.parse(String(form.get("egress_json") ?? "[]"));
@@ -103,6 +119,7 @@ export async function createTeamAction(_p: NewTeamState, form: FormData): Promis
   // Governance: teams are created PAUSED by default. Launching is an explicit
   // human approval — only auto-launch when the operator ticked "launch now".
   const launch = String(form.get("launch") ?? "") === "on";
+  const qualificationRun = form.get("qualification_run") === "true";
   let roles: CreateRole[] = [];
   try {
     roles = JSON.parse(String(form.get("roles_json") ?? "[]"));
@@ -153,6 +170,14 @@ export async function createTeamAction(_p: NewTeamState, form: FormData): Promis
   }
   const { currentPrincipal } = await import("@/lib/session");
   const principal = await currentPrincipal();
+  if (qualificationRun) {
+    if (!principal.roles.some((role) => role === "operator" || role === "admin")) {
+      return { error: "Only an operator or admin may designate a qualification attempt." };
+    }
+    if (engineeringEnabled || milestones.length === 0 || milestones[0].depends_on.length !== 0) {
+      return { error: "Qualification requires a reviewed first milestone with no dependencies and continuous engineering intake disabled." };
+    }
+  }
   try {
     await createTeam(defaultNamespace(), {
       name, charter, tier,
@@ -161,8 +186,6 @@ export async function createTeamAction(_p: NewTeamState, form: FormData): Promis
       budget: parsedBudget.budget,
       display_name: displayName || undefined,
       cadence_minutes: cadence || undefined,
-      lifecycle_mode: lifecycleMode,
-      warm_idle_seconds: lifecycleMode === "resourceOptimized" ? warmIdleSeconds : undefined,
       reporting_to: reporting || undefined,
       tool_policy: toolPolicy || undefined,
       pin_tool_policy: form.get("pin_tool_policy") === "on",
@@ -171,16 +194,18 @@ export async function createTeamAction(_p: NewTeamState, form: FormData): Promis
       model_fallbacks: modelFallbacks,
       mcp_servers: mcpServers,
       egress: egress.filter((entry) => entry.host?.trim()),
-      egress_mode: egressMode,
+      egress_mode: "strict",
       knowledge_commons: knowledgeCommons || undefined,
       memory: memory || undefined,
-      launch: launch && milestones.length === 0,
+      launch: !qualificationRun && launch && milestones.length === 0,
+      qualification_run: qualificationRun || undefined,
       roles: roles.filter((r) => r.name?.trim()),
       execution_plan: executionPlan,
       git_write_repos: gitWriteRepos.length ? gitWriteRepos : undefined,
       created_by: principal.name,
     });
     try {
+      let reviewedFirst: import("@/lib/types").TeamTask | null = null;
       for (const milestone of milestones) {
         const response = await authenticatedBffFetch(
           `/api/namespaces/${encodeURIComponent(defaultNamespace())}/teams/${encodeURIComponent(name)}/tasks`,
@@ -208,6 +233,14 @@ export async function createTeamAction(_p: NewTeamState, form: FormData): Promis
               ?? `Milestone ${milestone.id || milestone.title} could not be created (${response.status}).`,
           );
         }
+        if (qualificationRun) {
+          const created = await response.json() as import("@/lib/types").TeamTask;
+          reviewedFirst ??= created;
+        }
+      }
+      if (qualificationRun && launch && reviewedFirst) {
+        const team = await getTeam(defaultNamespace(), name);
+        await qualifyTeam(defaultNamespace(), name, team.uid, reviewedFirst);
       }
       if (engineeringEnabled) {
         await putEngineeringSource(defaultNamespace(), name, {
@@ -218,7 +251,7 @@ export async function createTeamAction(_p: NewTeamState, form: FormData): Promis
           poll_interval_seconds: engineeringPoll,
         });
       }
-      if (launch && milestones.length > 0) {
+      if (!qualificationRun && launch && milestones.length > 0) {
         const resume = await authenticatedBffFetch(
           `/api/namespaces/${encodeURIComponent(defaultNamespace())}/teams/${encodeURIComponent(name)}`,
           {
@@ -237,6 +270,9 @@ export async function createTeamAction(_p: NewTeamState, form: FormData): Promis
         }
       }
     } catch (error) {
+      if (qualificationRun) {
+        return { error: `Qualification Team ${name} is retained for inspection. ${error instanceof Error ? error.message : "Setup or attempt submission failed."} Open the Team before retrying; a request may already have been accepted.` };
+      }
       const cleanup = await authenticatedBffFetch(
         `/api/namespaces/${encodeURIComponent(defaultNamespace())}/teams/${encodeURIComponent(name)}`,
         { method: "DELETE", cache: "no-store" },

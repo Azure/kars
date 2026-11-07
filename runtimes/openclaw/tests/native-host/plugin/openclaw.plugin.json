@@ -1,0 +1,10 @@
+{
+  "id": "kars-native-host-verification",
+  "name": "Kars genuine native host verification",
+  "activation": { "onStartup": true },
+  "contracts": {
+    "webFetchProviders": ["kars-router"],
+    "tools": ["kars_mission_access_request", "kars_mission_file_read", "kars_mission_file_write", "kars_mission_http_fetch", "kars_mission_mcp_list", "kars_mission_mcp_call", "kars_mission_foundry_memory", "kars_mission_github_pr", "kars_mission_python_execute", "kars_mission_mesh_send", "kars_mission_discover", "kars_mission_mesh_inbox", "kars_mission_mesh_await"]
+  },
+  "configSchema": { "type": "object", "additionalProperties": false, "properties": {} }
+}

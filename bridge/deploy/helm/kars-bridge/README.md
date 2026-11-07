@@ -40,7 +40,137 @@ docker push <registry>/kars-bridge-bff:<tag>
 docker push <registry>/kars-bridge-web:<tag>
 ```
 
+## Protected consumer no-op upgrades
+
+A Bridge Deployment retained by private activation is not an ordinary rollout
+candidate. The chart permits only an **unchanged, already-qualified** BFF or Teams
+gateway, using an explicit operation fence. This allows a web-only upgrade or
+recording the BFF image already installed and qualified by the maintained
+retirement/migration path into Bridge's Helm history. Changing a protected image,
+replicas, environment, resources, identity, volumes, probes, strategy, labels or
+other Deployment execution settings still requires retirement/requalification.
+
+The maintained upgrade caller must first validate a durable root-migration
+receipt with `phase: complete`, its plan digest and current qualified activation
+(including all scopes, retired Pods and settled runtime material). It selects
+companion replica intent from **`receipt.plan.companions`**, then reviews the live
+Deployment UID/resourceVersion and verifies the current replicas match that
+intent. Namespace `Qualified` annotations do **not** prove original companion
+replicas or migration completion. A paused or partially restored migration must
+not generate upgrade fences, even if its namespaces already say Qualified.
+
+Supply one fence for **each protected consumer**, alongside the exact reviewed
+execution values. For example (identities and counts are illustrative, not
+instructions to scale a workload):
+
+```yaml
+bff:
+  privateContinuity:
+    uid: "<reviewed-bff-uid>"
+    resourceVersion: "<fresh-bff-resourceVersion>"
+    replicas: 1
+teamsGateway:
+  privateContinuity:
+    uid: "<reviewed-gateway-uid>"
+    resourceVersion: "<fresh-gateway-resourceVersion>"
+    replicas: 0
+```
+
+Each fence accepts exactly these three fields. UID and resourceVersion are
+strings; replicas is an integer and must equal both requested and live replicas.
+An intentionally disabled, qualified gateway can retain zero replicas; this is
+not permission to enable it. Fences are per-operation values, not reusable
+configuration. The chart does not generate fences or read the local migration
+journal; callers without completed-receipt verification must continue to refuse.
+No new finalization receipt format is required by this chart interface.
+
+After that review, use the normal connected `helm upgrade` with the reviewed
+values and fresh fence values last. A connected `--dry-run=server` can preflight
+the same selection; review again if any resourceVersion changes before applying.
+Do not use `--force`, replacement, rollback, namespace adoption, an offline
+render/apply, or a post-renderer that removes fences. Keep supporting RBAC,
+credentials and policy configuration unchanged in this bounded operation.
+
+The chart checks the retained v2 root proof, retirement binding, Qualified scope
+identities/epochs/parents, all retained consumer template digests, restored root
+replicas and root account identity, and retained TLS identity/version when present.
+Missing, Pending or inconsistent evidence fails closed. Scopes added after the
+root proof which are not in its retained inventory are not supported by this
+no-op path. Only known API defaults and exact common resource-quantity spellings
+are normalized for comparison; unknown differences refuse rather than being
+merged away. The emitted Deployment keeps its **entire exact live spec**, including
+its epoch (or legitimate retained-parent-only form), and UID/resourceVersion.
+Retained chart-owned private Namespace writes also carry UID/resourceVersion and
+preserve existing annotations. These are individual Kubernetes write fences,
+not a transaction across all resources or a substitute for migration completion.
+
 ## Install modes
+
+BFF, web, and Teams Gateway prefer nodes without the standard `control-plane` or
+legacy `master` role labels to leave API-server and etcd headroom when workers are
+available. The chart's `affinity` is only a preference: single-node Kind remains
+supported, node selectors and taints still apply, and existing Pods move only when
+replaced. Override `affinity` for dedicated pools or set it to `null` to remove the
+preference. Resource limits and isolation are unchanged; placement alone is not
+installed stability acceptance.
+
+### Durable Dex sessions on Kind
+
+The maintained chart already supports SQLite; do not add a second issuer or
+storage implementation. For a new installation with the optional IdP enabled,
+the storage values are:
+
+```yaml
+idp:
+  enabled: true
+  dex:
+    persistence:
+      enabled: true
+      existingClaim: ""
+      size: 1Gi
+      storageClass: standard
+```
+
+Use `standard` only after confirming that this is the installed Kind provisioner.
+`storageClass: null` selects the cluster default; `""` requests no storage class
+and needs a matching pre-provisioned volume. The Kind beta profile enables
+persistence but deliberately leaves the IdP disabled. Preserve reviewed issuer,
+client, TLS, user/connector and qualified image settings when supplying values.
+
+With an empty `existingClaim`, Helm creates the retained `dex-data` ReadWriteOnce
+PVC in the Bridge namespace. To reuse a retained claim, set `existingClaim` to
+its exact name; the chart then neither creates nor adopts a PVC. Dex writes
+`/var/lib/dex/dex.db` with UID/fsGroup 1001 and a single-replica `Recreate`
+Deployment. See [IdP persistence limitations](../../../idp/README.md#persistent-installed-sessions).
+
+With SSO enabled, an expired or missing Bridge session requires sign-in again.
+Protected Server Actions stop before execution and request full-page sign-in,
+rather than following the external IdP inside a background fetch. After signing
+in, review the original page before submitting again; the rejected action is not
+automatically replayed, and unsaved form edits may need to be re-entered.
+
+**No-reset installed validation (deployment owner only):**
+
+1. After other protected migrations finish, inspect the installed release values,
+   Dex ConfigMap and Deployment, and PVC/PV binding. Record storage backend,
+   database path, claim/PV UIDs, storage class and Pod UID without exporting
+   credentials. Saved values alone do not prove the live mount or backend.
+2. If the live issuer uses memory, stop: enabling SQLite creates new signing/session
+   state, not an identity-preserving migration. Do not restart it, swap in an
+   empty claim, or call a fresh login evidence of continuity. A memory-to-SQLite
+   cutover needs separate authorization; this procedure does not provide one.
+3. For an already SQLite-backed issuer, retain the same bound claim, issuer and
+   client/session Secrets. Verify a protected backup using the operator's
+   SQLite-consistent backup procedure; a raw copy of an active database is not
+   sufficient. Do not uninstall or delete the PVC, PV, Kind node or cluster.
+4. Through the maintained login/refresh flow, retain an unexpired token and its
+   verified signing-key identity plus a current refresh session securely. Record
+   only non-secret evidence. Replace the Dex Pod through its maintained
+   Deployment rollout, not by resetting identities or reinstalling the release.
+5. Confirm a new Pod UID, the same claim/PV UIDs and SQLite path, then verify the
+   old token against live JWKS and rotate the pre-restart refresh session. Confirm
+   authenticated Bridge and Headlamp access without a new login. Retain failures;
+   Ready Pods, matching key IDs alone, or offline render tests are not acceptance.
 
 ### Sharing Dex with Core Headlamp
 
@@ -149,6 +279,12 @@ helm install kars-bridge deploy/helm/kars-bridge -n kars-system \
   -f <your-bridge-values.yaml> --set workspaceEnrollment.enabled=true
 ```
 
+The `values-kind-beta.yaml` profile enables this credential-free enrollment by
+default so a fresh two-command install can create Missions and Teams. For an
+existing operator-managed workspace, override `workspaceEnrollment.enabled=false`
+in the private values supplied after the profile; existing authority is never
+adopted or overwritten.
+
 This creates only metadata: no writers, agent keys, integration stores, GitHub
 connections, or private activation authority. The installing operator needs the
 Core `manage` permission on that grant (in addition to Helm installation rights).
@@ -170,6 +306,90 @@ reviewed private enrollment. The grant is retained on disable/uninstall
 (`helm.sh/resource-policy: keep`); uninstall is not credential revocation.
 Explicit retirement must follow the
 [governed-grant lifecycle](../../../../docs/how-to/governed-credential-grants.md).
+
+### GitHub App storage enrollment
+
+The maintained Kind beta installer enrolls the empty `kars-github-app` store
+alongside provider/settings storage, using the actual installed Bridge writer
+and the existing reviewed private-activation path. No App credentials or
+repository connections are required at installation. Later, an operator can
+enter the App credentials in Console → Configuration without a separate
+storage-permission repair. Existing App material and explicitly enrolled
+connections are preserved; empty-store enrollment does not authorize agent
+repository access.
+
+A chart-only credential-free workspace is **not** ready to accept a GitHub App private
+key. Console → Configuration reports **GitHub App storage requires operator
+enrollment**, rather than offering an unusable credential form. An enrolled but
+empty store enables the form. Broken grant readiness, namespace/Secret UID
+changes, or inaccessible stores remain errors, not an empty configuration.
+
+1. Before expanding a Helm-created credential-free grant, set
+   **`workspaceEnrollment.enabled=false`** in the installation's maintained
+   Bridge values and perform the normal reviewed Helm upgrade with those values.
+   Keep this override after the Kind beta profile on future upgrades. The grant
+   is retained; do not delete/recreate it or ask Helm to manage expanded authority.
+2. As the credential-grant operator, bootstrap **only a missing** empty App
+   store in the configured Core namespace. Substitute the actual namespace:
+
+   ```sh
+   kars credentials grant bootstrap-store --namespace <core-namespace> \
+     --name kars-github-app --purpose github-app --dry-run
+   ```
+
+   Review the empty Opaque store, then repeat without `--dry-run`. If it already
+   exists, skip bootstrap: preview its actual UID instead. Never overwrite or
+   recreate an existing store, print its data, or put the App key in Helm values.
+3. Use the maintained `kars credentials grant preview` / `apply` flow with the
+   exact Bridge ServiceAccount and `--store kars-github-app=github-app`. Complete
+   the [private activation prerequisites](../../../../docs/how-to/governed-credential-grants.md)
+   for the installed controller/root and supported controller profile first.
+   **Preview constructs the complete desired grant; it is not an additive
+   store update.** For an existing expanded grant, reuse its full reviewed
+   enrollment command, retaining every writer, agent key, store, controller,
+   Bridge consumer, observation target, GitHub/legacy review and private
+   activation/consumer selection, and add the App store. Compare the generated
+   metadata review against the current grant before applying. Do not replace
+   an expanded grant with the minimal example below.
+
+   For a **fresh zero-writer, zero-store workspace only**, with no previous
+   authority to retain, the preview has this shape (use actual installed names
+   and the reviewed `service-accounts` or `kcm-certificate` profile):
+
+   ```sh
+   kars credentials grant preview --namespace <core-namespace> \
+     --writer <bridge-namespace>/<bridge-service-account> \
+     --store kars-github-app=github-app \
+     --private-root <installed-core-namespace> \
+     --private-controller-profile <reviewed-profile> \
+     > github-app-grant-review.json
+   ```
+
+   Supply any explicitly required existing private-consumer selections through
+   that same activation workflow. Review the resulting metadata-only file and
+   its exact namespace, grant, writer and store identities, then apply it:
+
+   ```sh
+   kars credentials grant apply github-app-grant-review.json
+   ```
+
+   Apply rechecks UIDs and fences the existing grant revision. It does not
+   authorize broad Secret access. Wait for the grant's current generation to be
+   observed Ready, including current `WriterReady` and `PrivateConsumptionReady`
+   for private activation; a historical Ready value is insufficient.
+4. Refresh Console → Configuration. Only now enter the App ID and private key
+   and select **Verify & connect**. The BFF checks enrolled storage before
+   contacting GitHub and rechecks authority when saving. Enrollment loss returns
+   the actionable `credential_authority_unavailable` error instead of an opaque
+   upstream failure. The response never contains the private key. GitHub permits
+   multiple active App keys: generating another does not invalidate an earlier
+   key; explicitly delete a key in GitHub when revocation is intended.
+
+Users then connect their installations from Workspace → Connections. Store
+setup alone does not grant repository execution authority: retain the separate
+[reviewed keyless GitHub enrollment](../../../../docs/how-to/governed-credential-grants.md#keyless-github-enrollment)
+for workload repository/write access. Neither this flow nor the Helm workspace
+option silently enables private credentials or bypasses private activation.
 
 ## Cloud-specific values
 

@@ -3,13 +3,10 @@
 
 "use client";
 
-// kars Bridge Workspace — fleet live telemetry. The "at scale" view: instead of
-// drilling into one mission, watch the WHOLE fleet's live tool-by-tool work in
-// one stream, with aggregate live metrics that tick as agents work. Polls the
-// fleet endpoint on a fast cadence; everything shown is real trace data — an
-// idle fleet shows an honest calm state, never fabricated ticks.
+// Fleet activity uses partial assignment-bound observations, not accounting totals.
 
 import { useEffect, useRef, useState } from "react";
+import Link from "@/components/navigation-link";
 import type { FleetTelemetry, FleetActivityItem } from "@/lib/types";
 
 function fmtMs(ms: number | null): string {
@@ -25,82 +22,91 @@ export function FleetLive({ initial }: { initial: FleetTelemetry | null }) {
 
   useEffect(() => {
     let alive = true;
+    let timer: ReturnType<typeof setTimeout>;
+    let controller: AbortController | undefined;
     async function tick() {
+      controller = new AbortController();
+      const timeout = setTimeout(() => {
+        controller?.abort();
+        if (alive) setFleet(null);
+      }, 8000);
       try {
-        const res = await fetch("/api/agents/fleet", { cache: "no-store" });
-        if (!res.ok) return;
+        const res = await fetch("/api/agents/fleet", { cache: "no-store", signal: controller.signal });
+        if (!res.ok) throw new Error("Activity unavailable");
         const data: FleetTelemetry = await res.json();
         if (!alive) return;
-        // Flash the feed when the newest event changed (a fresh action landed).
-        const key = data.feed[0] ? `${data.feed[0].agent}:${data.feed[0].round}:${data.feed[0].seq}` : "";
+        const newest = data.feed[0];
+        const key = newest ? `${newest.agent}:${newest.worker}:${newest.source}:${newest.round}:${newest.seq}` : "";
         if (key && key !== lastKey.current) {
           lastKey.current = key;
           setFlash((f) => f + 1);
         }
         setFleet(data);
       } catch {
-        /* transient — keep last good */
+        if (alive) setFleet(null);
+      } finally {
+        clearTimeout(timeout);
+        if (alive) timer = setTimeout(tick, 3000);
       }
     }
-    const id = setInterval(tick, 3000);
     void tick();
     return () => {
       alive = false;
-      clearInterval(id);
+      controller?.abort();
+      clearTimeout(timer);
     };
   }, []);
 
-  const working = fleet?.working ?? 0;
-  const idle = working === 0;
-  // Distinguish genuinely-working from just-booted: sandboxes are up but no
-  // model round/tool call has landed yet. Prevents "Working now 4" reading as
-  // broken next to "Model rounds 0" — it's warmup, and we say so.
-  const warming = working > 0 && (fleet?.rounds ?? 0) === 0 && (fleet?.tool_calls ?? 0) === 0;
+  const working = fleet?.working;
+  const idle = fleet != null && working === 0;
+  const unavailable = fleet == null;
 
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-6">
-        <LiveStat label={warming ? "Starting up" : "Working now"} value={working} accent={working > 0} pulse={working > 0} hint={warming ? "sandboxes up — no model round yet" : undefined} />
-        <LiveStat label="Teams active" value={fleet?.teams_active ?? 0} />
-        <LiveStat label="Sub-agents" value={fleet?.sub_agents ?? 0} />
-        <LiveStat label="Tokens in flight" value={(fleet?.tokens_in_flight ?? 0).toLocaleString()} />
-        <LiveStat label="Tool calls" value={fleet?.tool_calls ?? 0} />
-        <LiveStat label="Model rounds" value={fleet?.rounds ?? 0} />
+        <LiveStat label="Active workers" value={working ?? "Unavailable"} accent={(working ?? 0) > 0} pulse={(working ?? 0) > 0} />
+        <LiveStat label="Teams active" value={fleet?.teams_active ?? "Unavailable"} />
+        <LiveStat label="Child workers" value={fleet?.sub_agents ?? "Unavailable"} />
+        <LiveStat label="Observed tokens" value={fleet?.tokens_in_flight?.toLocaleString() ?? "Unavailable"} />
+        <LiveStat label="Observed tool results" value={fleet?.tool_calls ?? "Unavailable"} />
+        <LiveStat label="Observed model responses" value={fleet?.rounds ?? "Unavailable"} />
       </div>
 
       <section className="kb-card overflow-hidden">
         <div className="flex items-center justify-between border-b border-border px-5 py-3">
           <div className="flex items-center gap-2">
             <h2 className="text-sm font-semibold">Live fleet activity</h2>
-            {!idle && (
+            {!idle && !unavailable && (
               <span className="inline-flex items-center gap-1.5 rounded-full bg-ok/10 px-2 py-0.5 text-[11px] font-medium text-ok">
                 <span className="h-1.5 w-1.5 rounded-full bg-ok kb-pulse" aria-hidden />
-                streaming
+                updating
               </span>
             )}
           </div>
-          <span className="text-[11px] text-foreground-muted">every 3s · newest first</span>
+          <span className="text-[11px] text-foreground-muted">refreshes automatically · timestamped events first</span>
         </div>
+        {!unavailable && <p className="px-5 py-3 text-xs text-foreground-muted">
+          Partial, provisional observations from the run&apos;s verified assignment. Tool results are runtime reports,
+          not independent proof of success. Counts are not complete run totals or settled spending.
+          {(fleet?.activity_unavailable ?? 0) > 0 && ` Activity is unavailable for ${fleet!.activity_unavailable} active worker(s).`}
+        </p>}
 
         {(fleet?.feed.length ?? 0) === 0 ? (
           <div className="px-5 py-10 text-center">
-            {idle ? (
+            {unavailable ? (
               <>
-                <p className="text-sm font-medium">The fleet is calm</p>
-                <p className="mt-1 text-xs text-foreground-muted">
-                  No agent is working this moment. When a mission or standing team runs, every tool
-                  call and model round streams here live — across the whole fleet.
-                </p>
+                <p className="text-sm font-medium">Live activity is unavailable</p>
+                <p className="mt-1 text-xs text-foreground-muted">Kars cannot confirm current activity here. This does not mean your work has stopped. We will retry automatically; open the run for its latest status.</p>
+              </>
+            ) : idle ? (
+              <>
+                <p className="text-sm font-medium">No active worker found</p>
+                <p className="mt-1 text-xs text-foreground-muted">A queued run may still be waiting for a worker. Open the run to check its status.</p>
               </>
             ) : (
               <>
-                <p className="text-sm font-medium">
-                  {working} agent{working === 1 ? "" : "s"} warming up…
-                </p>
-                <p className="mt-1 text-xs text-foreground-muted">
-                  The sandbox is up; the first model rounds and tool calls will stream here the moment
-                  they happen.
-                </p>
+                <p className="text-sm font-medium">{working} active worker{working === 1 ? "" : "s"}; no detailed observations available yet</p>
+                <p className="mt-1 text-xs text-foreground-muted">Missing observations do not establish that no work has occurred. Open the run&apos;s Execution flow for details.</p>
               </>
             )}
           </div>
@@ -151,22 +157,24 @@ function FeedRow({ e, fresh }: { e: FleetActivityItem; fresh: boolean }) {
       <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${dotCls} ${fresh && !e.failed ? "kb-pulse" : ""}`} aria-hidden />
       <div className="min-w-0 flex-1">
         <div className="flex items-baseline gap-2">
-          <span className="truncate text-xs font-medium">{e.display_name ?? e.agent}</span>
+          <Link href={e.team ? `/workspace/teams/${encodeURIComponent(e.team)}/runs/${encodeURIComponent(e.agent)}` : `/workspace/missions/${encodeURIComponent(e.agent)}`} className="truncate text-xs font-medium text-signal hover:underline">{e.display_name ?? e.agent}</Link>
           {e.team && <span className="shrink-0 rounded bg-surface-muted px-1.5 py-0.5 text-[10px] text-foreground-muted">{e.team}</span>}
         </div>
         <p className="truncate text-xs text-foreground-muted">
           {isTool ? (
             <>
-              called <span className="font-mono text-foreground">{e.label}</span>
+              reported result · <span className="font-mono text-foreground">{e.label}</span>
               {e.detail ? <span className="text-foreground-muted"> · {e.detail}</span> : null}
               {e.failed ? <span className="ml-1 font-medium text-rose-500">failed</span> : null}
             </>
           ) : (
             <>
-              model round <span className="text-foreground-muted">· {e.label}</span>
+              model response <span className="text-foreground-muted">· {e.label}</span>
+              {e.failed && <span className="ml-1 font-medium text-rose-500">not accepted</span>}
             </>
           )}
         </p>
+        <p className="truncate text-[10px] text-foreground-muted">{e.role ?? e.worker ?? e.agent} · {e.source ?? "source unavailable"} · {e.observed_at ? new Date(e.observed_at).toLocaleString() : "timestamp unavailable"}</p>
       </div>
       <div className="shrink-0 text-right">
         <p className="text-[11px] tabular-nums text-foreground-muted">r{e.round}</p>

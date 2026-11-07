@@ -26,6 +26,7 @@ import base64
 import json
 import logging
 import os
+import re
 import threading
 from pathlib import Path
 from typing import Any
@@ -212,6 +213,10 @@ def _quarantine(client):
 async def _connect_and_verify(client: MeshClient, oauth_token: str, required_entra: bool) -> None:
     from .mesh_auth import RequiredEntraLease, bounded_cleanup
 
+    if os.environ.get("KARS_MISSION_DISPATCH_ENABLED") == "true":
+        from .mesh_worker import _is_reserved_message
+
+        client.partition_inbox(_is_reserved_message)
     client.connection_auth = RequiredEntraLease(client, _quarantine) if required_entra else None
     try:
         if required_entra:
@@ -338,16 +343,28 @@ def _maybe_prepend_peer_roster(content: str, recipient: str) -> str:
 
 
 def _kars_mesh_send(args: dict[str, Any], **_kwargs: Any) -> str:
-    """``kars_mesh_send(to_agent=<display_name>, content=<utf8-or-base64>)``
+    if not str(args.get("to_agent") or args.get("to") or args.get("name") or "").strip():
+        return json.dumps({"error": "missing required arg: to_agent=<display_name>"})
+    try:
+        client = _get_or_init_client()
+    except Exception as exc:
+        return json.dumps({"error": f"Mesh client init failed: {exc}"})
+    future = None
+    try:
+        future = asyncio.run_coroutine_threadsafe(_send_peer(client, args), _get_or_init_loop())
+        return future.result(timeout=35)
+    except Exception as exc:
+        if future is not None:
+            future.cancel()
+        return json.dumps({"error": f"send failed: {exc}"})
+
+
+async def _send_peer(client, args):
+    """``kars_mesh_send(to_agent=<display_name-or-DID>, content=<utf8>)``
 
     Accepts both the OpenClaw arg naming (``to_agent`` / ``content``) and
     a shorter Hermes-native form (``to`` / ``payload``) so LLMs trained on
     either convention can drive the tool without reading the schema."""
-    try:
-        client = _get_or_init_client()
-    except Exception as exc:  # noqa: BLE001
-        return json.dumps({"error": f"Mesh client init failed: {exc}"})
-
     # Accept OpenClaw-style (to_agent + content) and Hermes short form
     # (to + payload). OpenClaw also accepts `name`; mirror that too so
     # the AGT mesh-tool contract is uniform across runtimes.
@@ -378,12 +395,14 @@ def _kars_mesh_send(args: dict[str, Any], **_kwargs: Any) -> str:
     else:
         payload = bytes(payload_raw)
 
-    loop = _get_or_init_loop()
     try:
-        future = asyncio.run_coroutine_threadsafe(
-            client.send_by_name(to=peer, payload=payload), loop
-        )
-        future.result(timeout=30.0)
+        async with asyncio.timeout(30):
+            if peer.startswith("did:"):
+                if not re.fullmatch(r"did:mesh:[a-f0-9]{32}", peer):
+                    return json.dumps({"error": "Invalid peer DID"})
+                await client.send_by_did(to=peer, payload=payload)
+            else:
+                await client.send_by_name(to=peer, payload=payload)
         return json.dumps({"ok": True, "to_agent": peer, "bytes": len(payload)})
     except MeshPeerNotFoundError as exc:
         return json.dumps({"error": f"Peer {peer!r} not found: {exc}"})
@@ -393,86 +412,138 @@ def _kars_mesh_send(args: dict[str, Any], **_kwargs: Any) -> str:
         return json.dumps({"error": f"send failed: {exc}"})
 
 
+def _message_result(msg: InboundMessage, names: dict[str, str] | None = None) -> dict[str, Any]:
+    result = {
+        "from_did": msg.from_did,
+        "from_display_name": msg.from_display_name or (names or {}).get(msg.from_did),
+        "payload_b64": base64.b64encode(msg.payload).decode("ascii"),
+        "message_id": msg.message_id,
+        "received_at": msg.received_at.isoformat(),
+    }
+    try:
+        result["content"] = msg.payload.decode("utf-8")
+    except UnicodeDecodeError:
+        pass  # Binary messages retain their lossless base64 representation.
+    return result
+
+
 def _kars_mesh_inbox(_args: dict[str, Any], **_kwargs: Any) -> str:
-    """``kars_mesh_inbox()`` — drain all currently-queued messages
-    without blocking. Returns ``{"messages": [...]}``."""
-    if os.environ.get("KARS_MISSION_DISPATCH_ENABLED") == "true":
-        return json.dumps({"error": "Installed mission mode reserves the inbox for the shared mesh listener"})
+    """Drain live peer messages, never installed mission protocol envelopes."""
+    future = None
     try:
         client = _get_or_init_client()
+
+        future = asyncio.run_coroutine_threadsafe(_drain_peer(client), _get_or_init_loop())
+        return json.dumps(future.result(timeout=5.0))
     except Exception as exc:  # noqa: BLE001
-        return json.dumps({"error": f"Mesh client init failed: {exc}"})
+        if future is not None:
+            future.cancel()
+        return json.dumps({"error": f"inbox failed: {exc}"})
 
-    loop = _get_or_init_loop()
-    drained: list[dict[str, Any]] = []
 
-    async def _drain() -> None:
-        # Non-blocking drain: try to pull as many messages as are
-        # immediately available, no waiting.
-        queue = client._inbox  # noqa: SLF001 — internal but stable
-        while not queue.empty():
-            msg: InboundMessage = await queue.get()
-            drained.append(
-                {
-                    "from_did": msg.from_did,
-                    "from_display_name": msg.from_display_name,
-                    "payload_b64": base64.b64encode(msg.payload).decode("ascii"),
-                    "message_id": msg.message_id,
-                    "received_at": msg.received_at.isoformat(),
-                }
-            )
+class _PeerResultBudget:
+    def __init__(self, limit):
+        self.limit, self.used, self.truncated = limit, 0, False
 
-    future = asyncio.run_coroutine_threadsafe(_drain(), loop)
-    future.result(timeout=5.0)
-    return json.dumps({"messages": drained, "count": len(drained)})
+    def accepts(self, msg):
+        if self.limit is None:
+            return True
+        # Check raw length before allocating base64 for a large file transfer.
+        size = len(msg.payload) * 4 // 3
+        if size <= self.limit:
+            size = len(json.dumps(_message_result(msg)).encode()) + 512
+        if self.used + size > self.limit:
+            self.truncated = True
+            return False
+        self.used += size
+        return True
+
+    def result(self, messages, **fields):
+        result = {"messages": messages, "count": len(messages), **fields}
+        if self.truncated:
+            result["truncated"] = True
+        return result
+
+
+async def _drain_peer(client, *, max_bytes=None):
+    budget = _PeerResultBudget(max_bytes)
+    messages = [_message_result(msg) for msg in client.drain_inbox(budget.accepts)]
+    return budget.result(messages)
+
+
+async def _await_peer(client, senders, timeout, *, max_bytes=None):
+    stamp = client._auth_stamp()
+    names: dict[str, str] = {}
+    remaining = set(senders)
+    unresolved = {name for name in senders if not name.startswith("did:mesh:")}
+    loop = asyncio.get_running_loop()
+    retry_at = 0.0
+    drained = []
+    budget = _PeerResultBudget(max_bytes)
+    try:
+        async with asyncio.timeout(timeout):
+            def sender(msg):
+                return names.get(msg.from_did) or msg.from_display_name or msg.from_did
+
+            def match(msg):
+                return (not remaining or sender(msg) in remaining or msg.from_did in remaining) and budget.accepts(msg)
+
+            while True:
+                client._check_auth(stamp)
+                if unresolved and loop.time() >= retry_at:
+                    for name in tuple(unresolved):
+                        peer = await client._registry.find_by_display_name(name)
+                        client._check_auth(stamp)
+                        if peer is not None:
+                            names[peer.did] = name
+                            unresolved.remove(name)
+                    retry_at = loop.time() + 1.0
+                retry_delay = max(0.0, retry_at - loop.time()) if unresolved else None
+                try:
+                    # Peers may register after this wait starts; keep their messages
+                    # queued until discovery binds the name to an authenticated DID.
+                    async with asyncio.timeout(retry_delay):
+                        msg = await client.receive_inbox(match)
+                except TimeoutError:
+                    client._check_auth(stamp)
+                    continue
+                client._check_auth(stamp)
+                drained.append(_message_result(msg, names))
+                remaining.discard(sender(msg))
+                remaining.discard(msg.from_did)
+                if not remaining:
+                    return budget.result(drained, completed=True)
+    except TimeoutError:
+        client._check_auth(stamp)
+        return budget.result(drained, completed=False)
 
 
 def _kars_mesh_await(args: dict[str, Any], **_kwargs: Any) -> str:
-    """``kars_mesh_await(senders=[name,...], timeout_seconds=N)`` —
-    block until at least one message arrives from each listed sender
-    or the timeout fires."""
-    if os.environ.get("KARS_MISSION_DISPATCH_ENABLED") == "true":
-        return json.dumps({"error": "Installed mission mode reserves the inbox for the shared mesh listener"})
+    """Wait for each requested sender (or one peer if none), at most 300s.
+
+    Unmatched senders remain queued. Registry resolution matches authenticated
+    DIDs, not untrusted names in peer payloads. Timeout includes that lookup.
+    """
+    import math
+
+    future = None
     try:
+        senders = args.get("senders") or []
+        if not isinstance(senders, list) or any(not isinstance(s, str) or not s.strip() for s in senders):
+            raise ValueError("senders must be a list of nonempty names or DIDs")
+        timeout = float(args.get("timeout_seconds", 300))
+        if not math.isfinite(timeout) or not 0 < timeout <= 300:
+            raise ValueError("timeout_seconds must be greater than 0 and at most 300")
         client = _get_or_init_client()
+
+        future = asyncio.run_coroutine_threadsafe(_await_peer(client, senders, timeout), _get_or_init_loop())
+        return json.dumps(future.result(timeout=timeout + 5.0))
     except Exception as exc:  # noqa: BLE001
-        return json.dumps({"error": f"Mesh client init failed: {exc}"})
-
-    senders = list(args.get("senders") or [])
-    timeout = float(args.get("timeout_seconds", 300))
-    expected: set[str] = set(senders)
-
-    loop = _get_or_init_loop()
-    drained: list[dict[str, Any]] = []
-
-    async def _wait() -> None:
-        deadline = asyncio.get_event_loop().time() + timeout
-        seen_names: set[str] = set()
-        async for msg in client.inbox():
-            drained.append(
-                {
-                    "from_did": msg.from_did,
-                    "from_display_name": msg.from_display_name,
-                    "payload_b64": base64.b64encode(msg.payload).decode("ascii"),
-                    "message_id": msg.message_id,
-                }
-            )
-            if msg.from_display_name:
-                seen_names.add(msg.from_display_name)
-            if expected and seen_names.issuperset(expected):
-                return
-            remaining = deadline - asyncio.get_event_loop().time()
-            if remaining <= 0:
-                return
-
-    future = asyncio.run_coroutine_threadsafe(_wait(), loop)
-    try:
-        future.result(timeout=timeout + 5.0)
-    except Exception as exc:  # noqa: BLE001
-        return json.dumps({"error": f"await failed: {exc}", "partial": drained})
-    return json.dumps(
-        {"messages": drained, "count": len(drained), "completed": True}
-    )
+        if future is not None:
+            future.cancel()
+        # A failed authorization/cancelled wait must not publish buffered data
+        # from its former epoch. Normal timeouts return their live partial set.
+        return json.dumps({"error": f"await failed: {exc}", "partial": []})
 
 
 def _kars_mesh_transfer_file(args: dict[str, Any], **_kwargs: Any) -> str:

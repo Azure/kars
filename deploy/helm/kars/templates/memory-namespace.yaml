@@ -1,0 +1,58 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+# Credential accounts are deliberately outside tenant/workspace namespaces.
+# Do not grant workspace writers Pod, TokenRequest or Secret access here.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kars-memory-system
+  labels:
+    kars.azure.com/component: private-memory
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: kars-memory-system
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: kars-memory-accounts
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    matchPolicy: Equivalent
+    namespaceSelector: {}
+    objectSelector: {}
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: [CREATE, UPDATE, CONNECT]
+        resources: [pods, "pods/*", serviceaccounts/token]
+        scope: Namespaced
+  matchConditions:
+    - name: private-memory-namespace
+      expression: "request.namespace == 'kars-memory-system'"
+  validations:
+    - expression: "request.resource.resource != 'pods' && request.userInfo.username == 'system:serviceaccount:{{ .Release.Namespace }}:kars-controller'"
+      message: "Private memory accounts cannot run Pods; only the core controller may mint their tokens"
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: kars-memory-accounts
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  policyName: kars-memory-accounts
+  validationActions: [Deny, Audit]

@@ -56,8 +56,8 @@ export function classifyIntent(raw: string): IntentClassification {
   }
 
   const affirmativeText = text.replace(
-    /\b(?:not|no|without)\s+(?:(?:a|an)\s+)?(?:(?:standing|ongoing|persistent|recurring|recurrent|continuous|one-off|one-time|single-run)\s+)*(?:teams?|missions?|tasks?|reports?|assignments?|work)\b/g,
-    "",
+    /\b(?:not|no|without)\s+(?:(?:a|an)\s+)?(?:(?:standing|ongoing|persistent|recurring|recurrent|continuous|on[- ]demand|one-off|one-time|single-run)\s+)*(?:teams?|missions?|tasks?|reports?|assignments?|work)\b/g,
+    " ",
   );
   if (/\b(?:one[- ]off|one[- ]time|single[- ]run|bounded mission)\b/.test(affirmativeText)) {
     return {
@@ -68,7 +68,8 @@ export function classifyIntent(raw: string): IntentClassification {
     };
   }
   if (
-    /^\s*(?:(?:please\s+)?(?:maintain|run|operate|establish|form|start|create|build|set up|organize|organise|(?:i|we)\s+(?:want|need))\s+)?(?:(?:a|an|the|our|my)\s+)?(?:standing|persistent|ongoing|continuous|recurring|recurrent)\b(?:[\s,-]+[\w-]+){0,4}[\s,-]+teams?\b/.test(affirmativeText)
+    /^\s*(?:(?:please\s+)?(?:maintain|run|operate|establish|form|start|create|build|set up|organize|organise|(?:i|we)\s+(?:want|need))\s+)?(?:(?:a|an|the|our|my)\s+)?(?:standing|persistent|ongoing|continuous|recurring|recurrent|on[- ]demand)\b(?:[\s,-]+[\w-]+){0,4}[\s,-]+teams?\b/.test(affirmativeText)
+    || /^\s*(?:please\s+)?(?:maintain|run|operate|establish|form|start|create|build|set up|organize|organise|(?:i|we)\s+(?:want|need))\s+(?:(?:a|an|the|our|my)\s+)?teams?\b/.test(affirmativeText)
   ) {
     return {
       kind: "team",

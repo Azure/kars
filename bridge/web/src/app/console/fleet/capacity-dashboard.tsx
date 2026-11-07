@@ -59,7 +59,7 @@ function Gauge({
         <p className="font-medium">{label}</p>
         <p className="mt-1 text-xs text-foreground-muted">{detail}</p>
         <p className="mt-2 text-xs font-medium" style={{ color: percent == null ? "var(--color-foreground-muted)" : color }}>
-          {percent == null ? "Complete samples unavailable" : percent >= 85 ? "High pressure" : percent >= 70 ? "Watch" : "Healthy headroom"}
+          {percent == null ? "Complete samples unavailable" : percent >= 85 ? "High pressure" : percent >= 70 ? "Watch" : "Lower reported utilization"}
         </p>
       </div>
     </div>
@@ -97,14 +97,15 @@ export function CapacityDashboard({
   const memoryPercent = percentage(memoryUsed, memoryTotal);
   const activeRuns = capacity.active_team_runs;
 
-  const teams = new Map<string, { cpu: (number | null)[]; memory: (number | null)[]; sandboxes: number; executing: number }>();
+  const teams = new Map<string | null, { cpu: (number | null)[]; memory: (number | null)[]; sandboxes: number; executing: number; unknownExecution: number }>();
   for (const sandbox of sandboxes) {
-    const key = sandbox.team ?? (sandbox.parent ? "unattributed sub-agents" : "standalone");
-    const current = teams.get(key) ?? { cpu: [], memory: [], sandboxes: 0, executing: 0 };
+    const key = sandbox.team ?? null;
+    const current = teams.get(key) ?? { cpu: [], memory: [], sandboxes: 0, executing: 0, unknownExecution: 0 };
     current.cpu.push(sandbox.cpu_millicores);
     current.memory.push(sandbox.memory_bytes);
     current.sandboxes += 1;
-    if (sandbox.executing) current.executing += 1;
+    if (sandbox.executing === true) current.executing += 1;
+    if (sandbox.executing == null) current.unknownExecution += 1;
     teams.set(key, current);
   }
   const teamRows = Array.from(teams.entries())
@@ -123,7 +124,8 @@ export function CapacityDashboard({
           <p className="text-xs font-medium uppercase tracking-[0.14em] text-foreground-muted">Fleet resources</p>
           <h2 className="mt-1 text-lg font-semibold">Cluster & agent utilization</h2>
           <p className="mt-1 text-xs text-foreground-muted">
-            Kubernetes resource samples alongside observed team activity.
+            Kubernetes-reported resource samples alongside observed team activity.
+            External VM or container limits are not measured here; low reported utilization does not prove more work will fit.
           </p>
         </div>
         <div className="flex gap-2 text-xs">
@@ -202,12 +204,13 @@ export function CapacityDashboard({
               )}
                 <div className="mt-3 space-y-3">
                   {teamRows.map((team) => (
-                  <div key={team.name} className="rounded-lg border border-border p-3">
+                  <div key={JSON.stringify(team.name)} className="rounded-lg border border-border p-3">
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
-                        <p className="truncate text-xs font-medium">{team.name}</p>
+                        <p className="truncate text-xs font-medium">{team.name ?? "Team attribution unavailable"}</p>
                         <p className="mt-0.5 text-[10px] text-foreground-muted">
-                          {team.sandboxes} sandboxes · {team.executing} confirmed executing
+                          {team.sandboxes} sandbox{team.sandboxes === 1 ? "" : "es"} · {team.executing} confirmed executing
+                          {team.unknownExecution > 0 && ` · ${team.unknownExecution} execution status unavailable`}
                         </p>
                         <p className="mt-0.5 text-[10px] text-foreground-muted">
                           Complete samples: {team.samples}/{team.sandboxes}

@@ -76,7 +76,16 @@ fn archives_enrich_without_rewriting_audited_summaries_and_reject_replacement() 
 #[test]
 fn whole_archives_prune_together_and_oversized_recall_fails_before_admission() {
     let (identity, mut cm) = store();
-    let archive = full_archive(&"x".repeat(40000));
+    let mut archive = full_archive(&"x".repeat(60000));
+    for index in 1..3 {
+        let mut document = archive.documents[0].clone();
+        document.name = format!("report-{index}.md");
+        document.source.artifact_name = document.name.clone();
+        archive.documents.push(document);
+    }
+    archive.handoffs[0].content = "h".repeat(20000);
+    archive.handoffs[0].sha256 = crate::team_memory::digest(&archive.handoffs[0].content);
+    archive.validate().unwrap();
     for n in 0..20 {
         let id = format!("run-{n}");
         let base = prepare_entry_update(
@@ -111,6 +120,55 @@ fn whole_archives_prune_together_and_oversized_recall_fails_before_admission() {
             .to_string()
             .contains("refusing truncated recall")
     );
+}
+
+#[test]
+fn recall_uses_existing_mission_capacity_without_partial_bundles() {
+    let (identity, cm) = store();
+    let mut archive = full_archive("handoff");
+    let template = archive.documents[0].clone();
+    archive.documents = [29571, 13205, 19474, 43332, 17511]
+        .into_iter()
+        .enumerate()
+        .map(|(index, bytes)| {
+            let mut document = template.clone();
+            document.name = format!("report-{index}.md");
+            document.source.artifact_name = document.name.clone();
+            document.content = "x".repeat(bytes);
+            document.sha256 = crate::team_memory::digest(&document.content);
+            document
+        })
+        .collect();
+    archive.handoffs[0].content = "h".repeat(5728);
+    archive.handoffs[0].sha256 = crate::team_memory::digest(&archive.handoffs[0].content);
+    let mut second = archive.handoffs[0].clone();
+    second.name = "r1-p0.md".into();
+    second.content = "h".repeat(4869);
+    second.sha256 = crate::team_memory::digest(&second.content);
+    archive.handoffs.push(second);
+    archive.validate().unwrap();
+    let cm = append(&identity, &cm, "old", "Completed");
+    let cm = prepare_archive_update(&cm, None, "old", "task-1", &archive)
+        .unwrap()
+        .unwrap();
+    let cm = append(&identity, &cm, "new", "Completed");
+    let cm = prepare_archive_update(&cm, None, "new", "task-1", &archive)
+        .unwrap()
+        .unwrap();
+    let before = cm.clone();
+    let selected = select_documents(&cm, &read_index(&cm).unwrap()).unwrap();
+    assert_eq!(selected.len(), 7, "never include a partial older bundle");
+    assert!(serde_json::to_vec(&selected).unwrap().len() > 128 * 1024);
+    for (selected, retained) in selected
+        .iter()
+        .zip(archive.documents.iter().chain(&archive.handoffs))
+    {
+        assert_eq!(selected.content, retained.content);
+        assert_eq!(selected.sha256, retained.sha256);
+        assert_eq!(selected.source, retained.source);
+        assert!(selected.name.starts_with("memory-0-"));
+    }
+    assert_eq!(cm, before, "recall must not rewrite approved history");
 }
 
 #[test]
@@ -319,6 +377,70 @@ fn only_identical_content_and_provenance_are_idempotent() {
         assert!(
             prepare_entry_update(&identity, &cm, "run-1", title, author, source, content).is_err()
         );
+    }
+}
+
+#[test]
+fn truncated_whitespace_remains_idempotent_without_rewriting_approved_records() {
+    for character in ['x', '界'] {
+        for boundary in [" ", "\n"] {
+            let (identity, cm) = store();
+            let title = format!("{} remaining title", character.to_string().repeat(159));
+            let author = format!("{} remaining author", character.to_string().repeat(252));
+            let source = format!("{} remaining source", character.to_string().repeat(252));
+            let content = format!(
+                "{}{boundary}remaining content",
+                character.to_string().repeat(MAX_ENTRY_CHARS - 1)
+            );
+            let cm = prepare_entry_update(
+                &identity, &cm, "boundary", &title, &author, &source, &content,
+            )
+            .unwrap()
+            .unwrap();
+            let before = cm.clone();
+            assert!(read_index(&cm).unwrap()[0].title.ends_with(' '));
+            assert!(
+                prepare_entry_update(
+                    &identity, &cm, "boundary", &title, &author, &source, &content,
+                )
+                .unwrap()
+                .is_none()
+            );
+            for (title, author, source, content) in [
+                (
+                    "Changed title",
+                    author.as_str(),
+                    source.as_str(),
+                    content.as_str(),
+                ),
+                (
+                    title.as_str(),
+                    "Changed author",
+                    source.as_str(),
+                    content.as_str(),
+                ),
+                (
+                    title.as_str(),
+                    author.as_str(),
+                    "Changed source",
+                    content.as_str(),
+                ),
+                (
+                    title.as_str(),
+                    author.as_str(),
+                    source.as_str(),
+                    "Changed content",
+                ),
+            ] {
+                assert!(
+                    prepare_entry_update(
+                        &identity, &cm, "boundary", title, author, source, content,
+                    )
+                    .is_err()
+                );
+            }
+            assert_eq!(cm, before);
+        }
     }
 }
 

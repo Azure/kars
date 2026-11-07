@@ -108,6 +108,72 @@ async fn github_exchange_verifies_provenance_and_singleflights_per_repo() {
     server.verify().await;
 }
 
+pub(crate) fn stateless_token() -> String {
+    format!(
+        "ghs_42_{}.{}.{}",
+        "a".repeat(100),
+        "b".repeat(200),
+        "c".repeat(211)
+    )
+}
+
+#[tokio::test]
+async fn github_accepts_opaque_stateless_and_legacy_bearer_tokens() {
+    for token in [
+        TOKEN.to_string(),
+        stateless_token(),
+        "opaque_-.~+/token==".to_string(),
+        "a".repeat(16),
+        "a".repeat(4096),
+    ] {
+        let server = MockServer::start().await;
+        let mut response = minted("owner/repo");
+        response["token"] = serde_json::json!(token);
+        exchange(&server, "owner/repo", response, 1).await;
+        let app = app(&server.uri(), &["owner/repo"]);
+        assert_eq!(app.token("owner/repo").await.unwrap(), token);
+        assert_eq!(app.token("owner/repo").await.unwrap(), token);
+        assert_eq!(cached_count(&app).await, 1);
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+        server.verify().await;
+    }
+}
+
+#[tokio::test]
+async fn github_rejects_unsafe_or_unbounded_bearer_tokens_without_caching() {
+    let mut tokens = vec![
+        String::new(),
+        "a".repeat(15),
+        "a".repeat(4097),
+        "=".repeat(16),
+    ];
+    for invalid in [
+        "\r", "\n", "\t", " ", "\0", "\u{7f}", "é", ":", "=middle", "\"",
+    ] {
+        tokens.push(format!("sensitive-test-token{invalid}suffix"));
+    }
+    for token in tokens {
+        let server = MockServer::start().await;
+        let mut response = minted("owner/repo");
+        response["token"] = serde_json::json!(token);
+        exchange(&server, "owner/repo", response, 1).await;
+        let app = app(&server.uri(), &["owner/repo"]);
+        let error = app.token("owner/repo").await.unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Authentication {
+                stage: "token_validation",
+                reason: "token_format_invalid",
+                status: None
+            }
+        ));
+        assert!(!error.to_string().contains("sensitive"));
+        assert_eq!(cached_count(&app).await, 0);
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+        server.verify().await;
+    }
+}
+
 #[tokio::test]
 async fn github_ci_read_permissions_are_exact_in_both_token_profiles() {
     for write in [false, true] {
@@ -157,7 +223,14 @@ async fn github_ci_missing_or_broadened_read_permissions_never_cache() {
                 exchange(&server, "owner/repo", response, 1).await;
                 let mut app = app(&server.uri(), &["owner/repo"]);
                 Arc::get_mut(&mut app).unwrap().write = write;
-                assert!(matches!(app.token("owner/repo").await, Err(Error::Scope)));
+                assert!(matches!(
+                    app.token("owner/repo").await,
+                    Err(Error::Authentication {
+                        stage: "token_validation",
+                        reason: "permissions_mismatch",
+                        status: None
+                    })
+                ));
                 assert!(app.cache.lock().await.is_empty());
                 let requests = server.received_requests().await.unwrap();
                 assert_eq!(requests.len(), 2);
@@ -194,7 +267,11 @@ async fn github_ci_installation_permission_rejection_is_not_retried_or_downgrade
         Arc::get_mut(&mut app).unwrap().write = write;
         assert!(matches!(
             app.token("owner/repo").await,
-            Err(Error::Upstream)
+            Err(Error::Authentication {
+                stage: "token_mint",
+                reason: "http_rejected",
+                status: Some(422)
+            })
         ));
         assert!(app.cache.lock().await.is_empty());
         let requests = server.received_requests().await.unwrap();
@@ -219,7 +296,14 @@ async fn github_cross_owner_and_installation_never_authorize_mint() {
         .await;
     let app = app(&server.uri(), &["owner/repo"]);
     assert!(matches!(app.token("other/repo").await, Err(Error::Scope)));
-    assert!(matches!(app.token("owner/repo").await, Err(Error::Scope)));
+    assert!(matches!(
+        app.token("owner/repo").await,
+        Err(Error::Authentication {
+            stage: "installation_validation",
+            reason: "installation_mismatch",
+            status: None
+        })
+    ));
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].method.as_str(), "GET");
@@ -239,7 +323,14 @@ async fn github_app_id_suspension_and_exchange_body_limit_fail_closed() {
             .mount(&server)
             .await;
         let app = app(&server.uri(), &["owner/repo"]);
-        assert!(matches!(app.token("owner/repo").await, Err(Error::Scope)));
+        assert!(matches!(
+            app.token("owner/repo").await,
+            Err(Error::Authentication {
+                stage: "installation_validation",
+                reason: "app_mismatch" | "installation_suspended",
+                status: None
+            })
+        ));
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
     let server = MockServer::start().await;
@@ -253,7 +344,11 @@ async fn github_app_id_suspension_and_exchange_body_limit_fail_closed() {
         app(&server.uri(), &["owner/repo"])
             .token("owner/repo")
             .await,
-        Err(Error::Limit)
+        Err(Error::Authentication {
+            stage: "installation_lookup",
+            reason: "response_too_large",
+            status: Some(200)
+        })
     ));
 }
 
@@ -302,9 +397,103 @@ async fn github_exchange_errors_are_redacted_and_redirects_never_followed() {
         .await;
     let app = app(&server.uri(), &["owner/repo"]);
     let error = app.token("owner/repo").await.unwrap_err().to_string();
-    assert_eq!(error, "GitHub authentication upstream is unavailable");
+    assert_eq!(
+        error,
+        "GitHub authentication installation_lookup: http_rejected (HTTP Some(302))"
+    );
     assert!(sink.received_requests().await.unwrap().is_empty());
     assert!(app.cache.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn github_authentication_diagnostics_redact_response_values() {
+    let mut cases = Vec::new();
+    for (field, value, stage, reason) in [
+        (
+            "repositories",
+            serde_json::json!([{"full_name":"private/secret-repository"}]),
+            "token_validation",
+            "repository_mismatch",
+        ),
+        (
+            "permissions",
+            serde_json::json!({"sensitive-permission":"write"}),
+            "token_validation",
+            "permissions_mismatch",
+        ),
+        (
+            "expires_at",
+            serde_json::json!(Utc::now().to_rfc3339()),
+            "token_validation",
+            "expiry_invalid",
+        ),
+        (
+            "token",
+            serde_json::json!("sensitive-token\r\nwith-invalid-header"),
+            "token_validation",
+            "token_format_invalid",
+        ),
+        (
+            "expires_at",
+            serde_json::json!("sensitive-invalid-response"),
+            "token_mint",
+            "invalid_response",
+        ),
+    ] {
+        let mut response = minted("owner/repo");
+        response[field] = value;
+        cases.push((response, stage, reason));
+    }
+    for (response, expected_stage, expected_reason) in cases {
+        let server = MockServer::start().await;
+        exchange(&server, "owner/repo", response, 1).await;
+        let app = app(&server.uri(), &["owner/repo"]);
+        let error = app.token("owner/repo").await.unwrap_err();
+        assert!(matches!(&error, Error::Authentication { stage, reason, .. }
+            if *stage == expected_stage && *reason == expected_reason));
+        for formatted in [error.to_string(), format!("{error:?}")] {
+            for private in [
+                "sensitive",
+                "secret-repository",
+                TOKEN,
+                "owner/repo",
+                &server.uri(),
+            ] {
+                assert!(
+                    !formatted.contains(private),
+                    "diagnostic leaked response or request data"
+                );
+            }
+        }
+        assert!(app.cache.lock().await.is_empty());
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+        server.verify().await;
+    }
+}
+
+#[tokio::test]
+async fn github_authentication_lookup_diagnostics_distinguish_http_and_invalid_json() {
+    for (status, reason) in [
+        (401, "http_rejected"),
+        (403, "http_rejected"),
+        (200, "invalid_response"),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/owner/repo/installation"))
+            .respond_with(ResponseTemplate::new(status).set_body_string("sensitive-upstream-body"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let app = app(&server.uri(), &["owner/repo"]);
+        let error = app.token("owner/repo").await.unwrap_err();
+        assert!(matches!(error, Error::Authentication {
+            stage: "installation_lookup", reason: actual_reason, status: Some(actual_status)
+        } if actual_reason == reason && actual_status == status));
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        assert!(app.cache.lock().await.is_empty());
+        server.verify().await;
+    }
 }
 
 #[tokio::test]

@@ -15,7 +15,7 @@
 //! Public entry points:
 //!
 //! - [`load_repo_manifests`] — discover all `*.yaml` under the helm
-//!   templates dir and parse each into a list of `serde_yaml::Value`
+//!   templates dir and parse each into a list of `serde_json::Value`
 //!   documents (multi-doc YAML aware).
 //! - [`run_all_checks`] — apply every conformance criterion to the
 //!   loaded manifest set and return a [`ConformanceReport`].
@@ -25,8 +25,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use serde::Deserialize;
-use serde_yaml::Value;
+use serde_json::Value;
 
 /// Outcome of a single conformance criterion.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,8 +127,8 @@ pub fn load_repo_manifests() -> BTreeMap<PathBuf, Vec<Value>> {
         // meaningful (some checks key on path).
         for (source, body) in split_by_source(&text) {
             let key = root.join(source);
-            let docs: Vec<Value> = serde_yaml::Deserializer::from_str(&body)
-                .filter_map(|d| Value::deserialize(d).ok())
+            let docs: Vec<Value> = serde_saphyr::read::<_, Value>(&mut body.as_bytes())
+                .filter_map(Result::ok)
                 .filter(|v| !v.is_null())
                 .collect();
             if !docs.is_empty() {
@@ -156,8 +155,8 @@ pub fn load_repo_manifests() -> BTreeMap<PathBuf, Vec<Value>> {
         let Ok(text) = std::fs::read_to_string(path) else {
             continue;
         };
-        let docs: Vec<Value> = serde_yaml::Deserializer::from_str(&text)
-            .filter_map(|d| Value::deserialize(d).ok())
+        let docs: Vec<Value> = serde_saphyr::read::<_, Value>(&mut text.as_bytes())
+            .filter_map(Result::ok)
             .filter(|v| !v.is_null())
             .collect();
         if !docs.is_empty() {
@@ -174,7 +173,7 @@ fn render_helm(root: &std::path::Path) -> Option<String> {
     }
     let output = std::process::Command::new("helm")
         .arg("template")
-        .arg("ac")
+        .arg("kars")
         .arg(&chart)
         .arg("--namespace")
         .arg("kars-system")
@@ -230,7 +229,7 @@ fn crd_kind(crd: &Value) -> Option<&str> {
 fn crd_versions(crd: &Value) -> Vec<&Value> {
     crd.get("spec")
         .and_then(|s| s.get("versions"))
-        .and_then(Value::as_sequence)
+        .and_then(Value::as_array)
         .map(|v| v.iter().collect())
         .unwrap_or_default()
 }
@@ -274,7 +273,7 @@ pub fn check_printer_columns(crds: &[&Value]) -> Outcome {
         let kind = crd_kind(c).unwrap_or("?");
         let any = crd_versions(c).iter().any(|v| {
             v.get("additionalPrinterColumns")
-                .and_then(Value::as_sequence)
+                .and_then(Value::as_array)
                 .map(|s| !s.is_empty())
                 .unwrap_or(false)
         });
@@ -365,8 +364,8 @@ pub fn check_structural_schema(crds: &[&Value]) -> Outcome {
 /// rule somewhere in its schema tree.
 pub fn check_cel_validations(crds: &[&Value]) -> Outcome {
     fn walk(v: &Value) -> bool {
-        if let Some(map) = v.as_mapping() {
-            if map.contains_key(Value::String("x-kubernetes-validations".into())) {
+        if let Some(map) = v.as_object() {
+            if map.contains_key("x-kubernetes-validations") {
                 return true;
             }
             for val in map.values() {
@@ -374,7 +373,7 @@ pub fn check_cel_validations(crds: &[&Value]) -> Outcome {
                     return true;
                 }
             }
-        } else if let Some(seq) = v.as_sequence() {
+        } else if let Some(seq) = v.as_array() {
             for val in seq {
                 if walk(val) {
                     return true;
@@ -438,7 +437,7 @@ pub fn check_deployment_probes(manifests: &BTreeMap<PathBuf, Vec<Value>>) -> Out
                 .and_then(|s| s.get("template"))
                 .and_then(|t| t.get("spec"))
                 .and_then(|s| s.get("containers"))
-                .and_then(Value::as_sequence);
+                .and_then(Value::as_array);
             let Some(containers) = containers else {
                 missing.push(format!("{name} (no containers)"));
                 continue;
@@ -494,16 +493,16 @@ pub fn check_default_deny_netpol(manifests: &BTreeMap<PathBuf, Vec<Value>>) -> O
             let policy_types = d
                 .get("spec")
                 .and_then(|s| s.get("policyTypes"))
-                .and_then(Value::as_sequence);
+                .and_then(Value::as_array);
             let pod_selector_empty = d
                 .get("spec")
                 .and_then(|s| s.get("podSelector"))
                 .map(|ps| {
-                    ps.as_mapping()
+                    ps.as_object()
                         .map(|m| {
                             m.is_empty()
-                                || m.get(Value::String("matchLabels".into()))
-                                    .and_then(Value::as_mapping)
+                                || m.get("matchLabels")
+                                    .and_then(Value::as_object)
                                     .map(|x| x.is_empty())
                                     .unwrap_or(false)
                         })
@@ -548,7 +547,7 @@ pub fn check_image_pinning(manifests: &BTreeMap<PathBuf, Vec<Value>>) -> Outcome
                 .and_then(|s| s.get("template"))
                 .and_then(|t| t.get("spec"))
                 .and_then(|s| s.get("containers"))
-                .and_then(Value::as_sequence);
+                .and_then(Value::as_array);
             let Some(containers) = containers else {
                 continue;
             };
@@ -630,10 +629,7 @@ pub fn check_state_printer_column(crds: &[&Value]) -> Outcome {
         let kind = crd_kind(c).unwrap_or("?");
         let mut found = false;
         for v in crd_versions(c) {
-            let Some(cols) = v
-                .get("additionalPrinterColumns")
-                .and_then(Value::as_sequence)
-            else {
+            let Some(cols) = v.get("additionalPrinterColumns").and_then(Value::as_array) else {
                 continue;
             };
             for col in cols {

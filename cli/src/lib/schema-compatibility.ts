@@ -21,7 +21,31 @@ function containsDefault(value: unknown): boolean {
 }
 
 function retainedSchema(before: ObjectMap, after: ObjectMap, path: string): void {
-  if (canonicalSchema(attributes(before)) !== canonicalSchema(attributes(after))) migration(path);
+  const previousAttributes = attributes(before);
+  const desiredAttributes = attributes(after);
+  if (before.type === "array" && after.type === "array"
+    && Number.isSafeInteger(before.minItems) && Number.isSafeInteger(after.minItems)
+    && after.minItems >= 0 && after.minItems <= before.minItems) {
+    previousAttributes.minItems = after.minItems;
+  }
+  if (before.type === "array" && after.type === "array"
+    && Number.isSafeInteger(before.maxItems) && before.maxItems >= 0
+    && Number.isSafeInteger(after.maxItems) && after.maxItems >= before.maxItems) {
+    previousAttributes.maxItems = after.maxItems;
+  }
+  if (before.type === "string" && after.type === "string"
+    && Array.isArray(before.enum) && before.enum.length > 0
+    && Array.isArray(after.enum) && new Set(after.enum).size === after.enum.length
+    && after.enum.every((value: unknown) => typeof value === "string")
+    && before.enum.every((value: unknown) => typeof value === "string" && after.enum.includes(value))) {
+    previousAttributes.enum = after.enum;
+  }
+  if (before.type === "integer" && after.type === "integer"
+    && Number.isSafeInteger(before.maximum) && Number.isSafeInteger(after.maximum)
+    && after.maximum >= before.maximum) {
+    previousAttributes.maximum = after.maximum;
+  }
+  if (canonicalSchema(previousAttributes) !== canonicalSchema(desiredAttributes)) migration(path);
   for (const key of ["items", "additionalProperties"]) {
     const old = before[key];
     const next = after[key];
@@ -48,8 +72,9 @@ function retainedSchema(before: ObjectMap, after: ObjectMap, path: string): void
   }
 }
 
-/** Deliberately conservative: unchanged constraints and storage semantics,
- * retained fields/types, and only optional, non-defaulted property additions. */
+/** Deliberately conservative: retained constraints/storage except reduced array
+ * minima, increased array/safe-integer maxima and string enum supersets; retained
+ * fields/types and optional, non-defaulted property additions. */
 export function assertSchemaCompatibility(before: ObjectMap, after: ObjectMap): void {
   const from = normalizedCrd(before);
   const to = normalizedCrd(after);

@@ -20,7 +20,11 @@ export class AgtSocketOwner {
   private active: { socket: RelaySocket; mute(): void; closed: Promise<void> } | null = null;
   private opened = 0;
 
-  constructor(private readonly factory: (url: string) => unknown = url => new WebSocket(url)) {}
+  constructor(
+    private readonly factory: (url: string) => unknown = url => new WebSocket(url),
+    private readonly beforeSend?: (data: unknown) => (() => void) | undefined,
+    private readonly receive?: (data: unknown, deliver: () => void) => void,
+  ) {}
 
   get openCount(): number { return this.opened; }
 
@@ -35,14 +39,20 @@ export class AgtSocketOwner {
       onopen: null, onerror: null, onmessage: null, onclose: null,
       send: data => {
         if (!live) throw new Error("AGT socket has been retired");
+        const sent = this.beforeSend?.(data);
         socket.send(data);
+        sent?.();
       },
       close: (code, reason) => socket.close(code, reason),
     };
     this.active = { socket, mute: () => { live = false; }, closed };
     socket.onopen = event => { if (live) { this.opened++; facade.onopen?.(event); } };
     socket.onerror = event => { if (live) facade.onerror?.(event); };
-    socket.onmessage = event => { if (live) facade.onmessage?.(event); };
+    socket.onmessage = event => {
+      if (!live) return;
+      const deliver = () => facade.onmessage?.(event);
+      if (this.receive) this.receive(event.data, deliver); else deliver();
+    };
     socket.onclose = event => {
       resolveClosed();
       if (live) {

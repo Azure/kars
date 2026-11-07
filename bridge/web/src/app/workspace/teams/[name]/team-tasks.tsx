@@ -9,11 +9,11 @@
 
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import Link from "next/link";
+import Link from "@/components/navigation-link";
 import type { TeamTask, TeamDetail } from "@/lib/types";
 import { formatEvidenceTime } from "@/lib/format";
 import { LiveRefresh } from "@/components/live-refresh";
-import { addTeamTask, deleteTeamTask, reviewTeamTask } from "./task-actions";
+import { addTeamTask, amendTeamTaskFeedback, deleteTeamTask, reviewTeamTask } from "./task-actions";
 
 const ATTEMPT_LABELS: Record<NonNullable<TeamTask["history"]>[number]["outcome"], string> = {
   changes_requested: "Changes requested",
@@ -57,11 +57,13 @@ function finished(task: TeamTask) {
 
 export function TeamTasks({
   team,
+  teamUid,
   tasks,
   paused,
   reviews = [],
 }: {
   team: string;
+  teamUid: string;
   tasks: TeamTask[];
   paused: boolean;
   reviews?: TeamDetail["work_reviews"];
@@ -75,6 +77,9 @@ export function TeamTasks({
   const [reviewFeedback, setReviewFeedback] = useState<Record<string, string>>({});
   const [showCompleted, setShowCompleted] = useState(false);
   const [submittedReviews, setSubmittedReviews] = useState<Record<string, string>>({});
+  const [feedbackEdit, setFeedbackEdit] = useState<{
+    expected: TeamTask; teamUid: string; value: string; error: string | null;
+  } | null>(null);
   const waitingForReview = tasks.some((task) => {
     if (task.status !== "awaiting_review") return false;
     const review = reviews.find((item) =>
@@ -107,6 +112,25 @@ export function TeamTasks({
       setTitle("");
       setDescription("");
       setReviewRequired(false);
+      router.refresh();
+    });
+  }
+
+  const feedbackEditUnavailable = feedbackEdit !== null && (
+    !paused || teamUid !== feedbackEdit.teamUid
+    || !tasks.some((task) => task.id === feedbackEdit.expected.id && task.status === "pending")
+  );
+
+  function saveFeedback() {
+    if (!feedbackEdit || feedbackEditUnavailable) return;
+    const edit = feedbackEdit;
+    startTransition(async () => {
+      const result = await amendTeamTaskFeedback(team, edit.teamUid, edit.expected, edit.value);
+      if (result.error) {
+        setFeedbackEdit({ ...edit, error: result.error });
+        return;
+      }
+      setFeedbackEdit(null);
       router.refresh();
     });
   }
@@ -213,8 +237,17 @@ export function TeamTasks({
             <span className="text-[11px] text-foreground-muted">Enter a title to add</span>
           )}
         </div>
-        {error && <p className="mt-1.5 text-xs text-rose-600">{error}</p>}
+        {error && <p role="alert" className="mt-1.5 text-xs text-rose-600">{error}</p>}
       </div>
+      {feedbackEditUnavailable && (
+        <div role="alert" className="mt-2 text-xs text-rose-600">
+          The Team or item is no longer available for this edit. Cancel, then review the current queue before editing again.
+          <button type="button" disabled={pending} onClick={() => setFeedbackEdit(null)}
+            className="ml-2 rounded-md border border-border px-2.5 py-1 disabled:opacity-50">
+            Cancel
+          </button>
+        </div>
+      )}
 
       {/* Backlog list */}
       {tasks.length === 0 ? (
@@ -234,6 +267,7 @@ export function TeamTasks({
             return (
               <li
                 key={t.id}
+                data-work-item-id={t.id}
                 className="flex items-start justify-between gap-3 rounded-lg border border-border px-3 py-2.5"
               >
                 <div className="min-w-0">
@@ -270,6 +304,47 @@ export function TeamTasks({
                     <p className="mt-1 whitespace-pre-wrap text-xs text-foreground-muted">
                       Revision feedback: {t.feedback}
                     </p>
+                  )}
+                  {paused && !!teamUid && !feedbackEditUnavailable && t.status === "pending" && (
+                    <div className="mt-2 space-y-2">
+                      {feedbackEdit?.expected.id === t.id ? (
+                        <>
+                          <label className="block text-xs">
+                            Next-run feedback for {t.title}
+                            <textarea
+                              aria-label={`Next-run feedback for ${t.title}`}
+                              value={feedbackEdit.value}
+                              onChange={(event) => setFeedbackEdit({ ...feedbackEdit, value: event.target.value, error: null })}
+                              rows={5}
+                              disabled={pending}
+                              className="mt-1 w-full rounded-md border border-border bg-surface px-2.5 py-1.5 text-xs"
+                            />
+                          </label>
+                          <p className="text-xs text-foreground-muted">
+                            Changes only the next run’s instructions. Prior decisions and attempt history remain unchanged.
+                            The server checks the charter plus serialized work against the 4096-character objective limit; nothing is truncated.
+                          </p>
+                          {feedbackEdit.error && <p role="alert" className="text-xs text-rose-600">{feedbackEdit.error}</p>}
+                          <div className="flex gap-2">
+                            <button type="button" disabled={pending || teamUid !== feedbackEdit.teamUid}
+                              onClick={saveFeedback}
+                              className="rounded-md bg-signal px-2.5 py-1 text-xs font-semibold text-signal-fg disabled:opacity-50">
+                              Save feedback
+                            </button>
+                            <button type="button" disabled={pending} onClick={() => setFeedbackEdit(null)}
+                              className="rounded-md border border-border px-2.5 py-1 text-xs disabled:opacity-50">
+                              Cancel
+                            </button>
+                          </div>
+                        </>
+                      ) : (
+                        <button type="button" disabled={pending || feedbackEdit !== null}
+                          onClick={() => setFeedbackEdit({ expected: t, teamUid, value: t.feedback ?? "", error: null })}
+                          className="rounded-md border border-border px-2.5 py-1 text-xs disabled:opacity-50">
+                          Edit queued feedback
+                        </button>
+                      )}
+                    </div>
                   )}
                   {t.run && (
                     <Link

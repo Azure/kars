@@ -26,6 +26,9 @@ fn require_cluster(state: &AppState) -> AppResult<&crate::kars::cluster::Cluster
 pub struct GithubAppDto {
     /// Whether the operator has configured the shared kars GitHub App.
     pub configured: bool,
+    /// The exact App store is enrolled and readable under current authority.
+    /// False requires operator enrollment before accepting credentials.
+    pub storage_ready: bool,
     /// The App's slug (from the GitHub API), used to build the install URL.
     pub slug: Option<String>,
     /// `https://github.com/apps/<slug>/installations/new` — where the user picks
@@ -188,9 +191,11 @@ async fn list_installation_repos(app_jwt: &str, installation_id: &str) -> AppRes
 /// `GET /api/github/app` — is the shared App configured, and where to install it.
 pub async fn get_app(State(state): State<AppState>) -> AppResult<Json<GithubAppDto>> {
     let cluster = require_cluster(&state)?;
-    let Some((app_id, key)) = cluster.github_app_creds().await.map_err(AppError::from)? else {
+    let setup = cluster.github_app_setup().await.map_err(AppError::from)?;
+    let Some((app_id, key)) = setup.credentials else {
         return Ok(Json(GithubAppDto {
             configured: false,
+            storage_ready: setup.storage_ready,
             slug: None,
             install_url: None,
         }));
@@ -209,25 +214,174 @@ pub async fn get_app(State(state): State<AppState>) -> AppResult<Json<GithubAppD
         .map(|s| format!("https://github.com/apps/{s}/installations/new"));
     Ok(Json(GithubAppDto {
         configured: true,
+        storage_ready: setup.storage_ready,
         slug,
         install_url,
     }))
 }
 
-/// Operator-submitted App credentials.
-#[derive(Debug, Deserialize)]
+/// Operator-submitted App credentials. Never derive Debug for credential inputs.
+#[derive(Deserialize)]
 pub struct GithubAppRequest {
     pub app_id: String,
     pub private_key: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GithubManifestRequest {
+    pub code: String,
+}
+
+const GITHUB_SETUP_RESPONSE_LIMIT: usize = 64 * 1024;
+const MANIFEST_RECOVERY: &str = "GitHub App registration could not be confirmed. GitHub may already have created the App and consumed the code; do not retry this code. Refresh GitHub App settings first. To recover, open GitHub Settings → Developer settings → GitHub Apps, select the created App, generate a new private key, and use existing-App upload with its App ID and PEM file. Repair or enroll Bridge storage first if needed. Disconnect the configured App explicitly before setting up a replacement.";
+
+fn manifest_failure() -> AppError {
+    AppError::Rejected(MANIFEST_RECOVERY.into())
+}
+
+fn validate_manifest_code(code: &str) -> AppResult<()> {
+    if code.is_empty()
+        || code.len() > 128
+        || !code
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+    {
+        return Err(AppError::BadRequest(
+            "A valid GitHub App registration code is required".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn manifest_conversion_url(code: &str) -> AppResult<reqwest::Url> {
+    validate_manifest_code(code)?;
+    let mut url = reqwest::Url::parse("https://api.github.com/").map_err(|_| manifest_failure())?;
+    url.path_segments_mut()
+        .map_err(|_| manifest_failure())?
+        .extend(["app-manifests", code, "conversions"]);
+    Ok(url)
+}
+
+fn github_setup_client() -> AppResult<reqwest::Client> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|_| AppError::Upstream("GitHub setup client unavailable".into()))
+}
+
+/// Never format request errors: conversion URLs contain a one-use secret.
+async fn github_setup_response(request: reqwest::RequestBuilder) -> AppResult<Vec<u8>> {
+    let mut response = request
+        .header("Accept", "application/vnd.github+json")
+        .header("User-Agent", "kars-bridge")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .send()
+        .await
+        .map_err(|_| AppError::Upstream("GitHub setup request failed".into()))?;
+    if !response.status().is_success() {
+        return Err(AppError::Upstream(
+            "GitHub setup request was rejected".into(),
+        ));
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > GITHUB_SETUP_RESPONSE_LIMIT as u64)
+    {
+        return Err(AppError::Upstream(
+            "GitHub setup response exceeds its limit".into(),
+        ));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| AppError::Upstream("GitHub setup response could not be read".into()))?
+    {
+        if chunk.len() > GITHUB_SETUP_RESPONSE_LIMIT - body.len() {
+            return Err(AppError::Upstream(
+                "GitHub setup response exceeds its limit".into(),
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+fn parse_manifest_credentials(body: &[u8]) -> AppResult<GithubAppRequest> {
+    #[derive(Deserialize)]
+    struct ConvertedApp {
+        id: u64,
+        pem: String,
+    }
+    if body.len() > GITHUB_SETUP_RESPONSE_LIMIT {
+        return Err(manifest_failure());
+    }
+    let app: ConvertedApp = serde_json::from_slice(body).map_err(|_| manifest_failure())?;
+    let pem = app.pem.trim();
+    if app.id == 0
+        || pem.len() > 16 * 1024
+        || !pem.is_ascii()
+        || pem.contains('\0')
+        || !(pem.starts_with("-----BEGIN RSA PRIVATE KEY-----")
+            && pem.ends_with("-----END RSA PRIVATE KEY-----")
+            || pem.starts_with("-----BEGIN PRIVATE KEY-----")
+                && pem.ends_with("-----END PRIVATE KEY-----"))
+    {
+        return Err(manifest_failure());
+    }
+    Ok(GithubAppRequest {
+        app_id: app.id.to_string(),
+        private_key: pem.to_string(),
+    })
+}
+
+/// `POST /api/operator/github-app` — finish guided manifest registration. The
+/// web callback validates signed session-bound state before submitting a code;
+/// this endpoint independently requires an authenticated admin and ready store.
+pub async fn register_app(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Json(req): Json<GithubManifestRequest>,
+) -> AppResult<Json<serde_json::Value>> {
+    crate::auth::require_admin(&principal)?;
+    let conversion_url = manifest_conversion_url(&req.code)?;
+    let cluster = require_cluster(&state)?;
+    let setup = cluster.github_app_setup().await.map_err(AppError::from)?;
+    if !setup.storage_ready {
+        return Err(AppError::CredentialAuthorityUnavailable);
+    }
+    if setup.credentials.is_some() {
+        return Err(AppError::Conflict(
+            "A GitHub App is already configured. Disconnect the configured App explicitly before setting up a replacement. No registration code was exchanged.".into(),
+        ));
+    }
+    let (uid, version) = setup
+        .store_identity
+        .ok_or(AppError::CredentialAuthorityUnavailable)?;
+    let client = github_setup_client()?;
+    let body = github_setup_response(client.post(conversion_url))
+        .await
+        .map_err(|_| manifest_failure())?;
+    let credentials = parse_manifest_credentials(&body)?;
+    verify_and_store_app(
+        cluster,
+        &credentials.app_id,
+        &credentials.private_key,
+        Some((&uid, &version)),
+    )
+    .await
+    .map_err(|_| manifest_failure())
+}
+
 /// `PUT /api/operator/github-app` — the operator's self-service setup for the
-/// ONE shared kars GitHub App (replaces the manual `kubectl create secret`
-/// step). Verifies the submitted App id + key against GitHub's `/app`
-/// endpoint BEFORE saving, so a typo'd key surfaces as an immediate,
-/// actionable error instead of a silently broken secret. Write-only, like
-/// every other credential this Bridge holds: the private key is stored in
-/// the `kars-github-app` Secret and never read back into a response.
+/// ONE shared kars GitHub App, after explicit operator store enrollment.
+/// Checks storage authority, then verifies the submitted App id + key against
+/// GitHub's `/app` endpoint BEFORE saving. The private key is stored in the
+/// enrolled `kars-github-app` Secret and never read back into a response.
 pub async fn put_app(
     State(state): State<AppState>,
     Json(req): Json<GithubAppRequest>,
@@ -251,55 +405,75 @@ pub async fn put_app(
         ));
     }
 
-    // Verify against the real GitHub API before persisting anything. A
-    // malformed PEM is an actionable input error (Rejected — message shown
-    // verbatim), not an opaque upstream failure.
-    let jwt = mint_app_jwt(app_id, key).map_err(|e| {
-        AppError::Rejected(format!(
-            "That doesn't parse as a valid RSA private key ({e}). Paste the exact contents of the .pem file GitHub generated when you created the App (Settings → Developer settings → GitHub Apps → your App → Generate a private key)."
-        ))
-    })?;
-    let app = gh_get("https://api.github.com/app", &jwt).await.map_err(|e| {
-        AppError::Rejected(format!(
-            "GitHub rejected these credentials — double check the App ID and that this is the CURRENT private key (regenerating one on GitHub invalidates the last one): {e}"
-        ))
-    })?;
-    let slug = app.get("slug").and_then(|s| s.as_str()).map(str::to_string);
-    let name = app.get("name").and_then(|s| s.as_str()).map(str::to_string);
-
-    let body = serde_json::json!({
-        "apiVersion": "v1", "kind": "Secret", "type": "Opaque",
-        "metadata": { "name": "kars-github-app", "namespace": "kars-system",
-            "labels": {"app.kubernetes.io/managed-by": "kars-bridge"} },
-        "stringData": { "GITHUB_APP_ID": app_id, "GITHUB_APP_PRIVATE_KEY": key },
-    });
-    cluster
-        .upsert_secret("kars-system", "kars-github-app", body)
+    // Do not verify a private key externally when storage cannot accept it.
+    // The write adapter rechecks authority after GitHub verification as well.
+    if !cluster
+        .github_app_setup()
         .await
-        .map_err(upstream)?;
+        .map_err(AppError::from)?
+        .storage_ready
+    {
+        return Err(AppError::CredentialAuthorityUnavailable);
+    }
+
+    verify_and_store_app(cluster, app_id, key, None).await
+}
+
+async fn verify_and_store_app(
+    cluster: &crate::kars::cluster::Cluster,
+    app_id: &str,
+    key: &str,
+    expected: Option<(&str, &str)>,
+) -> AppResult<Json<serde_json::Value>> {
+    let jwt = mint_app_jwt(app_id, key).map_err(|_| {
+        AppError::Rejected(
+            "That doesn't parse as a valid RSA private key. Paste the exact contents of the .pem file GitHub generated when you created the App (Settings → Developer settings → GitHub Apps → your App → Generate a private key).".into(),
+        )
+    })?;
+    let client = github_setup_client()?;
+    let body = github_setup_response(client.get("https://api.github.com/app").bearer_auth(jwt))
+        .await
+        .map_err(|_| {
+            AppError::Rejected(
+                "GitHub could not verify these credentials — double check the App ID and that the private key belongs to this App and has not been deleted. GitHub supports multiple active private keys; generating another does not invalidate existing keys.".into(),
+            )
+        })?;
+    #[derive(Deserialize)]
+    struct VerifiedApp {
+        id: u64,
+        slug: Option<String>,
+        name: Option<String>,
+    }
+    let app: VerifiedApp = serde_json::from_slice(&body)
+        .map_err(|_| AppError::Rejected("GitHub returned invalid App metadata".into()))?;
+    if app.id == 0 || Some(app.id) != app_id.parse::<u64>().ok() {
+        return Err(AppError::Rejected(
+            "GitHub returned a different App ID".into(),
+        ));
+    }
+    cluster
+        .save_github_app(app_id, key, expected)
+        .await
+        .map_err(AppError::from)?;
 
     Ok(Json(serde_json::json!({
         "configured": true,
-        "slug": slug,
-        "name": name,
+        "slug": app.slug,
+        "name": app.name,
         "note": "Verified against GitHub and stored write-only — users can now connect their own installation from Workspace → Connections.",
     })))
 }
 
-/// `DELETE /api/operator/github-app` — disconnect the shared App (deletes the
-/// `kars-github-app` Secret). Existing per-principal connections (installation
-/// ids) are left as-is but become unusable until a new App is configured.
+/// `DELETE /api/operator/github-app` — clear the shared App credentials while
+/// retaining the enrolled Secret's UID. Existing per-principal connections
+/// become unusable until a new App is configured.
 pub async fn delete_app(State(state): State<AppState>) -> AppResult<Json<serde_json::Value>> {
     let cluster = require_cluster(&state)?;
     cluster
         .delete_secret("kars-system", "kars-github-app")
         .await
-        .map_err(upstream)?;
+        .map_err(AppError::from)?;
     Ok(Json(serde_json::json!({ "configured": false })))
-}
-
-fn upstream(e: kube::Error) -> AppError {
-    AppError::Upstream(e.to_string())
 }
 
 pub(crate) fn authorize_repo_set(
@@ -346,11 +520,27 @@ fn git_write_config(principal_sub: &str, repos: Vec<String>) -> GitWriteConfig {
     }
 }
 
-pub(crate) async fn authorize_git_write(
+pub(crate) fn validate_bound_github_egress<'a>(
+    hosts: impl Iterator<Item = &'a str>,
+) -> AppResult<()> {
+    let conflicts = hosts
+        .filter(|host| crate::kars::github_egress::opaque_github_egress(host))
+        .collect::<std::collections::BTreeSet<_>>();
+    if conflicts.is_empty() {
+        return Ok(());
+    }
+    Err(AppError::Rejected(format!(
+        "The selected repositories use protected GitHub access, but the Network settings also allow a direct connection to {}. Remove those entries from the package's Network settings (including any Team role settings), keep the repositories selected, then check readiness again. Kars will still access those repositories through its protected connection. Nothing was removed automatically.",
+        conflicts.into_iter().collect::<Vec<_>>().join(", ")
+    )))
+}
+
+pub(crate) async fn authorize_github_access(
     cluster: &crate::kars::cluster::Cluster,
     ns: &str,
     principal: &Principal,
     requested: Option<&[String]>,
+    write: bool,
 ) -> AppResult<
     Option<(
         GitWriteConfig,
@@ -380,7 +570,7 @@ pub(crate) async fn authorize_git_write(
         return Ok(None);
     }
     let binding = cluster
-        .github_connection_grant(ns, &principal.sub, repos.clone(), true)
+        .github_connection_grant(ns, &principal.sub, repos.clone(), write)
         .await
         .map_err(|error| {
             AppError::Rejected(format!("Keyless GitHub authority unavailable: {error}"))
@@ -516,6 +706,10 @@ pub async fn disconnect(
         repos: vec![],
     }))
 }
+
+#[cfg(test)]
+#[path = "github_setup_tests.rs"]
+mod github_setup_tests;
 
 #[cfg(test)]
 mod tests {

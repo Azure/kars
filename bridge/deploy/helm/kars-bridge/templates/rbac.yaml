@@ -5,6 +5,8 @@ Licensed under the MIT License. */}}{{- if .Values.rbac.create }}
 # policies, not only BFF code. This ClusterRole has no Secret mutation or
 # Deployment patch rule; core delegates exact enrolled stores separately.
 # See deploy/rbac.yaml for the annotated source.
+# Budget account access is deliberately absent here: the opt-in
+# orchestrator-funding-read.yaml delegates GET for one live UID-pinned account.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -21,6 +23,11 @@ metadata:
   labels:
     {{- include "kars-bridge.labels" . | nindent 4 }}
 rules:
+  # Report visibility needs only the canonical registration, never registrar use/renew.
+  - apiGroups: ["kars.azure.com"]
+    resources: ["karssreregistrations"]
+    resourceNames: ["canonical"]
+    verbs: ["get"]
   # Read the full kars CRD surface (status + envelope objects).
   - apiGroups: ["kars.azure.com"]
     resources:

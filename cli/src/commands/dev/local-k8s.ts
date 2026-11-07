@@ -2,19 +2,9 @@
 // Licensed under the MIT License.
 
 /**
- * `kars dev --target local-k8s` — runs a sandbox in a local kind
- * cluster instead of plain Docker. Pairs with a Headlamp dashboard
- * (added in a later phase) so developers get a real K8s view of their
- * agents without needing AKS.
- *
- * Phase 1: skeleton only.
- *   - Detects/creates a kind cluster (default name: kars-dev).
- *   - Loads the locally-built kars images into kind.
- *   - Helm-installs the existing chart in a local-friendly way.
- *   - Prints a `kubectl exec` recipe.
- *
- * Later phases add: values-local-dev overlay, fake-router, Headlamp,
- * kars Headlamp plugin, hot-reload, and lifecycle commands.
+ * Standalone Core development on Kind: install the maintained Core chart,
+ * deploy AgentMesh, and connect sandbox chat with optional observability.
+ * This compatibility path does not install the Bridge beta workspace.
  */
 
 import { execa } from "execa";
@@ -36,6 +26,7 @@ import { buildCopilotFallbackChain } from "../../github-copilot.js";
 import { CLAIM, prepareCredentialNamespace } from "../../lib/namespace-ownership.js";
 import { assertSafeMutation } from "../../lib/sre-authority.js";
 import { prepareCoreHelmSchemas } from "../../lib/core-helm-schemas.js";
+import { coreWitnessUpgradeFlags } from "../../lib/core-helm-witness.js";
 import { sreHelmStageWait } from "../../lib/sre-helm.js";
 import { DEFAULT_OPENCLAW_VERSION } from "../../runtime.js";
 import { MONITORING_IMAGE_TARGETS } from "../../lib/image-targets.js";
@@ -139,6 +130,8 @@ export interface LocalK8sOptions {
    * error" on an Apple Silicon kind node).
    */
   releaseVersion?: string;
+  /** Reviewed cold Kind beta inputs; bypasses standalone sandbox setup. */
+  betaConfig?: string;
 }
 
 /**
@@ -460,8 +453,12 @@ export async function ensureCluster(
   name: string,
   env: NodeJS.ProcessEnv,
   runtime: string,
+  cold?: { config: string; kubeconfig: string; image: string },
 ): Promise<void> {
-  if (await clusterExists(kind, name, env)) return;
+  if (await clusterExists(kind, name, env)) {
+    if (cold) throw new Error(`Kind beta requires a fresh cluster; ${name} already exists. Inspect it; no automatic adoption or replacement.`);
+    return;
+  }
   // Kind v0.20+ on single-node clusters automatically removes the
   // control-plane NoSchedule taint as a post-init step (it runs
   // `kubectl taint nodes --all node-role.kubernetes.io/control-plane-`
@@ -469,7 +466,8 @@ export async function ensureCluster(
   // — and using one (e.g. InitConfiguration with `taints: []`) actually
   // breaks creation because kind's untaint step then fails with
   // "taint not found" and aborts.
-  await execa(kind, ["create", "cluster", "--name", name], {
+  await execa(kind, ["create", "cluster", "--name", name,
+    ...(cold ? ["--config", cold.config, "--kubeconfig", cold.kubeconfig, "--image", cold.image, "--retain"] : [])], {
     stdio: ["pipe", "inherit", "inherit"],
     env,
   });
@@ -496,7 +494,7 @@ export async function ensureCluster(
       "systemctl restart systemd-journald; " +
       "systemctl is-active --quiet systemd-journald; " +
       "cat /etc/systemd/journald.conf.d/90-kars-kind-runtime.conf"],
-    { env, input: journal, timeout: 30_000 });
+    { env, input: journal, timeout: 30_000, stripFinalNewline: false });
     if (stdout !== journal) throw new Error(`Kind journal configuration verification failed: ${id}`);
   }
 }
@@ -981,18 +979,24 @@ export async function installLocalCoreChart(
   chartDir: string,
   valuesOverlays: string[],
   setArgs: string[] = [],
+  migration?: { receipt: string; replacePreparingRequest?: boolean; recoverFailedPublication?: boolean; retireHistoricalMonitoringHooks?: boolean },
+  coldBeta?: { kubeconfig: string },
+  connection?: { kubeconfig: string; fencedControllerNoop?: boolean },
 ): Promise<void> {
   if (!clusterName) throw new Error("The requested kind cluster must be explicit");
+  if (coldBeta && connection) throw new Error("Choose cold installation or existing-cluster connection, not both");
+  const kubeconfig = coldBeta?.kubeconfig ?? connection?.kubeconfig;
   const context = `kind-${clusterName}`;
   // Core dependencies require Helm's namespace/certificate hook ordering.
   // Schema preflight refuses legacy template ownership rather than adopting it.
   const args = [
-    "upgrade", "--install",
+    ...(coldBeta ? ["install"] : ["upgrade", "--install"]),
     release,
     chartDir,
     "--namespace",
     "kars-system",
-    "--timeout", "300s",
+    "--timeout", coldBeta ? "20m" : "300s",
+    ...(connection?.fencedControllerNoop ? ["--server-side=true"] : []),
   ];
   for (const overlay of valuesOverlays) {
     args.push("-f", overlay);
@@ -1003,9 +1007,25 @@ export async function installLocalCoreChart(
   const execute = new Proxy(execa, {
     apply(target, receiver, [file, commandArgs = [], options]) {
       return Reflect.apply(target, receiver, [file === "kubectl" ? kubectl : helm,
-        [file === "kubectl" ? "--context" : "--kube-context", context, ...commandArgs], options]);
+        [...(kubeconfig ? ["--kubeconfig", kubeconfig] : []),
+          file === "kubectl" ? "--context" : "--kube-context", context, ...commandArgs], options]);
     },
   });
+  if (coldBeta) {
+    if (migration || release !== "kars") throw new Error("Cold beta cannot adopt or migrate an existing release");
+    // The maintained chart owns schema establishment and SRE enrollment in hooks.
+    // Do not prepend compatibility schema staging or roll back failed identities.
+    await execute("helm", [...args, "--wait", "--wait-for-jobs"], { stdio: "inherit" });
+    return;
+  }
+  if (migration) {
+    const { publishPrivateCore } = await import("../../lib/private-core-publication.js");
+    await publishPrivateCore(execute, { receipt: migration.receipt, context, release, namespace: "kars-system",
+      chart: chartDir, values: valuesOverlays, set: setArgs, replacePreparingRequest: migration.replacePreparingRequest,
+      recoverFailedPublication: migration.recoverFailedPublication, retireHistoricalMonitoringHooks: migration.retireHistoricalMonitoringHooks });
+    return;
+  }
+  args.push(...await coreWitnessUpgradeFlags(execute, release, "kars-system", valuesOverlays, setArgs));
   args.push(await sreHelmStageWait(execute));
   await prepareCoreHelmSchemas(execute, args);
   await execute("helm", args, { stdio: "inherit" });
@@ -1326,7 +1346,22 @@ async function deployAgentMesh(
   }
 }
 
+export async function setupLocalKindBetaProviders(options: { clusterName: string; kubeconfig: string; stateDirectory: string }): Promise<void> {
+  const tools = await ensureTooling();
+  const { setupInstalledKindBetaProviders } = await import("./kind-beta-providers.js");
+  await setupInstalledKindBetaProviders(options.clusterName, path.resolve(options.kubeconfig), path.resolve(options.stateDirectory),
+    requireBundledAsset("deploy/helm/kars"), tools, async (tool, args, settings) => {
+      try { const result = await execa(tool, args, settings); return { stdout: result.stdout ?? "" }; }
+      catch { throw new Error(`${path.basename(tool)} provider setup operation failed; inspect the retained cluster and setup state. Credentials are not echoed.`); }
+    }, installLocalCoreChart);
+}
+
 export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
+  if (opts.betaConfig) {
+    const { runKindBeta } = await import("./kind-beta.js");
+    await runKindBeta(opts.betaConfig, opts.clusterName, await ensureTooling(), { ensureCluster, installLocalCoreChart, openBrowser });
+    return;
+  }
   const stepper = new Stepper({ totalSteps: 14 });
 
   // Release mode: pull published, signed images from ghcr.io/azure and load
@@ -1717,7 +1752,8 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   await openBrowser(headlampUrl);
 
   console.log("");
-  console.log(chalk.green("  ✓ Local-k8s dev environment is ready."));
+  console.log(chalk.green("  ✓ Standalone Core installation finished; checking sandbox readiness next."));
+  console.log(chalk.dim("  Bridge beta UX (Teams, Missions, Inbox and catalogue) is not installed by this command."));
   console.log("");
   console.log(chalk.bold("  Headlamp dashboard:"));
   console.log(`    ${chalk.cyan(headlampUrl)}`);

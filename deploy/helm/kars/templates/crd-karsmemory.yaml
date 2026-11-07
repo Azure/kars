@@ -48,15 +48,15 @@ spec:
               `KarsMemory.spec` — declares a Foundry Memory Store binding for a
               sandbox.
 
-              Resolution rule: a sandbox can have at most one `KarsMemory` per
-              scope key; multiple `KarsMemory` CRs targeting the same sandbox
-              must declare distinct `scope` values. Conflict detection is
-              router-side (S7) — the CRD admission only validates shape.
+              A sandbox selects one binding through `KarsSandbox.spec.memoryRef`.
+              The bound scope is private unless additional exact partitions are
+              explicitly authorized through `sharedScopes`. Missing or malformed
+              required bindings must fail closed, never select a fallback partition.
             properties:
               bundleRef:
                 description: |-
                   Signed OCI artifact carrying the binding content
-                  (`storeName`, `scope`, `retentionDays`,
+                  (`storeName`, `scope`, `sharedScopes`, `retentionDays`,
                   `deleteOnSandboxDelete`, `displayName`). When set, the
                   controller pulls the artifact by digest, verifies its
                   cosign signature against the active
@@ -139,16 +139,28 @@ spec:
                 type: object
               scope:
                 description: |-
-                  Scope key under which this sandbox writes/reads memories.
-                  Foundry Memory Store partitions data per scope and validates the
-                  value to letters, digits, and `_ - . % + @ /` — colons are
-                  rejected. CEL: non-empty + charset. Default convention (set by
-                  the runtime path if absent here): `agent_{sandboxName}`.
+                  Exact private partition under which this sandbox writes/reads memories.
+                  Required, 1-256 ASCII characters: letters, digits, and `_ - . % + @ /`.
+                  Path segments `.` and `..` are forbidden. No normalization, wildcard,
+                  or prefix matching is performed; there is no missing-scope fallback.
 
                   Required when [`Self::bundle_ref`] is absent (the inline
                   path); MUST be absent when [`Self::bundle_ref`] is set.
+                maxLength: 256
                 nullable: true
                 type: string
+              sharedScopes:
+                description: |-
+                  Up to 64 distinct exact partitions in the same store authorized for
+                  search, update, and delete_scope, excluding the bound scope. Each uses
+                  the same validation as scope. No normalization, wildcard, or prefix
+                  matching. Omit or use [] for private memory. Must be absent with bundleRef.
+                items:
+                  maxLength: 256
+                  type: string
+                maxItems: 64
+                nullable: true
+                type: array
               storeName:
                 description: |-
                   Foundry Memory Store name. The runtime path
@@ -160,6 +172,7 @@ spec:
                   path); MUST be absent when [`Self::bundle_ref`] is set
                   (the bundle supplies the value). Admission CEL enforces
                   the mutex.
+                maxLength: 63
                 nullable: true
                 type: string
             required:
@@ -172,15 +185,18 @@ spec:
             - message: spec.sandboxRef.name must be 1-253 characters
               reason: FieldValueInvalid
               rule: size(self.sandboxRef.name) > 0 && size(self.sandboxRef.name) <= 253
-            - message: spec.scope must be 1-256 characters using only letters, digits, and _ - . % + @ / (colons are rejected by the Foundry Memory Store) when spec.bundleRef is not set
+            - message: spec.scope must be 1-256 characters using only letters, digits, and _ - . % + @ / with no . or .. path segments when spec.bundleRef is not set
               reason: FieldValueInvalid
-              rule: has(self.bundleRef) || (has(self.scope) && size(self.scope) > 0 && size(self.scope) <= 256 && self.scope.matches('^[A-Za-z0-9_./%+@-]+$'))
+              rule: has(self.bundleRef) || (has(self.scope) && size(self.scope) > 0 && size(self.scope) <= 256 && self.scope.matches('^[A-Za-z0-9_./%+@-]+$') && !self.scope.matches('(^|/)[.]{1,2}(/|$)'))
             - message: spec.retentionDays must be > 0 when set (use delete_scope for immediate deletion)
               reason: FieldValueInvalid
               rule: '!has(self.retentionDays) || self.retentionDays > 0'
-            - message: spec.bundleRef is mutually exclusive with spec.storeName, spec.scope, spec.retentionDays, spec.deleteOnSandboxDelete, and spec.displayName
+            - message: spec.sharedScopes must contain at most 64 distinct valid exact scopes other than spec.scope
               reason: FieldValueInvalid
-              rule: '!has(self.bundleRef) || (!has(self.storeName) && !has(self.scope) && !has(self.retentionDays) && !has(self.deleteOnSandboxDelete) && !has(self.displayName))'
+              rule: "!has(self.sharedScopes) || (size(self.sharedScopes) <= 64 && self.sharedScopes.all(s, size(s) > 0 && size(s) <= 256 && s.matches('^[A-Za-z0-9_./%+@-]+$') && !s.matches('(^|/)[.]{1,2}(/|$)') && (!has(self.scope) || s != self.scope) && self.sharedScopes.filter(t, t == s).size() == 1))"
+            - message: spec.bundleRef is mutually exclusive with spec.storeName, spec.scope, spec.sharedScopes, spec.retentionDays, spec.deleteOnSandboxDelete, and spec.displayName
+              reason: FieldValueInvalid
+              rule: '!has(self.bundleRef) || (!has(self.storeName) && !has(self.scope) && !has(self.sharedScopes) && !has(self.retentionDays) && !has(self.deleteOnSandboxDelete) && !has(self.displayName))'
           status:
             description: Status of a `KarsMemory` reconcile.
             nullable: true

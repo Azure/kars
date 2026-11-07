@@ -149,8 +149,7 @@ class RequiredEntraLease:
             if task is not current:
                 task.cancel()
         # Queued frames from an earlier connection cannot authorize later work.
-        while not self.client._inbox.empty():
-            self.client._inbox.get_nowait()
+        self.client.clear_inboxes()
 
     async def prepare_relay(self):
         if self.token is None:

@@ -94,6 +94,56 @@ fn context(client: Client) -> Arc<Context> {
     })
 }
 
+pub(crate) async fn reconcile_rebind_projection_failure(client: Client, sandbox: KarsSandbox) {
+    let mut ctx = context(client);
+    Arc::get_mut(&mut ctx).unwrap().sandbox_image = "openclaw-sandbox:latest".into();
+    let sandbox = Arc::new(sandbox);
+    fn future_size<F: std::future::Future>(_: impl FnOnce() -> F) -> usize {
+        std::mem::size_of::<F>()
+    }
+    let preflight_size =
+        future_size(|| crate::reconciler::reconcile_inner(sandbox.clone(), ctx.clone()));
+    let provisioning_size = future_size(|| {
+        crate::reconciler::reconcile_provisioning(
+            sandbox.clone(),
+            ctx.clone(),
+            None,
+            false,
+            None,
+            crate::reconciler::credential_sources::Mode::Legacy,
+        )
+    });
+    assert!(
+        provisioning_size <= 1024,
+        "provisioning handle embeds {provisioning_size} bytes"
+    );
+    eprintln!(
+        "native-rebind-regression: sandbox-future-bytes preflight={preflight_size} provisioning-handle={provisioning_size}"
+    );
+    let future = reconcile(sandbox.clone(), ctx.clone());
+    let measured = crate::metrics::observe_reconcile("KarsSandbox", future);
+    eprintln!("native-rebind-regression: sandbox-parent-poll");
+    let error = measured.await.unwrap_err();
+    eprintln!("native-rebind-regression: sandbox-parent-returned");
+    assert!(matches!(
+        &error,
+        crate::reconciler::ReconcileError::Credentials(
+            crate::reconciler::credential_sources::Error::Invalid(
+                "Sandbox identity/reference changed"
+            )
+        )
+    ));
+    assert_ne!(error_policy(sandbox, &error, ctx), Action::await_change());
+    eprintln!("native-rebind-regression: sandbox-parent-error-policy");
+}
+
+fn memory_account_path(sandbox_uid: &str) -> String {
+    format!(
+        "/api/v1/namespaces/kars-memory-system/serviceaccounts/kars-memory-{}",
+        &crate::builtin_memory::digest(sandbox_uid)[..40]
+    )
+}
+
 fn response(code: u16, body: Value) -> ResponseTemplate {
     ResponseTemplate::new(code).set_body_json(body)
 }
@@ -138,6 +188,12 @@ impl Respond for Server {
                 }),
             ),
             ("GET", "/apis/apps/v1/namespaces/kars-demo/deployments/demo") => failure(404),
+            ("GET", path)
+                if path
+                    == memory_account_path(state.sandbox["metadata"]["uid"].as_str().unwrap()) =>
+            {
+                failure(404)
+            }
             (
                 "DELETE",
                 "/apis/rbac.authorization.k8s.io/v1/clusterrolebindings/kars-spawner-demo",
@@ -227,7 +283,10 @@ async fn setup(state: State) -> (MockServer, Client, Arc<StdMutex<State>>) {
         .mount(&server)
         .await;
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
+    let config = crate::kube_client_config::preserve_request_semantics(kube::Config::new(
+        server.uri().parse().unwrap(),
+    ));
+    let client = Client::try_from(config).unwrap();
     (server, client, state)
 }
 
@@ -238,6 +297,26 @@ fn only_finalizer_io(requests: &[Request]) {
             ("GET", CR_PATH) | ("GET", NS_PATH) | ("PATCH", CR_PATH)
         )
     }));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn reconciler_entry_stays_heap_bounded_on_a_default_worker_stack() {
+    let initial = State::legacy(Fault::None);
+    let observed = initial.observed();
+    let (server, client, _) = setup(initial).await;
+    let future = reconcile(observed, context(client));
+    let size = std::mem::size_of_val(&future);
+    assert!(size <= 1024, "sandbox entry future embeds {size} bytes");
+    let measured = crate::metrics::observe_reconcile("KarsSandbox", future);
+    let size = std::mem::size_of_val(&measured);
+    assert!(size <= 1024, "metrics wrapper embeds {size} bytes");
+    assert_eq!(
+        tokio::spawn(measured).await.unwrap().unwrap(),
+        Action::await_change()
+    );
+    let requests = server.received_requests().await.unwrap();
+    only_finalizer_io(&requests);
+    assert_eq!(requests.len(), 3);
 }
 
 #[tokio::test]
@@ -334,6 +413,24 @@ async fn reconciler_entry_cancels_prestage_when_deletion_races_binding_after_fin
         );
     }
     let requests = server.received_requests().await.unwrap();
+    let account_path = memory_account_path(sandbox_uid.as_str().unwrap());
+    let account_reads = requests
+        .iter()
+        .enumerate()
+        .filter(|(_, request)| request.url.path() == account_path)
+        .collect::<Vec<_>>();
+    assert_eq!(account_reads.len(), 1);
+    assert_eq!(account_reads[0].1.method, "GET");
+    let finalizer_removal = requests
+        .iter()
+        .rposition(|request| request.method == "PATCH" && request.url.path() == CR_PATH)
+        .unwrap();
+    assert!(account_reads[0].0 < finalizer_removal);
+    let final_patch: Value = serde_json::from_slice(&requests[finalizer_removal].body).unwrap();
+    assert_eq!(
+        final_patch["metadata"]["finalizers"],
+        json!([OTHER_FINALIZER])
+    );
     assert!(requests.iter().all(|request| {
         !(request.url.path().contains("/deployments/")
             || request.method == "DELETE" && request.url.path() == NS_PATH)

@@ -109,10 +109,22 @@ pub struct TeamRunAdmission {
     pub task_spec_digest: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TeamInferenceBudgetAccount {
+    pub namespace: String,
+    pub name: String,
+    pub uid: String,
+}
+
 /// `KarsTeam.status` — the controller is the sole writer.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct KarsTeamStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference_budget_account: Option<TeamInferenceBudgetAccount>,
+    // Decode separately so malformed observations become unavailable, not a failed Team GET.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference_budget_observation: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_admission: Option<TeamRunAdmission>,
     /// `Forming` | `Active` | `Hibernating` | `Degraded` | `Retired`.
@@ -147,6 +159,10 @@ pub struct KarsTeamStatus {
     pub runs_succeeded: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokens_spent_total: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_spent_scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_observed_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commons_entry_count: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

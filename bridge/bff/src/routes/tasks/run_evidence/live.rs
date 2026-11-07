@@ -21,6 +21,7 @@ pub(crate) struct LiveActivity {
     sandbox_uid: String,
     pod_uid: String,
     runtime_boot_id: String,
+    runtime: Option<String>,
     attempt_uid: String,
     progress_sequence: usize,
     observations: RouterActivity,
@@ -37,6 +38,10 @@ struct SourcePin {
 }
 
 impl LiveActivity {
+    pub(crate) fn observations(&self) -> &RouterActivity {
+        &self.observations
+    }
+
     fn identity(&self) -> [&str; 10] {
         [
             &self.task_uid,
@@ -97,7 +102,8 @@ impl StreamPin {
                 || !snapshot.source.journal.starts_with(&last.source.journal)
                 || snapshot.source.updated_at < last.source.updated_at
                 || snapshot.progress_sequence < last.progress_sequence
-                || snapshot.observations.response_count() < last.observations.response_count()
+                || snapshot.observations.coverage() != last.observations.coverage()
+                || snapshot.observations.observation_count() < last.observations.observation_count()
                 || self
                     .scope
                     .as_deref()
@@ -139,8 +145,49 @@ pub(super) fn evidence_valid(reply: &Reply) -> bool {
     }) && (reply.status == "accepted" || reply.version == 1 || reply.evidence.is_some())
 }
 
+pub(crate) fn is_stopped(task: &KarsTask) -> bool {
+    !task
+        .spec
+        .execution
+        .as_ref()
+        .is_some_and(|execution| execution.launch)
+        && task
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|annotations| annotations.get("kars.azure.com/halted"))
+            .is_some_and(|reason| !reason.is_empty())
+}
+
+/// Ordinary Stop need not carry the permanent Halt annotation. This only admits
+/// a retained-record read; projection still verifies the entire revision custody.
+pub(crate) fn can_read_stopped_activity(task: &KarsTask) -> bool {
+    task.spec
+        .execution
+        .as_ref()
+        .is_some_and(|execution| !execution.launch)
+        && task
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|annotations| annotations.get("kars.azure.com/run-requested"))
+            .is_some_and(|nonce| identifier(nonce))
+}
+
+/// Retain partial observations after stop without granting terminal result authority.
+/// The Task must be freshly re-authorized after reading this ConfigMap.
+pub(crate) fn from_stopped_attempt(cm: &ConfigMap, task: &KarsTask) -> Option<LiveActivity> {
+    can_read_stopped_activity(task)
+        .then(|| project_attempt(cm, task, true))
+        .flatten()
+}
+
 /// The Task must be freshly re-authorized after reading this ConfigMap.
 pub(crate) fn from_attempt(cm: &ConfigMap, task: &KarsTask) -> Option<LiveActivity> {
+    project_attempt(cm, task, false)
+}
+
+fn project_attempt(cm: &ConfigMap, task: &KarsTask, stopped: bool) -> Option<LiveActivity> {
     let name = task.metadata.name.as_deref()?;
     let uid = task.metadata.uid.as_deref().filter(|s| identifier(s))?;
     let namespace = task.metadata.namespace.as_deref()?;
@@ -178,10 +225,13 @@ pub(crate) fn from_attempt(cm: &ConfigMap, task: &KarsTask) -> Option<LiveActivi
         .as_ref()?
         .get("attempt.json")
         .filter(|s| s.len() <= 900 * 1024)?;
-    let attempt: Value = serde_json::from_str(raw).ok()?;
+    let attempt = crate::mission_record::decode(raw).ok()?;
     let candidate = attempt.get("candidate")?;
     let assignment = attempt.get("assignment")?;
     let value = attempt.get("reply")?;
+    if !contract::within_wire_bound(value) {
+        return None;
+    }
     let reply: Reply = serde_json::from_value(value.clone()).ok()?;
     let agent_name = candidate
         .get("agentName")?
@@ -191,9 +241,17 @@ pub(crate) fn from_attempt(cm: &ConfigMap, task: &KarsTask) -> Option<LiveActivi
         .get("content")?
         .as_str()
         .filter(|s| !s.trim().is_empty() && s.len() <= 192 * 1024)?;
+    // Teardown can leave dispatch uncertain while preserving the last validated
+    // running frame. Show that frame only as stopped observations, never live work.
+    let retained_uncertain = stopped
+        && attempt.get("phase")? == "uncertain"
+        && attempt
+            .get("error")
+            .and_then(Value::as_str)
+            .is_some_and(|error| !error.is_empty());
     if attempt.get("version")?.as_u64()? != 1
-        || attempt.get("phase")? != "running"
-        || attempt.get("error").is_some()
+        || (!retained_uncertain
+            && (attempt.get("phase")? != "running" || attempt.get("error").is_some()))
         || attempt
             .get("ownerSession")?
             .as_str()
@@ -215,6 +273,7 @@ pub(crate) fn from_attempt(cm: &ConfigMap, task: &KarsTask) -> Option<LiveActivi
         || candidate.get("reviewedPhase") != assignment.get("reviewedPhase")
         || candidate.get("inputArtifacts") != assignment.get("inputArtifacts")
         || candidate.get("requiredOutputs") != assignment.get("requiredOutputs")
+        || candidate.get("peerContext") != assignment.get("peerContext")
         || value.get("activityFormat")? != "router-observations-v1"
         || value
             .get("artifactFormat")
@@ -256,6 +315,7 @@ pub(crate) fn from_attempt(cm: &ConfigMap, task: &KarsTask) -> Option<LiveActivi
         "phaseDigest",
         "inputDigest",
         "requiredOutputs",
+        "peerContext",
     ] {
         if assignment.get(key) != value.get(key) {
             return None;
@@ -267,7 +327,18 @@ pub(crate) fn from_attempt(cm: &ConfigMap, task: &KarsTask) -> Option<LiveActivi
         return None;
     }
     let events = attempt.get("events")?.as_array()?;
-    if events.is_empty() || events.len() > 128 {
+    let phase = assignment.get("reviewedPhase");
+    let event_limit = if phase
+        .and_then(|phase| phase.get("executionMode"))
+        .and_then(Value::as_str)
+        == Some("native")
+    {
+        let tools = phase?.get("maxToolCalls")?.as_u64()?;
+        128.max(2 * 8.max(tools + 2) + 3 * tools + 2)
+    } else {
+        128
+    };
+    if events.is_empty() || events.len() as u64 > event_limit {
         return None;
     }
     let mut last_at = started;
@@ -353,6 +424,11 @@ pub(crate) fn from_attempt(cm: &ConfigMap, task: &KarsTask) -> Option<LiveActivi
         sandbox_uid: reply.sandbox_uid,
         pod_uid: reply.pod_uid,
         runtime_boot_id: reply.boot_id,
+        runtime: candidate
+            .get("runtime")
+            .and_then(Value::as_str)
+            .filter(|runtime| matches!(*runtime, "OpenClaw" | "Hermes"))
+            .map(str::to_owned),
         attempt_uid: attempt_uid.into(),
         progress_sequence: events.len(),
         observations,

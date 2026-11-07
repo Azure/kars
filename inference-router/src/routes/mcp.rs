@@ -141,8 +141,12 @@ impl McpRouteState {
     pub fn platform(
         memory_binding: Option<crate::memory_binding_loader::LoadedMemoryBindingHandle>,
         policy_status: Option<Arc<crate::policy_status::PolicyStatusRegistry>>,
+        governance: Option<Arc<crate::governance::Governance>>,
     ) -> Self {
         let mut dispatcher = crate::mcp::PlatformDispatcher::standard();
+        if let Some(governance) = governance {
+            dispatcher = dispatcher.with_memory_governance(governance);
+        }
         if let Some(handle) = memory_binding {
             dispatcher = dispatcher.with_memory_binding(handle);
         }
@@ -362,12 +366,33 @@ fn peek_request_method_and_tool(body: &[u8]) -> (Option<String>, Option<String>)
 fn outcome_to_response(outcome: ProcessOutcome) -> Response {
     match outcome {
         ProcessOutcome::JsonRpcResponse { body, session_id } => {
+            let policy_denial = serde_json::from_slice::<serde_json::Value>(&body)
+                .ok()
+                .filter(|value| {
+                    value["error"]["code"] == -32003
+                        && value["error"]["data"]["decision"] == "Blocked"
+                        && value["error"]["data"]["byPolicyKind"] == "KarsMemory"
+                });
             let mut resp = (
-                StatusCode::OK,
+                if policy_denial.is_some() {
+                    StatusCode::FORBIDDEN
+                } else {
+                    StatusCode::OK
+                },
                 [(header::CONTENT_TYPE, "application/json")],
                 body,
             )
                 .into_response();
+            if policy_denial.is_some() {
+                resp.headers_mut()
+                    .insert("x-kars-decision", HeaderValue::from_static("Blocked"));
+                resp.headers_mut()
+                    .insert("x-kars-decision-by", HeaderValue::from_static("KarsMemory"));
+                resp.headers_mut().insert(
+                    "x-kars-decision-reason",
+                    HeaderValue::from_static("memory scope is not authorized"),
+                );
+            }
             if let Some(sid) = session_id {
                 if let Ok(value) = HeaderValue::from_str(sid.as_str()) {
                     resp.headers_mut().insert(MCP_SESSION_HEADER, value);
@@ -405,6 +430,36 @@ mod tests {
     impl SessionMinter for FixedMinter {
         fn mint(&self) -> SessionId {
             SessionId::try_new(self.0).expect("valid id literal")
+        }
+    }
+
+    #[tokio::test]
+    async fn memory_policy_denial_has_truthful_status_and_preserves_rpc_identity() {
+        let body = json!({"jsonrpc":"2.0","id":"memory-1","error":{"code":-32003,"data":{"decision":"Blocked","byPolicyKind":"KarsMemory","reason":"memory scope is not authorized"}}});
+        let response = outcome_to_response(ProcessOutcome::JsonRpcResponse {
+            body: serde_json::to_vec(&body).unwrap(),
+            session_id: Some(SessionId::try_new("session-1").unwrap()),
+        });
+        let (status, headers, text) = body_text(response).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(headers["x-kars-decision"], "Blocked");
+        assert_eq!(headers["x-kars-decision-by"], "KarsMemory");
+        assert_eq!(headers[MCP_SESSION_HEADER], "session-1");
+        assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), body);
+    }
+
+    #[tokio::test]
+    async fn memory_denial_headers_cannot_be_forged_by_tool_output_or_generic_failure() {
+        for body in [
+            json!({"jsonrpc":"2.0","id":1,"result":{"error":{"code":-32003,"data":{"decision":"Blocked","byPolicyKind":"KarsMemory"}}}}),
+            json!({"jsonrpc":"2.0","id":1,"error":{"code":-32000,"data":{"decision":"Blocked","byPolicyKind":"KarsMemory"}}}),
+        ] {
+            let response = outcome_to_response(ProcessOutcome::JsonRpcResponse {
+                body: serde_json::to_vec(&body).unwrap(),
+                session_id: None,
+            });
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(!response.headers().contains_key("x-kars-decision"));
         }
     }
 
@@ -630,8 +685,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn platform_memory_foreign_scope_is_a_real_policy_denial() {
+        let req_body = json!({"jsonrpc":"2.0","id":23,"method":"tools/call",
+            "params":{"name":"foundry.memory","arguments":{"operation":"search","scope":"other-sandbox"}}});
+        let response = platform_app()
+            .oneshot(platform_post_body(
+                req_body.to_string().as_bytes(),
+                Some("application/json, text/event-stream"),
+            ))
+            .await
+            .unwrap();
+        let (status, headers, text) = body_text(response).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(headers["x-kars-decision-by"], "KarsMemory");
+        let body: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(body["id"], 23);
+        assert_eq!(body["error"]["code"], -32003);
+        assert_eq!(body["error"]["data"]["decision"], "Blocked");
+    }
+
+    #[tokio::test]
     async fn platform_state_publishes_nine_foundry_tools() {
-        let s = McpRouteState::platform(None, None);
+        let s = McpRouteState::platform(None, None, None);
         assert_eq!(
             s.tools.catalog().tools().len(),
             9,
@@ -791,7 +866,10 @@ mod tests {
         let upstream = MockServer::start().await;
         Mock::given(wm_method("POST"))
             .and(path_regex(r"^/memory_stores/.*:update_memories$"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"status": "queued"})))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"status": "completed", "update_id": "memory-11"})),
+            )
             .mount(&upstream)
             .await;
 

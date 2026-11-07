@@ -4,7 +4,7 @@
 //! One-use, authority-bound human transition tickets. Terminal approvals are
 //! never overwritten; consumption and the Team transition share one CAS.
 
-use super::{ReconcileError, namespace, parse_rfc3339, resource_version, tasks};
+use super::{ReconcileError, namespace, resource_version, tasks};
 use crate::kars_approval::{
     ApprovalAction, KarsApproval, KarsApprovalSpec, approval_authorizes_task,
 };
@@ -12,7 +12,6 @@ use crate::kars_task::KarsTask;
 use crate::kars_team::KarsTeam;
 use crate::mcp_server::LocalObjectRef;
 use crate::providers::signing::sha256_hex;
-use chrono::Utc;
 use kube::{
     Api, Client, ResourceExt,
     api::{Patch, PatchParams, PostParams},
@@ -91,29 +90,21 @@ pub(super) fn authorized(
         || target <= team.spec.envelope.tier
         || !(1..=5).contains(&target)
         || team.annotations().get(ANNOT_CONSUMED) == approval.metadata.uid.as_ref()
+        || approval.annotations().get("kars.azure.com/owner-sub")
+            != team
+                .annotations()
+                .get("kars.azure.com/owner-sub")
+                .or_else(|| team.labels().get("kars.azure.com/owner-sub"))
     {
         return false;
     }
-    let Some(status) = &approval.status else {
-        return false;
-    };
     let digest = principal.envelope_digest();
     if approval.annotations().get(ANNOT_PRINCIPAL_UID) != principal.metadata.uid.as_ref()
         || approval.annotations().get(ANNOT_PRINCIPAL_DIGEST) != Some(&digest)
     {
         return false;
     }
-    // TTL limits the first decision, not how long a timely terminal approval
-    // may wait for the Team controller to consume it.
-    matches!(
-        (
-            status.requested_at.as_deref().and_then(parse_rfc3339),
-            status.decided_at.as_deref().and_then(parse_rfc3339),
-            status.expires_at.as_deref().and_then(parse_rfc3339),
-        ),
-        (Some(requested), Some(decided), Some(expires))
-            if requested <= decided && decided < expires && decided <= Utc::now()
-    )
+    crate::kars_task_reconciler::promotion::timely(approval)
 }
 
 pub(super) async fn process_promotion(
@@ -149,6 +140,33 @@ pub(super) async fn process_promotion(
                 return Err(ReconcileError::Invalid(format!(
                     "refusing foreign promotion ticket '{name}'"
                 )));
+            }
+            // Repair visibility of previously produced tickets only under the
+            // same exact Team/principal custody; never adopt a foreign owner.
+            if approval
+                .annotations()
+                .get("kars.azure.com/owner-sub")
+                .is_none()
+                && let Some(owner) = team
+                    .annotations()
+                    .get("kars.azure.com/owner-sub")
+                    .or_else(|| team.labels().get("kars.azure.com/owner-sub"))
+                && approval.annotations().get(ANNOT_PRINCIPAL_UID)
+                    == principal.metadata.uid.as_ref()
+                && approval.annotations().get(ANNOT_PRINCIPAL_DIGEST)
+                    == Some(&principal.envelope_digest())
+                && approval.metadata.deletion_timestamp.is_none()
+                && approval
+                    .metadata
+                    .uid
+                    .as_ref()
+                    .is_some_and(|uid| !uid.is_empty())
+            {
+                approvals.patch(&name, &PatchParams::default(), &Patch::Merge(json!({"metadata":{
+                    "uid":approval.uid(), "resourceVersion":approval.metadata.resource_version.as_deref().filter(|rv| !rv.is_empty()).ok_or_else(|| ReconcileError::Invalid("promotion ticket has no resourceVersion".into()))?,
+                    "annotations":{"kars.azure.com/owner-sub":owner,"kars.azure.com/team":team.name_any()}
+                }}))).await?;
+                return Ok(false);
             }
             if !authorized(team, &principal, &approval, target) {
                 return Ok(false);
@@ -200,6 +218,17 @@ pub(super) async fn process_promotion(
                         ),
                         requested_tier: Some(target),
                     },
+                    requested_by: team
+                        .annotations()
+                        .get("kars.azure.com/promotion-requested-by-sub")
+                        .map(|subject| crate::kars_approval::ApprovalActor {
+                            subject: subject.clone(),
+                            name: team
+                                .annotations()
+                                .get("kars.azure.com/promotion-requested-by")
+                                .unwrap_or(subject)
+                                .clone(),
+                        }),
                     ttl: Some("PT1H".into()),
                     decision: None,
                 },
@@ -210,6 +239,16 @@ pub(super) async fn process_promotion(
                 .metadata
                 .annotations
                 .get_or_insert_with(Default::default);
+            for key in crate::kars_task_reconciler::promotion::CONTEXT {
+                if let Some(value) = team
+                    .annotations()
+                    .get(key)
+                    .or_else(|| team.labels().get(key))
+                {
+                    annotations.insert(key.into(), value.clone());
+                }
+            }
+            annotations.insert("kars.azure.com/team".into(), team.name_any());
             annotations.insert(
                 ANNOT_PRINCIPAL_UID.into(),
                 principal.metadata.uid.clone().expect("ready principal UID"),

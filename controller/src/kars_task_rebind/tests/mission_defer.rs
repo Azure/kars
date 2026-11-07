@@ -163,6 +163,111 @@ async fn deferred_runtime_does_not_bypass_authorization_or_private_activation() 
     }
 }
 
+fn recreate(state: &Arc<Mutex<State>>) -> (KarsSandbox, Deployment, Value) {
+    state.lock().unwrap().objects.get_mut(DEPLOYMENT).unwrap()["spec"]["strategy"] =
+        json!({"type":"RollingUpdate","rollingUpdate":{"maxSurge":"25%","maxUnavailable":"25%"}});
+    let (sandbox, mut deployment, identity) = desired(state);
+    deployment.spec.as_mut().unwrap().strategy =
+        Some(serde_json::from_value(json!({"type":"Recreate"})).unwrap());
+    (sandbox, deployment, identity)
+}
+
+#[tokio::test]
+async fn recreate_removes_defaulted_strategy_before_applying_and_is_idempotent() {
+    let (_server, ctx, state, _) = fixture().await;
+    let (sandbox, deployment, identity) = recreate(&state);
+    let before = state.lock().unwrap().objects[DEPLOYMENT].clone();
+    apply_deployment(&ctx.client, &sandbox, deployment, &identity)
+        .await
+        .unwrap();
+    let calls = writes(&state);
+    assert_eq!(calls.len(), 2);
+    assert_eq!(
+        calls[0].2,
+        json!({"metadata":{"uid":"deployment-uid","resourceVersion":"1"},
+        "spec":{"strategy":{"type":"Recreate","rollingUpdate":null}}})
+    );
+    assert_eq!(calls[1].2["metadata"]["resourceVersion"], "2");
+    {
+        let s = state.lock().unwrap();
+        assert_eq!(
+            s.objects[DEPLOYMENT]["metadata"]["uid"],
+            before["metadata"]["uid"]
+        );
+        assert_eq!(
+            s.objects[DEPLOYMENT]["spec"]["strategy"],
+            json!({"type":"Recreate"})
+        );
+        assert_eq!(s.objects[DEPLOYMENT]["spec"]["replicas"], 1);
+    }
+    state.lock().unwrap().calls.clear();
+    let (sandbox, deployment, identity) = desired(&state);
+    apply_deployment(&ctx.client, &sandbox, deployment, &identity)
+        .await
+        .unwrap();
+    assert_eq!(writes(&state).len(), 1);
+}
+
+#[tokio::test]
+async fn recreate_strategy_conflict_does_not_apply_or_replace_the_runtime() {
+    let (_server, ctx, state, _) = fixture().await;
+    let (sandbox, deployment, identity) = recreate(&state);
+    state.lock().unwrap().strategy_conflict = true;
+    let before = state.lock().unwrap().objects[DEPLOYMENT].clone();
+    assert!(
+        apply_deployment(&ctx.client, &sandbox, deployment, &identity)
+            .await
+            .is_err()
+    );
+    assert_eq!(writes(&state).len(), 1);
+    assert_eq!(state.lock().unwrap().objects[DEPLOYMENT], before);
+}
+
+#[tokio::test]
+async fn recreate_rechecks_task_fence_after_strategy_transition() {
+    let (_server, ctx, state, _) = fixture().await;
+    let (sandbox, deployment, identity) = recreate(&state);
+    state.lock().unwrap().hold_after_strategy = true;
+    apply_deployment(&ctx.client, &sandbox, deployment, &identity)
+        .await
+        .unwrap();
+    assert_eq!(
+        state.lock().unwrap().objects[DEPLOYMENT]["spec"]["replicas"],
+        0
+    );
+    assert_eq!(writes(&state).len(), 2);
+}
+
+#[tokio::test]
+async fn recreate_does_not_bypass_authorization_ownership_or_private_activation() {
+    for failure in ["authority", "owner", "private"] {
+        let (_server, ctx, state, _) = fixture().await;
+        let (sandbox, mut deployment, mut identity) = recreate(&state);
+        match failure {
+            "authority" => identity["task_authorization"] = json!("stale"),
+            "owner" => {
+                state.lock().unwrap().objects.get_mut(DEPLOYMENT).unwrap()["metadata"]["labels"]["kars.azure.com/sandbox"] =
+                    json!("foreign")
+            }
+            "private" => {
+                deployment.spec.as_mut().unwrap().template.metadata = Some(
+                    serde_json::from_value(
+                        json!({"annotations":{crate::private_activation::EPOCH:"unreviewed"}}),
+                    )
+                    .unwrap(),
+                )
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            apply_deployment(&ctx.client, &sandbox, deployment, &identity)
+                .await
+                .is_err()
+        );
+        assert!(writes(&state).is_empty(), "{failure}");
+    }
+}
+
 #[tokio::test]
 async fn creating_a_runtime_requires_current_namespace_custody() {
     let (_server, ctx, state, _) = fixture().await;

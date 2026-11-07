@@ -25,6 +25,7 @@ export function LoopDesigner({
   initialGoal = "",
   initialPatternId,
   initialCriteria = "",
+  initialContext = "",
   rationale,
   proposalSource,
   defaultOpen = false,
@@ -37,6 +38,7 @@ export function LoopDesigner({
   initialPatternId?: string;
   /** Pre-fill success criteria (e.g. the orchestrator's draft). */
   initialCriteria?: string;
+  initialContext?: string;
   /** The orchestrator's one-line why-this-pattern note, shown in review mode. */
   rationale?: string;
   proposalSource?: "orchestrator" | "heuristic";
@@ -48,7 +50,7 @@ export function LoopDesigner({
    * The second argument carries the structured loop fields so a caller can
    * re-seed this designer (e.g. after back-navigation) with the user's edits.
    */
-  onApply: (text: string, parts?: { goal: string; patternId: string; criteria: string }) => void;
+  onApply: (text: string, parts?: { goal: string; patternId: string; criteria: string; context: string }) => void;
 }) {
   const patterns = useMemo(() => patternsFor(surface), [surface]);
   const [open, setOpen] = useState(defaultOpen);
@@ -65,7 +67,7 @@ export function LoopDesigner({
   const [goalTouched, setGoalTouched] = useState(false);
   const effectiveGoal = goalTouched ? goal : initialGoal;
   const [criteria, setCriteria] = useState(initialCriteria);
-  const [context, setContext] = useState("");
+  const [context, setContext] = useState(initialContext);
 
   const preview = useMemo(
     () =>
@@ -205,7 +207,7 @@ export function LoopDesigner({
               type="button"
               disabled={!effectiveGoal.trim()}
               onClick={() => {
-                onApply(preview, { goal: effectiveGoal, patternId: selected.id, criteria });
+                onApply(preview, { goal: effectiveGoal, patternId: selected.id, criteria, context });
                 setOpen(false);
               }}
               className="rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-white transition hover:opacity-90 disabled:opacity-50"

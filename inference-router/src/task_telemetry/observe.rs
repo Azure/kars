@@ -146,8 +146,13 @@ impl Observation {
             "ms":self.started.elapsed().as_millis().min(u64::MAX as u128) as u64,
             "tool_calls_observed":parsed.tools.len(),
         });
-        self.telemetry
-            .finish(&self.scope, self.round, event, parsed.tools);
+        self.telemetry.finish(
+            &self.scope,
+            self.round,
+            event,
+            parsed.tools,
+            parsed.argument_previews,
+        );
     }
 }
 impl Drop for Observation {

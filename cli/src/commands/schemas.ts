@@ -20,6 +20,7 @@ export function schemasCommand(): Command {
     .option("--set-string <value>", "Chart string override", collect, [])
     .option("--reuse-values", "Mirror a Helm upgrade that reuses computed release values")
     .option("--reset-then-reuse-values", "Mirror a Helm upgrade that overlays saved user values on new defaults")
+    .option("--server-side <mode>", "Mirror Helm 4 true, false or auto apply mode; fenced root no-ops require true")
     .option("--atomic", "Verify the same automatic rollback safety as the following Helm operation")
     .option("--rollback-on-failure", "Helm 4 automatic rollback safety; equivalent to --atomic for preparation")
     .option("--timeout <seconds>", "Bounded establishment/discovery deadline (1-600)", "120")
@@ -33,11 +34,16 @@ export function schemasCommand(): Command {
       const reuse = options.reuseValues || options.resetThenReuseValues;
       if (reuse && options.ownership !== "helm") throw new Error("Values reuse requires Helm ownership");
       if ((options.atomic || options.rollbackOnFailure) && options.ownership !== "helm") throw new Error("Automatic rollback requires Helm ownership");
+      if (options.serverSide !== undefined
+        && (options.ownership !== "helm" || !["true", "false", "auto"].includes(options.serverSide))) {
+        throw new Error("--server-side requires Helm ownership and true, false or auto");
+      }
       const execute = schemaContextExecutor((file, args, settings) => execa(file, args, settings), options.context);
       const result = await prepareCoreHelmSchemas(execute, [options.ownership === "helm" ? "upgrade" : "install",
         "--install", options.release, options.chart ?? requireBundledAsset("deploy/helm/kars"),
         "--namespace", options.namespace, ...(options.reuseValues ? ["--reuse-values"] : []),
         ...(options.resetThenReuseValues ? ["--reset-then-reuse-values"] : []),
+        ...(options.serverSide !== undefined ? ["--server-side", options.serverSide] : []),
         ...(options.atomic ? ["--atomic"] : []), ...(options.rollbackOnFailure ? ["--rollback-on-failure"] : []),
         ...options.values.flatMap((file: string) => ["-f", file]),
         ...options.set.flatMap((value: string) => ["--set", value]),

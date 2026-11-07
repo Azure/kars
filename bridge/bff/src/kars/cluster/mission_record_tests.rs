@@ -185,6 +185,7 @@ struct Store {
     reads: Vec<String>,
     fail_tasks: bool,
     fail_maps: bool,
+    fail_record_prefix: Option<String>,
 }
 
 async fn handle(State(store): State<Arc<Mutex<Store>>>, uri: Uri) -> (StatusCode, Json<Value>) {
@@ -194,6 +195,10 @@ async fn handle(State(store): State<Arc<Mutex<Store>>>, uri: Uri) -> (StatusCode
     let task_path = "/apis/kars.azure.com/v1alpha1/namespaces/kars-system/karstasks";
     if (path.starts_with(task_path) && store.fail_tasks)
         || (path.ends_with("/configmaps") && store.fail_maps)
+        || store
+            .fail_record_prefix
+            .as_ref()
+            .is_some_and(|prefix| path.starts_with(prefix))
     {
         return (
             StatusCode::FORBIDDEN,
@@ -224,6 +229,82 @@ async fn handle(State(store): State<Arc<Mutex<Store>>>, uri: Uri) -> (StatusCode
         );
     };
     (StatusCode::OK, Json(body))
+}
+
+#[tokio::test]
+async fn efficiency_frontier_distinguishes_unavailable_evidence_from_absence() {
+    use crate::error::AppError;
+    use crate::routes::efficiency::compute_efficiency_for_owner;
+
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let state = Arc::new(Mutex::new(Store {
+        task: task(),
+        ..Default::default()
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = kube::Client::try_from(kube::Config::new(
+        format!("http://{}", listener.local_addr().unwrap())
+            .parse()
+            .unwrap(),
+    ))
+    .unwrap();
+    let server = tokio::spawn(
+        axum::serve(
+            listener,
+            Router::new().fallback(handle).with_state(state.clone()),
+        )
+        .into_future(),
+    );
+    let cluster = Cluster { client };
+    let empty = compute_efficiency_for_owner(&cluster, None).await.unwrap();
+    assert_eq!(empty.total_runs, 0);
+    assert!(empty.recommended.is_none());
+
+    for fail_tasks in [false, true] {
+        {
+            let mut store = state.lock().unwrap();
+            store.fail_maps = !fail_tasks;
+            store.fail_tasks = fail_tasks;
+        }
+        assert!(matches!(
+            compute_efficiency_for_owner(&cluster, None).await,
+            Err(AppError::Upstream(_))
+        ));
+    }
+    {
+        let mut store = state.lock().unwrap();
+        store.fail_maps = false;
+        store.fail_tasks = false;
+        store.maps = vec![record("output")];
+    }
+    let absent = compute_efficiency_for_owner(&cluster, None).await.unwrap();
+    assert_eq!(absent.total_runs, 1);
+    assert_eq!(absent.routes[0].accepted, 0);
+
+    for kind in ["review", "trace", "attempt"] {
+        {
+            let mut store = state.lock().unwrap();
+            store.fail_record_prefix = Some(format!(
+                "/api/v1/namespaces/kars-system/configmaps/kars-mission-{kind}-"
+            ));
+            if kind == "attempt" {
+                store.maps[0]["data"]["evidence.json"] = json!("{}");
+            }
+        }
+        assert!(
+            matches!(
+                compute_efficiency_for_owner(&cluster, None).await,
+                Err(AppError::Upstream(_))
+            ),
+            "{kind} read failure must not become missing measurements"
+        );
+    }
+    state.lock().unwrap().fail_record_prefix = None;
+    let absent = compute_efficiency_for_owner(&cluster, None).await.unwrap();
+    assert_eq!(absent.total_runs, 1);
+    assert!(absent.recommended.is_none());
+    server.abort();
+    let _ = server.await;
 }
 
 #[tokio::test]
@@ -286,6 +367,18 @@ async fn deliverable_index_joins_exact_ownership_and_revision_bound_files() {
     assert_eq!(current.output.evidence_key, "evidence-key");
     assert_eq!(current.output.data["ownerSub"], "subject-a");
     assert_eq!(current.output.data["displayName"], "Current mission title");
+    let producer: BTreeMap<String, String> =
+        serde_json::from_value(maps[0]["data"].clone()).unwrap();
+    assert_eq!(
+        current.output_sha256,
+        Some(crate::providers::signing::sha256_hex(
+            serde_json::to_vec(&producer).unwrap(),
+        ))
+    );
+    assert_eq!(
+        current.task.as_ref().unwrap().metadata.uid.as_deref(),
+        Some("task-uid")
+    );
     assert_eq!(
         current.artifacts.as_ref().unwrap().data.as_ref().unwrap()["response.md"],
         "Useful briefing"

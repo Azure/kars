@@ -70,20 +70,29 @@ impl Cluster {
     }
 
     pub async fn running_pod_for_sandbox(&self, sandbox: &str) -> Option<String> {
+        self.running_pod_for_sandbox_checked(sandbox)
+            .await
+            .ok()
+            .flatten()
+    }
+
+    pub async fn running_pod_for_sandbox_checked(
+        &self,
+        sandbox: &str,
+    ) -> Result<Option<String>, kube::Error> {
         let ns = format!("kars-{sandbox}");
         let pods: Api<Pod> = Api::namespaced(self.client.clone(), &ns);
         let list = pods
             .list(&ListParams::default().labels(&format!("kars.azure.com/sandbox={sandbox}")))
-            .await
-            .ok()?;
-        list.items.into_iter().find_map(|p| {
+            .await?;
+        Ok(list.items.into_iter().find_map(|p| {
             let phase = p.status.as_ref().and_then(|s| s.phase.as_deref());
-            if phase == Some("Running") {
+            if phase == Some("Running") && p.metadata.deletion_timestamp.is_none() {
                 p.metadata.name
             } else {
                 None
             }
-        })
+        }))
     }
 
     /// Health of a sandbox's newest non-terminating pod: readiness, restart
@@ -128,9 +137,11 @@ impl Cluster {
             })
             .unwrap_or(0);
         // Uptime from the pod start time.
-        let uptime_seconds = status
-            .and_then(|s| s.start_time.as_ref())
-            .map(|t| (chrono::Utc::now() - t.0).num_seconds().max(0));
+        let uptime_seconds = status.and_then(|s| s.start_time.as_ref()).map(|t| {
+            (chrono::Utc::now() - crate::kars::time::to_chrono(t.0))
+                .num_seconds()
+                .max(0)
+        });
         // A container stuck waiting (e.g. CrashLoopBackOff) is the honest
         // unhealthy signal — surface the reason.
         let waiting_reason = status.and_then(|status| {
@@ -299,61 +310,6 @@ impl Cluster {
                     .collect()
             })
             .unwrap_or_default()
-    }
-
-    /// LIVE per-agent execution trace, straight from a running sandbox's router
-    /// (`GET /telemetry/trace` — a PUBLIC in-pod endpoint, reached via the
-    /// apiserver pod-proxy; no admin token required). Unlike the persisted
-    /// `kars-mission-trace-<task>` ConfigMap (written once, at delivery), this
-    /// ticks WHILE the agent works, so the activity stream is genuinely live.
-    /// Returns the router's `events` array (round/tool shape); empty on any
-    /// error or when the sandbox has no running pod yet.
-    pub async fn sandbox_live_trace(&self, sandbox: &str) -> Vec<serde_json::Value> {
-        let ns = format!("kars-{sandbox}");
-        let pods: Api<k8s_openapi::api::core::v1::Pod> = Api::namespaced(self.client.clone(), &ns);
-        let pod_list = pods.list(&ListParams::default()).await;
-        if let Err(e) = &pod_list {
-            tracing::warn!(target: "kars_bridge::live_trace", %ns, error = %e, "pod list failed");
-        }
-        let Some(pod) = pod_list
-            .ok()
-            .and_then(|l| {
-                l.items.into_iter().find(|p| {
-                    p.status
-                        .as_ref()
-                        .and_then(|s| s.phase.as_deref())
-                        .map(|ph| ph == "Running")
-                        .unwrap_or(false)
-                })
-            })
-            .and_then(|p| p.metadata.name)
-        else {
-            tracing::warn!(target: "kars_bridge::live_trace", %ns, "no running pod found");
-            return Vec::new();
-        };
-        let path = format!("/api/v1/namespaces/{ns}/pods/{pod}:8443/proxy/telemetry/trace");
-        let Ok(req) = http::Request::builder()
-            .method(http::Method::GET)
-            .uri(&path)
-            .body(Vec::new())
-        else {
-            tracing::warn!(target: "kars_bridge::live_trace", %path, "request build failed");
-            return Vec::new();
-        };
-        match self.client.request_text(req).await {
-            Ok(text) => {
-                let n = serde_json::from_str::<serde_json::Value>(&text)
-                    .ok()
-                    .and_then(|v| v.get("events").and_then(|e| e.as_array()).cloned())
-                    .unwrap_or_default();
-                tracing::debug!(target: "kars_bridge::live_trace", %pod, events = n.len(), body_len = text.len(), "live trace ok");
-                n
-            }
-            Err(e) => {
-                tracing::warn!(target: "kars_bridge::live_trace", %path, error = %e, "proxy request failed");
-                Vec::new()
-            }
-        }
     }
 
     /// Names of the sub-agent sandboxes a principal spawned at run time — the

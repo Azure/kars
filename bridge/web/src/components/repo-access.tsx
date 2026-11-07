@@ -3,34 +3,43 @@
 
 "use client";
 
-// kars Bridge — Repository access (keyless git write) for a mission or team.
-//
-// Each principal connects repos through the shared GitHub App. Here the user
-// grants a subset of only their own connected repositories
-// to THIS mission/team so its agents can open pull requests — without ever holding
-// a credential (the router mints + injects a scoped token at run time). The
-// selection is written to a hidden `git_write_repos` field the create action reads;
-// the controller clamps it to declared ∩ connection-granted.
+// The legacy git_write_repos field carries the selected repository set. Typed
+// Missions and Teams derive authority from reviewed github-pr capabilities;
+// the server independently derives and authorizes the binding.
 
 import { useEffect, useState } from "react";
 import { defaultNamespace } from "@/lib/config";
+import type { ExecutionPlan } from "@/lib/types";
+
+export function missionGithubWriteEnabled(plan?: Partial<ExecutionPlan> | null): boolean {
+  // The review editor also supplies incomplete JSON while a plan is being edited.
+  const canWrite = (capabilities: unknown) => Array.isArray(capabilities) && capabilities.includes("github-pr");
+  return !plan || canWrite(plan.synthesis?.capabilities)
+    || (Array.isArray(plan.roles) && plan.roles.some((role) => Array.isArray(role?.phases)
+      && role.phases.some((phase) => canWrite(phase?.capabilities))));
+}
 
 type Connection = { connected: boolean; account: string | null; repos: string[] };
 
 export function RepoAccess({
   ns = defaultNamespace(),
   initialSelected = [],
+  selected: controlledSelection,
   onSelectionChange,
+  plan,
+  readOnly = !missionGithubWriteEnabled(plan),
 }: {
   ns?: string;
   initialSelected?: string[];
+  selected?: string[];
   onSelectionChange?: (repos: string[]) => void;
+  readOnly?: boolean;
+  plan?: Partial<ExecutionPlan> | null;
 }) {
   const [conn, setConn] = useState<Connection | null>(null);
   const [error, setError] = useState(false);
-  const [selected, setSelected] = useState<Set<string>>(
-    () => new Set(initialSelected),
-  );
+  const [localSelection, setLocalSelection] = useState<string[]>(initialSelected);
+  const selected = new Set(controlledSelection ?? localSelection);
 
   useEffect(() => {
     let live = true;
@@ -50,17 +59,17 @@ export function RepoAccess({
   const selectedHas = (repos: Set<string>, repo: string) =>
     Array.from(repos).some((entry) => entry.toLowerCase() === repo.toLowerCase());
 
-  const toggle = (repo: string) =>
-    setSelected((prev) => {
-      const next = new Set(prev);
-      const selectedEntry = Array.from(next).find(
-        (entry) => entry.toLowerCase() === repo.toLowerCase(),
-      );
-      if (selectedEntry) next.delete(selectedEntry);
-      else next.add(repo);
-      onSelectionChange?.(Array.from(next));
-      return next;
-    });
+  const toggle = (repo: string) => {
+    const next = new Set(selected);
+    const selectedEntry = Array.from(next).find(
+      (entry) => entry.toLowerCase() === repo.toLowerCase(),
+    );
+    if (selectedEntry) next.delete(selectedEntry);
+    else next.add(repo);
+    const repos = Array.from(next);
+    if (controlledSelection === undefined) setLocalSelection(repos);
+    onSelectionChange?.(repos);
+  };
 
   const value = Array.from(selected).join(",");
   const availableRepos = conn?.repos ?? [];
@@ -76,10 +85,12 @@ export function RepoAccess({
       <input type="hidden" name="git_write_repos" value={value} />
       <div className="flex items-center justify-between gap-2">
         <div>
-          <p className="text-sm font-medium">Pull request access</p>
+          <p className="text-sm font-medium">{readOnly ? "Read-only repository access" : "Pull request access"}</p>
           <p className="mt-0.5 text-xs text-foreground-muted">
-            Let this {`work`} open pull requests on connected repos. Agents never hold a
-            credential — a scoped token is injected at run time.
+            {readOnly
+              ? "This reviewed plan has no GitHub PR capability. Selected repositories receive read-only access through the router; GitHub writes are denied."
+              : "Let this work open pull requests on connected repos."}
+            {" "}Agents never hold a credential — a scoped token is injected at run time.
           </p>
         </div>
       </div>
@@ -92,8 +103,8 @@ export function RepoAccess({
         <p className="mt-2 text-xs text-foreground-muted">
           No repository is connected for your user yet. Connect GitHub on the{" "}
           <span className="font-medium text-foreground">Configuration</span> console to grant
-          pull-request access. Leaving this empty means no git write — the mission can still
-          read/clone public repos.
+          {readOnly ? " read-only repository access." : " pull-request access."}
+          {" "}Leaving this empty grants no connected GitHub access.
         </p>
       ) : (
         <div className="mt-2 space-y-1.5">
@@ -125,7 +136,9 @@ export function RepoAccess({
           ))}
           {selected.size === 0 && (
             <p className="text-[11px] text-foreground-muted">
-              None selected — no git write. Tick a repo to allow opening PRs.
+              {readOnly
+                ? "None selected — no connected GitHub access. Tick a repo to allow read-only verification."
+                : "None selected — no git write. Tick a repo to allow opening PRs."}
             </p>
           )}
         </div>

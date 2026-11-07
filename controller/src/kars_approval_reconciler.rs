@@ -477,6 +477,8 @@ mod tests {
             approval.spec.decision = Some(ApprovalDecision {
                 verdict: "deny".into(),
                 decider: "different-human".into(),
+                decider_subject: None,
+                decider_roles: vec![],
                 reason: None,
             });
             reconcile(
@@ -615,6 +617,8 @@ mod tests {
         let d = ApprovalDecision {
             verdict: "approve".to_string(),
             decider: "bob".to_string(),
+            decider_subject: None,
+            decider_roles: vec![],
             reason: Some("looks good".to_string()),
         };
         let out = evaluate(Some(&d), Some("sha256:aa"), Some("sha256:aa"), false);

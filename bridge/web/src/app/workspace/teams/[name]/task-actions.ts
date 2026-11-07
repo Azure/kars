@@ -8,6 +8,35 @@
 import { revalidatePath } from "next/cache";
 import { defaultNamespace } from "@/lib/config";
 import { authenticatedBffFetch } from "@/lib/bff";
+import type { TeamTask } from "@/lib/types";
+
+export async function amendTeamTaskFeedback(
+  team: string,
+  teamUid: string,
+  expected: TeamTask,
+  feedback: string,
+): Promise<{ error: string | null }> {
+  const ns = defaultNamespace();
+  try {
+    const response = await authenticatedBffFetch(
+      `/api/namespaces/${encodeURIComponent(ns)}/teams/${encodeURIComponent(team)}/tasks/${encodeURIComponent(expected.id)}/feedback`,
+      {
+        method: "PATCH",
+        cache: "no-store",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ team_uid: teamUid, expected, feedback }),
+      },
+    );
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null);
+      return { error: payload?.error?.message ?? `Save feedback failed (${response.status}).` };
+    }
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : "unknown error" };
+  }
+  revalidatePath(`/workspace/teams/${team}`);
+  return { error: null };
+}
 
 export async function addTeamTask(
   team: string,
@@ -79,7 +108,7 @@ export async function reviewTeamTask(
         cache: "no-store",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          decision, feedback: feedback?.trim() || null,
+          decision, feedback: feedback?.trim() ? feedback : null,
           assignment_nonce: binding.assignmentNonce, run_uid: binding.runUid,
         }),
       },

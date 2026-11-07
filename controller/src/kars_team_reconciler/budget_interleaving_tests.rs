@@ -191,6 +191,27 @@ fn ids(store: &Arc<Mutex<Store>>) -> BTreeMap<String, String> {
         })
         .collect()
 }
+#[tokio::test]
+async fn team_reconcile_future_stays_heap_bounded() {
+    let team = team();
+    let (_server, client, store) = setup(&team).await;
+    let future = reconcile(
+        Arc::new(team),
+        Arc::new(Ctx {
+            client: client.clone(),
+        }),
+    );
+    assert!(
+        std::mem::size_of_val(&future) <= 1024,
+        "reconciliation state must not inflate its caller's future"
+    );
+    let cycle = cycle(&client, &store);
+    assert!(
+        std::mem::size_of_val(&cycle) <= 1024,
+        "repeated reconciliation must keep caller stack usage bounded"
+    );
+}
+
 async fn cycle(client: &Client, store: &Arc<Mutex<Store>>) {
     reconcile(
         Arc::new(latest(store)),
@@ -321,7 +342,7 @@ fn settle_run(apis: &BudgetApis, run: &KarsTask) {
         identity: identity.clone(),
         sequence: 1,
         wire_digest: format!("sha256:{}", "a".repeat(64)),
-        quote,
+        quote: quote.into(),
     };
     let command = AttemptCommand {
         account_uid: request.account_uid.clone(),
@@ -554,7 +575,7 @@ async fn governed_team_admission_interleavings_preserve_uids_funding_and_launch_
         identity: identity.clone(),
         sequence: 1,
         wire_digest: format!("sha256:{}", "a".repeat(64)),
-        quote,
+        quote: quote.into(),
     };
     let command = AttemptCommand {
         account_uid: "account-uid".into(),
@@ -662,16 +683,19 @@ async fn governed_team_admission_interleavings_preserve_uids_funding_and_launch_
     }
     store.lock().unwrap().team["spec"]["paused"] = json!(true);
     let pause_ids = ids(&store);
-    cycle(&client, &store).await;
-    assert_eq!(ids(&store), pause_ids);
-    assert!(
+    let executions = |store: &Arc<Mutex<Store>>| {
         store
             .lock()
             .unwrap()
             .tasks
-            .values()
-            .all(|task| task["spec"]["execution"]["launch"] != true)
-    );
+            .iter()
+            .map(|(name, task)| (name.clone(), task["spec"]["execution"].clone()))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let before_pause = executions(&store);
+    cycle(&client, &store).await;
+    assert_eq!(ids(&store), pause_ids);
+    assert_eq!(executions(&store), before_pause);
     store.lock().unwrap().team["spec"]["roster"] = json!([]);
     cycle(&client, &store).await;
     assert!(

@@ -37,7 +37,7 @@ pub(super) fn to_summary(task: &KarsTask) -> TaskSummaryDto {
             .metadata
             .creation_timestamp
             .as_ref()
-            .map(|timestamp| timestamp.0.to_rfc3339()),
+            .map(|timestamp| crate::kars::time::to_chrono(timestamp.0).to_rfc3339()),
         tier: task.spec.envelope.tier,
         phase: phase_of(task),
         envelope_digest: task.status.as_ref().and_then(|s| s.envelope_digest.clone()),
@@ -47,7 +47,26 @@ pub(super) fn to_summary(task: &KarsTask) -> TaskSummaryDto {
             .cloned()
             .or_else(|| task.annotations().get("kars.azure.com/team").cloned()),
         delivered: false,
-        failed: false,
+        failed: task
+            .status
+            .as_ref()
+            .and_then(|status| status.assignment.as_ref())
+            .is_some_and(|assignment| {
+                task.annotations()
+                    .get("kars.azure.com/run-requested")
+                    .is_some_and(|nonce| {
+                        !nonce.is_empty()
+                            && assignment.task_id == *nonce
+                            && assignment.state == "Failed"
+                            && assignment.completed_at.is_some()
+                    })
+            }),
+        blocked: false,
+        current_run_nonce: task
+            .annotations()
+            .get("kars.azure.com/run-requested")
+            .cloned(),
+        reviewed_progress: super::reviewed_summary::unavailable(task),
         launched: task
             .spec
             .execution
@@ -101,7 +120,11 @@ pub(super) fn to_detail(
         .unwrap_or_default();
     canonicalize_assignment_event_roles(&mut assignment_events, &collaboration_events);
     TaskDetailDto {
+        qualification_run: crate::routes::qualification_runs::record(task)
+            .ok()
+            .flatten(),
         reviewed_execution: None,
+        stopped_activity: None,
         name: task.name_any(),
         namespace: task.namespace().unwrap_or_default(),
         objective: clean_objective(&task.spec.objective),
@@ -110,7 +133,7 @@ pub(super) fn to_detail(
             .metadata
             .creation_timestamp
             .as_ref()
-            .map(|timestamp| timestamp.0.to_rfc3339()),
+            .map(|timestamp| crate::kars::time::to_chrono(timestamp.0).to_rfc3339()),
         envelope: EnvelopeDto {
             tier: e.tier,
             authority_ceiling: e.authority_ceiling,
@@ -139,6 +162,7 @@ pub(super) fn to_detail(
             .or_else(|| task.annotations().get("kars.azure.com/team").cloned()),
         status_message: ready_message(task),
         children,
+        credential_setup_pending: crate::kars::cluster::Cluster::keyless_draft_setup_pending(task),
         launched: task
             .spec
             .execution

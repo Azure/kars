@@ -11,6 +11,7 @@ pub const LOCKED_DIGEST: &str = "kars.azure.com/skill-locked-digest";
 pub const LOCKED_UID: &str = "kars.azure.com/skill-locked-uid";
 pub const LOCKED_GENERATION: &str = "kars.azure.com/skill-locked-generation";
 pub const APPROVED_BY_SUB: &str = "kars.azure.com/skill-approved-by-sub";
+pub const APPROVED_BY_ROLE: &str = "kars.azure.com/skill-approved-by-role";
 pub const UPLOADED_BY_SUB: &str = "kars.azure.com/skill-uploaded-by-sub";
 pub const MAX_PACKAGE_BYTES: usize = 1024 * 1024;
 
@@ -260,9 +261,9 @@ pub fn approved_digest(object: &Value) -> Result<String, String> {
         || annotations[LOCKED_GENERATION].as_str() != Some(&generation.to_string())
         || reviewer.is_none()
         || author.is_none()
-        || reviewer == author
+        || (reviewer == author && annotations[APPROVED_BY_ROLE].as_str() != Some("admin"))
     {
-        return Err("Skill needs independent operator approval bound to its current UID, generation and content".into());
+        return Err("Skill needs operator approval (or administrator self-approval) bound to its current UID, generation and content".into());
     }
     Ok(digest)
 }
@@ -423,6 +424,31 @@ mod tests {
             )]))
             .is_err()
         );
+    }
+
+    #[test]
+    fn administrator_self_approval_requires_recorded_role_and_current_bindings() {
+        let mut object = reviewed();
+        object["metadata"]["annotations"][APPROVED_BY_SUB] = json!("author");
+        for role in ["", "operator", "user", "Admin"] {
+            object["metadata"]["annotations"][APPROVED_BY_ROLE] = json!(role);
+            assert!(approved_digest(&object).is_err(), "{role}");
+        }
+        object["metadata"]["annotations"][APPROVED_BY_ROLE] = json!("admin");
+        assert!(approved_digest(&object).is_ok());
+        for (pointer, value) in [
+            ("/metadata/uid", json!("replacement")),
+            ("/metadata/generation", json!(3)),
+            ("/status/observedGeneration", json!(1)),
+            ("/status/phase", json!("Degraded")),
+            ("/spec/summary", json!("Changed content")),
+        ] {
+            let mut bad = object.clone();
+            *bad.pointer_mut(pointer).unwrap() = value;
+            assert!(approved_digest(&bad).is_err(), "{pointer}");
+        }
+        object["metadata"]["annotations"][UPLOADED_BY_SUB] = json!("");
+        assert!(approved_digest(&object).is_err());
     }
 
     #[test]

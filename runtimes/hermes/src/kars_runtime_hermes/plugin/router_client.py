@@ -78,6 +78,7 @@ def call(
     json: Any | None = None,
     params: dict | None = None,
     headers: dict[str, str] | None = None,
+    timeout: float | httpx.Timeout | None = None,
 ) -> httpx.Response:
     """Call the router. Path is a leading-slash absolute path under base URL.
 
@@ -89,7 +90,8 @@ def call(
     e.g. to send the MCP ``Accept: application/json, text/event-stream`` header
     required by the router's ``/platform/mcp`` Streamable-HTTP endpoint.
     """
-    return _client().request(method, path, json=json, params=params, headers=headers)
+    return _client().request(method, path, json=json, params=params, headers=headers,
+                             **({"timeout": timeout} if timeout is not None else {}))
 
 
 def call_json(method: str, path: str, *, json: Any | None = None, params: dict | None = None) -> dict[str, Any]:

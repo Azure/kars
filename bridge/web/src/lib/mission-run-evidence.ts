@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 import type { ActivityEvent, MissionArtifact, MissionResult, TaskAssignmentStatus } from "./types";
+import type { ReviewedExecution } from "./types/missions";
 import { isSystemEvidenceArtifact, type RouterActivity } from "./router-activity";
 
 export function isStandaloneMission(task: { team: string | null; parent: string | null }): boolean {
@@ -24,6 +25,14 @@ export function missionFailureMessage(result: MissionResult | null): string {
   const messages = [result?.error?.trim(), result?.output.trim()]
     .filter((message): message is string => Boolean(message));
   return [...new Set(messages)].join("\n\n") || "No failure message was recorded for this revision.";
+}
+
+export function reviewedPhaseFailureMessage(phase: ReviewedExecution["phases"][number]): string {
+  // Generated output is retained evidence, not a diagnosis, even for committed failures.
+  if (phase.result) return phase.result.error?.trim() || missionFailureMessage(null);
+  const diagnostic = phase.state === "failed" && phase.task_name && phase.task_uid && phase.run_nonce
+    ? phase.failure_diagnostic?.trim() : null;
+  return diagnostic || missionFailureMessage(null);
 }
 
 export function missionFailureAdvice(reason: string): { cause: string; remedy: string } {
@@ -69,10 +78,11 @@ export function missionRunState(task: {
   const failed = currentResult != null
     ? !realDelivery && currentResult.blocked == null
     : assignmentMatches && task.assignment?.completed_at != null && task.assignment.state === "Failed";
-  const routerActivity = currentResult?.status === "ok"
-    && currentResult.source === "durable_agent"
-    && currentResult.run_evidence?.status === "succeeded"
-    && currentResult.run_evidence.run_nonce === nonce
+  const recordedStatus = currentResult?.run_evidence?.status;
+  const routerActivity = currentResult?.source === "durable_agent"
+    && ((currentResult.status === "ok" && recordedStatus === "succeeded")
+      || (currentResult.status === "failed" && recordedStatus === "failed"))
+    && currentResult.run_evidence?.run_nonce === nonce
     ? task.router_activity ?? null : null;
   return { currentResult, awaitingAssignment, assignmentInFlight, realDelivery, failed, routerActivity };
 }
@@ -113,6 +123,43 @@ export function mergeRevisionActivity(seed: ActivityEvent[], live: ActivityEvent
 export function revisionArtifactUrl(ns: string, name: string, file: string, nonce?: string | null): string | undefined {
   if (!ns || !name || !file || !nonce) return undefined;
   return `/api/namespaces/${encodeURIComponent(ns)}/tasks/${encodeURIComponent(name)}/artifact/${encodeURIComponent(file)}?run_nonce=${encodeURIComponent(nonce)}`;
+}
+
+export interface RevisionArtifactContext {
+  namespace: string;
+  task: string;
+  runNonce: string | null;
+  artifacts: Pick<MissionArtifact, "name" | "source_path">[];
+}
+
+function sandboxArtifactPath(value: string): string | undefined {
+  let path: string;
+  try {
+    path = decodeURIComponent(value.startsWith("sandbox:") ? value.slice(8) : value);
+  } catch {
+    return undefined;
+  }
+  if (path.startsWith("/sandbox/")) path = path.slice(9);
+  else if (path.startsWith("./")) path = path.slice(2);
+  if (/[\\?#:]/.test(path)
+      || [...path].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)
+      || path.split("/").some(part => !part || part === "." || part === "..")) return undefined;
+  return path;
+}
+
+/** Resolve unambiguous captured names, source paths, or flat native export paths for this revision. */
+export function resolveRevisionArtifactLink(url: string, context?: RevisionArtifactContext): string | undefined {
+  const path = sandboxArtifactPath(url);
+  if (!path || !context?.runNonce) return undefined;
+  const matches = new Set(context.artifacts.filter(artifact =>
+    sandboxArtifactPath(artifact.name) === path
+    || (artifact.source_path != null && sandboxArtifactPath(artifact.source_path) === path)
+    // Native exports are captured by flat filename, without source-path metadata.
+    || (artifact.source_path == null && !artifact.name.includes("/")
+      && sandboxArtifactPath(`exports/${artifact.name}`) === path),
+  ).map(artifact => artifact.name));
+  if (matches.size !== 1) return undefined;
+  return revisionArtifactUrl(context.namespace, context.task, [...matches][0], context.runNonce);
 }
 
 export function revisionStreamUrl(ns?: string, name?: string, nonce?: string | null): string | null {

@@ -73,6 +73,35 @@ describe("shared core schema entrypoints", () => {
     expect(f.writes).toEqual([]);
   });
 
+  it.each(["--server-side=true", "--server-side", "auto", "false", "rollback", "helm3"])(
+    "binds no-op schema staging to the actual fenced SSA operation: %s", async mode => {
+      const fenced = { ...structuredClone(root),
+        metadata: { ...root.metadata, uid: "controller-uid", resourceVersion: "3",
+          labels: { "app.kubernetes.io/managed-by": "Helm" },
+          annotations: { "meta.helm.sh/release-name": "kars", "meta.helm.sh/release-namespace": "kars-system" } } };
+      fenced.spec.template.spec.containers[0].image += `@sha256:${"a".repeat(64)}`;
+      const f = schemaFixture([crd(), admission(), fenced]);
+      f.objects.set("namespace/kars-system", protectedNamespace);
+      f.objects.set("deployment/kars-controller", structuredClone(fenced));
+      if (mode === "helm3") f.options.helmVersion = "v3.16.0";
+      const execute: SchemaExecute = (file, args, options) => file === "helm" && args[0] === "get" && args[1] === "manifest"
+        ? Promise.resolve({ stdout: [crd(), admission(), root].map(object => JSON.stringify(object)).join("\n---\n") })
+        : f.execute(file, args, options);
+      const flags = mode === "--server-side" ? ["--server-side", "true"]
+        : ["auto", "false"].includes(mode) ? [`--server-side=${mode}`]
+          : mode === "rollback" ? ["--server-side=true", "--rollback-on-failure"] : ["--server-side=true"];
+      const result = prepareCoreHelmSchemas(execute, ["upgrade", "kars", "chart", "-n", "kars-system", ...flags]);
+      if (mode.startsWith("--")) {
+        await expect(result).resolves.toMatchObject({ published: true });
+        expect(f.writes).toHaveLength(1);
+        expect(f.writes[0].kind).toBe("CustomResourceDefinition");
+        expect(f.objects.get("deployment/kars-controller")).toEqual(fenced);
+      } else {
+        await expect(result).rejects.toThrow(mode === "helm3" ? "inspected Helm" : "KARS_PRIVATE_ROOT_UPGRADE_BLOCKED");
+        expect(f.writes).toEqual([]);
+      }
+    });
+
   it("preserves bridge-only apply and its arguments without consulting a root", async () => {
     const bridge = { ...root, metadata: { name: "kars-bridge-bff", namespace: "bridge" } };
     const f = schemaFixture([crd(), admission(), bridge]);
@@ -176,6 +205,43 @@ describe("shared core schema entrypoints", () => {
     expect(f.writes).toEqual([]);
     await result.serverRender();
     expect(f.requests.at(-1)!.args).toContain("--dry-run=server");
+  });
+
+  it("uses authoritative server rendering when an installed profile requires live capabilities", async () => {
+    const f = schemaFixture();
+    const modes: string[] = [];
+    const execute: SchemaExecute = async (file, args, options) => {
+      if (file === "helm" && args[0] === "template") {
+        modes.push(args.includes("--dry-run=client") ? "client" : "server");
+        if (args.includes("--dry-run=client")) throw new Error("installed CNI APIs required");
+      }
+      return f.execute(file, args, options);
+    };
+    const result = await renderCoreSchemaChart(execute, ["upgrade", "kars", "chart", "-n", "kars-system"]);
+    expect(result.upgrading).toBe(true);
+    expect(result.documents).toContainEqual(crd());
+    expect(modes).toEqual(["client", "server"]);
+    expect(f.writes).toEqual([]);
+    await result.serverRender();
+    expect(modes).toEqual(["client", "server", "server"]);
+  });
+
+  it.each([true, false])("does not bypass failed chart guards or fresh bootstrap review: installed=%s", async installed => {
+    const f = schemaFixture();
+    f.options.releaseExists = installed;
+    const modes: string[] = [];
+    const execute: SchemaExecute = async (file, args, options) => {
+      if (file === "helm" && args[0] === "template") {
+        const mode = args.includes("--dry-run=client") ? "client" : "server";
+        modes.push(mode);
+        throw new Error(`${mode} chart guard rejected`);
+      }
+      return f.execute(file, args, options);
+    };
+    await expect(prepareCoreHelmSchemas(execute, ["upgrade", "--install", "kars", "chart", "-n", "kars-system"]))
+      .rejects.toThrow(`${installed ? "server" : "client"} chart guard rejected`);
+    expect(modes).toEqual(installed ? ["client", "server"] : ["client"]);
+    expect(f.writes).toEqual([]);
   });
 
   it("stages the exact previous Helm revision before returning an explicit rollback target", async () => {

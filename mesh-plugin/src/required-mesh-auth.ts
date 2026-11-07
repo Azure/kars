@@ -123,7 +123,7 @@ export class RequiredMeshAuth<T extends AuthTransport> {
         const value: any = Reflect.get(target, key, target);
         if (typeof value !== "function") return value;
         if (typeof key === "string" && ["onMessage", "onKnock", "onError", "onE2EVerified"].includes(key)) {
-          return (handler: (...args: any[]) => any) => value.call(target, (...args: any[]) => {
+          return (handler: (...args: any[]) => any, captureIngress?: () => unknown) => value.call(target, (...args: any[]) => {
             if (!this.usable) return key === "onKnock" ? { accept: false, reason: "Required Entra authentication unavailable" } : undefined;
             const epoch = this.epoch;
             const result = this.context.run({ epoch, admitted: true }, () => handler(...args));
@@ -132,7 +132,10 @@ export class RequiredMeshAuth<T extends AuthTransport> {
                 ? allowed : { accept: false, reason: "Required Entra authentication unavailable" });
             }
             return result;
-          });
+          }, key === "onMessage" && captureIngress ? () => {
+            this.assertUsable();
+            return captureIngress();
+          } : undefined);
         }
         if (key === "onDisconnect" || key === "enableKnockEnforcement") return value.bind(target);
         return (...args: any[]) => {

@@ -38,7 +38,7 @@
 //!   runner pods refuse malformed builtins at startup.
 //! - **Judge:** total function over (`Expect`, `ActualDecision`) →
 //!   [`Verdict`]. No I/O, no allocation beyond the verdict struct.
-//! - **Built-ins:** five starter corpora embedded via `include_str!`
+//! - **Built-ins:** starter corpora embedded via `include_str!`
 //!   under `eval-corpus/src/eval_corpora/`. They parse, are non-empty,
 //!   and survive a round-trip back through [`parse`].
 
@@ -812,26 +812,16 @@ fn augment(e: ParseError, ctx: &str) -> ParseError {
 
 // ─────────────────────────── built-ins ───────────────────────────
 
-/// Canonical names of the corpora embedded in this crate. Each one is
-/// signed at release time and ships in the runner image; operators
-/// reference them by name from `KarsEval.spec.corpora[].builtin`.
-///
-/// Adding a new built-in requires updating this constant and supplying
-/// the JSON file under `eval-corpus/src/eval_corpora/`. The
-/// `builtins_parse_and_are_non_empty` test enforces parity.
-pub const BUILTIN_NAMES: &[&str] = &[
-    "jailbreak-baseline",
-    "prompt-injection-2026q1",
-    "banned-tools",
-    "egress-known-bad",
-    "memory-isolation",
-];
+mod builtin_names;
+pub use builtin_names::BUILTIN_NAMES;
 
 const JAILBREAK_BASELINE_JSON: &str = include_str!("eval_corpora/jailbreak-baseline.json");
 const PROMPT_INJECTION_2026Q1_JSON: &str =
     include_str!("eval_corpora/prompt-injection-2026q1.json");
 const BANNED_TOOLS_JSON: &str = include_str!("eval_corpora/banned-tools.json");
 const EGRESS_KNOWN_BAD_JSON: &str = include_str!("eval_corpora/egress-known-bad.json");
+const GOVERNED_EGRESS_TUNNELS_JSON: &str =
+    include_str!("eval_corpora/governed-egress-tunnels.json");
 const MEMORY_ISOLATION_JSON: &str = include_str!("eval_corpora/memory-isolation.json");
 
 /// Return the raw signed bytes of a built-in corpus by name. The bytes
@@ -847,6 +837,7 @@ pub fn builtin_bytes(name: &str) -> Option<&'static [u8]> {
         "prompt-injection-2026q1" => Some(PROMPT_INJECTION_2026Q1_JSON.as_bytes()),
         "banned-tools" => Some(BANNED_TOOLS_JSON.as_bytes()),
         "egress-known-bad" => Some(EGRESS_KNOWN_BAD_JSON.as_bytes()),
+        "governed-egress-tunnels" => Some(GOVERNED_EGRESS_TUNNELS_JSON.as_bytes()),
         "memory-isolation" => Some(MEMORY_ISOLATION_JSON.as_bytes()),
         _ => None,
     }

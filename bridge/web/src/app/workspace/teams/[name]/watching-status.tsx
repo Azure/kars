@@ -38,6 +38,9 @@ export function WatchingStatus({
   lifecycleMode,
   warmIdleSeconds,
   runtimeState,
+  runInFlight,
+  runRunning,
+  runHeld = false,
   currentAssignment,
   idleDeadlineAt,
   memoryEntries,
@@ -50,6 +53,9 @@ export function WatchingStatus({
   lifecycleMode: TeamLifecycleMode;
   warmIdleSeconds: number | null;
   runtimeState: TeamRuntimeState | null;
+  runInFlight: boolean;
+  runRunning: boolean;
+  runHeld?: boolean;
   currentAssignment: string | null;
   idleDeadlineAt: string | null;
   memoryEntries: number;
@@ -63,15 +69,10 @@ export function WatchingStatus({
   }, []);
 
   if (paused) {
-    const detail =
-      lifecycleMode === "resourceOptimized"
-        ? "The principal runtime is suspended without losing team identity or approved memory. New work resumes it."
-        : lifecycleMode === "persistent"
-          ? "The persistent principal is explicitly suspended. It stays stopped until you resume the team."
-          : "No assignment runtime is allocated while the team is paused.";
+    const detail = "No new runs will start until you resume. Current work can finish and still uses tokens. Runtime cleanup follows the team's existing retention settings; Pause does not freeze or checkpoint a process.";
     return (
       <div className="rounded-xl border border-border bg-surface-muted p-5">
-        <p className="text-sm font-medium">Hibernating</p>
+        <p className="text-sm font-medium">{runInFlight ? "Scheduling paused — current run is finishing" : "Scheduling paused"}</p>
         <p className="mt-1 text-xs text-foreground-muted">{detail}</p>
       </div>
     );
@@ -81,13 +82,36 @@ export function WatchingStatus({
   const last = lastRunAt ? new Date(lastRunAt).getTime() : null;
   const idleDeadline = idleDeadlineAt ? new Date(idleDeadlineAt).getTime() : null;
 
-  const tone = runtimeState === "Working"
+  const working = runRunning || runtimeState === "Working";
+  const awaitingReview = health === "AwaitingReview";
+  const tone = runHeld
+    ? {
+        box: "border-amber-500/30 bg-amber-500/5",
+        dot: "bg-amber-500",
+        label: "Run held",
+        note: "Reviewed execution is held. Completed role evidence remains available in the latest run; synthesis is prohibited.",
+      }
+    : awaitingReview
+    ? {
+        box: "border-amber-500/30 bg-amber-500/5",
+        dot: "bg-amber-500",
+        label: "Awaiting your review",
+        note: "The retained outcome needs your decision before dependent work or memory promotion can proceed.",
+      }
+    : working
     ? {
         box: "border-sky-500/30 bg-sky-500/5",
         dot: "bg-sky-500",
         label: "Working",
         note: currentAssignment ? `Current assignment: ${currentAssignment}` : "An assignment is active.",
       }
+    : runInFlight
+      ? {
+          box: "border-amber-500/30 bg-amber-500/5",
+          dot: "bg-amber-500",
+          label: "Run in progress",
+          note: "Execution is starting or recovering. Follow the latest run for phase-level progress.",
+        }
     : runtimeState === "Warm"
       ? {
           box: "border-emerald-500/30 bg-emerald-500/5",
@@ -137,7 +161,13 @@ export function WatchingStatus({
       </div>
       {tone.note && <p className="mt-1 text-xs text-foreground-muted">{tone.note}</p>}
       <p className="mt-2 text-sm">
-        {next != null ? (
+        {runHeld ? (
+          "No final delivery recorded for this held run"
+        ) : awaitingReview ? (
+          "Schedule waits for your decision"
+        ) : runInFlight || working ? (
+          "Current assignment in progress"
+        ) : next != null ? (
           <>
             Next check{" "}
             <span className="font-medium">

@@ -53,16 +53,21 @@ export interface SearchResponse {
   total?: number;
 }
 
+export interface RegistryRequestOptions {
+  timeoutMs?: number;
+  operation?: { signal: AbortSignal; deadline: number; assertCurrent(): void };
+}
+
 export interface IMeshRegistry {
   /** Search by capability/display_name. */
   search(
     capability: string,
-    opts?: { limit?: number; timeoutMs?: number },
+    opts?: RegistryRequestOptions & { limit?: number },
   ): Promise<RegistryEntry[]>;
   /** Look up a single agent by AMID/DID. */
   lookup(
     amid: string,
-    opts?: { timeoutMs?: number },
+    opts?: RegistryRequestOptions,
   ): Promise<RegistryEntry | null>;
   /** Optional heartbeat — vendored only. AGT relay does its own liveness. */
   heartbeat?(
@@ -79,22 +84,37 @@ export interface IMeshRegistry {
 function httpGetJson(
   url: string,
   timeoutMs: number,
+  operation?: RegistryRequestOptions["operation"],
 ): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
-    const req = http.get(url, (res) => {
-      let d = "";
+    operation?.signal.throwIfAborted();
+    operation?.assertCurrent();
+    if (operation && (!Number.isFinite(operation.deadline) || operation.deadline <= Date.now()
+      || !Number.isFinite(timeoutMs) || timeoutMs <= 0)) throw new Error("Registry deadline exceeded or invalid");
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const req = http.get(url, { signal: operation?.signal }, (res) => {
+      const chunks: Buffer[] = [];
+      let size = 0;
       res.on("data", (c: Buffer) => {
-        d += c.toString();
+        size += c.length;
+        if (operation && size > 160 * 1024) res.destroy(new Error("Registry response exceeds 160 KiB"));
+        else chunks.push(c);
       });
-      res.on("end", () =>
-        resolve({ status: res.statusCode ?? 0, body: d }),
-      );
+      res.on("error", reject);
+      res.on("aborted", () => reject(new Error("Registry response aborted")));
+      res.on("close", () => clearTimeout(timer));
+      res.on("end", () => {
+        try {
+          operation?.signal.throwIfAborted();
+          operation?.assertCurrent();
+          if (operation && operation.deadline <= Date.now()) throw new Error("Registry deadline exceeded");
+          resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") });
+        } catch (error) { reject(error); }
+      });
     });
-    req.on("error", reject);
-    req.setTimeout(timeoutMs, () => {
-      req.destroy();
-      reject(new Error("timeout"));
-    });
+    req.on("error", error => { clearTimeout(timer); reject(error); });
+    if (operation) timer = setTimeout(() => req.destroy(new Error("Registry deadline exceeded")), operation.deadline - Date.now());
+    req.setTimeout(timeoutMs, () => req.destroy(new Error("timeout")));
   });
 }
 
@@ -145,8 +165,9 @@ class VendoredMeshRegistry implements IMeshRegistry {
 
   async search(
     capability: string,
-    opts: { limit?: number; timeoutMs?: number } = {},
+    opts: RegistryRequestOptions & { limit?: number } = {},
   ): Promise<RegistryEntry[]> {
+    if (opts.operation) throw new Error("Native peers require the AGT registry");
     const timeoutMs = opts.timeoutMs ?? 5000;
     try {
       const { status, body } = await httpGetJson(
@@ -167,8 +188,9 @@ class VendoredMeshRegistry implements IMeshRegistry {
 
   async lookup(
     amid: string,
-    opts: { timeoutMs?: number } = {},
+    opts: RegistryRequestOptions = {},
   ): Promise<RegistryEntry | null> {
+    if (opts.operation) throw new Error("Native peers require the AGT registry");
     const timeoutMs = opts.timeoutMs ?? 3000;
     try {
       const { status, body } = await httpGetJson(
@@ -268,25 +290,28 @@ class AgtMeshRegistry implements IMeshRegistry {
 
   async search(
     capability: string,
-    opts: { limit?: number; timeoutMs?: number } = {},
+    opts: RegistryRequestOptions & { limit?: number } = {},
   ): Promise<RegistryEntry[]> {
     const timeoutMs = opts.timeoutMs ?? 5000;
-    const limit = opts.limit ?? 50;
+    const limit = opts.operation ? Math.min(16, Math.max(1, opts.limit ?? 16)) : opts.limit ?? 50;
     try {
       const { status, body } = await httpGetJson(
         `${this.base}/v1/discover?capability=${encodeURIComponent(capability)}&limit=${limit}`,
-        timeoutMs,
+        timeoutMs, opts.operation,
       );
+      if (opts.operation && (status < 200 || status >= 300)) throw new Error(`Registry HTTP ${status}`);
       if (status < 200 || status >= 300) return [];
       const parsed = JSON.parse(body) as AgtDiscoverResult;
-      const results = parsed.results ?? [];
+      if (opts.operation && !Array.isArray(parsed.results)) throw new Error("Invalid registry discovery response");
+      const results = opts.operation ? parsed.results.slice(0, limit) : parsed.results ?? [];
       // Discover only returns a subset of fields. For each hit, fetch the
       // full record to populate metadata.display_name and signing key. This
       // is the same overhead the vendored registry imposes (its /search
       // already returns full records) so net cost is comparable.
       const full = await Promise.all(
         results.map(async (hit) => {
-          const rec = await this.lookup(hit.did, { timeoutMs });
+          if (opts.operation && !/^did:mesh:[a-f0-9]{32}$/.test(hit.did)) throw new Error("Invalid registry peer DID");
+          const rec = await this.lookup(hit.did, { timeoutMs, operation: opts.operation });
           if (rec) return rec;
           // Fall back to the discover hit alone — better than dropping it.
           return this.mapAgent({
@@ -298,26 +323,30 @@ class AgtMeshRegistry implements IMeshRegistry {
         }),
       );
       return full;
-    } catch {
+    } catch (error) {
+      if (opts.operation) throw error;
       return [];
     }
   }
 
   async lookup(
     amid: string,
-    opts: { timeoutMs?: number } = {},
+    opts: RegistryRequestOptions = {},
   ): Promise<RegistryEntry | null> {
     const timeoutMs = opts.timeoutMs ?? 3000;
     try {
       const { status, body } = await httpGetJson(
         `${this.base}/v1/agents/${encodeURIComponent(amid)}`,
-        timeoutMs,
+        timeoutMs, opts.operation,
       );
+      if (opts.operation && status !== 404 && (status < 200 || status >= 300)) throw new Error(`Registry HTTP ${status}`);
       if (status < 200 || status >= 300) return null;
       const parsed = JSON.parse(body) as AgtAgentRecord;
+      if (opts.operation && parsed?.did !== amid) throw new Error("Registry peer DID mismatch");
       if (!parsed || !parsed.did) return null;
       return this.mapAgent(parsed);
-    } catch {
+    } catch (error) {
+      if (opts.operation) throw error;
       return null;
     }
   }

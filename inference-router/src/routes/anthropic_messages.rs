@@ -313,9 +313,31 @@ pub(super) async fn anthropic_messages(
     // loaded `InferencePolicy` (Slice 2b); env-default fallback.
     // Latency: one snapshot read per request (mirrors chat_completions).
     let policy = crate::inference_policy_loader::current_snapshot(&state.inference_policy).await;
+    if policy.content_safety.is_active() {
+        let message = super::chat_completions::content_safety_route_message("Anthropic Messages");
+        tracing::warn!(
+            target: "inference.audit",
+            sandbox = %sandbox_name,
+            inference_policy_digest = %policy.digest,
+            decision = "deny",
+            gate = "route_enforcement_gap",
+            "{message}"
+        );
+        return deny_policy(
+            StatusCode::FORBIDDEN,
+            &message,
+            "permission_error",
+            super::chat_completions::CONTENT_SAFETY_ROUTE_UNSUPPORTED,
+        );
+    }
     if let Err(msg) = state
         .budget
-        .check_budget(sandbox_name, policy.daily_tokens, policy.monthly_tokens)
+        .check_governed_budget(
+            sandbox_name,
+            policy.daily_tokens,
+            policy.monthly_tokens,
+            state.inference_budget.as_deref(),
+        )
         .await
     {
         tracing::warn!(sandbox = %sandbox_name, "Token budget exceeded (anthropic): {msg}");

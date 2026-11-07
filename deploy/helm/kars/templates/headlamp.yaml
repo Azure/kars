@@ -1,8 +1,28 @@
 {{/* Copyright (c) Microsoft Corporation.
 Licensed under the MIT License. */}}
 {{- $headlamp := .Values.headlamp | default dict }}
-{{- if $headlamp.enabled }}
+{{- if and (hasKey $headlamp "oidc") (not (kindIs "map" $headlamp.oidc)) }}
+{{- fail "headlamp.oidc must be a map" }}
+{{- end }}
 {{- $oidc := $headlamp.oidc | default dict }}
+{{- if and (hasKey $oidc "clientSecret") (not (kindIs "map" $oidc.clientSecret)) }}
+{{- fail "headlamp.oidc.clientSecret must be a map" }}
+{{- end }}
+{{- $secret := $oidc.clientSecret | default dict }}
+{{- range $field := list "name" "sourceName" "key" }}
+{{- if and (hasKey $secret $field) (not (kindIs "string" (get $secret $field))) }}
+{{- fail (printf "headlamp.oidc.clientSecret.%s must be a string" $field) }}
+{{- end }}
+{{- end }}
+{{- range $field := list "caConfigMap" "caSourceConfigMap" }}
+{{- if and (hasKey $oidc $field) (not (kindIs "string" (get $oidc $field))) }}
+{{- fail (printf "headlamp.oidc.%s must be a string" $field) }}
+{{- end }}
+{{- end }}
+{{- if and (or $secret.sourceName $oidc.caSourceConfigMap) (or (not $headlamp.enabled) (not $oidc.enabled)) }}
+{{- fail "Headlamp OIDC projection requires headlamp.enabled and headlamp.oidc.enabled" }}
+{{- end }}
+{{- if $headlamp.enabled }}
 {{- $oidcPort := 443 }}
 {{- if and (hasKey $oidc "enabled") (not (kindIs "bool" $oidc.enabled)) }}
 {{- fail "headlamp.oidc.enabled must be a boolean" }}
@@ -21,9 +41,19 @@ Licensed under the MIT License. */}}
 {{- if not (trim (required "headlamp.oidc.clientID is required" $oidc.clientID)) }}
 {{- fail "headlamp.oidc.clientID must not be blank" }}
 {{- end }}
-{{- $secret := $oidc.clientSecret | default dict }}
 {{- if not (and $secret.name $secret.key) }}
-{{- fail "headlamp.oidc.clientSecret.name and key must reference an existing Secret in headlamp" }}
+{{- fail "headlamp.oidc.clientSecret.name and key must reference a Secret in headlamp" }}
+{{- end }}
+{{- range $field, $name := dict "clientSecret.name" $secret.name "clientSecret.sourceName" ($secret.sourceName | default "") "caConfigMap" ($oidc.caConfigMap | default "") "caSourceConfigMap" ($oidc.caSourceConfigMap | default "") }}
+{{- if and $name (or (gt (len $name) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $name))) }}
+{{- fail (printf "headlamp.oidc.%s must be a Kubernetes object name" $field) }}
+{{- end }}
+{{- end }}
+{{- if or (gt (len $secret.key) 253) (not (regexMatch "^[-._a-zA-Z0-9]+$" $secret.key)) }}
+{{- fail "headlamp.oidc.clientSecret.key must be a Kubernetes Secret data key" }}
+{{- end }}
+{{- if and $oidc.caSourceConfigMap (not $oidc.caConfigMap) }}
+{{- fail "headlamp.oidc.caConfigMap is required for CA projection" }}
 {{- end }}
 {{- $callback := required "headlamp.oidc.callbackURL is required" $oidc.callbackURL }}
 {{- if not (regexMatch "^(https://[^/?#@[:space:]]+|http://(localhost|127\\.0\\.0\\.1|\\[::1\\])(:[0-9]+)?)/oidc-callback$" $callback) }}
@@ -53,6 +83,57 @@ metadata:
   annotations:
     helm.sh/resource-policy: keep
     kars.azure.com/headlamp-owner: {{ $ownerID | quote }}
+{{- range $projection := list (dict "kind" "Secret" "source" ($secret.sourceName | default "") "target" $secret.name "key" $secret.key) (dict "kind" "ConfigMap" "source" ($oidc.caSourceConfigMap | default "") "target" $oidc.caConfigMap "key" "ca.crt") }}
+{{- if $projection.source }}
+{{- if and (eq $.Release.Namespace "headlamp") (eq $projection.source $projection.target) }}
+{{- fail "Headlamp OIDC projection source and destination must be distinct objects" }}
+{{- end }}
+{{- $existing := lookup "v1" $projection.kind "headlamp" $projection.target }}
+{{- if $existing }}
+{{- $annotations := $existing.metadata.annotations | default dict }}
+{{- $labels := $existing.metadata.labels | default dict }}
+{{- if or $existing.metadata.deletionTimestamp (ne (get $labels "app.kubernetes.io/managed-by") $.Release.Service) (ne (get $annotations "meta.helm.sh/release-name") $.Release.Name) (ne (get $annotations "meta.helm.sh/release-namespace") $.Release.Namespace) }}
+{{- fail "Headlamp OIDC projection destination ownership conflict; cannot adopt an unrelated or terminating object" }}
+{{- end }}
+{{- end }}
+{{- $source := lookup "v1" $projection.kind $.Release.Namespace $projection.source }}
+{{- if or (not $source) $source.metadata.deletionTimestamp }}
+{{- fail "Headlamp OIDC projection requires an existing non-terminating source in the Core release namespace" }}
+{{- end }}
+{{- if or (ne $source.kind $projection.kind) (not (kindIs "map" $source.data)) }}
+{{- fail "Headlamp OIDC projection source must contain the selected data key" }}
+{{- end }}
+{{- $data := get $source.data $projection.key }}
+{{- if not (kindIs "string" $data) }}
+{{- fail "Headlamp OIDC projection source data must be a nonempty string" }}
+{{- end }}
+{{- if eq $projection.kind "Secret" }}
+{{- if or (not (kindIs "string" $source.type)) (ne $source.type "Opaque") (not (trim (b64dec $data))) (ne (b64enc (b64dec $data)) $data) }}
+{{- fail "Headlamp OIDC projection requires an Opaque source Secret with nonempty base64 data at the selected key" }}
+{{- end }}
+{{- else }}
+{{- if not (regexMatch "^([[:space:]]*-----BEGIN CERTIFICATE-----[[:space:]]+[A-Za-z0-9+/=\\r\\n]+-----END CERTIFICATE-----[[:space:]]*)+$" $data) }}
+{{- fail "Headlamp OIDC projection source ca.crt must contain public PEM certificates only" }}
+{{- end }}
+{{- end }}
+---
+apiVersion: v1
+kind: {{ $projection.kind }}
+metadata:
+  name: {{ $projection.target | quote }}
+  namespace: headlamp
+  labels:
+    app.kubernetes.io/managed-by: {{ $.Release.Service | quote }}
+  annotations:
+    meta.helm.sh/release-name: {{ $.Release.Name | quote }}
+    meta.helm.sh/release-namespace: {{ $.Release.Namespace | quote }}
+{{- if eq $projection.kind "Secret" }}
+type: Opaque
+{{- end }}
+data:
+  {{ $projection.key | quote }}: {{ $data | quote }}
+{{- end }}
+{{- end }}
 ---
 apiVersion: v1
 kind: ServiceAccount

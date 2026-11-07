@@ -40,7 +40,7 @@ fn segment_name(index: usize) -> String {
     }
 }
 
-fn parse_state(maps: Vec<ConfigMap>, namespace: &str) -> Result<LogState> {
+fn ordered_segments(maps: Vec<ConfigMap>, namespace: &str) -> Result<BTreeMap<usize, ConfigMap>> {
     let mut ordered = BTreeMap::new();
     for map in maps {
         let name = map.name_any();
@@ -79,9 +79,13 @@ fn parse_state(maps: Vec<ConfigMap>, namespace: &str) -> Result<LogState> {
         );
     }
 
+    Ok(ordered)
+}
+
+fn parse_state(maps: Vec<ConfigMap>, namespace: &str) -> Result<LogState> {
     let mut chain = Vec::new();
     let mut segments = Vec::new();
-    for (expected, (index, map)) in ordered.into_iter().enumerate() {
+    for (expected, (index, map)) in ordered_segments(maps, namespace)?.into_iter().enumerate() {
         ensure!(expected == index, "receipt log has a missing segment");
         let data = map.data.as_ref().context("receipt segment has no data")?;
         let raw = data
@@ -113,20 +117,62 @@ fn parse_state(maps: Vec<ConfigMap>, namespace: &str) -> Result<LogState> {
 }
 
 async fn read_state(cms: &Api<ConfigMap>) -> Result<LogState> {
-    // One API snapshot includes the legacy head even when old replacements
-    // dropped its labels. Separate head/overflow reads can mix log generations.
-    let snapshot = cms.list(&ListParams::default()).await?;
+    // Discover every name, including unlabeled legacy heads and malformed segments,
+    // without transferring unrelated ConfigMap payloads on every reconciliation.
+    let snapshot = cms.list_metadata(&ListParams::default()).await?;
+    let revision = snapshot
+        .metadata
+        .resource_version
+        .filter(|rv| !rv.is_empty() && rv != "0")
+        .context("receipt log snapshot has no revision")?;
     ensure!(
-        snapshot.metadata.resource_version.is_some()
-            && snapshot
-                .metadata
-                .continue_
-                .as_deref()
-                .unwrap_or("")
-                .is_empty(),
+        snapshot
+            .metadata
+            .continue_
+            .as_deref()
+            .unwrap_or("")
+            .is_empty(),
         "receipt log snapshot is incomplete"
     );
-    parse_state(snapshot.items, &receipt_namespace())
+    let namespace = receipt_namespace();
+    let metadata = snapshot
+        .items
+        .into_iter()
+        .map(|item| ConfigMap {
+            metadata: item.metadata,
+            ..Default::default()
+        })
+        .collect();
+    let mut maps = Vec::new();
+    for (_, expected) in ordered_segments(metadata, &namespace)? {
+        // Exact LIST reads keep all payloads at the discovery snapshot, even
+        // across rotation. GETs or NotOlderThan reads would mix generations.
+        let params = ListParams {
+            field_selector: Some(format!("metadata.name={}", expected.name_any())),
+            resource_version: Some(revision.clone()),
+            version_match: Some(kube::api::VersionMatch::Exact),
+            ..Default::default()
+        };
+        let mut contents = cms.list(&params).await?;
+        ensure!(
+            contents.metadata.resource_version.as_deref() == Some(revision.as_str())
+                && contents
+                    .metadata
+                    .continue_
+                    .as_deref()
+                    .unwrap_or("")
+                    .is_empty()
+                && contents.items.len() == 1,
+            "receipt segment snapshot is incomplete or changed"
+        );
+        let map = contents.items.remove(0);
+        ensure!(
+            map.metadata == expected.metadata,
+            "receipt segment identity changed within snapshot"
+        );
+        maps.push(map);
+    }
+    parse_state(maps, &namespace)
 }
 
 /// Append without resetting corrupt history. Only actual API conflicts retry;

@@ -75,6 +75,12 @@ pub struct KarsTaskSpec {
     /// The trust envelope that governs this task and bounds any delegation.
     pub envelope: TaskEnvelope,
 
+    /// Exact autonomy tier requested for human review; never grants authority itself.
+    /// Consumed execution identities require a fresh run rather than in-place widening.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 5))]
+    pub requested_tier: Option<i32>,
+
     /// Optional reference to a parent `KarsTask` in the **same namespace**.
     ///
     /// When set, this task is a *delegated child*: the controller verifies
@@ -274,7 +280,7 @@ pub struct TaskBlueprint {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_servers: Vec<String>,
 
-    /// Same-namespace, independently approved skills pinned at runtime creation.
+    /// Same-namespace, content-bound approved skills pinned at runtime creation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<String>,
 

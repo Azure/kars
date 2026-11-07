@@ -32,6 +32,8 @@ pub(crate) enum Error {
     Invalid(&'static str),
     #[error("Mission delivery pending: {0}")]
     NotReady(&'static str),
+    #[error("Completed Mission awaits verified Task cleanup")]
+    Completed,
     #[error("Mission delivery: {stage} (Kubernetes status {status})")]
     Api { stage: &'static str, status: u16 },
 }
@@ -254,8 +256,25 @@ async fn task_for(client: &Client, sandbox: &KarsSandbox) -> Result<Option<KarsT
     }
     Ok(Some(task))
 }
+fn run_completed(task: &KarsTask) -> bool {
+    annotation(&task.metadata, "kars.azure.com/run-requested")
+        .filter(|nonce| !nonce.is_empty())
+        .is_some_and(|nonce| {
+            annotation(&task.metadata, "kars.azure.com/run-completed") == Some(nonce)
+        })
+}
+
+/// Suppress workload mutation; only the Task reconciler verifies evidence and deletes compute.
+pub(crate) async fn terminal_run(client: &Client, sandbox: &KarsSandbox) -> Result<bool> {
+    Ok(task_for(client, sandbox)
+        .await?
+        .as_ref()
+        .is_some_and(run_completed))
+}
+
 fn executable(task: &KarsTask, sandbox: &KarsSandbox) -> bool {
-    crate::kars_task_reconciler::task_is_ready(task)
+    !run_completed(task)
+        && crate::kars_task_reconciler::task_is_ready(task)
         && task.spec.execution.as_ref().is_some_and(|e| e.launch)
         && sandbox.spec.suspended != Some(true)
         && annotation(
@@ -305,6 +324,9 @@ async fn prepare_with(
     let Some(task) = task_for(client, &fresh).await? else {
         return Ok(None);
     };
+    if run_completed(&task) {
+        return Err(Error::Completed);
+    }
     if !executable(&task, &fresh) || desired.spec.as_ref().and_then(|s| s.replicas) == Some(0) {
         return Ok(None);
     }

@@ -24,6 +24,10 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: {{ include "kars-bridge.namespace" . }}
+  {{- if and $retainOwnedNamespace (hasKey (default dict $existing.metadata.annotations) "kars.azure.com/private-enabled") }}
+  uid: {{ required "Private Bridge namespace lacks UID" $existing.metadata.uid | quote }}
+  resourceVersion: {{ required "Private Bridge namespace lacks resourceVersion" $existing.metadata.resourceVersion | quote }}
+  {{- end }}
   annotations:
     # A Bridge uninstall must never cascade-delete Kars CRs that happen to
     # live in the same namespace. Leave an empty chart-created namespace

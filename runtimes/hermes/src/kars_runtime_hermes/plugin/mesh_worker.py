@@ -245,6 +245,10 @@ def _is_reserved_mission(payload_text: str) -> bool:
     return False
 
 
+def _is_reserved_message(msg: Any) -> bool:
+    return _is_reserved_mission(msg.payload.decode("utf-8", errors="replace"))
+
+
 async def _handle_message(client: Any, msg: Any, generation=None) -> None:
     from .mesh_auth import RequiredEntraLease
 
@@ -400,7 +404,10 @@ async def _worker_loop(get_client: Any) -> None:
         "mesh_worker: loop started for did=%s (auto-respond mode)",
         client._identity.did,  # noqa: SLF001 — internal but stable
     )
-    async for msg in client.inbox():
+    # Installed missions own protocol custody only. Ordinary peer payloads stay
+    # intact for the active native agent, never a second responder/LLM loop.
+    inbox = client.inbox(reserved=True) if getattr(client, "_kars_mission_receiver", None) else client.inbox()
+    async for msg in inbox:
         # Spawn the handler in its own task so a slow inbound (hermes
         # -z burning minutes on real work) doesn't block the inbox
         # drain — sibling messages can arrive concurrently when the

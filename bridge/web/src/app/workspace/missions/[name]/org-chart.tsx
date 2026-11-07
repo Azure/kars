@@ -7,7 +7,7 @@
 // "add a role" composer constrained to the principal's authority (§12).
 
 import { useState } from "react";
-import Link from "next/link";
+import Link from "@/components/navigation-link";
 import { MissionStatusBadge, missionStatus } from "@/components/mission-status";
 import { addRole, type AddRoleInput } from "./role-actions";
 import { TIER_LABELS, type BlueprintEgress, type TaskDetail, type TaskSummary } from "@/lib/types";

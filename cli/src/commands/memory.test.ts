@@ -27,6 +27,19 @@ describe("memoryCommand — registration", () => {
   });
 });
 
+describe("memoryCommand — parsed retention option", () => {
+  it.each([false, true])("preserves the Commander keep-memory selection: %s", keep => {
+    const apply = memoryCommand().commands.find(command => command.name() === "apply")!;
+    apply.parseOptions([
+      "--sandbox", "my-agent", "--store", "episodic", "--scope", "agent_my-agent",
+      ...(keep ? ["--no-delete-on-sandbox-delete"] : []),
+    ]);
+    const spec = buildMemorySpecFromFlags(apply.opts());
+    expect(spec.deleteOnSandboxDelete).toBe(keep ? false : undefined);
+    expect(validateMemorySpec(spec)).toEqual([]);
+  });
+});
+
 describe("memoryCommand — buildMemorySpecFromFlags", () => {
   it("emits sandboxRef.name + storeName + scope from flags", () => {
     const spec = buildMemorySpecFromFlags({ sandbox: "my-agent", store: "episodic", scope: "agent_my-agent" });
@@ -46,7 +59,7 @@ describe("memoryCommand — buildMemorySpecFromFlags", () => {
   });
 
   it("emits deleteOnSandboxDelete=false only when --no-delete-on-sandbox-delete passed", () => {
-    const off = buildMemorySpecFromFlags({ sandbox: "a", store: "s", scope: "x", noDeleteOnSandboxDelete: true });
+    const off = buildMemorySpecFromFlags({ sandbox: "a", store: "s", scope: "x", deleteOnSandboxDelete: false });
     expect(off.deleteOnSandboxDelete).toBe(false);
     const on = buildMemorySpecFromFlags({ sandbox: "a", store: "s", scope: "x" });
     expect("deleteOnSandboxDelete" in on).toBe(false);

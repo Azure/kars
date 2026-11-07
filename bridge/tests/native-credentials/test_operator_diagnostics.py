@@ -51,6 +51,17 @@ class OperatorDiagnosticsTests(unittest.TestCase):
                      f"    at object (/cli/dist/lib/private-activation.js:1:2){PRIVATE}"):
             self.assertEqual(source_location(line), "unavailable")
 
+    def test_late_reissuance_deadline_is_not_misreported_as_template_or_memory_validation(self):
+        stderr = ("Error: Controller has not reissued the retired private key and exact template; "
+                  "runtime remains suspended for re-preview\n"
+                  f"    at executeLateTransition (/private/{PRIVATE}/cli/dist/lib/private-activation-late-scope.js:651:23)\n")
+        with self.assertRaises(Failure) as failure:
+            operator_command("apply", sys.executable, "-c",
+                             "import sys; print(sys.argv[1],file=sys.stderr); sys.exit(1)", stderr, timeout=5)
+        self.assertEqual(str(failure.exception), "Native operator apply failed: late-controller-reissue-pending "
+                         "(source=lib/private-activation-late-scope:651)")
+        self.assertNotIn(PRIVATE, str(failure.exception))
+
     def test_template_drift_uses_a_fixed_category_without_weakening_the_failure(self):
         stderr = ("Error: Private consumer template changed after protection was enabled\n"
                   f"    at reviewedOwner (/private/{PRIVATE}/cli/dist/lib/private-activation.js:680:23)\n")

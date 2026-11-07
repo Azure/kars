@@ -20,6 +20,379 @@ fn reply(version: u8) -> Value {
         .take()
 }
 
+fn fetch_reply() -> Value {
+    let mut value = reply(4);
+    value["reviewedPhase"] = json!({"name":"research",
+        "objective":"Read and compare the reviewed public pricing sources.",
+        "capabilities":["filesystem-read","filesystem-write","network"],
+        "requiredToolCalls":[
+            {"name":"http_fetch","arguments":{"method":"GET","url":"https://example.org/pricing"}},
+            {"name":"http_fetch","arguments":{"method":"GET","url":"https://example.com/pricing"}}
+        ], "minToolCalls":0,"maxToolCalls":4,"freshContext":true});
+    let phase = serde_json::from_value(value["reviewedPhase"].clone()).unwrap();
+    value["phaseDigest"] = json!(contract::phase_digest(&phase).unwrap());
+    value["evidence"]["phase"] = json!({"name":"research","minToolCalls":0,"maxToolCalls":4,
+        "attemptedToolCalls":4,"successfulToolCalls":4,"completedRequiredToolCalls":2});
+    value
+}
+
+#[test]
+fn native_headroom_is_retained_with_exact_reviewed_evidence_bounds() {
+    let mut value = fetch_reply();
+    value["reviewedPhase"]["executionMode"] = json!("native");
+    value["reviewedPhase"]["maxToolCalls"] = json!(128);
+    value["evidence"]["phase"]["maxToolCalls"] = json!(128);
+    value["evidence"]["phase"]["attemptedToolCalls"] = json!(128);
+    value["evidence"]["phase"]["successfulToolCalls"] = json!(128);
+    let phase = serde_json::from_value(value["reviewedPhase"].clone()).unwrap();
+    value["phaseDigest"] = json!(contract::phase_digest(&phase).unwrap());
+    assert!(mission_result(&output(&value)).reviewable);
+    value["evidence"]["phase"]["attemptedToolCalls"] = json!(129);
+    invalid(&value);
+    value["evidence"]["phase"]["attemptedToolCalls"] = json!(128);
+    value["reviewedPhase"]
+        .as_object_mut()
+        .unwrap()
+        .remove("executionMode");
+    let phase = serde_json::from_value(value["reviewedPhase"].clone()).unwrap();
+    value["phaseDigest"] = json!(contract::phase_digest(&phase).unwrap());
+    invalid(&value);
+}
+
+#[test]
+fn native_extended_capabilities_retain_producer_usage_and_exact_authority() {
+    for capabilities in [
+        json!(["memory"]),
+        json!(["filesystem-read", "filesystem-write", "memory", "network"]),
+        json!(["github-pr"]),
+        json!(["filesystem-read", "filesystem-write", "github-pr"]),
+        json!([
+            "filesystem-read",
+            "filesystem-write",
+            "network",
+            "python-execute"
+        ]),
+        json!([
+            "filesystem-read",
+            "filesystem-write",
+            "github-pr",
+            "memory",
+            "network",
+            "python-execute"
+        ]),
+        json!([
+            "filesystem-read",
+            "filesystem-write",
+            "github-pr",
+            "memory",
+            "network"
+        ]),
+    ] {
+        let mut value = fetch_reply();
+        value["reviewedPhase"]["executionMode"] = json!("native");
+        value["reviewedPhase"]["capabilities"] = capabilities;
+        value["reviewedPhase"]["requiredToolCalls"] = json!([]);
+        value["evidence"]["phase"]["completedRequiredToolCalls"] = json!(0);
+        let parsed = serde_json::from_value(value["reviewedPhase"].clone()).unwrap();
+        value["phaseDigest"] = json!(contract::phase_digest(&parsed).unwrap());
+        let result = mission_result(&output(&value));
+        assert!(result.reviewable && result.usage_known && result.run_evidence.is_some());
+        for status in ["failed", "rejected"] {
+            let mut changed = value.clone();
+            changed["status"] = json!(status);
+            changed.as_object_mut().unwrap().remove("artifacts");
+            let result = mission_result(&output(&changed));
+            assert!(!result.reviewable && result.usage_known && result.run_evidence.is_some());
+        }
+        for capabilities in [
+            json!(["memory", "memory"]),
+            json!(["memory", "shell"]),
+            json!(["github-pr", "github-pr"]),
+            json!(["github-pr", "shell"]),
+            json!(["python-execute"]),
+            json!(["filesystem-read", "filesystem-write", "python-execute"]),
+            json!(["filesystem-read", "network", "python-execute"]),
+            json!(["filesystem-write", "network", "python-execute"]),
+        ] {
+            let mut changed = value.clone();
+            changed["reviewedPhase"]["capabilities"] = capabilities;
+            let parsed = serde_json::from_value(changed["reviewedPhase"].clone()).unwrap();
+            changed["phaseDigest"] = json!(contract::phase_digest(&parsed).unwrap());
+            invalid(&changed);
+        }
+        value["reviewedPhase"]
+            .as_object_mut()
+            .unwrap()
+            .remove("executionMode");
+        let parsed = serde_json::from_value(value["reviewedPhase"].clone()).unwrap();
+        value["phaseDigest"] = json!(contract::phase_digest(&parsed).unwrap());
+        invalid(&value);
+    }
+}
+
+#[test]
+fn reviewed_fetch_evidence_is_readable_and_requires_exact_success_counts() {
+    let original = fetch_reply();
+    let result = mission_result(&output(&original));
+    assert_eq!(result.source.as_deref(), Some("durable_agent"));
+    assert!(result.reviewable && result.usage_known);
+    for count in [
+        json!(null),
+        json!(true),
+        json!("2"),
+        json!(-1),
+        json!(1.5),
+        json!(0),
+        json!(1),
+        json!(3),
+    ] {
+        let mut changed = original.clone();
+        changed["evidence"]["phase"]["completedRequiredToolCalls"] = count;
+        invalid(&changed);
+    }
+    let mut changed = original.clone();
+    changed["evidence"]["phase"]
+        .as_object_mut()
+        .unwrap()
+        .remove("completedRequiredToolCalls");
+    invalid(&changed);
+    let mut changed = original;
+    changed["evidence"]["phase"]["successfulToolCalls"] = json!(1);
+    invalid(&changed);
+}
+
+#[test]
+fn reviewed_fetch_digest_binds_order_arguments_and_rejects_unsupported_calls() {
+    let original = fetch_reply();
+    // Generated independently by the TypeScript missionPhaseDigest producer.
+    assert_eq!(
+        original["phaseDigest"],
+        json!("sha256:f7eef6fc13f1cf521dee8ff4b001a53009edd32093818ebcdbdff1a8e2b7223b")
+    );
+    for (pointer, value) in [
+        (
+            "/requiredToolCalls/0/arguments/url",
+            json!("https://example.net/pricing"),
+        ),
+        ("/requiredToolCalls/0/arguments/method", json!("POST")),
+        ("/requiredToolCalls/0/arguments/headers", json!("private")),
+        ("/requiredToolCalls/0/name", json!("web_search")),
+        (
+            "/capabilities",
+            json!(["filesystem-read", "filesystem-write"]),
+        ),
+    ] {
+        let mut changed = original.clone();
+        let parts: Vec<_> = pointer.trim_start_matches('/').split('/').collect();
+        let mut target = &mut changed["reviewedPhase"];
+        for part in &parts[..parts.len() - 1] {
+            target = if let Ok(index) = part.parse::<usize>() {
+                &mut target[index]
+            } else {
+                &mut target[*part]
+            };
+        }
+        target[parts[parts.len() - 1]] = value;
+        invalid(&changed);
+        if pointer != "/requiredToolCalls/0/arguments/url" {
+            without_evidence_with_fresh_digest(&mut changed);
+            invalid(&changed);
+        }
+    }
+    let mut changed = original;
+    changed["reviewedPhase"]["requiredToolCalls"]
+        .as_array_mut()
+        .unwrap()
+        .swap(0, 1);
+    invalid(&changed);
+    let phase = serde_json::from_value(changed["reviewedPhase"].clone()).unwrap();
+    changed["phaseDigest"] = json!(contract::phase_digest(&phase).unwrap());
+    assert!(mission_result(&output(&changed)).reviewable);
+}
+
+#[test]
+fn native_phase_digest_and_result_preserve_explicit_authority() {
+    let projection: Value = serde_json::from_str(include_str!(
+        "../../../../../../controller/src/reviewed_execution/phase-projection-fixture.json"
+    ))
+    .unwrap();
+    let mut phase = projection["reviewedPhase"].clone();
+    phase["executionMode"] = json!("native");
+    phase["requiredToolCalls"] = json!([]);
+    let parsed = serde_json::from_value(phase).unwrap();
+    assert_eq!(
+        contract::phase_digest(&parsed).unwrap(),
+        "sha256:e67d6a318edfa7deed04ba8119bde4ef5b945983c39661e94eacf0f5133f7bff"
+    );
+    let mut value = fetch_reply();
+    value["reviewedPhase"]["executionMode"] = json!("native");
+    value["reviewedPhase"]["requiredToolCalls"] = json!([]);
+    value["evidence"]["phase"]["completedRequiredToolCalls"] = json!(0);
+    let parsed = serde_json::from_value(value["reviewedPhase"].clone()).unwrap();
+    value["phaseDigest"] = json!(contract::phase_digest(&parsed).unwrap());
+    assert!(mission_result(&output(&value)).reviewable);
+    for mode in [json!(null), json!("future"), json!(1)] {
+        let mut changed = value.clone();
+        changed["reviewedPhase"]["executionMode"] = mode;
+        invalid(&changed);
+    }
+    value["reviewedPhase"]
+        .as_object_mut()
+        .unwrap()
+        .remove("executionMode");
+    invalid(&value);
+}
+
+#[test]
+fn required_call_counts_preserve_legacy_replies_and_partial_failures() {
+    for version in [2, 3, 4] {
+        let mut value = reply(version);
+        value["evidence"]["phase"]["completedRequiredToolCalls"] = json!(0);
+        assert!(mission_result(&output(&value)).reviewable);
+        value["evidence"]["phase"]["completedRequiredToolCalls"] = json!(1);
+        invalid(&value);
+    }
+    for status in ["failed", "rejected"] {
+        for count in 0..=2 {
+            let mut value = fetch_reply();
+            value["status"] = json!(status);
+            value.as_object_mut().unwrap().remove("artifacts");
+            value["evidence"]["phase"]["completedRequiredToolCalls"] = json!(count);
+            let result = mission_result(&output(&value));
+            assert!(result.run_evidence.is_some());
+            assert_eq!(result.source.as_deref(), Some("durable_agent"));
+        }
+    }
+}
+
+pub(super) fn peer_reply() -> Value {
+    let mut value = reply(4);
+    value["version"] = json!(5);
+    value["reviewedPhase"]["capabilities"] = json!(["filesystem-read", "filesystem-write"]);
+    value["reviewedPhase"]["executionMode"] = json!("native");
+    value["reviewedPhase"]["requiredToolCalls"] = json!([]);
+    let phase = serde_json::from_value(value["reviewedPhase"].clone()).unwrap();
+    value["phaseDigest"] = json!(contract::phase_digest(&phase).unwrap());
+    value["peerContext"] = json!({"rootUid":"root-uid",
+        "stateName":format!("kars-reviewed-{}", "a".repeat(40)), "slot":"r0-p0",
+        "peers":[{"role":"researcher","phase":"research","slot":"r0-p0",
+            "agentName":format!("rp-{}-r0-p0", "a".repeat(20))},
+            {"role":"reviewer","phase":"challenge","slot":"r1-p0",
+            "agentName":format!("rp-{}-r1-p0", "a".repeat(20))}]});
+    value
+}
+
+#[test]
+fn native_github_v5_keeps_producer_evidence_when_some_tool_calls_fail() {
+    let mut value = peer_reply();
+    value["reviewedPhase"]["capabilities"] =
+        json!(["filesystem-read", "filesystem-write", "github-pr"]);
+    value["reviewedPhase"]["minToolCalls"] = json!(0);
+    value["reviewedPhase"]["maxToolCalls"] = json!(8);
+    let phase = serde_json::from_value(value["reviewedPhase"].clone()).unwrap();
+    value["phaseDigest"] = json!(contract::phase_digest(&phase).unwrap());
+    value["evidence"]["rounds"] = json!(8);
+    value["evidence"]["phase"] = json!({"name":value["reviewedPhase"]["name"],
+        "attemptedToolCalls":7,"successfulToolCalls":1,"minToolCalls":0,"maxToolCalls":8});
+    let result = mission_result(&output(&value));
+    assert_eq!(result.source.as_deref(), Some("durable_agent"));
+    assert!(result.usage_known && result.run_evidence.is_some());
+    value["reviewedPhase"]["capabilities"] = json!(["filesystem-read", "filesystem-write"]);
+    invalid(&value); // Changing reviewed authority still invalidates the bound digest.
+}
+
+#[test]
+fn peer_context_native_success_and_failure_preserve_recorded_evidence() {
+    let original = peer_reply();
+    assert!(mission_result(&output(&original)).reviewable);
+    for status in ["failed", "rejected"] {
+        let mut value = original.clone();
+        value["status"] = json!(status);
+        value["error"] = json!("Required exports missing");
+        value.as_object_mut().unwrap().remove("artifacts");
+        value.as_object_mut().unwrap().remove("output");
+        let result = mission_result(&output(&value));
+        assert!(result.run_evidence.is_some());
+        assert!(result.usage_known);
+        assert_eq!(result.run_evidence.unwrap().status, status);
+    }
+    for pointer in ["/peerContext", "/requiredOutputs", "/phaseDigest"] {
+        let mut value = original.clone();
+        value.as_object_mut().unwrap().remove(&pointer[1..]);
+        invalid(&value);
+    }
+    let mut value = original;
+    value["requiredOutputs"] = json!(["missing.md"]);
+    invalid(&value);
+}
+
+#[test]
+fn peer_context_rejects_malformed_cross_role_duplicate_and_legacy_locators() {
+    let original = peer_reply();
+    for (pointer, value) in [
+        ("/peerContext", json!(null)),
+        ("/peerContext/rootUid", json!("bad uid")),
+        (
+            "/peerContext/stateName",
+            json!(format!("kars-reviewed-{}", "A".repeat(40))),
+        ),
+        ("/peerContext/slot", json!("r8-p0")),
+        ("/peerContext/slot", json!("r2-p0")),
+        ("/peerContext/peers", json!([])),
+        ("/peerContext/peers/0/role", json!("-invalid")),
+        ("/peerContext/peers/0/phase", json!("Invalid")),
+        ("/peerContext/peers/0/slot", json!("r0-p8")),
+        ("/peerContext/peers/0/agentName", json!("unrelated-agent")),
+        ("/peerContext/peers/1/role", json!("researcher")),
+    ] {
+        let mut changed = original.clone();
+        *changed.pointer_mut(pointer).unwrap() = value;
+        invalid(&changed);
+    }
+    for version in [1, 2, 3, 4, 6] {
+        let mut value = original.clone();
+        value["version"] = json!(version);
+        invalid(&value);
+    }
+    for pointer in ["/peerContext", "/peerContext/peers/0"] {
+        let mut value = original.clone();
+        value.pointer_mut(pointer).unwrap()["extra"] = json!(true);
+        invalid(&value);
+    }
+    let mut value = original.clone();
+    value["peerContext"]["peers"][1] = original["peerContext"]["peers"][0].clone();
+    invalid(&value);
+    value = original;
+    value["peerContext"]["slot"] = json!("synthesis");
+    value["peerContext"]["peers"] = json!([]);
+    assert!(mission_result(&output(&value)).reviewable);
+}
+
+#[test]
+fn peer_context_accepts_bounded_rosters_and_rejects_role_index_aliases() {
+    let mut value = peer_reply();
+    let peers: Vec<_> = (0..8)
+        .flat_map(|r| {
+            (0..8).map(move |p| json!({
+        "role":format!("role-{r}"), "phase":format!("phase-{p}"),
+        "slot":format!("r{r}-p{p}"), "agentName":format!("rp-{}-r{r}-p{p}", "a".repeat(20))
+    }))
+        })
+        .collect();
+    value["peerContext"]["peers"] = json!(peers);
+    assert!(mission_result(&output(&value)).reviewable);
+    for (field, changed) in [("role", "another-role"), ("phase", "phase-0")] {
+        let mut invalid_roster = value.clone();
+        invalid_roster["peerContext"]["peers"][1][field] = json!(changed);
+        invalid(&invalid_roster);
+    }
+    value["peerContext"]["peers"]
+        .as_array_mut()
+        .unwrap()
+        .push(peers[0].clone());
+    invalid(&value);
+}
+
 fn output(reply: &Value) -> BTreeMap<String, String> {
     let mut data: BTreeMap<String, String> = reply
         .as_object()
@@ -131,6 +504,77 @@ fn terminal_agent_display_names_match_live_and_dispatcher_contracts() {
         assert_eq!(result.source.as_deref(), Some("invalid_evidence"));
     }
     assert!(valid_agent_name(&"x".repeat(512)));
+}
+
+#[test]
+fn failed_python_receipts_are_diagnostics_with_exact_native_authority() {
+    let mut terminal = fetch_reply();
+    terminal["reviewedPhase"]["executionMode"] = json!("native");
+    terminal["reviewedPhase"]["capabilities"] = json!([
+        "filesystem-read",
+        "filesystem-write",
+        "network",
+        "python-execute"
+    ]);
+    let phase = serde_json::from_value(terminal["reviewedPhase"].clone()).unwrap();
+    terminal["phaseDigest"] = json!(contract::phase_digest(&phase).unwrap());
+    terminal["status"] = json!("failed");
+    terminal["error"] = json!("Application exceeded process limit");
+    terminal.as_object_mut().unwrap().remove("output");
+    terminal["artifacts"] = json!({"kars-python-executions.json":"{\"version\":1,\"runs\":[]}"});
+    let result = mission_result(&output(&terminal));
+    assert_eq!(result.source.as_deref(), Some("durable_agent"));
+    assert_eq!(result.status.as_deref(), Some("failed"));
+    assert!(!result.reviewable && result.usage_known && result.output.is_empty());
+    for artifacts in [
+        json!({"report.md":"not a completed deliverable"}),
+        json!({"kars-python-executions.json":"x".repeat(65537)}),
+        json!({"kars-python-executions.json":" "}),
+    ] {
+        let mut changed = terminal.clone();
+        changed["artifacts"] = artifacts;
+        invalid(&changed);
+    }
+    terminal["reviewedPhase"]["capabilities"] =
+        json!(["filesystem-read", "filesystem-write", "network"]);
+    let phase = serde_json::from_value(terminal["reviewedPhase"].clone()).unwrap();
+    terminal["phaseDigest"] = json!(contract::phase_digest(&phase).unwrap());
+    invalid(&terminal);
+}
+
+#[test]
+fn failed_observations_are_diagnostic_only_and_require_negotiated_valid_documents() {
+    let content = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../inference-router/tests/fixtures/router-observations-v1.json"
+    ));
+    for version in [2, 3, 4] {
+        let mut terminal = reply(version);
+        terminal["status"] = json!("failed");
+        terminal["error"] = json!("Write failed");
+        terminal.as_object_mut().unwrap().remove("output");
+        terminal.as_object_mut().unwrap().remove("artifacts");
+        terminal["activityFormat"] = json!("router-observations-v1");
+        terminal["routerObservations"] = json!(content);
+        let result = mission_result(&output(&terminal));
+        assert_eq!(result.source.as_deref(), Some("durable_agent"));
+        assert_eq!(result.status.as_deref(), Some("failed"));
+        assert!(!result.reviewable && result.output.is_empty());
+        for bad in [json!(null), json!("{}"), json!("x".repeat(32 * 1024 + 1))] {
+            let mut changed = terminal.clone();
+            changed["routerObservations"] = bad;
+            invalid(&changed);
+        }
+        let mut changed = terminal.clone();
+        changed.as_object_mut().unwrap().remove("activityFormat");
+        invalid(&changed);
+        let mut changed = terminal.clone();
+        changed["artifacts"] = json!({"briefing.md":"Not delivered"});
+        invalid(&changed);
+        let mut changed = terminal;
+        changed["status"] = json!("rejected");
+        invalid(&changed);
+    }
 }
 
 #[test]
@@ -262,6 +706,33 @@ fn required_outputs_are_bounded_unique_names_and_require_successful_exports() {
         r["status"] = json!(status);
         invalid(&r);
     }
+}
+
+#[test]
+fn activity_reservation_preserves_ordinary_wire_and_artifact_limits() {
+    let mut value = reply(4);
+    let observations = format!(
+        "{}{}",
+        json!({"version":1,"source":"runtime-forwarded-router-observations",
+        "coverage":"returned-responses-only","responses":1,"rounds":[1],"state":"unavailable",
+        "reason":"Router observations unavailable after execution (reset, expiry or read failure)"}),
+        " ".repeat(300 * 1024)
+    );
+    value["activityFormat"] = json!("router-observations-v1");
+    value["requiredOutputs"] = json!(["report.md"]);
+    value["artifacts"] =
+        json!({"report.md":"x".repeat(120 * 1024), "kars-router-observations.json":observations});
+    assert!(contract::within_wire_bound(&value));
+    assert!(mission_result(&output(&value)).reviewable);
+    value["extra"] = json!("x".repeat(192 * 1024));
+    assert!(!contract::within_wire_bound(&value));
+    invalid(&value);
+    value.as_object_mut().unwrap().remove("extra");
+    value["artifacts"]["report.md"] = json!("x".repeat(128 * 1024));
+    invalid(&value);
+    value["artifacts"]["report.md"] = json!("small");
+    value["artifacts"]["kars-router-observations.json"] = json!("x".repeat(384 * 1024));
+    invalid(&value);
 }
 
 #[test]

@@ -95,7 +95,7 @@ export function SkillComposer({
         <div>
           <p className="text-sm font-medium">Upload a skill</p>
           <p className="text-xs text-foreground-muted">
-            Propose a capability package. It needs content validation and independent operator review before use.
+            Propose a capability package. It needs content validation and operator review before use; administrators may review their own submissions.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -272,7 +272,7 @@ export function SkillComposer({
         >
           {pending ? "Submitting…" : "Submit for review"}
         </button>
-        <p className="text-[11px] text-foreground-muted">Pending until a different operator reviews and approves the current content.</p>
+        <p className="text-[11px] text-foreground-muted">Pending until an operator approves the current content. Administrators may approve their own submissions.</p>
       </div>
     </div>
   );

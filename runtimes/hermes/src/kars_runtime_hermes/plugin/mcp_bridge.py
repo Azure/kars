@@ -80,6 +80,8 @@ def _initialize(server: str | None) -> None:
 
 
 def _invoke(method: str, params: dict[str, Any], server: str | None = None) -> dict[str, Any]:
+    if server == "":
+        server = None
     if server is not None and (not isinstance(server, str) or len(server) > 253
                               or not re.fullmatch(r"[a-z0-9.-]+", server)):
         raise RuntimeError("Invalid MCP server scope")
@@ -130,9 +132,11 @@ def _call_tool(args: dict[str, Any], **_kwargs: Any) -> str:
 
 def register(ctx: Any) -> None:
     for name, description, parameters, handler in (
-        ("kars_mcp_list", "List qualified MCP tools mounted in this sandbox, optionally scoped to one server.",
+        ("kars_mcp_list", "List qualified MCP tools mounted in this sandbox. Omit server or use an empty string "
+         "for the catalog; a nonempty server scope narrows it.",
          {"type": "object", "properties": {"server": {"type": "string"}}}, _list_tools),
-        ("kars_mcp_call", "Call an exact MCP tool name returned by kars_mcp_list. No automatic call replay.",
+        ("kars_mcp_call", "Call an exact MCP tool name returned by kars_mcp_list. Omit server or use an empty string "
+         "unless narrowing to a nonempty server scope. No automatic call replay.",
          {"type": "object", "properties": {"name": {"type": "string"}, "arguments": {"type": "object"},
                                           "server": {"type": "string"}}, "required": ["name"]}, _call_tool),
     ):

@@ -42,14 +42,55 @@ pub async fn list_tasks(
         .list(&ListParams::default())
         .await
         .map_err(map_kube_err)?;
-    let summaries = list
+    let authorized = |task: &&KarsTask| {
+        is_task_owner(task, &principal)
+            && task.namespace().as_deref() == Some(ns.as_str())
+            && task.metadata.deletion_timestamp.is_none()
+    };
+    let output_index = outputs
+        .iter()
+        .filter_map(|record| {
+            record
+                .data
+                .get("taskName")
+                .map(|name| (name.as_str(), &record.data))
+        })
+        .collect();
+    let mut budget = super::reviewed_summary::SummaryBudget::new();
+    let mut candidates = list.items.iter().filter(authorized).collect::<Vec<_>>();
+    candidates.sort_by(|a, b| {
+        b.metadata
+            .creation_timestamp
+            .as_ref()
+            .map(|time| &time.0)
+            .cmp(&a.metadata.creation_timestamp.as_ref().map(|time| &time.0))
+    });
+    let mut progress = std::collections::BTreeMap::new();
+    for task in candidates {
+        if let Some(evidence) =
+            super::reviewed_summary::read(cluster, task, &principal, &output_index, &mut budget)
+                .await
+        {
+            progress.insert(task.name_any(), (task, evidence));
+        }
+    }
+    // Reviewed reads add multiple snapshots. Recheck authorization and revision
+    // once for the list; never reuse child evidence across replacement or rerun.
+    let final_list = if progress.is_empty() {
+        None
+    } else {
+        Some(
+            api.list(&ListParams::default())
+                .await
+                .map_err(map_kube_err)?,
+        )
+    };
+    let summaries = final_list
+        .as_ref()
+        .unwrap_or(&list)
         .items
         .iter()
-        .filter(|task| {
-            is_task_owner(task, &principal)
-                && task.namespace().as_deref() == Some(ns.as_str())
-                && task.metadata.deletion_timestamp.is_none()
-        })
+        .filter(authorized)
         .map(|task| {
             let mut summary = to_summary(task);
             if let Some(record) = outputs
@@ -57,8 +98,17 @@ pub async fn list_tasks(
                 .find(|record| output_matches_task(task, &record.data))
             {
                 let result = mission_result(&record.data);
-                summary.delivered = result.reviewable;
-                summary.failed = !result.reviewable;
+                summary.delivered = result.reviewable
+                    && result.status.as_deref() == Some("ok")
+                    && !result.output.trim().is_empty()
+                    && result.blocked.is_none();
+                summary.blocked = result.blocked.is_some();
+                summary.failed = !summary.delivered && !summary.blocked;
+            }
+            if let Some((before, evidence)) = progress.remove(&task.name_any())
+                && super::reviewed_summary::same_revision(before, task)
+            {
+                summary.reviewed_progress = Some(evidence);
             }
             summary
         })
@@ -162,7 +212,26 @@ pub async fn get_task(
     } else {
         None
     };
-    let result = output_data.as_ref().map(mission_result);
+    let attempt = match (
+        task.metadata.uid.as_deref(),
+        task.annotations().get("kars.azure.com/run-requested"),
+    ) {
+        (Some(uid), Some(nonce))
+            if output_data.is_some()
+                || (ns == "kars-system"
+                    && super::run_evidence::live::can_read_stopped_activity(&task)) =>
+        {
+            cluster
+                .read_mission_attempt(uid, nonce)
+                .await
+                .ok()
+                .flatten()
+        }
+        _ => None,
+    };
+    let result = output_data
+        .as_ref()
+        .map(|output| super::run_evidence::mission_result_with_attempt(output, attempt.as_ref()));
 
     // The mission's full artifact set: the manifest (name + size, incl. binary)
     // comes from the output ConfigMap; text contents come from the companion
@@ -241,5 +310,10 @@ pub async fn get_task(
         egress_mode,
     );
     detail.reviewed_execution = reviewed_execution;
+    if detail.result.is_none() {
+        detail.stopped_activity = attempt
+            .as_ref()
+            .and_then(|attempt| super::run_evidence::live::from_stopped_attempt(attempt, &task));
+    }
     Ok(Json(detail))
 }

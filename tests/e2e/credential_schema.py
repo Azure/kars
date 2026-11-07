@@ -3,7 +3,9 @@
 
 """Hosted Kind proof of shipped credential CEL against native namespace UIDs.
 
-Only fixture policy/binding names and namespace selectors are changed. The
+The supported Core release is rendered unchanged. The proof requires a fresh
+fixture-owned kars-system namespace and refuses any existing namespace; cleanup
+is UID-fenced. Only policy/binding names and namespace selectors are changed. The
 source-writes binding pins one real grant across two owned namespaces to vary
 only namespaceObject's actual UID, without racing grant generation/readiness.
 This is admission-expression evidence, not bearer authentication, grant lifecycle,
@@ -94,9 +96,9 @@ def select_shipped(raw):
     return crd, result
 
 
-def render(root, namespace, version):
-    args = ["helm", "template", "credential-cel-proof", str(root / "deploy/helm/kars"),
-            "--namespace", namespace, "--kube-version", version]
+def render(root, version):
+    args = ["helm", "template", "kars", str(root / "deploy/helm/kars"),
+            "--namespace", "kars-system", "--kube-version", version]
     for template in TEMPLATES:
         args += ["--show-only", "templates/" + template]
     yaml = command("credential-render", args, root=root)
@@ -128,7 +130,7 @@ def as_actor(port, path, obj, actor):
     # supplies the UID read from a real ServiceAccount; no token is minted/read.
     require(type(port) is int and 0 < port < 65536 and path.startswith("/"), "identity")
     username, uid = actor
-    require(re.fullmatch(r"system:serviceaccount:kars-cel-[a-f0-9-]+:[a-z-]+", username)
+    require(re.fullmatch(r"system:serviceaccount:kars-system:(credential-writer|kars-controller)", username)
             and re.fullmatch(r"[A-Za-z0-9-]{1,128}", uid), "identity")
     req = Request(f"http://127.0.0.1:{port}{path}", data=json.dumps(obj).encode(), method="POST",
                   headers={"Content-Type": "application/json", "Accept": "application/json",
@@ -204,7 +206,15 @@ class Owned:
 
     def cleanup(self):
         failed, deadline = False, time.monotonic() + 45
-        for path, uid in reversed(self.resources):
+        def parent(resource):
+            path = resource[0]
+            return path.startswith(CRDS + "/") or (
+                path.startswith("/api/v1/namespaces/") and path.count("/") == 4)
+
+        # Failed child cleanup must also prevent cascading deletion by its parent.
+        for path, uid in sorted(reversed(self.resources), key=parent):
+            if failed and parent((path, uid)):
+                continue
             if time.monotonic() >= deadline:
                 failed = True
                 break
@@ -348,8 +358,8 @@ def prove_pair(port, key, policy, validation, actor, good, bad, good_path, bad_p
 
 
 def exercise(root, port, version, token, results=None):
-    namespace, other = "kars-cel-" + token, "kars-cel-" + token + "-other"
-    crd, shipped = render(root, namespace, version)
+    namespace, other = "kars-system", "kars-cel-" + token + "-other"
+    crd, shipped = render(root, version)
     owned = Owned(port)
     results = [] if results is None else results
     try:

@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { parseAllDocuments } from "yaml";
 
 export type SchemaExecute = (file: string, args: readonly string[], options: {
-  stdio: "pipe"; input?: string; timeout?: number;
+  stdio: "pipe"; input?: string; timeout?: number; env?: Record<string, string>;
 }) => Promise<{ stdout: string }>;
 export type ObjectMap = Record<string, any>;
 export interface SchemaOwner { release: string; namespace: string; ownership: "helm" | "template" }
@@ -124,7 +124,7 @@ function verifyOwnerMetadata(object: ObjectMap, owner: SchemaOwner): void {
 }
 
 export async function readSchemaObject(execute: SchemaExecute, kind: string, name: string): Promise<ObjectMap | undefined> {
-  const { stdout } = await execute("kubectl", ["get", kind, name, "--ignore-not-found", "-o", "json", "--request-timeout=20s"],
+  const { stdout } = await execute("kubectl", ["get", kind, name, "--ignore-not-found", "--show-managed-fields", "-o", "json", "--request-timeout=20s"],
     { stdio: "pipe", timeout: 25_000 });
   if (!stdout.trim()) return undefined;
   const object: ObjectMap = JSON.parse(stdout);

@@ -18,7 +18,7 @@ mod palette;
 mod projections;
 mod qualification;
 
-pub(crate) use palette::provider_for;
+pub(crate) use palette::{build_available_options, provider_for};
 pub use palette::{build_options, get_options};
 pub(crate) use projections::{mcp_server_option, memory_option, skill_option};
 pub(crate) use qualification::{
@@ -74,9 +74,7 @@ pub struct RuntimeOption {
     pub note: String,
 }
 
-/// The inference provider this cluster inherits from its setup (GitHub Copilot,
-/// GitHub Models, or Azure AI Foundry) — surfaced so the UI states it as fact
-/// rather than pretending the Bridge picks it.
+/// The selected default provider for new Bridge work, falling back to cluster setup.
 #[derive(Debug, Serialize)]
 pub struct ProviderInfo {
     pub id: String,
@@ -123,9 +121,11 @@ pub struct IsolationOption {
 /// The full composable palette for the launch package.
 #[derive(Debug, Serialize)]
 pub struct Options {
+    /// Mode capability only; designation still requires operator authorization.
+    pub per_run_qualification_available: bool,
     pub models: Vec<ModelOption>,
-    /// The controller default deployment, surfaced explicitly so the UI can say
-    /// "leave unset → uses <default>" honestly.
+    /// The saved Bridge default deployment, or controller bootstrap fallback
+    /// when no selection has been saved.
     pub default_model: Option<String>,
     /// The inherited inference provider for this cluster (None when unreadable).
     pub provider: Option<ProviderInfo>,

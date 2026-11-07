@@ -36,18 +36,49 @@ impl Ledger {
         {
             return Err(BudgetError::Capacity);
         }
-        if !self.limits.allows(self.meters.total()?)
+        self.validate_unbounded_tokens()?;
+        self.validate_top_ups()?;
+        if !self.effective_limits()?.allows(self.meters.total()?)
             || (self.limits.normalized().usd_micros.is_some() && self.meters.unpriced_attempts > 0)
         {
             return Err(BudgetError::Corrupt);
         }
+        if let Some(history) = &self.history
+            && (!valid_digest(&history.root)
+                || history
+                    .node_unknown
+                    .iter()
+                    .any(|(uid, count)| *count == 0 || !self.nodes.contains_key(uid))
+                || (history.unknown_usage_attempts > 0 && self.effective_limits()?.finite())
+                || history.node_unknown.keys().any(|uid| {
+                    self.effective_node_limits(uid)
+                        .map_or(true, |limits| limits.finite())
+                }))
+        {
+            return Err(BudgetError::Corrupt);
+        }
+        let mut root_unknown = self
+            .history
+            .as_ref()
+            .map_or(0, |history| history.unknown_usage_attempts);
+        let mut node_unknown = self
+            .history
+            .as_ref()
+            .map_or_else(BTreeMap::new, |history| history.node_unknown.clone());
         let mut root_reserved = Amounts::default();
         let mut node_reserved = BTreeMap::<String, Amounts>::new();
         let mut children_used = BTreeMap::<String, Amounts>::new();
         let mut root_nodes_used = Amounts::default();
+        if self.root.kind == RootKind::KarsSandbox && !self.nodes.is_empty() {
+            // The bound grant validates both finite and explicitly unbounded funding.
+            self.funding_at(i64::MIN)?;
+        }
         for (uid, node) in &self.nodes {
             node.authority.task.validate()?;
             if uid != &node.authority.task.uid
+                || (self.root.kind == RootKind::KarsSandbox
+                    && (node.authority.task != self.root.resource
+                        || node.authority.parent_uid.is_some()))
                 || node.authority.task.namespace != self.root.resource.namespace
                 || !valid_digest(&node.authority.authorization_digest)
                 || !node.authority.effective_authorization.is_object()
@@ -55,7 +86,9 @@ impl Ledger {
                     .map_err(|_| BudgetError::Corrupt)?
                     .len()
                     > 65_536
-                || !node.authority.limits.allows(node.meters.total()?)
+                || !self
+                    .effective_node_limits(uid)?
+                    .allows(node.meters.total()?)
                 || (node.authority.limits.normalized().usd_micros.is_some()
                     && node.meters.unpriced_attempts > 0)
             {
@@ -71,7 +104,7 @@ impl Ledger {
                 let prior = children_used.get(parent).copied().unwrap_or_default();
                 children_used.insert(parent.clone(), prior.checked_add(used)?);
             } else {
-                if self.root.kind == RootKind::KarsTask && node.authority.task != self.root.resource
+                if self.root.kind != RootKind::KarsTeam && node.authority.task != self.root.resource
                 {
                     return Err(BudgetError::Corrupt);
                 }
@@ -116,10 +149,20 @@ impl Ledger {
                 .ok_or(BudgetError::Corrupt)?;
             if key != &attempt.key.storage_key()
                 || attempt.identity != session.identity
-                || attempt.key.sequence <= session.closed_through
+                || attempt.key.sequence == 0
+                || (attempt.key.sequence <= session.closed_through
+                    && !(session.closed
+                        && attempt.phase.terminal()
+                        && (attempt.phase == AttemptPhase::Uncertain
+                            || attempt.observed_breach.is_some())))
                 || attempt.key.sequence >= session.next_sequence
                 || !valid_digest(&attempt.wire_digest)
-                || !attempt.charged.within(attempt.quote.maximum)
+                || (!attempt.quote.is_record_only()
+                    && !attempt.charged.within(attempt.quote.maximum()))
+                || (attempt.quote.is_record_only()
+                    && (attempt.charged.usd_micros != 0
+                        || (attempt.phase != AttemptPhase::Settled
+                            && attempt.charged != Amounts::default())))
                 || attempt.observed_breach.as_ref().is_some_and(|observation| {
                     serde_json::from_str::<Usage>(observation).is_err()
                         || self.phase == AccountPhase::Active
@@ -128,27 +171,56 @@ impl Ledger {
                 return Err(BudgetError::Corrupt);
             }
 
+            if attempt.quote.is_record_only() {
+                let path = self.ancestors(&attempt.identity.task_uid)?;
+                if (!attempt.phase.terminal() || attempt.phase == AttemptPhase::Uncertain)
+                    && (self.effective_limits()?.finite()
+                        || path.iter().any(|uid| {
+                            self.effective_node_limits(uid)
+                                .map_or(true, |limits| limits.finite())
+                        }))
+                {
+                    return Err(BudgetError::Corrupt);
+                }
+                if attempt.phase == AttemptPhase::Uncertain {
+                    root_unknown = root_unknown.checked_add(1).ok_or(BudgetError::Overflow)?;
+                    for uid in path {
+                        let count = node_unknown.entry(uid).or_default();
+                        *count = count.checked_add(1).ok_or(BudgetError::Overflow)?;
+                    }
+                }
+            }
+
             // Expired contracts remain accounting evidence; validate their
             // shape and arithmetic without making old charges disappear.
             attempt
                 .quote
-                .validate(i64::MIN, attempt.quote.price_covered)?;
+                .validate(i64::MIN, attempt.quote.price_covered())?;
             if !attempt.phase.terminal() {
                 if attempt.charged != Amounts::default() {
                     return Err(BudgetError::Corrupt);
                 }
-                root_reserved = root_reserved.checked_add(attempt.quote.maximum)?;
+                root_reserved = root_reserved.checked_add(attempt.quote.maximum())?;
                 for uid in self.ancestors(&attempt.identity.task_uid)? {
                     let previous = node_reserved.get(&uid).copied().unwrap_or_default();
-                    node_reserved.insert(uid, previous.checked_add(attempt.quote.maximum)?);
+                    node_reserved.insert(uid, previous.checked_add(attempt.quote.maximum())?);
                 }
             }
+        }
+        if self.meters.unknown_usage_attempts != root_unknown
+            || self.meters.unpriced_attempts < root_unknown
+        {
+            return Err(BudgetError::Corrupt);
         }
         if self.meters.reserved != root_reserved {
             return Err(BudgetError::Corrupt);
         }
         for (uid, node) in &self.nodes {
-            if node.meters.reserved != node_reserved.get(uid).copied().unwrap_or_default() {
+            if node.meters.unknown_usage_attempts
+                != node_unknown.get(uid).copied().unwrap_or_default()
+                || node.meters.unpriced_attempts < node.meters.unknown_usage_attempts
+                || node.meters.reserved != node_reserved.get(uid).copied().unwrap_or_default()
+            {
                 return Err(BudgetError::Corrupt);
             }
         }

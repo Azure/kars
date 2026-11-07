@@ -125,6 +125,9 @@ struct Store {
     compete_once: bool,
     list_failure: Option<u16>,
     truncated: bool,
+    payload_fault: Option<&'static str>,
+    snapshot: Option<(u64, BTreeMap<String, ConfigMap>)>,
+    concurrent_maps: Option<Vec<ConfigMap>>,
 }
 
 fn status(code: u16) -> ResponseTemplate {
@@ -142,13 +145,67 @@ fn respond(request: &Request, shared: &Arc<Mutex<Store>>) -> ResponseTemplate {
         if let Some(code) = state.list_failure {
             return status(code);
         }
-        return ResponseTemplate::new(200).set_body_json(json!({
+        let metadata_only = request
+            .headers
+            .get("accept")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.contains("PartialObjectMetadataList"));
+        if metadata_only {
+            assert!(request.url.query_pairs().next().is_none());
+            state.snapshot = Some((state.revision, state.maps.clone()));
+            return ResponseTemplate::new(200).set_body_json(json!({
+                "apiVersion": "meta.k8s.io/v1", "kind": "PartialObjectMetadataList",
+                "metadata": { "resourceVersion": state.revision.to_string(),
+                    "continue": if state.truncated { "next-page" } else { "" } },
+                "items": state.maps.values().map(|map| json!({
+                    "apiVersion": "meta.k8s.io/v1", "kind": "PartialObjectMetadata",
+                    "metadata": map.metadata
+                })).collect::<Vec<_>>(),
+            }));
+        }
+        let query: BTreeMap<_, _> = request.url.query_pairs().into_owned().collect();
+        assert_eq!(
+            query.get("resourceVersionMatch").map(String::as_str),
+            Some("Exact")
+        );
+        if let Some(maps) = state.concurrent_maps.take() {
+            state.revision += 1;
+            for mut map in maps {
+                map.metadata.resource_version = Some(state.revision.to_string());
+                state.maps.insert(map.name_any(), map);
+            }
+        }
+        let (snapshot_revision, snapshot) = state.snapshot.as_ref().unwrap();
+        assert_eq!(
+            query.get("resourceVersion"),
+            Some(&snapshot_revision.to_string())
+        );
+        let name = query["fieldSelector"]
+            .strip_prefix("metadata.name=")
+            .unwrap();
+        let mut items: Vec<_> = snapshot.get(name).cloned().into_iter().collect();
+        let mut revision = snapshot_revision.to_string();
+        let mut continuation = "";
+        match state.payload_fault {
+            Some("expired") => return status(410),
+            Some("newer") => revision = (state.revision + 1).to_string(),
+            Some("missing") => items.clear(),
+            Some("extra") => items.push(items[0].clone()),
+            Some("identity") => items[0].metadata.uid = Some("replacement".into()),
+            Some("truncated") => continuation = "next-page",
+            _ => {}
+        }
+        ResponseTemplate::new(200).set_body_json(json!({
             "apiVersion": "v1", "kind": "ConfigMapList",
-            "metadata": { "resourceVersion": state.revision.to_string(),
-                "continue": if state.truncated { "next-page" } else { "" } },
-            "items": state.maps.values().collect::<Vec<_>>(),
-        }));
+            "metadata": { "resourceVersion": revision, "continue": continuation },
+            "items": items,
+        }))
+    } else {
+        respond_write(request, &mut state, &collection)
     }
+}
+
+fn respond_write(request: &Request, state: &mut Store, collection: &str) -> ResponseTemplate {
     assert!(request.method == "PUT" || request.method == "POST");
     let mut incoming: ConfigMap = request.body_json().unwrap();
     state
@@ -213,6 +270,103 @@ async fn fixture(maps: Vec<ConfigMap>) -> (MockServer, Client, Arc<Mutex<Store>>
         .await;
     let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
     (server, client, state)
+}
+
+#[tokio::test]
+async fn reads_only_receipt_payloads_including_an_unlabeled_legacy_head() {
+    let entries = chain(2);
+    let mut unrelated = map(0, &[]);
+    unrelated.metadata.name = Some("large-unrelated-state".into());
+    unrelated.data = Some(BTreeMap::from([(
+        "payload".into(),
+        "x".repeat(1024 * 1024),
+    )]));
+    let (server, client, state) = fixture(vec![
+        unrelated,
+        map(1, &entries[1..]),
+        map(0, &entries[..1]),
+    ])
+    .await;
+    assert_eq!(read_chain(&client).await.unwrap(), entries);
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 3);
+    let names: Vec<_> = requests
+        .iter()
+        .skip(1)
+        .map(|request| {
+            request
+                .url
+                .query_pairs()
+                .find(|(key, _)| key == "fieldSelector")
+                .unwrap()
+                .1
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            format!("metadata.name={LOG_CONFIGMAP_NAME}"),
+            format!("metadata.name={}", segment_name(1)),
+        ]
+    );
+    assert!(state.lock().unwrap().writes.is_empty());
+}
+
+#[tokio::test]
+async fn exact_snapshot_survives_concurrent_rotation_without_mixing_generations() {
+    let entries = chain(3);
+    let head = map(0, &entries[..1]);
+    let overflow = map(1, &entries[1..2]);
+    let (_server, client, state) = fixture(vec![head, overflow.clone()]).await;
+    let mut sealed = overflow;
+    sealed.immutable = Some(true);
+    state.lock().unwrap().concurrent_maps = Some(vec![sealed, map(2, &entries[2..])]);
+    assert_eq!(read_chain(&client).await.unwrap(), entries[..2]);
+    assert_eq!(read_chain(&client).await.unwrap(), entries);
+    assert!(state.lock().unwrap().writes.is_empty());
+}
+
+#[tokio::test]
+async fn rejects_expired_mixed_and_incomplete_payload_snapshots_without_writes() {
+    for fault in [
+        "expired",
+        "newer",
+        "missing",
+        "extra",
+        "identity",
+        "truncated",
+    ] {
+        let (_server, client, state) = fixture(vec![map(0, &chain(1))]).await;
+        state.lock().unwrap().payload_fault = Some(fault);
+        assert!(
+            append(&client, "ns/new", "digest").await.is_err(),
+            "{fault}"
+        );
+        assert!(state.lock().unwrap().writes.is_empty(), "{fault}");
+    }
+    let (_server, client, state) = fixture(vec![map(0, &chain(1))]).await;
+    state.lock().unwrap().revision = 0;
+    assert!(append(&client, "ns/new", "digest").await.is_err());
+    assert!(state.lock().unwrap().writes.is_empty());
+}
+
+#[tokio::test]
+async fn metadata_discovery_rejects_unlabeled_prefix_and_misnamed_segment_attacks() {
+    for (name, component) in [
+        ("kars-receipt-log-bogus", None),
+        ("kars-receipt-log-000001", None),
+        ("unrelated-name", Some(SEGMENT_COMPONENT)),
+    ] {
+        let mut invalid = map(1, &chain(2)[1..]);
+        invalid.metadata.name = Some(name.into());
+        invalid.metadata.labels =
+            component.map(|label| BTreeMap::from([(COMPONENT_LABEL.into(), label.into())]));
+        let (server, client, state) = fixture(vec![map(0, &chain(1)), invalid]).await;
+        assert!(append(&client, "ns/new", "digest").await.is_err(), "{name}");
+        assert!(state.lock().unwrap().writes.is_empty());
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
 }
 
 #[tokio::test]

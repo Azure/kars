@@ -132,7 +132,7 @@ export function FleetList({ sandboxes, observedAt, initialQuery = "" }: {
           aria-label="Search sandboxes"
           value={q}
           onChange={(e) => setQ(e.target.value)}
-          placeholder="Search name, namespace, parent, harness…"
+          placeholder="Search name, namespace, parent, team, harness…"
           className="min-w-0 flex-1 basis-56 rounded-lg border border-border bg-surface px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal"
         />
         <div className="flex flex-wrap items-center gap-1">
@@ -151,7 +151,7 @@ export function FleetList({ sandboxes, observedAt, initialQuery = "" }: {
           ))}
         </div>
         <label className="inline-flex items-center gap-1.5 text-xs text-foreground-muted">
-          <input type="checkbox" checked={leadsOnly} onChange={(e) => setLeadsOnly(e.target.checked)} /> Leads only
+          <input type="checkbox" checked={leadsOnly} onChange={(e) => setLeadsOnly(e.target.checked)} /> No recorded parent
         </label>
       </div>
 
@@ -167,21 +167,21 @@ export function FleetList({ sandboxes, observedAt, initialQuery = "" }: {
                 <div className="min-w-0">
                   <p className="font-mono text-sm font-medium [overflow-wrap:anywhere]">
                     {s.name}
-                    {!s.parent && <span className="ml-2 rounded-full bg-surface-muted px-1.5 py-0.5 text-[10px] font-medium text-foreground-muted">lead</span>}
+                    {!s.parent && <span className="ml-2 rounded-full bg-surface-muted px-1.5 py-0.5 text-[10px] font-medium text-foreground-muted">no parent recorded</span>}
                   </p>
                   <p className="mt-0.5 font-mono text-xs text-foreground-muted [overflow-wrap:anywhere]">{s.namespace}</p>
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
                   {s.created && <span className="text-xs text-foreground-muted">{age(s.created, observedAt)} old</span>}
                   {s.phase === "Running" && s.working === false ? (
-                    <span title="The pod is Running but the agent has produced no activity — idle (e.g. a chat-gateway harness waiting for input, or between scheduled runs).">
+                    <span title="No activity was reported in the observed scope. This does not establish that the assignment is idle or finished.">
                       <Badge tone="muted" dot>
-                        Running · idle
+                        Running · no activity observed
                       </Badge>
                     </span>
                   ) : (
                     <Badge tone={phaseTone(s.phase)} dot>
-                      {s.phase === "Running" && s.working ? "Running · working" : s.phase ?? "Unknown"}
+                      {s.phase === "Running" && s.working ? "Running · activity observed" : s.phase ?? "Unknown"}
                     </Badge>
                   )}
                 </div>

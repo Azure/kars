@@ -16,15 +16,67 @@ use super::{
     BlueprintDto, CreateTaskRequest, ModelDto, TaskDetailDto, map_kube_err, require_cluster,
 };
 
+pub(crate) fn mission_github_write_enabled(blueprint: Option<&BlueprintDto>) -> bool {
+    // Legacy packages retain their explicit PR grant. Typed plans must review
+    // the write capability; network access alone only needs a read-only binding.
+    blueprint
+        .and_then(|blueprint| blueprint.execution_plan.as_ref())
+        .is_none_or(super::ExecutionPlanDto::github_write_enabled)
+}
+
+#[cfg(test)]
+#[test]
+fn mission_github_access_requires_reviewed_write_capability() {
+    assert!(mission_github_write_enabled(None));
+    assert!(mission_github_write_enabled(Some(&BlueprintDto::default())));
+    let mut blueprint: BlueprintDto = serde_json::from_value(serde_json::json!({
+        "execution_plan": {
+            "schema": "kars.execution-plan/v1", "max_parallel": 1,
+            "roles": [{"name": "reader", "objective": "Verify an existing PR", "phases": [{
+                "name": "collect", "objective": "Read evidence", "capabilities": ["network", "filesystem-write"],
+                "max_tool_calls": 2147483647, "execution_mode": "native"
+            }]}],
+            "synthesis": {"objective": "Report offline", "capabilities": ["filesystem-read", "filesystem-write"],
+                "max_tool_calls": 2147483647, "execution_mode": "native"}
+        }
+    }))
+    .unwrap();
+    assert!(!mission_github_write_enabled(Some(&blueprint)));
+    blueprint.execution_plan.as_mut().unwrap().roles[0].phases[0]
+        .capabilities
+        .push("github-pr".into());
+    assert!(mission_github_write_enabled(Some(&blueprint)));
+    blueprint.execution_plan.as_mut().unwrap().roles.clear();
+    assert!(!mission_github_write_enabled(Some(&blueprint)));
+    blueprint
+        .execution_plan
+        .as_mut()
+        .unwrap()
+        .synthesis
+        .capabilities
+        .push("github-pr".into());
+    assert!(mission_github_write_enabled(Some(&blueprint)));
+}
+
+struct MissionFallbackRequirements<'a> {
+    capabilities: &'a std::collections::BTreeSet<String>,
+    max_parallel: i32,
+    total_tokens: Option<i64>,
+}
+
 fn validate_mission_fallback_route(
     options: &crate::routes::options::Options,
     blueprint: &BlueprintDto,
     runtime: &str,
     model: &ModelDto,
-    required_capabilities: &std::collections::BTreeSet<String>,
-    max_parallel: i32,
-    total_tokens: Option<i64>,
+    requirements: MissionFallbackRequirements<'_>,
+    qualification_run: bool,
 ) -> AppResult<()> {
+    let MissionFallbackRequirements {
+        capabilities: required_capabilities,
+        max_parallel,
+        total_tokens,
+    } = requirements;
     if !options
         .models
         .iter()
@@ -44,6 +96,7 @@ fn validate_mission_fallback_route(
         total_tokens,
     ) {
         Ok(true) => {}
+        Ok(false) if qualification_run => {}
         Ok(false) => {
             return Err(AppError::BadRequest(format!(
                 "fallback route `{runtime} · {}::{}` lacks atomic qualification for capabilities: {}",
@@ -73,10 +126,15 @@ fn validate_mission_fallback_route(
                     "MCP server `{server}` is not present in the live options catalogue"
                 ))
             })?;
-        if !crate::routes::options::mcp_server_admitted_for_route(
-            runtime,
-            &model.provider,
-            &model.deployment,
+        if !crate::routes::qualification_runs::admit_resource(
+            crate::routes::options::mcp_server_admitted_for_route(
+                runtime,
+                &model.provider,
+                &model.deployment,
+                option,
+            ),
+            qualification_run,
+            "McpServer",
             option,
         )
         .map_err(|error| {
@@ -103,10 +161,15 @@ fn validate_mission_fallback_route(
                     "memory `{memory}` is not present in the live options catalogue"
                 ))
             })?;
-        if !crate::routes::options::memory_binding_admitted_for_route(
-            runtime,
-            &model.provider,
-            &model.deployment,
+        if !crate::routes::qualification_runs::admit_resource(
+            crate::routes::options::memory_binding_admitted_for_route(
+                runtime,
+                &model.provider,
+                &model.deployment,
+                option,
+            ),
+            qualification_run,
+            "KarsMemory",
             option,
         )
         .map_err(|error| {
@@ -129,10 +192,15 @@ fn validate_mission_fallback_route(
                     "skill `{skill}` is not present in the approved live catalogue"
                 ))
             })?;
-        if !crate::routes::options::skill_version_admitted_for_route(
-            runtime,
-            &model.provider,
-            &model.deployment,
+        if !crate::routes::qualification_runs::admit_resource(
+            crate::routes::options::skill_version_admitted_for_route(
+                runtime,
+                &model.provider,
+                &model.deployment,
+                option,
+            ),
+            qualification_run,
+            "KarsSkill",
             option,
         )
         .map_err(|error| {
@@ -148,6 +216,67 @@ fn validate_mission_fallback_route(
     Ok(())
 }
 
+pub(super) fn prepare_reviewed_task(task: &mut KarsTask) -> AppResult<()> {
+    let Some(role_count) = task
+        .spec
+        .blueprint
+        .as_ref()
+        .and_then(|blueprint| blueprint.execution_plan.as_ref())
+        .map(|plan| plan.roles.len())
+    else {
+        return Ok(());
+    };
+    // Reviewed workers share an accounting lineage even without a spending ceiling.
+    let budget = task.spec.envelope.budget.get_or_insert(TaskBudget {
+        scope: Some(crate::kars::task::BudgetScope::GovernedInference),
+        tokens: None,
+        usd_micros: None,
+    });
+    if !matches!(
+        budget.scope,
+        Some(crate::kars::task::BudgetScope::GovernedInference)
+    ) {
+        return Err(AppError::BadRequest(
+            "reviewed execution requires explicit GovernedInference accounting scope".into(),
+        ));
+    }
+    let allocation = budget
+        .tokens
+        .map(|total| {
+            crate::routes::compose::delegation_budget_allocation(total, role_count)
+                .map(|(principal, child)| (total, principal, child))
+                .map_err(AppError::BadRequest)
+        })
+        .transpose()?;
+    let annotations = task
+        .metadata
+        .annotations
+        .get_or_insert_with(Default::default);
+    if let Some((total, principal, child)) = allocation {
+        annotations.insert(
+            "kars.azure.com/mission-budget-total".into(),
+            total.to_string(),
+        );
+        annotations.insert(
+            "kars.azure.com/mission-principal-budget".into(),
+            principal.to_string(),
+        );
+        annotations.insert(
+            "kars.azure.com/mission-child-budget".into(),
+            child.to_string(),
+        );
+    }
+    annotations.insert(
+        "kars.azure.com/mission-specialist-count".into(),
+        role_count.to_string(),
+    );
+    annotations.insert(
+        "kars.azure.com/mission-decomposition".into(),
+        "execution-plan/v1".into(),
+    );
+    Ok(())
+}
+
 /// `POST /api/namespaces/:ns/tasks` — create a task.
 ///
 /// The BFF never sets status — it submits the spec and lets the controller
@@ -159,6 +288,20 @@ pub async fn create_task(
     Path(ns): Path<String>,
     Json(mut req): Json<CreateTaskRequest>,
 ) -> AppResult<Json<TaskDetailDto>> {
+    crate::routes::qualification_runs::authorize(&principal, req.qualification_run)?;
+    if req.qualification_run {
+        let blueprint = req.blueprint.as_ref().ok_or_else(|| {
+            AppError::BadRequest("Qualification runs require an explicit blueprint".into())
+        })?;
+        crate::routes::qualification_runs::validate_package(
+            blueprint,
+            req.envelope
+                .budget
+                .as_ref()
+                .and_then(|budget| budget.tokens),
+        )
+        .map_err(AppError::BadRequest)?;
+    }
     let cluster = require_cluster(&state)?;
     cluster.credential_grant(&ns).await.map_err(map_kube_err)?;
     let api: Api<KarsTask> = cluster.tasks(&ns);
@@ -175,7 +318,11 @@ pub async fn create_task(
         if req.launch {
             crate::kars::task::execution_plan::validate_reviewed_delegation_depth(
                 i64::from(req.envelope.delegation_depth),
-                crate::kars::task::execution_plan::REVIEWED_TASK_DELEGATION_DEPTH,
+                if plan.roles.is_empty() {
+                    0
+                } else {
+                    crate::kars::task::execution_plan::REVIEWED_TASK_DELEGATION_DEPTH
+                },
             )
             .map_err(AppError::BadRequest)?;
         }
@@ -188,18 +335,44 @@ pub async fn create_task(
         && let Some(runtime) = blueprint.runtime.as_deref()
         && crate::routes::compose::is_non_autonomous_harness(runtime)
     {
+        if req.qualification_run {
+            return Err(AppError::BadRequest(format!(
+                "Runtime `{runtime}` has no autonomous Mission loop; qualification does not install missing harness capabilities"
+            )));
+        }
         harness_correction = Some(format!(
             "harness {runtime} is a bootstrap-only adapter (no autonomous task loop) and cannot run a one-shot mission; corrected to OpenClaw"
         ));
         blueprint.runtime = Some("OpenClaw".to_string());
     }
-    let git_write = crate::routes::github::authorize_git_write(
+    if req.launch
+        && req
+            .blueprint
+            .as_ref()
+            .and_then(|blueprint| blueprint.execution_plan.as_ref())
+            .is_none()
+    {
+        return Err(AppError::BadRequest(
+            "Native Missions require an explicit reviewed execution plan; single-agent work uses roles=[] and a native principal synthesis".into(),
+        ));
+    }
+    let github_write = mission_github_write_enabled(req.blueprint.as_ref());
+    let git_access = crate::routes::github::authorize_github_access(
         cluster,
         &ns,
         &principal,
         req.git_write_repos.as_deref(),
+        github_write,
     )
     .await?;
+    if git_access.is_some() {
+        crate::routes::github::validate_bound_github_egress(
+            req.blueprint
+                .iter()
+                .flat_map(|blueprint| &blueprint.egress)
+                .map(|entry| entry.host.as_str()),
+        )?;
+    }
     if req.blueprint.as_ref().is_some_and(|blueprint| {
         blueprint.runtime.as_deref().unwrap_or("OpenClaw") != "OpenClaw"
             && !blueprint.skills.is_empty()
@@ -272,6 +445,7 @@ pub async fn create_task(
             total_tokens,
         ) {
             Ok(true) => {}
+            Ok(false) if req.qualification_run => {}
             Ok(false) => {
                 return Err(AppError::BadRequest(format!(
                     "runtime/model route `{runtime} · {}::{}` lacks qualification evidence for capabilities: {}",
@@ -302,10 +476,15 @@ pub async fn create_task(
                     "MCP server `{server}` is not present in the live options catalogue"
                 )));
             };
-            match crate::routes::options::mcp_server_admitted_for_route(
-                runtime,
-                &model.provider,
-                &model.deployment,
+            match crate::routes::qualification_runs::admit_resource(
+                crate::routes::options::mcp_server_admitted_for_route(
+                    runtime,
+                    &model.provider,
+                    &model.deployment,
+                    option,
+                ),
+                req.qualification_run,
+                "McpServer",
                 option,
             ) {
                 Ok(true) => {}
@@ -337,10 +516,15 @@ pub async fn create_task(
                     "memory `{memory}` is not present in the live options catalogue"
                 )));
             };
-            match crate::routes::options::memory_binding_admitted_for_route(
-                runtime,
-                &model.provider,
-                &model.deployment,
+            match crate::routes::qualification_runs::admit_resource(
+                crate::routes::options::memory_binding_admitted_for_route(
+                    runtime,
+                    &model.provider,
+                    &model.deployment,
+                    option,
+                ),
+                req.qualification_run,
+                "KarsMemory",
                 option,
             ) {
                 Ok(true) => {}
@@ -369,10 +553,15 @@ pub async fn create_task(
                     "skill `{skill}` is not present in the approved live catalogue"
                 )));
             };
-            match crate::routes::options::skill_version_admitted_for_route(
-                runtime,
-                &model.provider,
-                &model.deployment,
+            match crate::routes::qualification_runs::admit_resource(
+                crate::routes::options::skill_version_admitted_for_route(
+                    runtime,
+                    &model.provider,
+                    &model.deployment,
+                    option,
+                ),
+                req.qualification_run,
+                "KarsSkill",
                 option,
             ) {
                 Ok(true) => {}
@@ -405,9 +594,12 @@ pub async fn create_task(
                 blueprint,
                 runtime,
                 fallback,
-                &required_capabilities,
-                max_parallel,
-                total_tokens,
+                MissionFallbackRequirements {
+                    capabilities: &required_capabilities,
+                    max_parallel,
+                    total_tokens,
+                },
+                req.qualification_run,
             )?;
         }
     }
@@ -451,9 +643,9 @@ pub async fn create_task(
     // the correction as a governance annotation on the task so it survives into
     // the run and the receipt/decision view. (Hermes/BYO are autonomous — kept.)
     let mut blueprint = req.blueprint.map(BlueprintDto::into_crd);
-    if let Some((git_write, binding)) = git_write {
+    if let Some((git_write, binding)) = git_access {
         let blueprint = blueprint.get_or_insert_with(Default::default);
-        blueprint.git_write = Some(git_write);
+        blueprint.git_write = github_write.then_some(git_write);
         blueprint.github_binding = Some(binding);
     }
     let spec = KarsTaskSpec {
@@ -485,52 +677,15 @@ pub async fn create_task(
                 .map(|name| LocalObjectRef { name }),
         },
         retention_ttl_seconds: req.retention_ttl_seconds,
+        requested_tier: None,
     };
     let mut task = KarsTask::new(&req.name, spec);
-    if let Some(plan) = task
-        .spec
-        .blueprint
-        .as_ref()
-        .and_then(|blueprint| blueprint.execution_plan.as_ref())
-    {
-        let total_tokens = task
-            .spec
-            .envelope
-            .budget
-            .as_ref()
-            .and_then(|budget| budget.tokens)
-            .ok_or_else(|| {
-                AppError::BadRequest(
-                    "execution-plan missions require an explicit total token budget".into(),
-                )
-            })?;
-        let (principal_tokens, child_tokens) =
-            crate::routes::compose::delegation_budget_allocation(total_tokens, plan.roles.len())
-                .map_err(AppError::BadRequest)?;
-        let annotations = task
-            .metadata
-            .annotations
-            .get_or_insert_with(Default::default);
-        annotations.insert(
-            "kars.azure.com/mission-budget-total".into(),
-            total_tokens.to_string(),
-        );
-        annotations.insert(
-            "kars.azure.com/mission-principal-budget".into(),
-            principal_tokens.to_string(),
-        );
-        annotations.insert(
-            "kars.azure.com/mission-child-budget".into(),
-            child_tokens.to_string(),
-        );
-        annotations.insert(
-            "kars.azure.com/mission-specialist-count".into(),
-            plan.roles.len().to_string(),
-        );
-        annotations.insert(
-            "kars.azure.com/mission-decomposition".into(),
-            "execution-plan/v1".into(),
-        );
+    prepare_reviewed_task(&mut task)?;
+    if req.qualification_run {
+        task.metadata.namespace = Some(ns.clone());
+        let bindings = crate::routes::qualification_runs::resource_bindings(cluster, &task).await?;
+        crate::routes::qualification_runs::stamp(&mut task, &principal, bindings)?;
+        crate::routes::validate::require_task_checks(cluster, &task, true).await?;
     }
     // Record the capability correction on the task so it's durable and surfaces in
     // the governed record (the run reads task annotations; the receipt/decision
@@ -578,6 +733,17 @@ pub async fn create_task(
         .await
         .map_err(map_kube_err)?;
     crate::kars::execution_plans::ensure_preserved(&task, &created).map_err(AppError::Upstream)?;
+    if req.qualification_run
+        && !crate::routes::qualification_runs::authorize_stored(&created, &principal)?
+    {
+        return Err(AppError::Upstream(
+            "Task CREATE did not preserve qualification authorization; execution remains disabled"
+                .into(),
+        ));
+    }
+    if req.qualification_run {
+        crate::routes::qualification_runs::check_resources(cluster, &created).await?;
+    }
     cluster
         .finish_created_credentials(
             &crate::kars::credentials::Target {

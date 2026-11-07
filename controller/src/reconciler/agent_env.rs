@@ -6,7 +6,27 @@ use serde_json::{Value, json};
 
 pub const RESERVED_PREFIXES: &[&str] = &["AGT_", "FOUNDRY_AGENT_", "AZURE_", "IMDS_", "KARS_"];
 
-pub fn merge(env: &mut Vec<Value>, plan: &RuntimeDeploymentPlan) {
+// Linux limits each argv/env string to 32 pages; use the supported 4 KiB page floor.
+pub const MAX_INSTRUCTION_BYTES: usize = 32 * 4096 - "KARS_AGENT_INSTRUCTIONS=".len() - 1;
+
+pub fn validate_instructions(instructions: Option<&str>) -> Result<(), &'static str> {
+    if let Some(instructions) = instructions {
+        if instructions.contains('\0') {
+            return Err("agent.instructions cannot contain NUL bytes in the runtime environment");
+        }
+        if instructions.len() > MAX_INSTRUCTION_BYTES {
+            return Err(
+                "agent.instructions exceeds the Linux 128 KiB environment-string boundary including its name and terminator; use reviewed input files for larger context",
+            );
+        }
+    }
+    Ok(())
+}
+
+pub fn merge(env: &mut Vec<Value>, plan: &RuntimeDeploymentPlan, instructions: Option<&str>) {
+    if let Some(instructions) = instructions {
+        env.push(json!({"name": "KARS_AGENT_INSTRUCTIONS", "value": instructions}));
+    }
     let mut existing: std::collections::HashSet<String> = env
         .iter()
         .filter_map(|v| v.get("name").and_then(|n| n.as_str()).map(String::from))

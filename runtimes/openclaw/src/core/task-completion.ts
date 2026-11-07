@@ -20,10 +20,15 @@ export interface TaskExecutionEvidence {
 
 export class TaskExecutionError extends Error {
   readonly evidence: TaskExecutionEvidence;
-  readonly phase?: TaskPhaseEvidence;
-  constructor(message: string, evidence: TaskExecutionEvidence, phase?: TaskPhaseEvidence) {
+  declare readonly phase?: TaskPhaseEvidence;
+  declare readonly output?: string;
+  declare readonly artifacts?: MissionArtifacts;
+  constructor(message: string, evidence: TaskExecutionEvidence, phase?: TaskPhaseEvidence, output?: string, artifacts?: MissionArtifacts) {
     super(message);
     this.name = "TaskExecutionError";
+    if (artifacts && Object.keys(artifacts).length === 1 && Object.hasOwn(artifacts, "kars-python-executions.json") && validMissionArtifacts(artifacts)) this.artifacts = { ...artifacts };
+    const partial = typeof output === "string" ? Array.from(output.slice(0, 8192)).slice(0, 4096).join("") : "";
+    if (partial.trim()) this.output = partial;
     const measuredPhase = phase ?? evidence.phase;
     if (measuredPhase) this.phase = { ...measuredPhase };
     this.evidence = {
@@ -58,7 +63,7 @@ export class TaskCompletionLedger {
   prepareArtifact(name: unknown, content: unknown): MissionArtifacts {
     if (!this.artifactsEnabled) throw new Error("Dispatcher does not support named artifacts; return the full content inline");
     if (typeof name !== "string" || typeof content !== "string") throw new Error("Artifact name and content must be strings");
-    if (name === ROUTER_OBSERVATIONS_ARTIFACT) throw new Error("Router observation filename is reserved for runtime evidence");
+    if (name === ROUTER_OBSERVATIONS_ARTIFACT || name === "kars-python-executions.json") throw new Error("Observation and execution receipt filenames are reserved for runtime evidence");
     const next = { ...this.artifacts, [name]: content };
     if (!validMissionArtifacts(next)) throw new Error("Artifact requires a safe, nonreserved filename, nonempty UTF-8 text, at most 16 files and 128 KiB serialized total");
     return next;

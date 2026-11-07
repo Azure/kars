@@ -40,6 +40,300 @@ fn events(telemetry: &TaskTelemetry) -> Vec<Value> {
         .clone()
 }
 
+#[tokio::test]
+async fn correlated_egress_records_actual_policy_denial_without_inventing_fetch_or_harness_success()
+{
+    let state = state("workspace", "uid");
+    let scope = state.services.telemetry.cursor().0;
+    state.services.telemetry.begin("chat/completions", "provider", "model", b"{}").unwrap().buffered(
+        200, br#"{"choices":[{"message":{"tool_calls":[{"id":"web-1","function":{"name":"web_fetch","arguments":"{}"}}]}}]}"#,
+    );
+    let app = app(state.clone());
+    let (status, result) = send(&app, request("POST", "/agt/evaluate", json!({
+        "agent_id":"test", "action":"tool:web_fetch", "context":{"scope_id":scope,"tool_call_id":"web-1"}
+    }), None, None, true)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(result["allowed"], true);
+    let (status, _) = send(&app, request("POST", "/egress/fetch", json!({
+        "url":"https://localhost/secret?token=private", "telemetry":{"scope_id":scope,"call_id":"web-1"}
+    }), None, None, true)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let trace = state
+        .services
+        .telemetry
+        .selected_snapshot(&scope, &[1])
+        .unwrap();
+    let operations: Vec<_> = trace["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["kind"] == "router_operation")
+        .collect();
+    assert_eq!(operations.len(), 2);
+    assert_eq!(operations[0]["flag"], "governance");
+    assert_eq!(operations[0]["allowed"], true);
+    assert_eq!(operations[1]["flag"], "private_target");
+    assert_eq!(operations[1]["allowed"], false);
+    assert_eq!(operations[1]["call_id"], "web-1");
+    assert_eq!(operations[1]["destination_host"], "localhost");
+    assert_eq!(operations[1]["destination_port"], 443);
+    assert_eq!(operations[1]["http_status"], Value::Null);
+    assert!(
+        !trace["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["kind"] == "tool_result")
+    );
+    assert!(!trace.to_string().contains("secret"));
+    assert!(!trace.to_string().contains("token="));
+}
+
+#[tokio::test]
+async fn correlated_egress_retains_upstream_status_and_truncation_separately_from_policy() {
+    for (status, size, complete) in [
+        (200, 12, true),
+        (403, 12, true),
+        (200, 2 * 1024 * 1024 + 1, false),
+    ] {
+        let upstream = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(status).set_body_string("x".repeat(size)))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        let address = *upstream.address();
+        let mut state = state("workspace", "uid");
+        state.blocklist = kars_inference_router::blocklist::Blocklist::new(None).await;
+        state
+            .blocklist
+            .replace_allowlist(vec!["approved.example".into()])
+            .await;
+        state.client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .resolve("approved.example", address)
+            .build()
+            .unwrap();
+        let scope = state.services.telemetry.cursor().0;
+        state.services.telemetry.begin("chat/completions", "provider", "model", b"{}").unwrap().buffered(
+            200, br#"{"choices":[{"message":{"tool_calls":[{"id":"web-1","function":{"name":"web_fetch","arguments":"{}"}}]}}]}"#,
+        );
+        assert!(
+            state
+                .services
+                .telemetry
+                .authorize_harness_tool(&scope, "web-1", "web_fetch")
+        );
+        let app = app(state.clone());
+        let response = app.oneshot(request("POST", "/egress/fetch", json!({
+            "url":format!("http://approved.example:{}/private?token=secret-marker", address.port()),
+            "telemetry":{"scope_id":scope,"call_id":"web-1"}
+        }), None, None, true)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        // The JSON envelope adds bytes beyond the router's 2 MiB fetched-body cap.
+        let bytes = axum::body::to_bytes(response.into_body(), 2 * 1024 * 1024 + 16384)
+            .await
+            .unwrap();
+        let response: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(response["status"], status);
+        assert_eq!(response["truncated"], !complete);
+        let body = response["body"].as_str().unwrap();
+        let fetched = if complete {
+            body
+        } else {
+            body.strip_suffix("... [truncated at 2097152 bytes]")
+                .unwrap()
+        };
+        assert_eq!(fetched.len(), size.min(2 * 1024 * 1024));
+        let trace = state
+            .services
+            .telemetry
+            .selected_snapshot(&scope, &[1])
+            .unwrap();
+        let operations: Vec<_> = trace["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| event["kind"] == "router_operation")
+            .collect();
+        assert_eq!(operations.len(), 2);
+        assert_eq!(operations[0]["operation"], "egress_policy");
+        assert_eq!(operations[0]["allowed"], true);
+        assert_eq!(operations[1]["operation"], "egress_fetch");
+        assert_eq!(operations[1]["http_status"], status);
+        assert_eq!(operations[1]["complete"], complete);
+        assert_eq!(operations[1]["allowed"], Value::Null);
+        assert_eq!(operations[1]["destination_host"], "approved.example");
+        assert!(!trace.to_string().contains("secret-marker"));
+        assert!(
+            !trace["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|event| event["kind"] == "tool_result")
+        );
+    }
+}
+
+#[test]
+fn argument_previews_cover_all_buffered_api_shapes_without_retaining_credentials() {
+    let arguments = json!({"path":"/sandbox/handoff.md", "content":"Useful recommendations", "headers":{"Authorization":"private-value"}, "url":"https://docs.example/page?token=private-value"});
+    for (path, response) in [
+        (
+            "chat/completions",
+            json!({"choices":[{"message":{"tool_calls":[{"id":"call-1","function":{"name":"write_file","arguments":arguments.to_string()}}]}}]}),
+        ),
+        (
+            "responses",
+            json!({"status":"completed","output":[{"type":"function_call","call_id":"call-1","name":"write_file","arguments":arguments.to_string()}]}),
+        ),
+        (
+            "messages",
+            json!({"content":[{"type":"tool_use","id":"call-1","name":"write_file","input":arguments}]}),
+        ),
+    ] {
+        let telemetry = telemetry();
+        telemetry
+            .begin(path, "provider", "model", b"{}")
+            .unwrap()
+            .buffered(200, &serde_json::to_vec(&response).unwrap());
+        let events = events(&telemetry);
+        let preview = &events[1]["argument_preview"];
+        assert_eq!(preview["redacted"], true, "{path}");
+        assert_eq!(preview["truncated"], false, "{path}");
+        assert!(
+            preview["text"]
+                .as_str()
+                .unwrap()
+                .contains("/sandbox/handoff.md")
+        );
+        assert!(
+            preview["text"]
+                .as_str()
+                .unwrap()
+                .contains("Useful recommendations")
+        );
+        assert!(
+            !serde_json::to_string(&events)
+                .unwrap()
+                .contains("private-value")
+        );
+    }
+}
+
+#[tokio::test]
+async fn argument_previews_reassemble_streamed_arguments_before_redaction() {
+    let arguments = json!({"path":"/sandbox/report.md", "content":"Body with useful evidence", "api_key":"private-value"}).to_string();
+    let middle = arguments.len() / 2;
+    let openai = vec![
+        json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"write_file","arguments":&arguments[..middle]}}]}}]}),
+        json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":&arguments[middle..]}}]},"finish_reason":"tool_calls"}]}),
+    ];
+    let anthropic = vec![
+        json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call-1","name":"write_file","input":{}}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":&arguments[..middle]}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":&arguments[middle..]}}),
+        json!({"type":"message_stop"}),
+    ];
+    let responses = vec![
+        json!({"type":"response.completed","response":{"status":"completed","output":[{"type":"function_call","call_id":"call-1","name":"write_file","arguments":arguments}]}}),
+    ];
+    for (path, frames) in [
+        ("chat/completions", openai),
+        ("messages", anthropic),
+        ("responses", responses),
+    ] {
+        let telemetry = telemetry();
+        let mut observation = telemetry.begin(path, "provider", "model", b"{}").unwrap();
+        observation.headers(200);
+        let stream = frames
+            .iter()
+            .map(|v| format!("data: {v}\n\n"))
+            .collect::<String>()
+            + "data: [DONE]\n\n";
+        let chunks = stream
+            .as_bytes()
+            .chunks(7)
+            .map(|b| Ok::<_, std::io::Error>(Bytes::copy_from_slice(b)))
+            .collect::<Vec<_>>();
+        wrap_stream(
+            futures::stream::iter(chunks).boxed(),
+            Some(observation),
+            true,
+        )
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+        let records = events(&telemetry);
+        assert_eq!(records[1]["argument_preview"]["redacted"], true, "{path}");
+        assert!(
+            records[1]["argument_preview"]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Body with useful evidence")
+        );
+        assert!(
+            !serde_json::to_string(&records)
+                .unwrap()
+                .contains("private-value")
+        );
+    }
+}
+
+#[test]
+fn argument_preview_budget_is_bounded_without_dropping_execution_records() {
+    let telemetry = telemetry();
+    for number in 0..100 {
+        let arguments = json!({"content":"useful body ".repeat(160), "context":"more useful detail ".repeat(100)});
+        telemetry.begin("chat/completions", "provider", "model", b"{}").unwrap().buffered(200, &serde_json::to_vec(&json!({"choices":[{"message":{"tool_calls":[{"id":format!("call-{number}"),"function":{"name":"write_file","arguments":arguments.to_string()}}]}}]})).unwrap());
+    }
+    let records = events(&telemetry);
+    assert_eq!(records.len(), 200);
+    assert!(records.iter().any(|v| {
+        v["argument_preview"]["text"]
+            .as_str()
+            .is_some_and(|s| s.contains("budget exhausted"))
+    }));
+    let bytes: usize = records
+        .iter()
+        .filter_map(|v| v.get("argument_preview"))
+        .map(|v| v.to_string().len())
+        .sum();
+    assert!(bytes < 80 * 1024);
+    assert_eq!(
+        telemetry.snapshot("scope-a", 0).unwrap()["dropped_events"],
+        0
+    );
+}
+
+#[test]
+fn fetch_correlation_requires_current_authorized_proposal_and_allowed_tool_name() {
+    let telemetry = telemetry();
+    telemetry.begin("chat/completions", "provider", "model", b"{}").unwrap().buffered(
+        200, br#"{"choices":[{"message":{"tool_calls":[{"id":"web-1","function":{"name":"web_fetch","arguments":"{}"}},{"id":"write-1","function":{"name":"file_write","arguments":"{}"}}]}}]}"#,
+    );
+    let request = json!({"telemetry":{"scope_id":"scope-a","call_id":"web-1"}});
+    assert!(telemetry.correlate_fetch(&request).is_none());
+    assert!(telemetry.authorize_harness_tool("scope-a", "web-1", "web_fetch"));
+    assert!(telemetry.correlate_fetch(&request).is_some());
+    for request in [
+        json!({}),
+        json!({"telemetry":{"scope_id":"other","call_id":"web-1"}}),
+        json!({"telemetry":{"scope_id":"scope-a","call_id":"unknown"}}),
+    ] {
+        assert!(telemetry.correlate_fetch(&request).is_none());
+    }
+    assert!(telemetry.authorize_harness_tool("scope-a", "write-1", "file_write"));
+    assert!(
+        telemetry
+            .correlate_fetch(&json!({"telemetry":{"scope_id":"scope-a","call_id":"write-1"}}))
+            .is_none()
+    );
+    telemetry.reset("scope-b".into());
+    assert!(telemetry.correlate_fetch(&request).is_none());
+}
+
 #[test]
 fn authorized_completion_survives_conversation_projection_without_raw_content() {
     use kars_inference_router::task_telemetry::ToolSummary;
@@ -141,6 +435,144 @@ fn authorized_completion_survives_conversation_projection_without_raw_content() 
 }
 
 #[test]
+fn native_file_summaries_require_matching_authorized_calls() {
+    use kars_inference_router::task_telemetry::ToolSummary;
+    for (name, summary) in [
+        (
+            "read_file",
+            ToolSummary::FileRead {
+                bytes: 12,
+                returned_bytes: 12,
+                truncated: false,
+            },
+        ),
+        (
+            "write_file",
+            ToolSummary::FileWrite {
+                bytes: 12,
+                artifact_name: Some("briefing.md".into()),
+            },
+        ),
+        (
+            "kars_mission_file_read",
+            ToolSummary::FileRead {
+                bytes: 12,
+                returned_bytes: 12,
+                truncated: false,
+            },
+        ),
+        (
+            "kars_mission_file_write",
+            ToolSummary::FileWrite {
+                bytes: 12,
+                artifact_name: Some("briefing.md".into()),
+            },
+        ),
+    ] {
+        let telemetry = telemetry();
+        let response = json!({"choices":[{"finish_reason":"tool_calls","message":{"tool_calls":[{"id":"native-1","function":{"name":name,"arguments":"private-arguments"}}]}}]});
+        telemetry
+            .begin("chat/completions", "provider", "model", b"{}")
+            .unwrap()
+            .buffered(200, &serde_json::to_vec(&response).unwrap());
+        assert!(!telemetry.complete_harness_tool_with_summary(
+            "scope-a",
+            "native-1",
+            true,
+            1,
+            Some(summary.clone())
+        ));
+        assert!(telemetry.authorize_harness_tool("scope-a", "search-1", "search_files"));
+        assert!(!telemetry.complete_harness_tool_with_summary(
+            "scope-a",
+            "search-1",
+            true,
+            1,
+            Some(summary.clone())
+        ));
+        assert!(telemetry.authorize_harness_tool("scope-a", "native-1", name));
+        assert!(!telemetry.complete_harness_tool_with_summary(
+            "scope-a",
+            "native-1",
+            false,
+            1,
+            Some(summary.clone())
+        ));
+        assert!(!telemetry.complete_harness_tool_with_summary(
+            "wrong-scope",
+            "native-1",
+            true,
+            1,
+            Some(summary.clone())
+        ));
+        assert!(telemetry.complete_harness_tool_with_summary(
+            "scope-a",
+            "native-1",
+            true,
+            1,
+            Some(summary.clone())
+        ));
+        let snapshot = telemetry.snapshot("scope-a", 0).unwrap();
+        assert_eq!(snapshot["has_more"], false);
+        assert_eq!(snapshot["cursor"], snapshot["high_water"]);
+        assert_eq!(snapshot["coverage"], "router-observed-only");
+        let result = snapshot["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["kind"] == "tool_result")
+            .unwrap();
+        assert_eq!(
+            result["result_summary"],
+            serde_json::to_value(summary).unwrap()
+        );
+        assert!(!snapshot.to_string().contains("private-arguments"));
+    }
+}
+
+#[test]
+fn selected_rounds_keep_immediate_results_after_large_requests_and_final_tools() {
+    let telemetry = telemetry();
+    telemetry.begin("chat/completions", "provider", "model", b"{}").unwrap().buffered(200,
+        br#"{"choices":[{"message":{"tool_calls":[{"id":"read-1","function":{"name":"read_file","arguments":"{}"}}]}}]}"#);
+    assert!(telemetry.authorize_harness_tool("scope-a", "read-1", "read_file"));
+    assert!(telemetry.complete_harness_tool("scope-a", "read-1", true, 7));
+    assert!(telemetry.authorize_harness_tool("scope-a", "unmatched", "read_file"));
+    assert!(telemetry.complete_harness_tool("scope-a", "unmatched", true, 7));
+    let result = |rounds: &[u64]| {
+        telemetry.selected_snapshot("scope-a", rounds).unwrap()["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| event["kind"] == "tool_result")
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let immediate = result(&[1]);
+    assert_eq!(immediate.len(), 1);
+    assert_eq!(immediate[0]["call_id"], "read-1");
+    assert_eq!(immediate[0]["ok"], true);
+    assert!(immediate[0].get("reported_in_round").is_none());
+    let large = serde_json::to_vec(&json!({"messages":[{"role":"tool", "tool_call_id":"read-1",
+        "content":"x".repeat(65_536)}]}))
+    .unwrap();
+    telemetry
+        .begin("chat/completions", "provider", "model", &large)
+        .unwrap()
+        .buffered(200, b"{}");
+    assert_eq!(result(&[1, 2]), immediate);
+    assert!(result(&[2]).is_empty());
+    telemetry.begin("chat/completions", "provider", "model",
+        br#"{"messages":[{"role":"tool","tool_call_id":"read-1","is_error":true,"content":"contradiction"}]}"#)
+        .unwrap().buffered(200, b"{}");
+    let echoed = result(&[1, 2, 3]);
+    assert_eq!(echoed.len(), 1);
+    assert_eq!(echoed[0]["reported_in_round"], 3);
+    assert!(echoed[0]["ok"].is_null());
+    assert_eq!(result(&[1, 2]), immediate);
+}
+
+#[test]
 fn selected_rounds_match_the_runtime_and_bridge_contract() {
     let telemetry = telemetry();
     let mut first = telemetry
@@ -165,6 +597,11 @@ fn selected_rounds_match_the_runtime_and_bridge_contract() {
     let contract: Value =
         serde_json::from_str(include_str!("fixtures/router-observations-v1.json")).unwrap();
     let mut router_trace = contract["trace"].clone();
+    // The shared fixture also exercises historical records without previews.
+    router_trace["events"][1]["argument_preview"] = json!({
+        "text":"[Argument preview unavailable: capture limit or incomplete JSON]",
+        "truncated":true,"redacted":false
+    });
     for event in router_trace["events"].as_array_mut().unwrap() {
         if event["kind"] == "round" {
             event["usage"]["cached_tokens"] = Value::Null;
@@ -183,7 +620,7 @@ fn selected_rounds_match_the_runtime_and_bridge_contract() {
         );
     }
     assert!(telemetry.selected_snapshot("wrong-scope", &[1]).is_none());
-    for rounds in [vec![], vec![0], (1..=33).collect()] {
+    for rounds in [vec![], vec![0], vec![2, 1], vec![1, 1], (1..=131).collect()] {
         assert!(telemetry.selected_snapshot("scope-a", &rounds).is_none());
     }
     assert_eq!(
@@ -213,8 +650,8 @@ fn selected_rounds_report_truncation_eviction_and_reused_call_ids() {
     let selection = telemetry
         .selected_snapshot("scope-a", &(1..=20).collect::<Vec<_>>())
         .unwrap();
-    assert_eq!(selection["events"].as_array().unwrap().len(), 256);
-    assert_eq!(selection["truncated"], true);
+    assert_eq!(selection["events"].as_array().unwrap().len(), 340);
+    assert_eq!(selection["truncated"], false);
     assert_eq!(selection["missing_rounds"], json!([]));
     assert!(selection["dropped_events"].as_u64().unwrap() > 0);
     let mut report = telemetry
@@ -250,6 +687,128 @@ fn selected_rounds_report_truncation_eviction_and_reused_call_ids() {
 }
 
 #[tokio::test]
+async fn selected_rounds_http_pages_ordinary_128_tool_phase_without_losing_correlation() {
+    use kars_inference_router::task_telemetry::operation::RouterOperation;
+    let state = state("workspace", "uid");
+    let telemetry = state.services.telemetry.clone();
+    let scope = telemetry.cursor().0;
+    for round in 1..=129 {
+        let request_body = if round == 1 {
+            json!({})
+        } else {
+            json!({"messages":[{"role":"tool","tool_call_id":format!("call-{}", round - 1),"content":"result"}]})
+        };
+        let response = if round == 129 {
+            json!({})
+        } else {
+            json!({"choices":[{"message":{"tool_calls":[{"id":format!("call-{round}"),
+                "function":{"name":"web_fetch","arguments":"{}"}}]}}]})
+        };
+        telemetry
+            .begin(
+                "chat/completions",
+                "foundry",
+                "reviewed",
+                &serde_json::to_vec(&request_body).unwrap(),
+            )
+            .unwrap()
+            .buffered(200, &serde_json::to_vec(&response).unwrap());
+        if round == 129 {
+            break;
+        }
+        let id = format!("call-{round}");
+        assert!(telemetry.authorize_harness_tool(&scope, &id, "web_fetch"));
+        let tool = telemetry
+            .correlate_operation(&scope, &id, Some("web_fetch"))
+            .unwrap();
+        for operation in [
+            RouterOperation::ToolPolicy {
+                allowed: true,
+                rate_limited: false,
+            },
+            RouterOperation::EgressPolicy {
+                allowed: true,
+                flag: "egress_check",
+            },
+            RouterOperation::Fetch {
+                status: Some(200),
+                complete: true,
+                flag: "response",
+            },
+        ] {
+            telemetry.record_operation(
+                Some(&tool),
+                operation,
+                Some("https://source.example/public"),
+                1,
+            );
+        }
+        assert!(telemetry.complete_harness_tool(&scope, &id, true, 1));
+    }
+    let rounds: Vec<u64> = (1..=129).collect();
+    let expected = telemetry.selected_snapshot(&scope, &rounds).unwrap();
+    assert_eq!(expected["events"].as_array().unwrap().len(), 769);
+    assert_eq!(expected["dropped_events"], 0);
+    assert!(
+        telemetry
+            .selected_snapshot(&scope, &(1..=130).collect::<Vec<_>>())
+            .is_some()
+    );
+    let app = app(state);
+    let selection = rounds
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut cursor = 0;
+    let mut collected = Vec::<Value>::new();
+    for page in 0..4 {
+        let (status, response) = send(
+            &app,
+            request(
+                "GET",
+                &format!("/telemetry/trace?rounds={selection}&after={cursor}"),
+                json!({}),
+                None,
+                Some(&scope),
+                true,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["has_more"], page < 3);
+        assert_eq!(response["missing_rounds"], json!([]));
+        let events = response["events"].as_array().unwrap();
+        assert!(events.len() <= 256);
+        assert!(
+            events
+                .iter()
+                .all(|event| event["seq"].as_u64().unwrap() > cursor)
+        );
+        cursor = response["cursor"].as_u64().unwrap();
+        collected.extend(events.iter().cloned());
+    }
+    assert_eq!(json!(collected), expected["events"]);
+    telemetry.reset("new-scope".into());
+    assert_eq!(
+        send(
+            &app,
+            request(
+                "GET",
+                &format!("/telemetry/trace?rounds={selection}&after={cursor}"),
+                json!({}),
+                None,
+                Some(&scope),
+                true
+            )
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+}
+
+#[tokio::test]
 async fn selected_rounds_http_validates_queries_and_preserves_cursor_mode() {
     let state = state("workspace", "uid");
     let scope = state.services.telemetry.cursor().0;
@@ -273,7 +832,7 @@ async fn selected_rounds_http_validates_queries_and_preserves_cursor_mode() {
         "1&since=1".into(),
     ];
     invalid.push(
-        (1..=33)
+        (1..=131)
             .map(|n| n.to_string())
             .collect::<Vec<_>>()
             .join(","),

@@ -167,7 +167,8 @@ impl RouterToolDispatcher {
     /// `tools/list` to each upstream with a per-call timeout. Returns
     /// a dispatcher with the discovered catalog. Servers whose
     /// discovery fails are recorded in `skipped` and excluded from
-    /// the catalog.
+    /// the catalog. Tool execution has its own 30-second request deadline,
+    /// independent of the shorter startup discovery deadline.
     ///
     /// Catalog construction errors that affect the *aggregate* (duplicate
     /// namespaced tool names across servers, schema validation) bubble
@@ -496,7 +497,7 @@ async fn initialize_session(http: &reqwest::Client, url: &str, bearer: Option<&s
     // reply with SSE); `extract_jsonrpc_payload` handles both. If anything is
     // missing we fall back to the version we proposed.
     let protocol_version = match super::response_body::text(resp).await {
-        Ok(body) => extract_jsonrpc_payload(&content_type, &body)
+        Ok(body) => extract_jsonrpc_payload(&content_type, &body, &init_body["id"])
             .ok()
             .and_then(|v| {
                 v.get("result")
@@ -728,11 +729,11 @@ async fn fetch_upstream_tools(
             .and_then(|value| value.to_str().ok())
             .unwrap_or("")
             .to_string();
-        let body = super::response_body::text(resp).await?;
+        let body_text = super::response_body::text(resp).await?;
         if !status.is_success() {
             return Err(format!("tools/list HTTP {}", status.as_u16()));
         }
-        let value = extract_jsonrpc_payload(&content_type, &body)
+        let value = extract_jsonrpc_payload(&content_type, &body_text, &body["id"])
             .map_err(|_| "tools/list response decode failed")?;
         let parsed: ToolsListResponse =
             serde_json::from_value(value).map_err(|_| "tools/list response is invalid")?;
@@ -859,6 +860,8 @@ async fn post_tools_call(
 
     let mut req = http
         .post(&entry.upstream_url)
+        // Discovery's short client timeout must not truncate real tool execution.
+        .timeout(Duration::from_secs(30))
         .header("content-type", "application/json")
         .header("accept", "application/json, text/event-stream")
         .json(&body);
@@ -914,7 +917,7 @@ async fn post_tools_call(
         });
     }
 
-    let json_payload = match extract_jsonrpc_payload(&content_type, &body_text) {
+    let json_payload = match extract_jsonrpc_payload(&content_type, &body_text, &body["id"]) {
         Ok(v) => v,
         Err(e) => {
             return CallAttempt::Fatal(DispatchError::ExecutionFailed {
@@ -1030,7 +1033,17 @@ async fn forward_tools_call(
 /// JSON-RPC response — so on SSE we scan `data:` lines until we find
 /// a JSON-RPC envelope (object with `jsonrpc:"2.0"` AND a matching
 /// `id`) and return it.
-fn extract_jsonrpc_payload(content_type: &str, body: &str) -> Result<serde_json::Value, String> {
+fn extract_jsonrpc_payload(
+    content_type: &str,
+    body: &str,
+    expected_id: &Value,
+) -> Result<Value, String> {
+    let matches_response = |value: &Value| {
+        value.get("jsonrpc").and_then(Value::as_str) == Some("2.0")
+            && value.get("id") == Some(expected_id)
+            && value.get("method").is_none()
+            && (value.get("result").is_some() ^ value.get("error").is_some())
+    };
     let is_sse = content_type
         .split(';')
         .next()
@@ -1038,13 +1051,17 @@ fn extract_jsonrpc_payload(content_type: &str, body: &str) -> Result<serde_json:
         .unwrap_or(false);
 
     if !is_sse {
-        return serde_json::from_str::<serde_json::Value>(body)
-            .map_err(|e| format!("json parse failed: {e}"));
+        let value =
+            serde_json::from_str::<Value>(body).map_err(|e| format!("json parse failed: {e}"))?;
+        return if matches_response(&value) {
+            Ok(value)
+        } else {
+            Err("JSON-RPC response did not match the request".into())
+        };
     }
 
-    // Parse SSE: concatenate consecutive `data:` lines per event,
-    // dispatch on blank line. Stop at the first event whose body
-    // parses as a JSON-RPC response (object with `jsonrpc` field).
+    // Progress notifications and server requests may precede the response.
+    // Concatenate each event's data lines, accepting only our response ID.
     let mut data_buf = String::new();
     let mut last_decode_err: Option<String> = None;
     for line in body.split('\n') {
@@ -1053,7 +1070,7 @@ fn extract_jsonrpc_payload(content_type: &str, body: &str) -> Result<serde_json:
             if !data_buf.is_empty() {
                 match serde_json::from_str::<serde_json::Value>(&data_buf) {
                     Ok(v) => {
-                        if v.get("jsonrpc").is_some() {
+                        if matches_response(&v) {
                             return Ok(v);
                         }
                     }
@@ -1074,7 +1091,7 @@ fn extract_jsonrpc_payload(content_type: &str, body: &str) -> Result<serde_json:
     // Trailing event with no terminating blank line.
     if !data_buf.is_empty()
         && let Ok(v) = serde_json::from_str::<serde_json::Value>(&data_buf)
-        && v.get("jsonrpc").is_some()
+        && matches_response(&v)
     {
         return Ok(v);
     }
@@ -1177,7 +1194,9 @@ mod tests {
         /// If set, the upstream returns this HTTP status for tools/call.
         force_call_http_status: Option<u16>,
         force_call_result: Option<Value>,
+        call_delay: Duration,
         call_sse: bool,
+        call_sse_prefix: String,
         /// Last `Authorization` header value seen by the mock (used by
         /// the bearer-attach test to confirm outbound auth wiring).
         last_auth_header: StdArc<TokioMutex<Option<String>>>,
@@ -1194,13 +1213,14 @@ mod tests {
                      headers: HeaderMap,
                      Json(body): Json<Value>| async move {
                         let sse = state.call_sse && body["method"] == "tools/call";
+                        let prefix = state.call_sse_prefix.clone();
                         let (status, Json(payload)) =
                             mock_handler(State(state), headers, Json(body)).await;
                         if sse {
                             (
                                 status,
                                 [("content-type", "text/event-stream")],
-                                format!("data: {payload}\n\n"),
+                                format!("{prefix}data: {payload}\n\n"),
                             )
                                 .into_response()
                         } else {
@@ -1247,6 +1267,7 @@ mod tests {
             ),
             "tools/call" => {
                 state.call_count.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(state.call_delay).await;
                 if let Some(status) = state.force_call_http_status {
                     return (
                         StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
@@ -1300,6 +1321,105 @@ mod tests {
                 })),
             ),
         }
+    }
+
+    #[test]
+    fn sse_response_skips_notifications_requests_and_other_ids() {
+        let prefix = concat!(
+            ": ping\r\n\r\n",
+            "event: message\r\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\",\"params\":{\"level\":\"info\",\"data\":\"Processing query\"}}\r\n\r\n",
+            "data: {\"jsonrpc\":\"2.0\",\"id\":99,\"result\":{}}\r\n\r\n",
+            "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\r\n\r\n",
+        );
+        for response in [
+            json!({"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"actual answer"}]}}),
+            json!({"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"tool failed"}}),
+        ] {
+            for suffix in ["\r\n\r\n", ""] {
+                let body = format!("{prefix}event: message\r\ndata: {response}{suffix}");
+                assert_eq!(
+                    extract_jsonrpc_payload("text/event-stream; charset=utf-8", &body, &json!(1))
+                        .unwrap(),
+                    response
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn response_matching_rejects_invalid_or_unrelated_envelopes() {
+        for value in [
+            json!({"jsonrpc":"2.0","method":"notifications/message"}),
+            json!({"jsonrpc":"2.0","id":2,"result":{}}),
+            json!({"jsonrpc":"2.0","id":"1","result":{}}),
+            json!({"jsonrpc":"1.0","id":1,"result":{}}),
+            json!({"id":1,"result":{}}),
+            json!({"jsonrpc":"2.0","id":1}),
+            json!({"jsonrpc":"2.0","id":1,"result":{},"error":{}}),
+            json!({"jsonrpc":"2.0","id":1,"method":"ping","result":{}}),
+        ] {
+            for (content_type, body) in [
+                ("application/json", value.to_string()),
+                ("text/event-stream", format!("data: {value}\n\n")),
+                ("text/event-stream", format!("data: {value}")),
+            ] {
+                assert!(extract_jsonrpc_payload(content_type, &body, &json!(1)).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn matching_json_and_multiline_sse_preserve_the_response() {
+        let value = json!({"jsonrpc":"2.0","id":"request-1","result":{"tools":[]}});
+        assert_eq!(
+            extract_jsonrpc_payload("application/json", &value.to_string(), &json!("request-1"))
+                .unwrap(),
+            value
+        );
+        let body = concat!(
+            "data: {\"jsonrpc\":\"2.0\",\n",
+            "data: \"id\":\"request-1\",\"result\":{\"tools\":[]}}\n\n"
+        );
+        assert_eq!(
+            extract_jsonrpc_payload("text/event-stream", body, &json!("request-1")).unwrap(),
+            value
+        );
+    }
+
+    #[tokio::test]
+    async fn forwarded_sse_progress_does_not_hide_the_result_or_replay_the_call() {
+        let expected = json!({"content":[{"type":"text","text":"readiness gates traffic; liveness restarts containers"}],"isError":false});
+        let state = MockState {
+            tools: vec![tool_def("ask_wiki_question", "public documentation")],
+            call_sse: true,
+            call_sse_prefix: concat!(
+                ": ping\n\n",
+                "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\",\"params\":{\"data\":\"Processing query\"}}\n\n",
+                "data: {\"jsonrpc\":\"2.0\",\"id\":99,\"result\":{}}\n\n"
+            ).into(),
+            force_call_result: Some(expected.clone()),
+            ..Default::default()
+        };
+        let calls = state.call_count.clone();
+        let url = mock_upstream(state).await;
+        let registry = registry_with(vec![discovered(
+            "deepwiki",
+            &url,
+            vec!["ask_wiki_question"],
+        )]);
+        let dispatcher = RouterToolDispatcher::discover(registry, Duration::from_secs(5))
+            .await
+            .unwrap();
+        let output = dispatcher
+            .invoke(
+                "deepwiki.ask_wiki_question",
+                &json!({"repoName":"kubernetes/website"}),
+            )
+            .await
+            .expect("progress notification must not be treated as the answer");
+        assert!(!output.is_error);
+        assert_eq!(serde_json::to_value(output).unwrap(), expected);
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "do not replay tools/call");
     }
 
     #[test]
@@ -1372,6 +1492,38 @@ mod tests {
             .collect();
         assert!(names.contains(&"github_mcp.search"));
         assert!(names.contains(&"github_mcp.fetch"));
+    }
+
+    #[tokio::test]
+    async fn tool_execution_does_not_inherit_startup_discovery_timeout() {
+        for call_sse in [false, true] {
+            let state = MockState {
+                tools: vec![tool_def("ask_wiki_question", "public repository question")],
+                call_delay: Duration::from_millis(600),
+                call_sse,
+                ..Default::default()
+            };
+            let calls = state.call_count.clone();
+            let url = mock_upstream(state).await;
+            let registry = registry_with(vec![discovered(
+                "deepwiki",
+                &url,
+                vec!["ask_wiki_question"],
+            )]);
+            let dispatcher = RouterToolDispatcher::discover(registry, Duration::from_millis(200))
+                .await
+                .expect("discover");
+            assert!(dispatcher.skipped().is_empty());
+            let result = dispatcher
+                .invoke(
+                    "deepwiki.ask_wiki_question",
+                    &json!({"repoName": "microsoft/TypeScript", "question": "Setup commands?"}),
+                )
+                .await
+                .expect("tool execution must outlive the shorter discovery deadline");
+            assert!(!result.is_error);
+            assert_eq!(calls.load(Ordering::SeqCst), 1, "no invocation replay");
+        }
     }
 
     #[tokio::test]

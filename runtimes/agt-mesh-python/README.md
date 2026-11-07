@@ -85,6 +85,18 @@ heartbeats, explicit reconnect, error-close recovery, and proxy isolation.
 It runs both client APIs where available; automatic-proxy control tests
 skip on older clients. These tests are not deployed or live-Entra acceptance.
 
+### Registry presence
+
+Every successful relay heartbeat also calls the existing signed registry
+heartbeat endpoint. Relay heartbeats alone do not refresh discovery's
+`last_seen`; without the HTTP refresh, live Python peers age out of fresh-name
+lookup. Both use `heartbeat_interval_seconds` (30 seconds by default).
+The existing relay task owns cancellation and reconnect, so no second client,
+prekey writer, or independent timer is created. Transient registry failures are
+logged and retried on the next heartbeat, without interrupting encrypted message
+delivery. Connection authorization is checked before and after the refresh;
+name freshness, trust, and encryption requirements are unchanged.
+
 ## Wire-protocol compatibility with the TypeScript SDK
 
 Every byte of the X3DH bundle, Double Ratchet header, and relay frame

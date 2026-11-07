@@ -16,13 +16,19 @@ import type { IntakeState } from "../actions";
 type Setter<T> = Dispatch<SetStateAction<T>>;
 
 export interface ReviewProps {
+  canQualify: boolean;
+  qualificationRun: boolean;
+  changeQualification: (checked: boolean) => void;
   formAction: (payload: FormData) => void;
   objective: string;
   tier: number;
   budgetTokens: string;
   launch: boolean;
   blueprint: Blueprint;
+  selectedRepos: string[];
+  changeSelectedRepos: (repos: string[]) => void;
   delegation: MissionDelegation;
+  setDelegation: Setter<MissionDelegation>;
   rationale: string | null;
   proposed: boolean;
   composeSource: string | null;
@@ -57,8 +63,6 @@ export interface ReviewProps {
   mcpNeedsPolicy: boolean;
   skills: string[];
   setSkills: Setter<string[]>;
-  setEgressMode: Setter<"strict" | "learning">;
-  egressMode: "strict" | "learning";
   egress: BlueprintEgress[];
   setEgress: Setter<BlueprintEgress[]>;
   isolation: string;

@@ -3,6 +3,44 @@
 
 import type { Execute } from "./sre-authority.js";
 
+export function sreInferenceFlags(options: { provider?: string; model?: string }, previousValues?: unknown): string[] {
+  const flags: string[] = [];
+  for (const key of ["provider", "model"] as const) {
+    const value = options[key];
+    if (value === undefined) continue;
+    if (!value.trim() || value !== value.trim()) {
+      throw new Error(`SRE --${key} must be nonblank with no surrounding whitespace.`);
+    }
+    if (key === "provider" && !/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(value)) {
+      throw new Error("SRE --provider must be a configured provider tag (letters, digits, hyphens or underscores).");
+    }
+    // JSON scalars keep model names containing commas/braces from becoming
+    // additional Helm assignments or lists, without replacing other SRE values.
+    flags.push("--set-json", `sre.${key}=${JSON.stringify(value)}`);
+  }
+  if (flags.length && previousValues !== undefined) {
+    if (!previousValues || typeof previousValues !== "object" || Array.isArray(previousValues)) {
+      throw new Error("SRE model selection requires valid existing Helm values.");
+    }
+    const sre = "sre" in previousValues ? previousValues.sre : {};
+    if (!sre || typeof sre !== "object" || Array.isArray(sre)) {
+      throw new Error("SRE model selection requires valid existing SRE values.");
+    }
+    const baseline = "modelRouteBaseline" in sre ? sre.modelRouteBaseline : {
+      provider: "provider" in sre ? sre.provider : "",
+      model: "model" in sre ? sre.model : "",
+    };
+    if (!baseline || typeof baseline !== "object" || Array.isArray(baseline)
+        || Object.keys(baseline).length !== 2
+        || !("provider" in baseline) || typeof baseline.provider !== "string"
+        || !("model" in baseline) || typeof baseline.model !== "string") {
+      throw new Error("SRE model selection requires the original provider/model string baseline.");
+    }
+    flags.push("--set-json", `sre.modelRouteBaseline=${JSON.stringify(baseline)}`);
+  }
+  return flags;
+}
+
 export async function sreHelmMajor(execute: Execute): Promise<3 | 4> {
   const { stdout } = await execute("helm", ["version", "--template", "{{.Version}}"], { stdio: "pipe" });
   const match = /^v([34])\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?$/.exec(stdout.trim());

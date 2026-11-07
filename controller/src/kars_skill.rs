@@ -130,7 +130,7 @@ impl KarsSkill {
             name: String,
             description: String,
         }
-        let metadata: Frontmatter = serde_yaml::from_str(&frontmatter.join("\n"))
+        let metadata: Frontmatter = serde_saphyr::from_str(&frontmatter.join("\n"))
             .map_err(|error| format!("SKILL.md frontmatter is invalid YAML: {error}"))?;
         if Some(metadata.name.as_str()) != self.metadata.name.as_deref()
             || metadata.description.trim().is_empty()
@@ -268,7 +268,7 @@ mod tests {
     fn skill_package_helm_fields_match_typed_schema() {
         use kube::CustomResourceExt;
         let generated = serde_json::to_value(KarsSkill::crd()).unwrap();
-        let installed: serde_json::Value = serde_yaml::from_str(include_str!(
+        let installed: serde_json::Value = serde_saphyr::from_str(include_str!(
             "../../deploy/helm/kars/templates/crd-karsskill.yaml"
         ))
         .unwrap();

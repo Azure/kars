@@ -20,11 +20,13 @@ pub mod insights;
 pub mod operator;
 pub mod options;
 mod ownership;
+pub(crate) mod qualification_runs;
 pub mod receipts;
 pub mod retention;
 pub mod review;
 pub mod run;
 pub mod sre_actions;
+mod sre_reports;
 pub mod system;
 pub mod tasks;
 pub mod teams;
@@ -85,6 +87,10 @@ pub fn router(state: AppState) -> Router {
             post(teams::run_team),
         )
         .route(
+            "/api/namespaces/{ns}/teams/{name}/qualification",
+            post(teams::qualify_team),
+        )
+        .route(
             "/api/namespaces/{ns}/teams/{name}/runs/{run}/halt",
             post(teams::halt_team_run),
         )
@@ -95,6 +101,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/namespaces/{ns}/teams/{name}/tasks/{task_id}",
             delete(teams::delete_team_task),
+        )
+        .route(
+            "/api/namespaces/{ns}/teams/{name}/tasks/{task_id}/feedback",
+            axum::routing::patch(teams::amend_team_task_feedback),
         )
         .route(
             "/api/namespaces/{ns}/teams/{name}/tasks/{task_id}/review",
@@ -239,7 +249,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/github/app", get(github::get_app))
         .route(
             "/api/operator/github-app",
-            put(github::put_app).delete(github::delete_app),
+            put(github::put_app)
+                .post(github::register_app)
+                .delete(github::delete_app),
         )
         .route(
             "/api/namespaces/{ns}/github/connection",
@@ -282,6 +294,14 @@ pub fn router(state: AppState) -> Router {
             delete(operator::delete_toolpolicy),
         )
         .route(
+            "/api/operator/component-models",
+            get(operator::get_component_models),
+        )
+        .route(
+            "/api/operator/component-models/{component}",
+            axum::routing::put(operator::set_component_model),
+        )
+        .route(
             "/api/operator/inferencepolicies",
             get(operator::list_inferencepolicies).put(operator::create_inferencepolicy),
         )
@@ -317,6 +337,7 @@ pub fn router(state: AppState) -> Router {
             "/api/operator/orchestrator",
             get(operator::get_orchestrator),
         )
+        .route("/api/operator/sre-report", get(sre_reports::get_report))
         .route(
             "/api/operator/sre-actions",
             get(sre_actions::list_sre_actions),

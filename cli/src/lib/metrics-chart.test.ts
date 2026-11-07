@@ -176,7 +176,9 @@ describe("default metrics prerequisite", () => {
       if (!address || typeof address === "string") throw new Error("Fixture server did not listen");
       const isolatedChart = join(directory, "chart");
       mkdirSync(join(isolatedChart, "templates"), { recursive: true });
-      for (const file of ["Chart.yaml", "values.yaml", "templates/metrics-server.yaml"]) {
+      // Only the metrics template participates in this lookup fixture, not Core subcharts.
+      writeFileSync(join(isolatedChart, "Chart.yaml"), "apiVersion: v2\nname: kars\nversion: 0.1.0\n");
+      for (const file of ["values.yaml", "templates/metrics-server.yaml"]) {
         copyFileSync(join(chart, file), join(isolatedChart, file));
       }
       const kubeconfig = join(directory, "config");

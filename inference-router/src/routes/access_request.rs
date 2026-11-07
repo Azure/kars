@@ -24,16 +24,30 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .merge(super::task_telemetry::routes())
         .route_layer(middleware::from_fn_with_state(state.clone(), agent_auth))
         .layer(tower::limit::ConcurrencyLimitLayer::new(24));
-    let admin = Router::new()
-        .route("/internal/access-requests", get(inspect))
-        .route("/internal/access-requests/reset", post(reset))
-        .route("/internal/access-requests/decision", post(decide))
-        .route_layer(middleware::from_fn_with_state(state, control_auth))
-        .layer(tower::limit::ConcurrencyLimitLayer::new(8));
+    let admin = control_routes(state.clone()).route(
+        "/internal/access-requests/reset",
+        post(reset).layer(middleware::from_fn_with_state(state, control_auth)),
+    );
     agent.merge(admin).layer(DefaultBodyLimit::max(8192))
 }
 
+/// Only queue inspection and decisions are exposed on the private TLS listener.
+/// Assignment resets remain on the existing local service-control surface.
+pub fn control_routes(state: AppState) -> Router<AppState> {
+    Router::new()
+        .route("/internal/access-requests", get(inspect))
+        .route(
+            "/internal/access-requests/decision",
+            post(decide).layer(DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route_layer(middleware::from_fn_with_state(state, control_auth))
+        .layer(tower::limit::ConcurrencyLimitLayer::new(8))
+}
+
 fn bearer(headers: &HeaderMap) -> Option<&str> {
+    if headers.get_all("authorization").iter().count() != 1 {
+        return None;
+    }
     headers
         .get("authorization")
         .and_then(|header| header.to_str().ok())
@@ -222,16 +236,22 @@ struct Decision {
     scope_id: String,
     request_id: String,
     verdict: Status,
+    answer: Option<String>,
+    explanation: Option<String>,
 }
 async fn decide(State(state): State<AppState>, Json(body): Json<Decision>) -> Response {
-    if !matches!(body.verdict, Status::Approved | Status::Denied) {
-        return error(Error::Invalid);
-    }
-    match state
-        .services
-        .requests
-        .transition(&body.scope_id, &body.request_id, body.verdict)
-    {
+    let result = match (body.verdict, body.answer, body.explanation) {
+        (Status::Cancelled, None, Some(explanation)) => state
+            .services
+            .requests
+            .cancel_reviewed_tier(&body.scope_id, &body.request_id, explanation),
+        (verdict @ (Status::Approved | Status::Denied), answer, None) => state
+            .services
+            .requests
+            .decide(&body.scope_id, &body.request_id, verdict, answer),
+        _ => Err(Error::Invalid),
+    };
+    match result {
         Ok(entry) => Json(json!({"request":entry,"enforcement_changed":false})).into_response(),
         Err(err) => error(err),
     }

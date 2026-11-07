@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Prometheus Operator on Azure Linux 3
 
 The operator and config reloader retain the upstream `0.90.1` version used by

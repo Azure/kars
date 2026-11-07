@@ -28,6 +28,16 @@ spec:
       hostPID: false
       hostNetwork: false
       nodeSelector: {kubernetes.io/os: linux}
+      {{- with .Values.nodes }}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchFields:
+                  - key: metadata.name
+                    operator: In
+                    values: {{ . | toJson }}
+      {{- end }}
       tolerations:
         - {operator: Exists, effect: NoSchedule}
         - {operator: Exists, effect: NoExecute}
@@ -64,6 +74,11 @@ spec:
               valueFrom: {fieldRef: {fieldPath: metadata.uid}}
             - {name: GADGET_IMAGE, value: ghcr.io/inspektor-gadget/inspektor-gadget}
             - {name: HOST_ROOT, value: /host}
+            - name: GOMEMLIMIT
+              value: {{ include "witness.gadgetGoMemoryLimit" . | quote }}
+            - name: GOMAXPROCS
+              valueFrom:
+                resourceFieldRef: {containerName: gadget, resource: limits.cpu, divisor: "1"}
           securityContext:
             runAsUser: 0
             readOnlyRootFilesystem: true
@@ -73,20 +88,21 @@ spec:
               drop: ["ALL"]
               add: [SYS_ADMIN, SYSLOG, SYS_PTRACE, SYS_RESOURCE, IPC_LOCK, NET_RAW, NET_ADMIN]
           readinessProbe:
-            exec: {command: ["/bin/gadgettracermanager", "-liveness"]}
+            exec: {command: ["/usr/bin/kars-witness-health"]}
             periodSeconds: 5
-            timeoutSeconds: 2
+            timeoutSeconds: 5
           livenessProbe:
-            exec: {command: ["/bin/gadgettracermanager", "-liveness"]}
+            exec: {command: ["/usr/bin/kars-witness-health"]}
             periodSeconds: 5
-            timeoutSeconds: 2
+            timeoutSeconds: 5
           startupProbe:
-            exec: {command: ["/bin/gadgettracermanager", "-liveness"]}
+            exec: {command: ["/usr/bin/kars-witness-health"]}
             failureThreshold: 24
             periodSeconds: 5
+            timeoutSeconds: 5
           resources:
             requests: {cpu: 100m, memory: 256Mi}
-            limits: {cpu: "1", memory: 1Gi}
+            limits: {cpu: {{ include "witness.gadgetCpuLimit" . | quote }}, memory: 1Gi}
           volumeMounts:
             - {name: bin, mountPath: /host/bin, readOnly: true}
             - {name: usr, mountPath: /host/usr, readOnly: true}

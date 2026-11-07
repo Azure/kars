@@ -62,6 +62,7 @@ pub const ACTION_KINDS: &[&str] = &[
     "toolCall",
     "egress",
     "checkpoint",
+    "clarification",
     "tierRaise",
     "irreversible",
     "custom",
@@ -91,6 +92,10 @@ pub struct KarsApprovalSpec {
 
     /// What needs a human decision.
     pub action: ApprovalAction,
+
+    /// Requester identity, immutable when supplied. Omitted on legacy requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_by: Option<ApprovalActor>,
 
     /// Time-to-live as an ISO-8601 duration (`PT15M`, `PT4H`, `P1D`). An
     /// undecided approval past `requestedAt + ttl` becomes `Expired`. Defaults
@@ -141,6 +146,18 @@ impl Default for ApprovalAction {
     }
 }
 
+/// Identity of the principal requesting an approval.
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalActor {
+    /// Stable subject used by the Bridge's self-approval guard.
+    #[schemars(length(max = 320))]
+    pub subject: String,
+    /// Human-readable requester name.
+    #[schemars(length(max = 320))]
+    pub name: String,
+}
+
 /// A human's decision on an approval.
 #[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -153,6 +170,16 @@ pub struct ApprovalDecision {
     /// verbatim into status and, for granted approvals, into the receipt.
     #[schemars(length(max = 320))]
     pub decider: String,
+
+    /// Stable subject of the deciding principal. Optional for legacy decisions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 320))]
+    pub decider_subject: Option<String>,
+
+    /// Roles recorded at decision time, not a grant of authority to consumers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 64))]
+    pub decider_roles: Vec<String>,
 
     /// Optional justification, surfaced to auditors.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -199,7 +226,7 @@ pub struct KarsApprovalStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bound_task_uid: Option<String>,
 
-    /// Controller snapshot of taskRef/action/ttl, excluding the later decision.
+    /// Controller snapshot of taskRef/action/ttl/requestedBy, excluding the later decision.
     /// Prevents request mutation even on clusters with outdated admission rules.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bound_request: Option<String>,
@@ -307,12 +334,17 @@ fn undecided_outcome(
 
 /// Stable request snapshot for controller-side immutability checks and receipts.
 pub fn request_snapshot(spec: &KarsApprovalSpec) -> String {
-    serde_json::json!({
+    let mut snapshot = serde_json::json!({
         "taskRef": spec.task_ref,
         "action": spec.action,
         "ttl": spec.ttl,
-    })
-    .to_string()
+    });
+    // Preserve the exact legacy snapshot when no requester was recorded. Adding,
+    // removing or changing a requester after binding must still fail closed.
+    if let Some(actor) = &spec.requested_by {
+        snapshot["requestedBy"] = serde_json::json!(actor);
+    }
+    snapshot.to_string()
 }
 
 /// Match immutable request identity and the task's current effective authority.
@@ -370,6 +402,8 @@ mod tests {
         ApprovalDecision {
             verdict: verdict.to_string(),
             decider: "alice@example.com".to_string(),
+            decider_subject: None,
+            decider_roles: vec![],
             reason: None,
         }
     }
@@ -388,6 +422,73 @@ mod tests {
     }
 
     #[test]
+    fn bridge_identity_fields_and_legacy_decisions_roundtrip() {
+        let wire = serde_json::json!({
+            "taskRef": {"name": "task"},
+            "action": {"kind": "egress", "summary": "Reach docs.example.com"},
+            "requestedBy": {"subject": "requester-sub", "name": "Requester"},
+            "decision": {
+                "verdict": "approve", "decider": "Reviewer",
+                "deciderSubject": "reviewer-sub", "deciderRoles": ["operator"],
+                "reason": "Reviewed destination"
+            }
+        });
+        let spec: KarsApprovalSpec = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(spec).unwrap(), wire);
+
+        let legacy = serde_json::json!({
+            "taskRef": {"name": "task"},
+            "action": {"kind": "checkpoint", "summary": "Review"},
+            "decision": {"verdict": "approve", "decider": "Reviewer"}
+        });
+        let spec: KarsApprovalSpec = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(spec.requested_by.is_none());
+        assert_eq!(serde_json::to_value(spec).unwrap(), legacy);
+    }
+
+    #[test]
+    fn snapshot_preserves_legacy_bytes_and_freezes_requester_identity() {
+        let mut spec = KarsApprovalSpec::default();
+        // The legacy serializer used preserve_order, including taskRef before action.
+        let legacy =
+            r#"{"taskRef":{"name":""},"action":{"kind":"custom","summary":""},"ttl":null}"#;
+        assert_eq!(request_snapshot(&spec), legacy);
+        spec.requested_by = Some(ApprovalActor {
+            subject: "requester-sub".into(),
+            name: "Requester".into(),
+        });
+        let bound = request_snapshot(&spec);
+        assert_ne!(bound, legacy);
+        spec.decision = Some(decision("approve"));
+        assert_eq!(request_snapshot(&spec), bound);
+        spec.requested_by.as_mut().unwrap().subject = "replacement-sub".into();
+        assert_ne!(request_snapshot(&spec), bound);
+        spec.requested_by.as_mut().unwrap().subject = "requester-sub".into();
+        spec.requested_by.as_mut().unwrap().name = "Replacement name".into();
+        assert_ne!(request_snapshot(&spec), bound);
+        spec.requested_by = None;
+        assert_ne!(request_snapshot(&spec), bound);
+        assert_eq!(request_snapshot(&spec), legacy);
+    }
+
+    #[test]
+    fn snapshot_preserves_legacy_bytes_with_optional_action_fields() {
+        let spec: KarsApprovalSpec = serde_json::from_value(serde_json::json!({
+            "taskRef": {"name": "task"},
+            "action": {
+                "kind": "tierRaise", "summary": "Review", "detail": "Reason",
+                "requestedTier": 3
+            },
+            "ttl": "PT15M"
+        }))
+        .unwrap();
+        assert_eq!(
+            request_snapshot(&spec),
+            r#"{"taskRef":{"name":"task"},"action":{"kind":"tierRaise","summary":"Review","detail":"Reason","requestedTier":3},"ttl":"PT15M"}"#
+        );
+    }
+
+    #[test]
     fn admission_freezes_request_and_write_once_decision() {
         let crd = serde_json::to_value(crate::crd_validations::kars_approval_crd()).unwrap();
         let spec = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"];
@@ -396,6 +497,7 @@ mod tests {
             "self.taskRef == oldSelf.taskRef",
             "self.action == oldSelf.action",
             "self.ttl == oldSelf.ttl",
+            "(!has(self.requestedBy) && !has(oldSelf.requestedBy)) || (has(self.requestedBy) && has(oldSelf.requestedBy) && self.requestedBy == oldSelf.requestedBy)",
             "self.decision == oldSelf.decision",
         ] {
             assert!(

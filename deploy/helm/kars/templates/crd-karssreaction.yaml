@@ -220,12 +220,38 @@ spec:
                 type: string
               writerCrbName:
                 description: |-
-                  Name of the one-shot ClusterRoleBinding the controller minted
-                  for the writer SA on approval. Cleaned up post-execution.
-                  Persisted in status so the cleanup reconciler can find it
-                  after a controller restart.
+                  Legacy ClusterRoleBinding reference, retained only to detect unresolved
+                  authority from older controllers. New executions never create a CRB.
                 nullable: true
                 type: string
+              execution:
+                description: Durable, single-attempt execution claim. Never cleared or replayed.
+                nullable: true
+                type: object
+                required:
+                - authorityName
+                - cleanupPending
+                - deadline
+                - namespace
+                - namespaceUid
+                - startedAt
+                - targetUid
+                properties:
+                  startedAt:
+                    type: string
+                  deadline:
+                    description: Other controller replicas wait until this deadline before crash cleanup.
+                    type: string
+                  namespace:
+                    type: string
+                  namespaceUid:
+                    type: string
+                  authorityName:
+                    type: string
+                  targetUid:
+                    type: string
+                  cleanupPending:
+                    type: boolean
             type: object
         required:
         - spec

@@ -5,9 +5,11 @@ pub mod account;
 pub mod admission;
 pub mod auth;
 pub mod binding;
+pub mod builtin;
 pub mod calendar;
 pub mod claim;
 pub mod config;
+pub(crate) mod first_install;
 pub mod launch;
 pub mod pod;
 pub mod recovery;
@@ -16,7 +18,9 @@ pub mod service;
 mod status;
 pub mod store;
 pub mod team;
+mod topups;
 pub mod transport;
+mod unbounded;
 
 pub fn start(client: kube::Client) {
     match config::Settings::from_env() {

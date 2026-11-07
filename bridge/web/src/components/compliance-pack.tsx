@@ -3,21 +3,6 @@
 
 "use client";
 
-// kars Bridge — compliance evidence pack. The mission's signed Governance
-// Receipt expressed in the auditor's frameworks: each receipt claim is mapped to
-// EU AI Act articles and NIST AI RMF functions, backed by the signed envelope
-// digest + transparency-log inclusion. No competitor ships this from first-party
-// audit data. Status is inherited verbatim from the signed claim — a PARTIAL
-// control is never rendered as satisfied.
-//
-// `advisory` controls (the `regulatory` claim class) are a NAMED V0 product
-// limitation — an external transparency anchor is a V1 roadmap item, so this
-// claim reads PARTIAL on every receipt kars issues today, not a gap specific
-// to this mission. Mirrors the same distinction AuditReceiptRow already makes
-// when computing its "Verified" verdict (`isAdvisoryClaim`) — without this,
-// the pack's own satisfied/partial count contradicted the receipt row sitting
-// right above it.
-
 import { Icon } from "@/components/icon";
 import type { CompliancePack } from "@/lib/types";
 
@@ -32,10 +17,11 @@ export function CompliancePackView({ pack }: { pack: CompliancePack }) {
   const coreControls = pack.controls.filter((c) => !c.advisory);
   const advisoryControls = pack.controls.filter((c) => c.advisory);
   const frameworks = [...new Set(coreControls.map((c) => c.framework))];
-  const advisoryCount = pack.advisory ?? advisoryControls.length;
+  const passingCount = coreControls.filter((c) => c.status.toUpperCase() === "PASS").length;
+  const interpretation = "These mappings describe recorded claims, not control-enforcement proof or regulatory certification. Opening or downloading this pack does not run receipt verification. The legacy satisfied count counts mapped PASS claims, not satisfied obligations. Legacy aggregate fields are preserved unchanged; inspect controls for each recorded status. Multiple mappings may share one claim. Signature and inclusion metadata are recorded pointers, not verification results; a cluster-published key is not an independent trust anchor. Advisory statuses remain evidence limitations, not verified compliance.";
 
   function download() {
-    const blob = new Blob([JSON.stringify(pack, null, 2)], { type: "application/json" });
+    const blob = new Blob([JSON.stringify({ ...pack, interpretation }, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -53,8 +39,9 @@ export function CompliancePackView({ pack }: { pack: CompliancePack }) {
         <div>
           <h2 className="text-sm font-semibold">Compliance evidence pack</h2>
           <p className="mt-0.5 text-xs text-foreground-muted">
-            This mission&apos;s signed receipt mapped to EU AI Act &amp; NIST AI RMF controls —
-            first-party audit evidence, generated from the attestation, not a self-assessment.
+            Recorded receipt claims mapped to EU AI Act &amp; NIST AI RMF references —
+            not control-enforcement proof or regulatory certification. Opening or downloading
+            this pack does not run receipt verification.
           </p>
         </div>
         <button
@@ -68,14 +55,14 @@ export function CompliancePackView({ pack }: { pack: CompliancePack }) {
       </div>
 
       <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
-        <span className="rounded-full border border-ok/40 bg-ok/10 px-2 py-0.5 text-ok">{pack.satisfied} satisfied</span>
-        <span className="rounded-full border border-warning/40 bg-warning/10 px-2 py-0.5 text-warning">{pack.partial} partial</span>
-        {advisoryCount > 0 && (
+        <span className="rounded-full border border-ok/40 bg-ok/10 px-2 py-0.5 text-ok">{passingCount} mapped passing claims</span>
+        <span className="rounded-full border border-warning/40 bg-warning/10 px-2 py-0.5 text-warning">{coreControls.length - passingCount} other mapped claims</span>
+        {advisoryControls.length > 0 && (
           <span
             className="rounded-full border border-border bg-surface-muted px-2 py-0.5 text-foreground-muted"
-            title="Named V0 product limitation, not a gap in this mission — see below"
+            title="Advisory claims are shown separately, with their recorded status"
           >
-            {advisoryCount} roadmap (V1)
+            {advisoryControls.length} advisory mappings
           </span>
         )}
         <span className="text-foreground-muted">across {frameworks.join(" · ")}</span>
@@ -91,7 +78,7 @@ export function CompliancePackView({ pack }: { pack: CompliancePack }) {
                 .map((c) => (
                   <li key={c.control_id} className="flex items-start gap-3 bg-surface px-3 py-2.5">
                     <span className={`mt-0.5 shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${statusTone(c.status)}`}>
-                      {c.status.toUpperCase()}
+                      Claim {c.status.toUpperCase()}
                     </span>
                     <div className="min-w-0">
                       <p className="text-sm font-medium">{c.reference}</p>
@@ -106,24 +93,21 @@ export function CompliancePackView({ pack }: { pack: CompliancePack }) {
         ))}
       </div>
 
-      {/* Advisory (roadmap) controls — separated so they never blend into the
-          "real gap" partial count above. Same claim, same framing the receipt
-          row's own verdict already applies; the pack now agrees with it. */}
       {advisoryControls.length > 0 && (
         <div className="mt-4">
           <p className="flex items-center gap-1.5 text-xs font-semibold text-foreground-muted">
-            <Icon name="compass" size={13} /> Roadmap — not yet available in this product version
+            <Icon name="compass" size={13} /> Advisory claims and evidence limitations
           </p>
           <p className="mt-0.5 text-[11px] text-foreground-muted">
-            These controls read PARTIAL on every receipt kars issues today — an external
-            transparency anchor is a named V1 item, not a gap in this specific mission. They never
-            block the mission&apos;s own &ldquo;Verified&rdquo; verdict.
+            Advisory claims are separate from the required receipt claims. Missing or omitted
+            evidence remains a limitation even when cryptographic checks pass. Inspect the
+            recorded status and supporting evidence; advisory does not mean satisfied.
           </p>
           <ul className="mt-1.5 divide-y divide-border overflow-hidden rounded-lg border border-dashed border-border">
             {advisoryControls.map((c) => (
               <li key={c.control_id} className="flex items-start gap-3 bg-surface-muted/30 px-3 py-2.5">
                 <span className="mt-0.5 shrink-0 rounded-full border border-border bg-surface px-2 py-0.5 text-[10px] font-semibold text-foreground-muted">
-                  ROADMAP
+                  Claim {c.status.toUpperCase()}
                 </span>
                 <div className="min-w-0">
                   <p className="text-sm font-medium text-foreground-muted">{c.reference}</p>
@@ -139,12 +123,14 @@ export function CompliancePackView({ pack }: { pack: CompliancePack }) {
 
       <div className="mt-4 rounded-lg border border-border bg-surface-muted/40 p-3 text-[11px] text-foreground-muted">
         <p>
-          Backed by envelope digest <span className="font-mono">{pack.envelope_digest.slice(0, 24)}…</span>,
-          signature <span className="font-mono">{pack.signature_scheme}</span>
-          {pack.inclusion_seq != null && <> , transparency-log entry #{pack.inclusion_seq}</>}.
+          Recorded envelope digest <span className="font-mono">{pack.envelope_digest.slice(0, 24)}…</span>,
+          signature scheme <span className="font-mono">{pack.signature_scheme}</span>
+          {pack.inclusion_seq != null && <> , inclusion-log entry #{pack.inclusion_seq}</>}.
+          These pointers are not verification results. Multiple mappings may share one claim.
         </p>
         <p className="mt-1">
-          Verify independently: <span className="font-mono">{pack.verify_command}</span>
+          Re-check the receipt: <span className="font-mono">{pack.verify_command}</span>.
+          A cluster-published key is not an independent trust anchor.
         </p>
       </div>
     </section>

@@ -210,7 +210,7 @@ pub struct PolicyRefs {
     pub tool_policy: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct A2AAgentStatus {
     /// Lifecycle phase: `Pending` | `Ready` | `Degraded` | `Unknown`.
@@ -243,7 +243,8 @@ pub struct A2AAgentStatus {
     #[serde(default)]
     pub version_hash: Option<String>,
 
-    /// RFC-3339 timestamp of the last successful compile.
+    /// RFC-3339 timestamp of the last changed compilation result published to status.
+    /// Unchanged periodic verification preserves this timestamp.
     #[serde(default)]
     pub last_compiled_at: Option<String>,
 }

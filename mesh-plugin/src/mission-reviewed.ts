@@ -6,7 +6,7 @@ import { isDeepStrictEqual } from "node:util";
 import type { KubernetesJson } from "./kubernetes-json.js";
 import { missionContract, missionRequiredOutputs, parseMissionContract, sameMissionContract, type MissionContract } from "./mission-protocol.js";
 import { filesystemPhase, type FilesystemPhase } from "./mission-phase.js";
-import { missionInputReferences, missionInputs, type MissionInput, type MissionInputReference } from "./mission-inputs.js";
+import { MAX_MISSION_RETAINED_INPUT_BYTES, missionInputReferences, missionInputs, type MissionInput, type MissionInputReference } from "./mission-inputs.js";
 import type { MissionMetadata } from "./mission-workload.js";
 import { missionRuntime } from "./mission-runtime.js";
 
@@ -19,9 +19,9 @@ export interface ReviewedTask {
   status?: { phase?: string; envelopeDigest?: string; observedGeneration?: number; conditions?: Array<{type: string; status: string}> };
 }
 interface Role { name: string; objective: string; dependsOn?: string[]; budgetTokens?: number; phases: FilesystemPhase[] }
-interface Plan { schema: string; roles: Role[]; maxParallel: number; synthesis: { objective: string; capabilities: string[]; maxToolCalls: number }; deliverables?: Array<{name: string; mediaType?: string}> }
+interface Plan { schema: string; roles: Role[]; maxParallel: number; synthesis: { objective: string; capabilities: string[]; maxToolCalls: number; executionMode?: "native" }; deliverables?: Array<{name: string; mediaType?: string}> }
 interface Reservation { name: string; uid: string; spec: ReviewedTask["spec"] }
-interface State { schema: string; rootName: string; rootUid: string; admission: unknown; planDigest: string; plan: Plan; teamRoles?: string; teamMemory?: string; children: Record<string, Reservation> }
+interface State { schema: string; rootName: string; rootUid: string; admission: unknown; planDigest: string; plan: Plan; teamRoles?: string; teamMemory?: string; teamRevision?: string; children: Record<string, Reservation> }
 interface TeamRoleAuthority { blueprint: ReviewedTask["spec"]["blueprint"] | null; envelope: NonNullable<ReviewedTask["spec"]["envelope"]> }
 interface Map { metadata: MissionMetadata; data?: Record<string,string> }
 const prefix = "kars.azure.com/";
@@ -31,6 +31,7 @@ const slotKey = `${prefix}reviewed-slot`;
 const runKey = `${prefix}run-requested`;
 const teamRolesKey = `${prefix}reviewed-team-roles`;
 const teamMemoryKey = `${prefix}reviewed-team-memory`;
+const teamRevisionKey = `${prefix}reviewed-team-revision`;
 const hash = (text: string): string => `sha256:${createHash("sha256").update(text).digest("hex")}`;
 const sorted = (v: unknown): unknown => Array.isArray(v) ? v.map(sorted) : v && typeof v === "object"
   ? Object.fromEntries(Object.entries(v).sort(([a],[b]) => a < b ? -1 : a > b ? 1 : 0).map(([k,v]) => [k,sorted(v)])) : v;
@@ -70,8 +71,9 @@ function currentReady(task: ReviewedTask): void {
 function normalizePlan(input: unknown): Plan {
   const p = structuredClone(input) as Plan;
   shape(p,["schema","roles","maxParallel","synthesis","deliverables"]);
-  requireFact(p.schema === "kars.execution-plan/v1" && Array.isArray(p.roles) && p.roles.length >= 1 && p.roles.length <= 8
-    && Number.isSafeInteger(p.maxParallel) && p.maxParallel >= 1 && p.maxParallel <= p.roles.length, "unsupported plan");
+  requireFact(p.schema === "kars.execution-plan/v1" && Array.isArray(p.roles) && p.roles.length <= 8
+    && (p.roles.length > 0 || p.synthesis?.executionMode === "native")
+    && Number.isSafeInteger(p.maxParallel) && p.maxParallel >= 1 && p.maxParallel <= Math.max(1,p.roles.length), "unsupported plan");
   for (const r of p.roles) {
     shape(r,["name","objective","dependsOn","budgetTokens","phases"]);
     requireFact(typeof r.name === "string" && /^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/.test(r.name)
@@ -86,13 +88,16 @@ function normalizePlan(input: unknown): Plan {
     requireFact(Array.isArray(r.dependsOn) && r.dependsOn.length <= p.roles.length && new Set(r.dependsOn).size === r.dependsOn.length
       && r.dependsOn.every(name => names.has(name) && name !== r.name), "invalid dependency");
     const phases = new Set<string>();
-    for (const phase of r.phases) {
+    for (const [index, phase] of r.phases.entries()) {
       const normalized = filesystemPhase(phase);
-      requireFact(normalized.freshContext && normalized.maxToolCalls > 0 && normalized.capabilities.length === 2 && !phases.has(normalized.name), "unsupported phase");
+      const needsRead = normalized.executionMode !== "native" || index > 0 || r.dependsOn.length > 0;
+      requireFact(normalized.freshContext && normalized.maxToolCalls > 0
+        && (!needsRead || normalized.capabilities.includes("filesystem-read"))
+        && normalized.capabilities.includes("filesystem-write") && !phases.has(normalized.name), "unsupported phase");
       phases.add(normalized.name);
       // Rust omits empty requiredToolCalls; canonical wire phases always include them.
       phase.minToolCalls ??= 0;
-      delete (phase as Partial<FilesystemPhase>).requiredToolCalls;
+      if (!normalized.requiredToolCalls.length) delete (phase as Partial<FilesystemPhase>).requiredToolCalls;
     }
   }
   const done = new Set<string>();
@@ -101,14 +106,18 @@ function normalizePlan(input: unknown): Plan {
     requireFact(next.length > 0, "cyclic dependencies");
     next.forEach(r => done.add(r.name));
   }
-  shape(p.synthesis,["objective","capabilities","maxToolCalls"]);
+  shape(p.synthesis,["objective","capabilities","maxToolCalls","executionMode"]);
   const synthesis = filesystemPhase({name:"synthesis",...p.synthesis,minToolCalls:0,freshContext:true});
-  requireFact(synthesis.capabilities.length === 2 && synthesis.maxToolCalls > 0, "unsupported synthesis");
+  const synthesisFiles = synthesis.capabilities.filter(capability => !(synthesis.executionMode === "native" && capability === "memory"));
+  requireFact(synthesis.maxToolCalls > 0 && (p.roles.length === 0
+    ? synthesis.executionMode === "native" && (!(p.deliverables?.length) || synthesis.capabilities.includes("filesystem-write"))
+    : synthesisFiles.length === 2 && synthesisFiles.includes("filesystem-read")
+      && synthesisFiles.includes("filesystem-write")), "unsupported synthesis");
   if (p.deliverables === undefined) p.deliverables = [];
   requireFact(Array.isArray(p.deliverables) && p.deliverables.length <= 16, "invalid deliverables");
   for (const d of p.deliverables) {
     shape(d,["name","mediaType"]);
-    requireFact(d.mediaType === undefined || ["text/plain","text/markdown","application/json"].includes(d.mediaType), "unsupported output media type");
+    requireFact(d.mediaType === undefined || ["text/plain","text/markdown","text/csv","application/json"].includes(d.mediaType), "unsupported output media type");
   }
   missionRequiredOutputs(p.deliverables.map(d => d.name));
   return p;
@@ -166,7 +175,7 @@ export async function reviewedMission(api: KubernetesJson, task: ReviewedTask, s
   currentReady(task); currentReady(root);
   requireFact(root.metadata.namespace === ns && root.metadata.name === rootName && root.spec.execution?.launch === true, "root is not current and Ready");
   requireFact(missionRuntime(root.spec) !== null
-    && (root.spec.envelope?.delegationDepth ?? 0) >= 2 && root.spec.envelope?.budget?.scope === "GovernedInference", "unsupported runtime or budget lineage");
+    && root.spec.envelope?.budget?.scope === "GovernedInference", "unsupported runtime or budget lineage");
   const pin = boundedJson(root.metadata.annotations?.[pinKey],1024) as {name:string; uid:string};
   shape(pin,["name","uid"]);
   requireFact(pin?.name && pin.uid && authority.rootName === rootName && authority.rootUid === root.metadata.uid
@@ -174,15 +183,72 @@ export async function reviewedMission(api: KubernetesJson, task: ReviewedTask, s
   const map = await api.request<Map>("GET",mapPath(ns,pin.name)); reads.push([mapPath(ns,pin.name),map]); owned(map,root);
   requireFact(map.metadata.uid === pin.uid, "reserved state replaced");
   const state = boundedJson(map.data?.["state.json"],900*1024) as State;
-  shape(state,["schema","rootName","rootUid","admission","planDigest","plan","teamRoles","teamMemory","children"]);
+  shape(state,["schema","rootName","rootUid","admission","planDigest","plan","teamRoles","teamMemory","teamRevision","children"]);
   const plan = normalizePlan(root.spec.blueprint?.executionPlan);
+  requireFact(Number.isSafeInteger(root.spec.envelope?.delegationDepth)
+    && root.spec.envelope!.delegationDepth! >= (plan.roles.length === 0 ? 0 : 2), "unsupported delegation depth");
   const teamRoles = teamRoleAuthorities(root,state,plan);
   const memoryRaw = root.metadata.annotations?.[teamMemoryKey];
   requireFact(state.teamMemory === memoryRaw, "sealed Team memory binding changed");
-  const memory = memoryRaw === undefined ? [] : missionInputs(boundedJson(memoryRaw,32*1024));
+  const memory = memoryRaw === undefined ? [] : missionInputs(boundedJson(memoryRaw,MAX_MISSION_RETAINED_INPUT_BYTES));
   requireFact(memoryRaw === undefined || (teamRoles !== undefined && memory.length <= 8
     && memory.every(input => input.name.startsWith("memory-") && input.source.namespace === ns)),
     "retained memory lacks admitted Team custody");
+  const revisionRaw = root.metadata.annotations?.[teamRevisionKey];
+  requireFact(state.teamRevision === revisionRaw, "sealed Team revision binding changed");
+  const revisionValue = revisionRaw === undefined ? undefined : boundedJson(revisionRaw,MAX_MISSION_RETAINED_INPUT_BYTES);
+  let revision: readonly MissionInput[] = [];
+  let referencedRevision: readonly MissionInputReference[] = [];
+  let diagnosticRoles: Array<{name: string; phases: string[]}> = [];
+  if (revisionValue !== undefined) {
+    requireFact(teamRoles !== undefined, "retained revision lacks admitted Team custody");
+    let ordered: MissionInputReference[];
+    if (Array.isArray(revisionValue)) {
+      requireFact(revisionValue.length <= 16, "excessive inline revision documents");
+      revision = missionInputs(revisionValue);
+      ordered = revisionValue.map(({content: _content,...reference}) => reference);
+    } else {
+      shape(revisionValue,["schema","inputs","diagnosticRoles"]);
+      const manifest = revisionValue as {schema: string; inputs: MissionInputReference[]; diagnosticRoles?: typeof diagnosticRoles};
+      requireFact(manifest.schema === "kars.team-revision-inputs/v1", "unknown revision manifest schema");
+      referencedRevision = missionInputReferences(manifest.inputs);
+      ordered = manifest.inputs;
+      const roles = manifest.diagnosticRoles === undefined ? [] : manifest.diagnosticRoles;
+      requireFact(Array.isArray(roles) && roles.length <= 8, "excessive diagnostic role routing");
+      const validName = (value: unknown): value is string => typeof value === "string" && value.length > 0 && Buffer.byteLength(value) <= 128;
+      for (const role of roles) {
+        shape(role,["name","phases"]);
+        requireFact(validName(role.name) && Array.isArray(role.phases) && role.phases.length > 0 && role.phases.length <= 8
+          && role.phases.every(validName) && new Set(role.phases).size === role.phases.length, "invalid diagnostic role routing");
+      }
+      requireFact(new Set(roles.map(role => role.name)).size === roles.length, "duplicate diagnostic role routing");
+      diagnosticRoles = roles;
+    }
+    const producers = new Map<string,unknown>();
+    let diagnosticsStarted = false;
+    ordered.forEach((input,index) => {
+      let group = "delivery";
+      if (input.name.startsWith("revision-unaccepted-")) {
+        diagnosticsStarted = true;
+        const alias = /^revision-unaccepted-(r(0|[1-9][0-9]*)-p(0|[1-9][0-9]*))(?:\.md|--[a-zA-Z0-9._-]+)$/.exec(input.name);
+        requireFact(alias !== null, "invalid diagnostic revision alias");
+        group = alias![1];
+        if (diagnosticRoles.length) {
+          const r = Number(alias![2]), p = Number(alias![3]);
+          requireFact(Number.isSafeInteger(r) && Number.isSafeInteger(p)
+            && diagnosticRoles[r]?.phases.length === p + 1, "diagnostic routing is not a retained final phase");
+        }
+      } else {
+        requireFact(!diagnosticsStarted && input.name === `revision-${index}`, "invalid rejected-delivery revision alias");
+      }
+      const {artifactName,...source} = input.source;
+      if (!producers.has(group)) producers.set(group,source);
+      requireFact(source.namespace === ns && same(source,producers.get(group))
+        && !["response.md","kars-router-observations.json"].includes(artifactName),
+        "retained revision lacks matching producer provenance");
+    });
+  }
+  const base = [...memory,...revision];
   const cap = root.spec.envelope?.budget?.tokens;
   requireFact(cap === undefined || (Number.isSafeInteger(cap) && cap >= 0), "invalid root token cap");
   requireFact(!cap || plan.roles.every(role => role.budgetTokens === undefined || role.budgetTokens <= cap), "role budget exceeds root cap");
@@ -192,7 +258,7 @@ export async function reviewedMission(api: KubernetesJson, task: ReviewedTask, s
   const content = objective(root,nonce);
   const admission = {version:1,state:"run",taskGeneration:root.metadata.generation,authorizationDigest:root.status?.envelopeDigest,runNonce:nonce,objectiveDigest:content && hash(content)};
   const expectedStateName = `kars-reviewed-${hash(JSON.stringify([root.metadata.uid,admission.taskGeneration,admission.authorizationDigest,nonce,admission.objectiveDigest])).slice(7,47)}`;
-  requireFact(content && state?.schema === "kars.reviewed-run/v1" && state.rootName === rootName && state.rootUid === root.metadata.uid
+  requireFact(content && ["kars.reviewed-run/v1", "kars.reviewed-run/v2"].includes(state?.schema) && state.rootName === rootName && state.rootUid === root.metadata.uid
     && same(state.admission,admission) && same(state.plan,plan) && state.planDigest === hash(JSON.stringify(sorted(plan)))
     && pin.name === expectedStateName, "review/run/plan binding changed");
   const checkChild = async (r: number,p?: number): Promise<ReviewedTask> => {
@@ -250,7 +316,6 @@ export async function reviewedMission(api: KubernetesJson, task: ReviewedTask, s
   if (task.metadata.name === rootName) {
     requireFact(authority.slot === "synthesis", "root may only synthesize");
     phase = filesystemPhase({name:"synthesis",...plan.synthesis,minToolCalls:0,freshContext:true,requiredToolCalls:[]});
-    requireFact(phase.capabilities.length === 2 && phase.maxToolCalls > 0, "unsupported synthesis");
     required = plan.deliverables!.map(d => d.name);
     sources = plan.roles.map((r,i) => [i,r.phases.length-1]);
   } else {
@@ -261,27 +326,70 @@ export async function reviewedMission(api: KubernetesJson, task: ReviewedTask, s
     const [r,p] = coordinates!;
     const actual = await checkChild(r,p);
     if (!same(actual,task)) throw new ReviewedSnapshotChangedError("Reviewed execution: phase changed during admission");
-    phase = filesystemPhase({...plan.roles[r].phases[p],requiredToolCalls:[]}); required = ["handoff.md"];
+    phase = filesystemPhase(plan.roles[r].phases[p]); required = ["handoff.md"];
     sources = p > 0 ? [[r,p-1]] : plan.roles[r].dependsOn!.map(name => {
       const i = plan.roles.findIndex(r => r.name === name); return [i,plan.roles[i].phases.length-1];
     });
   }
   const refs = (g.inputs as unknown[]).length ? missionInputReferences(g.inputs) : [];
-  const memoryRefs = memory.map(({content: _content,...reference}) => reference);
-  requireFact(refs.length === sources.length + memory.length
-    && same(refs.filter(input => input.name.startsWith("memory-")),memoryRefs),
-    "dependency or memory input set differs from the sealed run");
+  const baseInput = (input: MissionInputReference): boolean => input.name.startsWith("memory-") || input.name.startsWith("revision-");
+  const peerRefs = refs.filter(input => !baseInput(input));
+  const selectedRevision = referencedRevision.filter(historical => {
+    const coordinates = /^revision-unaccepted-r([0-9]+)-p([0-9]+)(?:\.md|--)/.exec(historical.name);
+    if (!coordinates || !diagnosticRoles.length) return true;
+    const role = diagnosticRoles[Number(coordinates[1])];
+    const phase = role.phases[Number(coordinates[2])];
+    return !peerRefs.some(peer => {
+      const current = /^r([0-9]+)-p([0-9]+)(?:\.md|--)/.exec(peer.name);
+      if (!current) return false;
+      const currentRole = plan.roles[Number(current[1])];
+      return currentRole?.name === role.name && currentRole.phases[Number(current[2])]?.name === phase
+        && peer.source.artifactName === historical.source.artifactName;
+    });
+  });
+  const baseRefs = base.length + selectedRevision.length
+    ? missionInputReferences([...base.map(({content: _content,...reference}) => reference),...selectedRevision]) : [];
+  requireFact(refs.length >= sources.length + baseRefs.length
+    && same(refs.filter(baseInput),baseRefs),
+    "dependency, memory or revision input set differs from the sealed run");
+  const selected = new Set<string>();
   for (const [r,p] of sources) {
     const child = await checkChild(r,p);
-    const ref = refs.find(i => i.name === `r${r}-p${p}.md`) as MissionInputReference | undefined;
+    const ref = peerRefs.find(i => i.name === `r${r}-p${p}.md`) as MissionInputReference | undefined;
     requireFact(ref && ref.source.namespace === ns && ref.source.taskName === child.metadata.name && ref.source.taskUid === child.metadata.uid
       && ref.source.runNonce === child.metadata.annotations?.[runKey] && ref.source.artifactName === "handoff.md"
       && child.metadata.annotations?.[`${prefix}run-completed`] === ref.source.runNonce, "input is not the reviewed successful dependency");
+    const documents = peerRefs.filter(input => input.source.taskUid === child.metadata.uid)
+      .sort((a,b) => a.source.artifactName < b.source.artifactName ? -1 : a.source.artifactName > b.source.artifactName ? 1 : 0);
+    requireFact(documents.length <= 16
+      && new Set(documents.map(input => input.source.artifactName)).size === documents.length,
+      "duplicate or excessive dependency documents");
+    for (const [index, document] of documents.entries()) {
+      const {artifactName, ...source} = document.source;
+      const {artifactName: _handoff, ...expectedSource} = ref!.source;
+      const alias = artifactName === "handoff.md" ? `r${r}-p${p}.md` : `r${r}-p${p}--${index}-${artifactName}`.slice(0,128);
+      requireFact(same(source,expectedSource) && document.name === alias
+        && !["response.md","kars-router-observations.json"].includes(artifactName),
+        "dependency document source or alias differs from the reviewed handoff");
+      selected.add(document.name);
+    }
   }
-  const peerRefs = refs.filter(input => !input.name.startsWith("memory-"));
+  requireFact(selected.size === peerRefs.length, "input is outside the reviewed dependencies");
+  // Validate the complete retained history even when current dependency exports
+  // supersede mounted diagnostics. Each read remains within the existing bound.
+  const history = referencedRevision.length ? missionInputs(await readInputs(referencedRevision)) : [];
+  requireFact(same(history.map(({content: _content,...reference}) => reference),referencedRevision),
+    "complete historical custody differs from the sealed revision");
   const peers = peerRefs.length ? await readInputs(peerRefs) : [];
-  const retained = refs.length ? missionInputs([...memory,...peers]) : undefined;
-  const contract = missionContract(phase,retained,required);
+  const selectedNames = new Set(selectedRevision.map(input => input.name));
+  const retained = refs.length ? missionInputs([...base,...history.filter(input => selectedNames.has(input.name)),...peers]) : undefined;
+  const peerContext = state.schema === "kars.reviewed-run/v2" ? {
+    rootUid: state.rootUid, stateName: pin.name, slot: authority.slot,
+    peers: plan.roles.flatMap((role, r) => role.phases.map((phase, p) => ({
+      role: role.name, phase: phase.name, slot: slot(r, p), agentName: `rp-${pin.name.slice(14, 34)}-${slot(r, p)}`,
+    }))),
+  } : undefined;
+  const contract = missionContract(phase,retained,required,peerContext);
   const installed = parseMissionContract(g.contract);
   requireFact(installed && sameMissionContract(installed,contract), "installed phase/input/output requirements differ");
   for (const [path,prior] of reads.reverse()) {

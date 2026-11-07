@@ -158,6 +158,8 @@ jobs:
             --file .native/core/controller/Dockerfile --tag kars-native-controller:latest .native/core
           docker build --build-arg TARGETARCH=amd64 \
             --file .native/core/inference-router/Dockerfile --tag kars-native-router:latest .native/core
+          docker build --file .native/core/sandbox-images/metrics-server/Dockerfile \
+            --tag kars-native-metrics-server:latest .native/core
           docker build --file .native/core/tests/e2e/Dockerfile.sandbox-stub \
             --tag kars-native-runtime-base:latest .native/core/tests/e2e
           docker build --file tests/native-credentials/Dockerfile.runtime \
@@ -188,10 +190,23 @@ jobs:
           kubectl rollout status daemonset/cilium -n kube-system --timeout=180s
           kubectl wait --for=condition=Ready nodes --all --timeout=180s
           kind load docker-image --name bridge-native kars-native-controller:latest \
-            kars-native-router:latest kars-native-runtime:latest kars-native-bff:latest kars-native-probe:latest
+            kars-native-router:latest kars-native-runtime:latest kars-native-bff:latest kars-native-probe:latest \
+            kars-native-metrics-server:latest
       - name: Exercise normal BFF entrypoints and native controller authority
+        id: native_runtime
         timeout-minutes: 35
         run: python3 tests/native-credentials/run.py
+      - name: Exercise Team projection on the same native debug profile and default worker stack
+        if: ${{ !cancelled() && (steps.native_runtime.outcome == 'success' || steps.native_runtime.outcome == 'failure') }}
+        run: |
+          cargo test --manifest-path .native/core/Cargo.toml --locked \
+            -p kars-controller --bin kars-controller \
+            kars_task_reconciler::rebind::tests::credential_rebind_full_reconcile_preserves_authority_before_resume \
+            -- --exact --nocapture
+          cargo test --manifest-path .native/core/Cargo.toml --locked \
+            -p kars-controller --bin kars-controller \
+            private_activation::late_scope::tests::runtime_control_material_receipts_preserve_rotation_and_resume_fences \
+            -- --exact --nocapture
       - name: Retain only bounded secret-free native outcomes
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4

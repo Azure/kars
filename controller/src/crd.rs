@@ -1559,7 +1559,7 @@ hermes:
   extraEnv:
     MY_KEY: "my-value"
 "#;
-        let spec: RuntimeSpec = serde_yaml::from_str(yaml).expect("parses");
+        let spec: RuntimeSpec = serde_saphyr::from_str(yaml).expect("parses");
         assert_eq!(spec.kind, RuntimeKind::Hermes);
         let h = spec.hermes.clone().expect("hermes block present");
         assert_eq!(h.version.as_deref(), Some("0.5.1"));

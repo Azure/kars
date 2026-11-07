@@ -14,10 +14,9 @@
 //!    sandbox reconciler then spawns the real pod + OpenClaw agent through the
 //!    secure inference router.
 //!
-//! **Honest limitation:** the sandbox needs a real AI Foundry inference
-//! endpoint to perform inference. On a local kind cluster with no endpoint the
-//! sandbox materializes but degrades at the inference step — the controller
-//! surfaces that verbatim in `status.executionDetail` rather than hiding it.
+//! Sandbox failures are projected from current controller conditions into
+//! `status.executionDetail`. Missing diagnostics stay unknown; neither the
+//! cluster type nor a degraded phase establishes an inference-provider fault.
 
 use kube::api::{Api, DeleteParams, DynamicObject, ObjectMeta, PostParams, Preconditions};
 use kube::core::ApiResource;
@@ -272,14 +271,7 @@ pub async fn materialize(
                     detail:"Credential runtime remains held until current authorization and attestation are durable".into(),
                 });
             }
-            let sb_phase = sb
-                .data
-                .get("status")
-                .and_then(|s| s.get("phase"))
-                .and_then(|p| p.as_str())
-                .unwrap_or("")
-                .to_string();
-            map_sandbox_phase(&sb_phase)
+            map_sandbox_phase(&sb)
         }
         None => (
             "Launching".to_string(),
@@ -520,7 +512,9 @@ fn governance_spec(blueprint: &TaskBlueprint, envelope: &TaskEnvelope) -> serde_
 }
 
 /// Map a `KarsSandbox` phase to the task's execution phase + honest detail.
-fn map_sandbox_phase(sb_phase: &str) -> (String, String) {
+fn map_sandbox_phase(sandbox: &DynamicObject) -> (String, String) {
+    let status = &sandbox.data["status"];
+    let sb_phase = status["phase"].as_str().unwrap_or("");
     match sb_phase {
         "Running" => (
             "Running".to_string(),
@@ -528,9 +522,9 @@ fn map_sandbox_phase(sb_phase: &str) -> (String, String) {
         ),
         "Failed" | "Degraded" => (
             "Degraded".to_string(),
-            "Sandbox degraded. On a local cluster this is expected at the inference \
-             step — a real AI Foundry endpoint is required for the agent to run."
-                .to_string(),
+            sandbox_failure_detail(sandbox).unwrap_or_else(|| {
+                format!("Sandbox reports {sb_phase}; current failure details are not available.")
+            }),
         ),
         "" | "Pending" | "Creating" => (
             "Launching".to_string(),
@@ -538,6 +532,39 @@ fn map_sandbox_phase(sb_phase: &str) -> (String, String) {
         ),
         other => ("Launching".to_string(), format!("Sandbox phase: {other}.")),
     }
+}
+
+fn sandbox_failure_detail(sandbox: &DynamicObject) -> Option<String> {
+    use crate::status::conditions::{TYPE_DEGRADED, TYPE_READY};
+
+    let generation = sandbox.metadata.generation?;
+    let status = &sandbox.data["status"];
+    if status["observedGeneration"].as_i64() != Some(generation) {
+        return None;
+    }
+    let conditions = status["conditions"].as_array()?;
+    for (kind, expected) in [(TYPE_DEGRADED, "True"), (TYPE_READY, "False")] {
+        let condition = conditions.iter().find(|condition| {
+            condition["type"] == kind
+                && condition["status"] == expected
+                && condition["observedGeneration"].as_i64() == Some(generation)
+        });
+        if let Some(condition) = condition {
+            let reason = condition["reason"]
+                .as_str()
+                .filter(|s| !s.trim().is_empty());
+            let message = condition["message"]
+                .as_str()
+                .filter(|s| !s.trim().is_empty());
+            let detail = match (reason, message) {
+                (Some(reason), Some(message)) => format!("{reason}: {message}"),
+                (Some(detail), None) | (None, Some(detail)) => detail.to_string(),
+                (None, None) => continue,
+            };
+            return Some(format!("Sandbox {}: {detail}", status["phase"].as_str()?));
+        }
+    }
+    None
 }
 
 /// Create atomically or replace an already-owned object using its UID and
@@ -750,16 +777,138 @@ mod tests {
         assert_eq!(g["mcpServerRefs"][1]["name"], "jira");
     }
 
+    fn observed_sandbox(phase: &str) -> DynamicObject {
+        serde_json::from_value(json!({
+            "apiVersion": "kars.azure.com/v1alpha1", "kind": "KarsSandbox",
+            "metadata": {"name": "task", "generation": 7},
+            "status": {"phase": phase, "observedGeneration": 7, "conditions": [{
+                "type": "Ready", "status": "False", "observedGeneration": 7,
+                "reason": "GovernedServicePrivacyNotReady",
+                "message": "SRE privacy qualification is still pending; no credential issued or reused"
+            }]}
+        })).unwrap()
+    }
+
     #[test]
-    fn degraded_phase_explains_inference_caveat() {
-        let (phase, detail) = map_sandbox_phase("Degraded");
+    fn degraded_phase_reports_actual_current_privacy_wait() {
+        let (phase, detail) = map_sandbox_phase(&observed_sandbox("Degraded"));
         assert_eq!(phase, "Degraded");
-        assert!(detail.contains("Foundry"));
+        assert_eq!(
+            detail,
+            "Sandbox Degraded: GovernedServicePrivacyNotReady: SRE privacy qualification is still pending; no credential issued or reused"
+        );
+        assert!(!detail.contains("Foundry"));
+    }
+
+    #[test]
+    fn pending_privacy_keeps_reviewed_execution_launching_until_qualified() {
+        let mut sandbox: crate::crd::KarsSandbox = serde_json::from_value(json!({
+            "apiVersion":"kars.azure.com/v1alpha1", "kind":"KarsSandbox",
+            "metadata":{"name":"task", "namespace":"workspace", "generation":7},
+            "spec":{"runtime":{"kind":"BYO","byo":{"image":"pinned:test","contractVersion":"v1"}},
+                "sandbox":{"isolation":"standard"},"inferenceRef":{"name":"inference"}}
+        }))
+        .unwrap();
+        let pending = crate::status::build_pending_status_patch(
+            &sandbox,
+            "GovernedServicePrivacyPending",
+            "Waiting for qualified privacy",
+        );
+        let mut observed = observed_sandbox("Pending");
+        observed.data["status"] = pending["status"].clone();
+        assert_eq!(map_sandbox_phase(&observed).0, "Launching");
+        for (kind, expected) in [
+            ("Ready", "False"),
+            ("Degraded", "False"),
+            ("Progressing", "True"),
+        ] {
+            let condition = pending["status"]["conditions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|condition| condition["type"] == kind)
+                .unwrap();
+            assert_eq!(condition["status"], expected);
+            assert_eq!(condition["observedGeneration"], 7);
+        }
+        sandbox.status = Some(serde_json::from_value(pending["status"].clone()).unwrap());
+        assert_eq!(
+            crate::status::build_pending_status_patch(
+                &sandbox,
+                "GovernedServicePrivacyPending",
+                "Waiting for qualified privacy",
+            ),
+            pending
+        );
+        let rejected = crate::status::build_degraded_status_patch(
+            &sandbox,
+            "GovernedServicePrivacyNotReady",
+            "Legacy Secret access is not denied",
+        );
+        observed.data["status"] = rejected["status"].clone();
+        assert_eq!(map_sandbox_phase(&observed).0, "Degraded");
+        observed.data["status"] =
+            crate::status::build_running_status_patch(&sandbox, "kars-task", "Hermes")["status"]
+                .clone();
+        assert_eq!(map_sandbox_phase(&observed).0, "Running");
+    }
+
+    #[test]
+    fn stale_or_missing_diagnostics_do_not_invent_a_failure_cause() {
+        for phase in ["Failed", "Degraded"] {
+            for missing in ["status", "condition", "metadata", "conditions"] {
+                let mut sandbox = observed_sandbox(phase);
+                match missing {
+                    "status" => sandbox.data["status"]["observedGeneration"] = json!(6),
+                    "condition" => {
+                        sandbox.data["status"]["conditions"][0]["observedGeneration"] = json!(6)
+                    }
+                    "metadata" => sandbox.metadata.generation = None,
+                    "conditions" => sandbox.data["status"]["conditions"] = json!([]),
+                    _ => unreachable!(),
+                }
+                let (mapped, detail) = map_sandbox_phase(&sandbox);
+                assert_eq!(mapped, "Degraded");
+                assert_eq!(
+                    detail,
+                    format!("Sandbox reports {phase}; current failure details are not available.")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn degraded_condition_takes_priority_and_never_uses_resolved_conditions() {
+        let mut sandbox = observed_sandbox("Failed");
+        sandbox.data["status"]["conditions"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "type": "Degraded", "status": "True", "observedGeneration": 7,
+                "reason": "SpecInvalid", "message": "Invalid isolation level"
+            }));
+        assert_eq!(
+            map_sandbox_phase(&sandbox).1,
+            "Sandbox Failed: SpecInvalid: Invalid isolation level"
+        );
+        sandbox.data["status"]["conditions"][1]["status"] = json!("False");
+        assert!(
+            map_sandbox_phase(&sandbox)
+                .1
+                .contains("GovernedServicePrivacyNotReady")
+        );
+        sandbox.data["status"]["conditions"][0]["status"] = json!("True");
+        assert!(
+            map_sandbox_phase(&sandbox)
+                .1
+                .contains("current failure details are not available")
+        );
     }
 
     #[test]
     fn running_phase_maps_through() {
-        let (phase, _) = map_sandbox_phase("Running");
+        let (phase, detail) = map_sandbox_phase(&observed_sandbox("Running"));
         assert_eq!(phase, "Running");
+        assert_eq!(detail, "The governed agent is running in its sandbox.");
     }
 }

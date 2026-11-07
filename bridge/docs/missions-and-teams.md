@@ -30,6 +30,83 @@ a duplicate member that disappears from the editable roster. Requested filenames
 belong in the typed deliverable contract, not only in milestone prose. Model-route
 fallback selection preserves explicit member harness choices.
 
+## Composition and launch readiness
+
+The standing orchestrator's inference policy is bootstrapped only when absent.
+Restarting Bridge preserves its selected model route instead of restoring the
+controller default. Route readiness still requires every referencing sandbox
+router to confirm the compiled policy digest.
+
+Mission and Team composers propose task-specific runtimes, models, instructions,
+roles, tools, external destinations and budgets. Public-source research needs the
+relevant official hosts; model-only access is not a research configuration.
+Finite budgets are proposed unless the user explicitly requests an uncapped Mission.
+Creating an uncapped reviewed Mission still enrolls its Task tree in
+`GovernedInference` accounting without inventing a token ceiling. Every enrolled
+Task retains its private router-to-broker binding, including uncapped descendants,
+so OpenClaw and Hermes receive selected-model metadata and record actual usage.
+Explicit token, currency and role limits remain intact. Provider contracts, workspace funding,
+production spending policy and launch authorization remain independently enforced.
+Bridge normalizes the model-proposed hosts and removes model-provider endpoints;
+it does not add GitHub, package-registry or advisory hosts from task keywords or
+MCP selection. Mentioning an excluded service (for example, “no GitHub”) must not
+silently widen the proposed network envelope. Review the actual proposed hosts;
+normalization alone does not establish that the model understood the task.
+
+A complete generated proposal remains editable when route or resource qualification
+is missing. Its rationale reports **Launch blocked** with the failing check rather
+than discarding the proposal, removing required capabilities or replacing it with
+manual defaults. `available: true` means a proposal is available for review, not
+that execution is authorized. Invalid/incomplete model output still triggers a
+bounded repair attempt and an honest composition failure if repair fails.
+
+Every Mission requires a reviewed capability plan, including single-agent work:
+use `roles: []` with a native principal `synthesis`, retaining its capabilities and
+deliverables. Removing workers is not the same as removing the whole plan. An
+empty plan stays editable but blocks validation and submission; repair it before
+continuing. No runtime authority is silently synthesized from an empty plan.
+
+The reviewed package instructions, including the selected loop, are retained in
+`KarsSandbox.spec.agent.instructions` and passed to the runtime through the
+controller-owned `KARS_AGENT_INSTRUCTIONS` environment variable. OpenClaw and
+Hermes include this charter in Mission context; Hermes forwards only that explicit
+field through its isolated worker environment, not ambient credentials. Runtime
+extra environment settings cannot override it. Current assigned work and revision
+feedback take precedence over the original charter without changing reviewed
+capabilities or required phase exports. Objective digests and execution identities
+remain unchanged; instructions are not a separate grant of authority. Before
+creating the runtime deployment, the controller reports `SpecInvalid` for NUL
+bytes or UTF-8 content that exceeds Linux's 128 KiB per-environment-string
+boundary (including the variable name, `=` and terminating NUL). It never
+truncates the charter; larger context belongs in reviewed input files.
+
+Existing pre-flight, creation and activation checks remain authoritative. Reviewing
+a proposal does not waive qualification, grant egress, approve spending or start work.
+
+**Stop** and **Halt agent** are different controls. An ordinary stop closes the
+execution gate without permanently halting the Mission. Launch remains subject to
+admission and revision checks; a completed reviewed run cannot be replayed.
+A governed halt permanently retires that Mission and its owned task tree; neither
+Launch, Request changes, nor Retry failed revision can reverse it. The halt
+confirmation states this permanence; retained deliverable review stays available,
+but revision and relaunch controls are not offered. Preflight reports that permanent
+gate. Create a new reviewed Mission to continue the work, keeping the halted
+Mission's results, decision and accounting. Failed-revision retry is available only
+for an ordinarily stopped revision with verified failed-phase evidence.
+
+The composer knows that native OpenClaw and Hermes worker phases can use their
+existing encrypted AgentMesh discovery, send, inbox and wait tools with the
+`network` capability. This facility supports reviewed Missions and Teams; live
+peer discussion does not inherently require a standing Team, an external MCP
+server or a new transport. Assignment authority, policy and route qualification
+still apply. Reviewed peer locators identify the intended role/phase for discovery,
+not an already-authenticated or ready peer. Reciprocal discussion belongs in
+concurrently running worker phases: completion dependencies between those roles
+would prevent overlap, and final synthesis runs after workers finish. A successful
+send is not proof of receipt or reply. Actual attributable challenges, replies and
+revisions must support a collaboration claim; failed waits, missing replies and
+unresolved disagreements must remain visible in the retained output.
+
 ## Missions (one-shot)
 
 A mission is a `KarsTask` with a trust envelope (tier, budget, tools, egress,
@@ -41,13 +118,40 @@ delivery—not a launch acknowledgement. Task-level signed receipts do not by
 themselves establish revision-bound delivery. A mission can delegate within its
 envelope—see [Observability → agent graph](observability.md).
 
-Supported reviewed filesystem plans execute their reserved roles and phases,
-then synthesize from their immutable named handoffs. The composer's
+Supported reviewed filesystem plans, optionally including exact public HTTPS
+GET requirements, execute their reserved roles and phases, then synthesize from
+their immutable named handoffs. Network phases use the existing governed
+`http_fetch` path with reviewed method/URL arguments and no headers or body.
+Only distinct verified successful fetches satisfy required calls; failures,
+redirects and truncated responses cannot establish completion. Hosted search
+remains unsupported under finite funding; necessary search requirements are
+retained and rejected, not silently replaced with fetch. The composer's
 `execution-plan/v1` marker is eligible only with a pinned typed plan; the
 dispatcher still reconstructs and verifies the complete reviewed authority,
 installed contract, current revision and input custody before execution.
 Unsupported plans cannot fall back to objective-only execution. See the
 [current execution boundary](team-workflows.md#current-execution-boundary).
+
+Deliverable summaries and artifact previews resolve local document links only
+against the current revision's captured artifact names and source paths. These
+links use the same authenticated, revision-pinned download route as **Artifacts**,
+including in Team run synthesis. Unknown or ambiguous `sandbox:` paths are not
+clickable; they never expose the sandbox filesystem or another run's files.
+External source links retain the Markdown renderer's URL safety checks.
+
+Stopping a completed reviewed Mission does not authorize another execution.
+Launch preflight rejects reactivation of that completed run; review its retained
+output or use **Request changes** in Deliverable, then launch the distinct revision
+from Overview. The controller also refuses to reserve new phases for a completed
+nonce when activation changes its admission binding. Existing live completed
+runs remain readable, and explicitly requested revisions retain their normal
+execution checks. Previous results and spending are never reset.
+
+**Run again** explicitly creates independent reliability replicas, including from
+a completed Mission. Each receives a new task identity and, when launched, its
+own run nonce; it never inherits the source's completion or revision authority.
+The copied package must pass active plan validation before any replica is created,
+and budget, qualification and credential checks still apply.
 
 Both runtime adapters request another authorized tool operation while a reviewed
 phase's successful-call minimum is unmet and attempts remain. Failed operations
@@ -98,6 +202,33 @@ available. Changing a role allocation never increases or resets the Team's
 immutable lifetime account.
 
 ## Teams (standing)
+
+### Catalogue profiles in natural composition
+
+Describe a standing charter in the normal intake flow. The Team orchestrator
+reads the same installed `KarsProfile` catalogue used by **Use profile**, scoped
+to the workspace, and can propose a relevant **Ready** template (for example,
+`public-software-adoption` when installed). No profile is hard-coded or installed
+by composition. The existing `?profile=<name>` link still copies a chosen template
+without an AI call; returning to the charter keeps that profile selected.
+
+The review shows the selected template name, domain and available template digest.
+The user's charter stays the task, while template roles, instructions, skills,
+authority ceiling, delegation depth (including zero), optional micro-USD cap,
+policy reference and knowledge commons are preserved in the editable draft.
+Generated lifetime token funding must stay within the template cap and any smaller
+user ceiling. Recomposition preserves reviewed profile envelope edits and clears
+previous launch/preflight selections; it never auto-approves the proposal.
+
+Missing roles, skills or policies, non-Ready templates, unsupported envelope
+settings, and attempts to drop a selected profile cause repair or an explicit
+refusal, not a weaker replacement. **Ready validates the template, not execution.**
+Review the proposed MCP bindings, per-role skills, native phases and egress in the
+same package, run preflight, then explicitly create/launch. Native MCP phases use
+`network` with explicit `mcp_servers`; they still require MCP resource qualification.
+Missing qualification remains a visible launch blocker; neither a profile nor
+composition waives it. Delivery must be established from the resulting Team tasks,
+agent activity and outputs, not from catalogue status or successful composition.
 
 A `KarsTeam` is a standing org with a charter and an optional cadence. For
 supported active Teams, a cadence tick or admitted **Run now** request creates a
@@ -155,12 +286,13 @@ constraints. This is an open integration gate, not evidence that all profile
 features are operational. Team-level bounding tool policy and an explicitly
 reviewed lifetime token budget remain separate supported inputs.
 
-### Operating mode — always-on vs on/off
+### Durable Teams and on-demand compute
 
-Standing intent and runtime retention are separate. The configured lifecycle
-policy controls whether a principal remains ready, stays warm for an idle window,
-or is torn down between assignments. Pausing explicitly suspends retained
-runtimes. See [runtime lifecycle modes](team-workflows.md#runtime-lifecycle-modes).
+The Team's charter, history, shared memory and lifetime inference account persist
+across runs. The current controller creates isolated execution identities and
+agent pods per run; it does not implement warm or always-on principal reuse.
+Pause stops further work without deleting the Team's retained state.
+See [runtime lifecycle modes](team-workflows.md#runtime-lifecycle-modes).
 
 An operating-mode badge describes runtime state, not whether the reviewed plan
 was executed or a useful deliverable exists. Verify the exact run and its

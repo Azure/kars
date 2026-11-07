@@ -434,9 +434,8 @@ pub enum FloorViolation {
         observed: SeverityLevel,
         floor: SeverityLevel,
     },
-    /// Policy required Prompt Shields annotations, but the upstream
-    /// response had no `prompt_filter_results` at all (neither
-    /// `jailbreak` nor `indirect_attack`). Fail-closed.
+    /// Policy required Prompt Shields, but at least one prompt lacked
+    /// a well-formed `jailbreak` or `indirect_attack` annotation.
     PromptShieldsMissing,
 }
 
@@ -469,7 +468,7 @@ impl FloorViolation {
             ),
             Self::PromptShieldsMissing => {
                 "Response blocked: InferencePolicy requires Prompt Shields but the upstream \
-                 response carried no prompt_filter_results annotations"
+                 response lacked valid jailbreak or indirect_attack annotations"
                     .to_string()
             }
         }
@@ -489,10 +488,10 @@ impl FloorViolation {
 ///    iteration order: hate → self_harm → sexual → violence).
 /// 2. Same for `error.innererror.content_filter_result` on 400
 ///    responses.
-/// 3. If `require_prompt_shields` is true and **no**
-///    `prompt_filter_results` array (and no `jailbreak`/`indirect_attack`
-///    inside `content_filter_results`) is present, emit
-///    `PromptShieldsMissing`. Fail-closed.
+/// 3. If `require_prompt_shields` is true, require a nonempty set of
+///    prompt results, each containing a `jailbreak` or `indirect_attack`
+///    annotation with boolean `detected` and `filtered` fields. Missing
+///    or malformed evidence emits `PromptShieldsMissing` (fail-closed).
 #[must_use]
 pub fn enforce_floor(
     response_body: &serde_json::Value,
@@ -506,16 +505,15 @@ pub fn enforce_floor(
     // both the top-level prompt_filter_results array (200 path) and the
     // error.innererror.content_filter_result single object (400 path).
     let mut filter_results: Vec<&serde_json::Value> = Vec::new();
-    let mut saw_prompt_filter_block = false;
     if let Some(arr) = response_body
         .get("prompt_filter_results")
         .and_then(|v| v.as_array())
     {
-        saw_prompt_filter_block = true;
         for item in arr {
-            if let Some(cfr) = item.get("content_filter_results") {
-                filter_results.push(cfr);
-            }
+            filter_results.push(
+                item.get("content_filter_results")
+                    .unwrap_or(&serde_json::Value::Null),
+            );
         }
     }
     if let Some(cfr) = response_body
@@ -523,7 +521,6 @@ pub fn enforce_floor(
         .and_then(|e| e.get("innererror"))
         .and_then(|ie| ie.get("content_filter_result"))
     {
-        saw_prompt_filter_block = true;
         filter_results.push(cfr);
     }
 
@@ -558,7 +555,17 @@ pub fn enforce_floor(
         }
     }
 
-    if floor.require_prompt_shields && !saw_prompt_filter_block {
+    if floor.require_prompt_shields
+        && (filter_results.is_empty()
+            || filter_results.iter().any(|cfr| {
+                !["jailbreak", "indirect_attack"].iter().any(|category| {
+                    cfr.get(category).is_some_and(|annotation| {
+                        annotation.get("detected").is_some_and(|v| v.is_boolean())
+                            && annotation.get("filtered").is_some_and(|v| v.is_boolean())
+                    })
+                })
+            }))
+    {
         return Some(FloorViolation::PromptShieldsMissing);
     }
 
@@ -1073,11 +1080,7 @@ data: [DONE]"#;
 
     #[test]
     fn enforce_floor_require_prompt_shields_allows_when_annotations_present() {
-        // Even if the array is empty in content but the block exists,
-        // the upstream is annotating — that's enough to satisfy the
-        // fail-closed gate. (A genuinely missing shield would also
-        // trip the category-severity branch in practice; this gate is
-        // about catching configuration silence.)
+        // A complete negative attack annotation proves the shield ran.
         let floor = ContentSafetyFloor {
             require_prompt_shields: true,
             ..Default::default()
@@ -1091,6 +1094,86 @@ data: [DONE]"#;
             }]
         });
         assert_eq!(enforce_floor(&body, &floor), None);
+    }
+
+    #[test]
+    fn enforce_floor_requires_actual_shield_evidence_on_success_error_and_stream() {
+        let floor = ContentSafetyFloor {
+            require_prompt_shields: true,
+            ..Default::default()
+        };
+        for cfr in [
+            serde_json::Value::Null,
+            serde_json::json!({}),
+            serde_json::json!({"hate": {"filtered": false, "severity": "safe"}}),
+            serde_json::json!({"jailbreak": {}}),
+            serde_json::json!({"jailbreak": {"filtered": false}}),
+            serde_json::json!({"jailbreak": {"detected": false}}),
+            serde_json::json!({"jailbreak": {"filtered": "false", "detected": false}}),
+            serde_json::json!({"indirect_attack": {"filtered": false, "detected": null}}),
+        ] {
+            for body in [
+                serde_json::json!({"prompt_filter_results": [{"content_filter_results": cfr}]}),
+                serde_json::json!({"error": {"innererror": {"content_filter_result": cfr}}}),
+            ] {
+                assert_eq!(
+                    enforce_floor(&body, &floor),
+                    Some(FloorViolation::PromptShieldsMissing),
+                    "{body}"
+                );
+                assert_eq!(
+                    first_data_line_violation(&format!("data: {body}\n\n"), &floor),
+                    Some(FloorViolation::PromptShieldsMissing)
+                );
+                assert_eq!(enforce_floor(&body, &ContentSafetyFloor::default()), None);
+            }
+        }
+    }
+
+    #[test]
+    fn enforce_floor_rejects_empty_or_partially_annotated_prompt_results() {
+        let floor = ContentSafetyFloor {
+            require_prompt_shields: true,
+            ..Default::default()
+        };
+        let annotated = serde_json::json!({"content_filter_results": {
+            "jailbreak": {"filtered": false, "detected": false}
+        }});
+        for results in [
+            serde_json::json!([]),
+            serde_json::json!([{}]),
+            serde_json::json!([annotated, {}]),
+            serde_json::json!([{}, annotated]),
+            serde_json::json!([annotated, {"content_filter_results": {"hate": {"severity": "safe"}}}]),
+        ] {
+            let body = serde_json::json!({"prompt_filter_results": results});
+            assert_eq!(
+                enforce_floor(&body, &floor),
+                Some(FloorViolation::PromptShieldsMissing),
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn enforce_floor_accepts_valid_shield_annotations_in_both_response_shapes() {
+        let floor = ContentSafetyFloor {
+            require_prompt_shields: true,
+            ..Default::default()
+        };
+        for category in ["jailbreak", "indirect_attack"] {
+            let cfr = serde_json::json!({category: {"filtered": false, "detected": false}});
+            for body in [
+                serde_json::json!({"prompt_filter_results": [{"content_filter_results": cfr}]}),
+                serde_json::json!({"error": {"innererror": {"content_filter_result": cfr}}}),
+            ] {
+                assert_eq!(enforce_floor(&body, &floor), None, "{body}");
+                assert_eq!(
+                    first_data_line_violation(&format!("data: {body}\n\n"), &floor),
+                    None
+                );
+            }
+        }
     }
 
     #[test]

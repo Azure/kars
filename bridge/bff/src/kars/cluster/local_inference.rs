@@ -8,75 +8,6 @@ use super::{
 use kube::api::{Api, DynamicObject, GroupVersionKind, ListParams};
 use kube::core::ApiResource;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::{
-        body::Body,
-        http::{Request, Response, StatusCode},
-    };
-    use std::convert::Infallible;
-
-    fn cluster(status: StatusCode) -> Cluster {
-        let service = tower::service_fn(move |request: Request<kube::client::Body>| async move {
-            assert_eq!(request.method(), "GET");
-            assert!(request.uri().path().ends_with("/modeldeployments"));
-            let body = if status == StatusCode::OK {
-                serde_json::json!({
-                    "apiVersion": "airunway.ai/v1alpha1",
-                    "kind": "ModelDeploymentList", "metadata": {}, "items": [],
-                })
-                .to_string()
-            } else if status == StatusCode::NOT_FOUND {
-                "404 page not found\n".into()
-            } else {
-                serde_json::json!({
-                    "apiVersion": "v1", "kind": "Status", "status": "Failure",
-                    "reason": "API failure", "message": "test response",
-                    "code": status.as_u16(),
-                })
-                .to_string()
-            };
-            Ok::<_, Infallible>(
-                Response::builder()
-                    .status(status)
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
-        });
-        Cluster::for_test_client(kube::Client::new(service, LOCAL_INFERENCE_NAMESPACE))
-    }
-
-    #[tokio::test]
-    async fn local_inference_absent_api_is_not_an_outage() {
-        let cluster = cluster(StatusCode::NOT_FOUND);
-        assert!(!cluster.local_inference_available().await.unwrap());
-        assert!(cluster.list_model_deployments().await.unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn local_inference_installed_empty_api_remains_available() {
-        let cluster = cluster(StatusCode::OK);
-        assert!(cluster.local_inference_available().await.unwrap());
-        assert!(cluster.list_model_deployments().await.unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn local_inference_forbidden_and_failed_api_are_not_empty_state() {
-        for status in [
-            StatusCode::UNAUTHORIZED,
-            StatusCode::FORBIDDEN,
-            StatusCode::INTERNAL_SERVER_ERROR,
-        ] {
-            let cluster = cluster(status);
-            assert!(matches!(cluster.local_inference_available().await,
-                Err(kube::Error::Api(response)) if response.code == status.as_u16()));
-            assert!(matches!(cluster.list_model_deployments().await,
-                Err(kube::Error::Api(response)) if response.code == status.as_u16()));
-        }
-    }
-}
-
 /// Milestone-derived deploy percentage from real signals. Each milestone the
 /// deployment has genuinely reached sets a floor; nothing here advances on a
 /// timer alone (the client adds a small time-based ease WITHIN the current
@@ -183,12 +114,16 @@ impl Cluster {
             "spec": spec,
         }))
         .map_err(|e| {
-            kube::Error::Api(kube::core::ErrorResponse {
-                status: "Failure".into(),
-                message: e.to_string(),
-                reason: "BadRequest".into(),
-                code: 400,
-            })
+            kube::Error::Api(
+                kube::core::Status {
+                    status: Some(kube::core::response::StatusSummary::Failure),
+                    message: e.to_string(),
+                    reason: "BadRequest".into(),
+                    code: 400,
+                    ..Default::default()
+                }
+                .boxed(),
+            )
         })?;
         api.patch(
             name,
@@ -400,8 +335,12 @@ impl Cluster {
                 let time = e
                     .last_timestamp
                     .as_ref()
-                    .map(|t| t.0.to_rfc3339())
-                    .or_else(|| e.event_time.as_ref().map(|t| t.0.to_rfc3339()));
+                    .map(|t| crate::kars::time::to_chrono(t.0).to_rfc3339())
+                    .or_else(|| {
+                        e.event_time
+                            .as_ref()
+                            .map(|t| crate::kars::time::to_chrono(t.0).to_rfc3339())
+                    });
                 status.activities.push(DeployActivity {
                     time,
                     reason: e.reason.clone().unwrap_or_default(),
@@ -437,5 +376,74 @@ impl Cluster {
         // Milestone-derived percentage — advances only on real progress.
         status.percent = compute_deploy_percent(&status);
         Ok(status)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        body::Body,
+        http::{Request, Response, StatusCode},
+    };
+    use std::convert::Infallible;
+
+    fn cluster(status: StatusCode) -> Cluster {
+        let service = tower::service_fn(move |request: Request<kube::client::Body>| async move {
+            assert_eq!(request.method(), "GET");
+            assert!(request.uri().path().ends_with("/modeldeployments"));
+            let body = if status == StatusCode::OK {
+                serde_json::json!({
+                    "apiVersion": "airunway.ai/v1alpha1",
+                    "kind": "ModelDeploymentList", "metadata": {}, "items": [],
+                })
+                .to_string()
+            } else if status == StatusCode::NOT_FOUND {
+                "404 page not found\n".into()
+            } else {
+                serde_json::json!({
+                    "apiVersion": "v1", "kind": "Status", "status": "Failure",
+                    "reason": "API failure", "message": "test response",
+                    "code": status.as_u16(),
+                })
+                .to_string()
+            };
+            Ok::<_, Infallible>(
+                Response::builder()
+                    .status(status)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+        });
+        Cluster::for_test_client(kube::Client::new(service, LOCAL_INFERENCE_NAMESPACE))
+    }
+
+    #[tokio::test]
+    async fn local_inference_absent_api_is_not_an_outage() {
+        let cluster = cluster(StatusCode::NOT_FOUND);
+        assert!(!cluster.local_inference_available().await.unwrap());
+        assert!(cluster.list_model_deployments().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn local_inference_installed_empty_api_remains_available() {
+        let cluster = cluster(StatusCode::OK);
+        assert!(cluster.local_inference_available().await.unwrap());
+        assert!(cluster.list_model_deployments().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn local_inference_forbidden_and_failed_api_are_not_empty_state() {
+        for status in [
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ] {
+            let cluster = cluster(status);
+            assert!(matches!(cluster.local_inference_available().await,
+                Err(kube::Error::Api(response)) if response.code == status.as_u16()));
+            assert!(matches!(cluster.list_model_deployments().await,
+                Err(kube::Error::Api(response)) if response.code == status.as_u16()));
+        }
     }
 }

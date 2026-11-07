@@ -14,6 +14,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createServer, type Server } from "node:http";
 import { callPlatformTool } from "./core/router-client.js";
+import { callFoundryMemory, memoryUpdateSummary } from "./core/foundry-memory.js";
 
 let server: Server | undefined;
 
@@ -28,7 +29,7 @@ afterEach(async () => {
 /** Start a fake MCP server that enforces the same Accept negotiation the real
  *  router does, captures the request, and returns a JSON-RPC tools/call
  *  result. Resolves with the captured request once it's been hit. */
-function startFakeRouter(): Promise<{ port: number; captured: () => { accept?: string; body: any } }> {
+function startFakeRouter(text = '{"memories":[]}', isError = false): Promise<{ port: number; captured: () => { accept?: string; body: any } }> {
   let capturedAccept: string | undefined;
   let capturedBody: any;
   return new Promise((resolve) => {
@@ -49,7 +50,7 @@ function startFakeRouter(): Promise<{ port: number; captured: () => { accept?: s
         res.end(JSON.stringify({
           jsonrpc: "2.0",
           id: capturedBody.id,
-          result: { content: [{ type: "text", text: '{"memories":[]}' }], isError: false },
+          result: { content: [{ type: "text", text }], isError },
         }));
       });
     });
@@ -60,6 +61,62 @@ function startFakeRouter(): Promise<{ port: number; captured: () => { accept?: s
     });
   });
 }
+
+describe("shared Foundry memory client", () => {
+  it.each(["foundry", "builtin"])("preserves the router-selected %s backend without a local substitute", async (backend) => {
+    const completed = { backend, status: "completed", update_id: "durable-id", approved_knowledge: false };
+    const { port, captured } = await startFakeRouter(JSON.stringify(completed));
+    process.env.KARS_ROUTER_URL = `http://127.0.0.1:${port}`;
+    expect(await callFoundryMemory({ operation: "update", text: "retained preference", scope: null })).toEqual(completed);
+    expect(captured().body.params.arguments).toEqual({ operation: "update", text: "retained preference" });
+    expect(memoryUpdateSummary(completed)).toBe("completed");
+  });
+
+  it("preserves lexical recall and private scope from the built-in backend", async () => {
+    const result = { backend: "builtin", retrieval: "lexical", scope: "private_owner_role", memories: [{ text: "Helsinki" }] };
+    const { port } = await startFakeRouter(JSON.stringify(result));
+    process.env.KARS_ROUTER_URL = `http://127.0.0.1:${port}`;
+    expect(await callFoundryMemory({ operation: "search", text: "Helsinki" })).toEqual(result);
+  });
+
+  it("forwards static reads without inventing an agent-side store or scope", async () => {
+    const { port, captured } = await startFakeRouter();
+    process.env.KARS_ROUTER_URL = `http://127.0.0.1:${port}`;
+    expect(await callFoundryMemory({ operation: "search", top_k: 20 })).toEqual({ memories: [] });
+    expect(captured().body.params).toEqual({ name: "foundry.memory", arguments: { operation: "search", top_k: 20 } });
+  });
+
+  it("preserves an explicit partition, assistant role and terminal result", async () => {
+    const completed = { status: "completed", update_id: "u-1" };
+    const { port, captured } = await startFakeRouter(JSON.stringify(completed));
+    process.env.KARS_ROUTER_URL = `http://127.0.0.1:${port}`;
+    const args = { operation: "update", text: "handoff context", role: "assistant", scope: "custom_partition" };
+    expect(await callFoundryMemory(args)).toEqual(completed);
+    expect(captured().body.params.arguments).toEqual(args);
+    expect(memoryUpdateSummary(completed)).toBe("completed");
+  });
+
+  it("surfaces a failed asynchronous operation rather than claiming persistence", async () => {
+    const failed = { status: "failed", update_id: "u-1", error: { code: "model_failure" } };
+    const { port } = await startFakeRouter(JSON.stringify(failed), true);
+    process.env.KARS_ROUTER_URL = `http://127.0.0.1:${port}`;
+    await expect(callFoundryMemory({ operation: "update", text: "x" })).rejects.toThrow("model_failure");
+  });
+
+  it.each(["null", "[]", "not JSON"])("rejects malformed MCP memory content: %s", async (text) => {
+    const { port } = await startFakeRouter(text);
+    process.env.KARS_ROUTER_URL = `http://127.0.0.1:${port}`;
+    await expect(callFoundryMemory({ operation: "search" })).rejects.toThrow();
+  });
+
+  it.each(["queued", "in_progress"])("reports %s as unconfirmed", (status) => {
+    expect(memoryUpdateSummary({ status, update_id: "u-1" })).toBe(`${status} (update u-1; persistence not yet confirmed)`);
+  });
+
+  it.each([{}, { status: "failed" }, { status: "unknown" }])("rejects unconfirmed success: %j", (value) => {
+    expect(() => memoryUpdateSummary(value)).toThrow("did not confirm");
+  });
+});
 
 describe("callPlatformTool — MCP Accept negotiation (foundry memory regression)", () => {
   it("sends Accept: application/json + text/event-stream and parses the result", async () => {

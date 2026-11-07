@@ -63,6 +63,53 @@ async fn pending(app: &axum::Router) -> Value {
 }
 
 #[tokio::test]
+async fn nonwaiting_denial_returns_the_actual_scoped_request_without_granting_access() {
+    let (state, app, upstream, scope, url) = setup().await;
+    let fetch = || {
+        request(
+            "POST",
+            "/egress/fetch",
+            json!({"url":url}),
+            None,
+            None,
+            true,
+        )
+    };
+    let (status, body) = send(&app, fetch()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["enforcement_changed"], false);
+    let queued = pending(&app).await;
+    assert_eq!(body["request"], queued);
+    assert_eq!(queued["scope_id"], scope);
+    assert_eq!(queued["status"], "pending");
+    assert_eq!(queued["kind"], "egress");
+    assert_eq!(queued["target"], "approved.example");
+    assert_eq!(
+        queued["port"],
+        reqwest::Url::parse(&url).unwrap().port().unwrap()
+    );
+    assert!(!queued.to_string().contains("request-secret-marker"));
+    let id = queued["request_id"].as_str().unwrap();
+    assert_eq!(decision(&app, &scope, id, "denied").await.0, StatusCode::OK);
+    let (status, repeated) = send(&app, fetch()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(repeated["request"]["request_id"], id);
+    assert_eq!(repeated["request"]["status"], "denied");
+    assert_eq!(
+        repeated["request"]["expires_at_unix"],
+        queued["expires_at_unix"]
+    );
+    assert!(upstream.received_requests().await.unwrap().is_empty());
+    assert!(
+        state
+            .blocklist
+            .check_egress(&url, "workspace")
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn approved_decision_alone_cannot_widen_egress_but_signed_policy_wakes_the_request() {
     let (state, app, upstream, scope, url) = setup().await;
     let waiting = tokio::spawn(app.clone().oneshot(request(
@@ -216,6 +263,20 @@ async fn ordinary_denied_fetch_is_still_immediate_and_private_targets_never_ente
     )
     .await;
     assert_eq!(response.0, StatusCode::FORBIDDEN);
+    let (_, requests) = send(
+        &app,
+        request(
+            "GET",
+            "/internal/access-requests",
+            json!({}),
+            Some(CONTROL),
+            None,
+            true,
+        ),
+    )
+    .await;
+    assert_eq!(requests["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(requests["entries"][0]["target"], "approved.example");
     assert!(upstream.received_requests().await.unwrap().is_empty());
 }
 

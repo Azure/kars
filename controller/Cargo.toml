@@ -24,7 +24,7 @@ async-trait.workspace = true
 # Serialization
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml.workspace = true
+serde-saphyr.workspace = true
 
 # Shared corpus library (KarsEval slice 6)
 kars-eval-corpus = { path = "../eval-corpus", version = "0.1.0" }
@@ -75,10 +75,10 @@ oci-client = { version = "=0.16.1", default-features = false, features = ["rustl
 # aws-lc-rs) enable both providers, which makes rustls 0.23.40+
 # refuse to auto-detect and panic on first TLS handshake. Pin to
 # `aws-lc-rs` to align with the rest of the workspace.
-rustls = { version = "0.23.45", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 rcgen.workspace = true
 time.workspace = true
-regex = "1.12.3"
+regex.workspace = true
 hmac.workspace = true
 
 [dev-dependencies]

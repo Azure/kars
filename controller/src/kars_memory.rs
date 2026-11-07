@@ -70,10 +70,10 @@ use crate::mcp_server::LocalObjectRef;
 /// `KarsMemory.spec` — declares a Foundry Memory Store binding for a
 /// sandbox.
 ///
-/// Resolution rule: a sandbox can have at most one `KarsMemory` per
-/// scope key; multiple `KarsMemory` CRs targeting the same sandbox
-/// must declare distinct `scope` values. Conflict detection is
-/// router-side (S7) — the CRD admission only validates shape.
+/// A sandbox selects one binding through `KarsSandbox.spec.memoryRef`.
+/// The bound scope is private unless additional exact partitions are
+/// explicitly authorized through `sharedScopes`. Missing or malformed
+/// required bindings must fail closed, never select a fallback partition.
 #[derive(CustomResource, Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[kube(
     group = "kars.azure.com",
@@ -100,6 +100,7 @@ pub struct KarsMemorySpec {
     /// (the bundle supplies the value). Admission CEL enforces
     /// the mutex.
     #[serde(default)]
+    #[schemars(length(max = 63))]
     pub store_name: Option<String>,
 
     /// Sandbox this binding applies to. Owned by the CR (never the
@@ -107,16 +108,24 @@ pub struct KarsMemorySpec {
     /// multiple `KarsMemory` CRs targeting different sandboxes.
     pub sandbox_ref: SandboxRef,
 
-    /// Scope key under which this sandbox writes/reads memories.
-    /// Foundry Memory Store partitions data per scope and validates the
-    /// value to letters, digits, and `_ - . % + @ /` — colons are
-    /// rejected. CEL: non-empty + charset. Default convention (set by
-    /// the runtime path if absent here): `agent_{sandboxName}`.
+    /// Exact private partition under which this sandbox writes/reads memories.
+    /// Required, 1-256 ASCII characters: letters, digits, and `_ - . % + @ /`.
+    /// Path segments `.` and `..` are forbidden. No normalization, wildcard,
+    /// or prefix matching is performed; there is no missing-scope fallback.
     ///
     /// Required when [`Self::bundle_ref`] is absent (the inline
     /// path); MUST be absent when [`Self::bundle_ref`] is set.
     #[serde(default)]
+    #[schemars(length(max = 256))]
     pub scope: Option<String>,
+
+    /// Up to 64 distinct exact partitions in the same store authorized for
+    /// search, update, and delete_scope, excluding the bound scope. Each uses
+    /// the same validation as scope. No normalization, wildcard, or prefix
+    /// matching. Omit or use [] for private memory. Must be absent with bundleRef.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 64))]
+    pub shared_scopes: Option<Vec<String>>,
 
     /// Optional retention floor in days. Runtime path may apply a
     /// `delete_scope` sweep when entries exceed this age. CEL:
@@ -142,7 +151,7 @@ pub struct KarsMemorySpec {
     pub display_name: Option<String>,
 
     /// Signed OCI artifact carrying the binding content
-    /// (`storeName`, `scope`, `retentionDays`,
+    /// (`storeName`, `scope`, `sharedScopes`, `retentionDays`,
     /// `deleteOnSandboxDelete`, `displayName`). When set, the
     /// controller pulls the artifact by digest, verifies its
     /// cosign signature against the active

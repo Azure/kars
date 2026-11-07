@@ -30,6 +30,12 @@ spec:
           .name('canonical').check('use').allowed()
       message: "Canonical SRE source changes require explicit cluster-level registrar authority"
       reason: Forbidden
+    - expression: >-
+        object == null || oldObject == null ||
+        ((!has(object.metadata.annotations) || !('kars.azure.com/sre-first-install-intent' in object.metadata.annotations)) ? '' : object.metadata.annotations['kars.azure.com/sre-first-install-intent']) ==
+          ((!has(oldObject.metadata.annotations) || !('kars.azure.com/sre-first-install-intent' in oldObject.metadata.annotations)) ? '' : oldObject.metadata.annotations['kars.azure.com/sre-first-install-intent'])
+      message: "First-install SRE funding provenance cannot be added, removed or changed on an existing source"
+      reason: Forbidden
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
@@ -60,6 +66,18 @@ spec:
         authorizer.group('kars.azure.com').resource('karssreregistrations')
           .name('canonical').check('use').allowed()
       message: "SRE enrollment requires explicit registrar use permission"
+      reason: Forbidden
+    - expression: >-
+        object == null || oldObject == null ||
+        (has(object.spec.firstInstallFunding) == has(oldObject.spec.firstInstallFunding) &&
+          (!has(oldObject.spec.firstInstallFunding) || object.spec.firstInstallFunding == oldObject.spec.firstInstallFunding))
+      message: "First-install funding is CREATE-only; replay, retirement and updates cannot change its authorization"
+      reason: Forbidden
+    - expression: >-
+        object == null || oldObject == null || !has(oldObject.spec.firstInstallFunding) ||
+        (object.spec.controller == oldObject.spec.controller && object.spec.sandbox == oldObject.spec.sandbox &&
+          object.spec.runtimeNamespace == oldObject.spec.runtimeNamespace)
+      message: "First-install funding remains bound to the original source, runtime and controller even after retirement"
       reason: Forbidden
     - expression: >-
         request.operation != 'DELETE' ||

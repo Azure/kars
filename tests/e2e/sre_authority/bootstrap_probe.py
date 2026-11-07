@@ -12,13 +12,7 @@ import re
 import time
 
 from sre_authority.bootstrap_diagnostics import api_result, collect, controller_stack
-from sre_authority.registration_schema import CONTEXT, command, kind_proxy, request, write_report as schema_report
-
-REPORT_PREFIX = ""
-
-
-def write_report(root, filename, report):
-    schema_report(root, REPORT_PREFIX + filename, report)
+from sre_authority.registration_schema import CONTEXT, command, kind_proxy, request, write_report
 
 
 def failure_site(error):
@@ -35,6 +29,7 @@ def failure_site(error):
 
 
 PATHS = {
+    "Namespace": "/api/v1/namespaces",
     "CustomResourceDefinition": "/apis/apiextensions.k8s.io/v1/customresourcedefinitions",
     "ServiceAccount": "/api/v1/namespaces/{namespace}/serviceaccounts",
     "ClusterRole": "/apis/rbac.authorization.k8s.io/v1/clusterroles",
@@ -104,21 +99,6 @@ def safe_controller(obj):
         container["image"] = "registry.invalid/kars-admission-proof:never"
         container["imagePullPolicy"] = "Never"
     return fixture
-
-
-def preserved_json_candidate(objects):
-    candidate = copy.deepcopy(objects)
-    matches = [obj for obj in candidate if obj["kind"] == "CustomResourceDefinition"
-               and obj["metadata"]["name"] == "karssreactions.kars.azure.com"]
-    if len(matches) != 1:
-        raise RuntimeError("Expected one public SRE action schema")
-    schema = matches[0]["spec"]["versions"][0]["schema"]["openAPIV3Schema"]
-    params = schema["properties"]["spec"]["properties"]["action"]["properties"]["params"]
-    if params.get("type") != "object" or params.get("additionalProperties") is not True:
-        raise RuntimeError("API-evidenced boolean additionalProperties candidate precondition failed")
-    del params["additionalProperties"]
-    params["x-kubernetes-preserve-unknown-fields"] = True
-    return candidate
 
 
 def upsert(port, obj, policies):
@@ -206,14 +186,10 @@ def exercise(root, port, objects, policies, wait_seconds=90, retirement=False):
     return retirement_state
 
 
-def main(root, diagnostics_only, candidate=False, retirement=False):
-    global REPORT_PREFIX
-    REPORT_PREFIX = "candidate-" if candidate else ""
+def main(root, diagnostics_only, retirement=False):
     with kind_proxy(root) as (port, version):
         write_report(root, "bootstrap-versions.json", {"apiServer": version, "context": CONTEXT})
         objects = chart(root)
-        if candidate:
-            objects = preserved_json_candidate(objects)
         policies = {obj["metadata"]["name"]: obj for obj in objects
                     if obj["kind"] == "ValidatingAdmissionPolicy"}
         if not policies:
@@ -233,8 +209,7 @@ def main(root, diagnostics_only, candidate=False, retirement=False):
                 write_report(root, "bootstrap-log-media.json", {"cases": media})
                 if next(case["httpStatus"] for case in media if case["accept"] == "application/json") != 200:
                     raise RuntimeError("Actual API log media precondition failed")
-                state = exercise(root, port, objects, policies, wait_seconds=180 if candidate else 90,
-                                 retirement=retirement and not candidate)
+                state = exercise(root, port, objects, policies, retirement=retirement)
                 from sre_authority.private_consumption_phase import cases as private_phase_cases
                 private_phase_cases(port, objects,
                                     lambda facts: write_report(root, "bootstrap-private-consumption-phase.json", facts))
@@ -278,14 +253,11 @@ if __name__ == "__main__":
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--diagnostics-only", action="store_true")
-    parser.add_argument("--json-params-candidate", action="store_true",
-                        help="Diagnose only the API-evidenced nil-schema adapter candidate; never edit production")
     parser.add_argument("--retirement-bind-proof", action="store_true",
                         help="Prove controller-principal retirement dry-runs with a test-only exact reader bind grant")
     args = parser.parse_args()
     try:
-        main(Path(__file__).resolve().parents[3], args.diagnostics_only, args.json_params_candidate,
-             args.retirement_bind_proof)
+        main(Path(__file__).resolve().parents[3], args.diagnostics_only, args.retirement_bind_proof)
     except Exception as error:
         print(f"SRE-BOOTSTRAP-FAIL category={type(error).__name__}", flush=True)
         write_report(Path(__file__).resolve().parents[3], "bootstrap-failure-site.json", failure_site(error))

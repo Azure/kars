@@ -58,12 +58,15 @@ class HeaderTests(unittest.TestCase):
             "a.tsx": b"'use client';\nexport const A = () => <p />;\n",
             "a.js": b'"use strict";\nconst x = 1;',
             "a.mjs": b'"use server";\nexport const x = 1;\n',
+            "a.cjs": b'"use strict";\nmodule.exports = {};\n',
+            "a.mts": b'export const value: number = 1;\n',
             "a.bicep": b"param location string = 'westus'\n",
             "a.sh": b"printf 'unchanged\\n'\n",
             "a.py": b'"""Module docs."""\nx = 1\n',
             "a.toml": b"[package]\nname = 'fixture'\n",
             "a.yaml": b"---\nname: value\n",
             "a.yml": b"on: [push]\njobs: {}\n",
+            "a.qls": b"- import: codeql-suites/rust-security-and-quality.qls\n  from: codeql/rust-queries\n",
             "a.md": b"# Title\n\nText\n",
             "a.css": b'@import "theme.css";\na { color: red; }\n',
             "a.hbs": b"<!DOCTYPE html>\n<p>{{name}}</p>\n",
@@ -262,9 +265,12 @@ class HeaderTests(unittest.TestCase):
         for name, body in fixtures.items():
             self.write(name, body)
         command = ["helm", "template", "fixture", str(self.root / "chart")]
-        def resources():
-            return list(yaml.safe_load_all(subprocess.check_output(command)))
+        def resources(enabled=True):
+            arguments = command + ["--set", "enabled=" + str(enabled).lower()]
+            return list(yaml.safe_load_all(subprocess.check_output(arguments)))
         before = resources()
+        disabled_before = resources(False)
+        self.assertEqual(len(disabled_before), 1)
         self.assertEqual(len(before), 2)
         self.assertTrue(all(isinstance(doc, dict) for doc in before))
         name = "chart/templates/plain.yaml"
@@ -277,6 +283,7 @@ class HeaderTests(unittest.TestCase):
         self.assertTrue(all(r["status"] == "applied" for r in records))
         self.assertEqual(list(yaml.safe_load_all(plain.read_bytes())), raw_before)
         self.assertEqual(resources(), before)
+        self.assertEqual(resources(False), disabled_before)
         self.assertEqual(plain.read_bytes(), b"---\n" + headers.STYLES["hash"].encode() + fixtures[name][4:])
         self.assertTrue(all(r["status"] == "present" for r in headers.process(
             self.root, list(fixtures), self.policy, apply=True,
@@ -331,6 +338,113 @@ class HeaderTests(unittest.TestCase):
                     self.assertEqual(doc["kind"], "CustomResourceDefinition")
                     self.assertIn("openAPIV3Schema", doc["spec"]["versions"][0]["schema"])
 
+    def test_go_build_constraints_keep_existing_notice_and_blank_separator(self):
+        for prefix in (b"//go:build cgo\n\n", b"//go:build linux\n// +build linux\n\n"):
+            body = prefix + b"package fixture\n"
+            after = self.apply("fixture.go", body, len(prefix))
+            self.assertEqual(after, prefix + headers.STYLES["slash"].encode() + b"package fixture\n")
+            self.assertEqual(headers.insertion("fixture.go", after, "slash")[1], b"")
+
+    def test_single_line_helm_notices_and_unseparated_hash_notices(self):
+        for newline in (b"\n", b"\r\n"):
+            control = b"{{- if .Values.enabled -}}\nkind: ConfigMap\n{{- end -}}\n".replace(b"\n", newline)
+            single = headers.STYLES["helm"].encode().replace(b"\n", b" ")
+            name = "chart/templates/controlled.yaml"
+            body = single + newline + control
+            self.assertEqual(headers.yaml_license_prefix(body), (0, single))
+            self.assertEqual(headers.insertion(name, body, "helm")[1], b"")
+            for hash_prefix in (
+                headers.header_for("hash", control),
+                headers.header_for("hash", control)[:-len(newline)],
+            ):
+                path = self.write(name, hash_prefix + control)
+                result, = headers.process(self.root, [name], self.policy, apply=True)
+                self.assertEqual(result["removed_bytes"], len(hash_prefix))
+                self.assertEqual(path.read_bytes(), headers.header_for("helm", control) + control)
+                self.assertEqual(path.read_bytes().count(headers.COPYRIGHT.encode()), 1)
+            bad = single.replace(b" Licensed", b" Not licensed") + control
+            self.assertTrue(headers.insertion(name, bad, "helm")[1])
+
+    def test_reviewed_symlinks_are_verified_without_following_or_rewriting(self):
+        name = "aliases/native.py"
+        target_name = "shared/native.py"
+        target_bytes = headers.STYLES["hash"].encode() + b"value = 1\n"
+        target = self.write(target_name, target_bytes)
+        link = self.write(name, b"")
+        link.unlink()
+        link.symlink_to("../shared/native.py")
+        self.policy["files"][name] = {
+            "category": "repository-license", "notice": "LICENSE",
+            "reason": "Reviewed test alias to header-covered source.", "target": target_name,
+        }
+        for apply in (False, True):
+            result, = headers.process(self.root, [name], self.policy, apply=apply)
+            self.assertEqual(result["status"], "covered-without-header")
+            self.assertEqual(link.readlink(), Path("../shared/native.py"))
+            self.assertEqual(target.read_bytes(), target_bytes)
+        for destination in ("../shared/missing.py", "../../escape.py", str(target)):
+            link.unlink()
+            link.symlink_to(destination)
+            result, = headers.process(self.root, [name], self.policy, apply=True)
+            self.assertEqual(result["status"], "error")
+            self.assertEqual(link.readlink(), Path(destination))
+        link.unlink()
+        link.symlink_to("../shared/native.py")
+        target.write_bytes(b"value = 1\n")
+        good = self.write("good.py", b"value = 2\n")
+        results = headers.process(self.root, [name, "good.py"], self.policy, apply=True)
+        self.assertEqual({r["status"] for r in results}, {"error", "missing"})
+        self.assertEqual(good.read_bytes(), b"value = 2\n")
+        target.unlink()
+        self.write("other.py", target_bytes)
+        target.symlink_to("../other.py")
+        result, = headers.process(self.root, [name], self.policy, apply=True)
+        self.assertEqual(result["status"], "error")
+        target.unlink()
+        target.write_bytes(target_bytes)
+        target.parent.rename(self.root / "moved")
+        target.parent.symlink_to("moved", target_is_directory=True)
+        result, = headers.process(self.root, [name], self.policy, apply=True)
+        self.assertEqual(result["status"], "error")
+        target.parent.unlink()
+        (self.root / "moved").rename(target.parent)
+        link.unlink()
+        link.write_bytes(target_bytes)
+        result, = headers.process(self.root, [name], self.policy, apply=True)
+        self.assertEqual(result["status"], "error")
+        link.unlink()
+        link.symlink_to("../shared/native.py")
+        link.parent.rename(self.root / "aliases-real")
+        link.parent.symlink_to("aliases-real", target_is_directory=True)
+        result, = headers.process(self.root, [name], self.policy, apply=True)
+        self.assertEqual(result["status"], "error")
+
+    def test_symlink_rules_are_exact_and_reject_unsafe_policy_targets(self):
+        aliases = {p for p, r in self.policy["files"].items() if "target" in r}
+        self.assertEqual(aliases, {
+            "runtimes/openclaw/src/core/native-github-pr.py",
+            "runtimes/openclaw/src/core/native-python.py",
+        })
+        for name in ("LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.txt"):
+            self.write(name, b"notice\n")
+        for target in ("../escape.py", "/outside.py", "shared/../native.py", "", None, "alias.py"):
+            with self.subTest(target=target):
+                self.policy["files"]["alias.py"] = {
+                    "category": "repository-license", "notice": "LICENSE",
+                    "reason": "Invalid test alias.", "target": target,
+                }
+                self.write(headers.POLICY_PATH, json.dumps(self.policy).encode())
+                with self.assertRaises(headers.CoverageError):
+                    headers.load_policy(self.root)
+        del self.policy["files"]["alias.py"]
+        self.policy["formats"][".py"] = {
+            "category": "repository-license", "notice": "LICENSE",
+            "reason": "Format-wide aliases are forbidden.", "target": "shared/native.py",
+        }
+        self.write(headers.POLICY_PATH, json.dumps(self.policy).encode())
+        with self.assertRaises(headers.CoverageError):
+            headers.load_policy(self.root)
+
     def test_original_attribution_and_legacy_annotation_preserved(self):
         body = b"// Copyright (c) 2026 Original Author\n// SPDX-License-Identifier: MIT\nfn main() {}\n"
         after = self.apply("a.rs", body)
@@ -352,7 +466,7 @@ class HeaderTests(unittest.TestCase):
             self.assertTrue(headers.insertion("a.rs", body, "slash")[1])
 
     def test_unknown_and_unsafe_formats_fail(self):
-        for name in ("unknown.conf", "new.txt", "new.lock", "own.whl", "unknown", "a.cjs"):
+        for name in ("unknown.conf", "new.txt", "new.lock", "own.whl", "unknown", "a.unsupported"):
             with self.subTest(name=name):
                 with self.assertRaises(headers.CoverageError):
                     headers.classification(name, self.policy)
@@ -461,7 +575,24 @@ class HeaderTests(unittest.TestCase):
             "api-modules.json", "graph.txt", "toolchain.txt", "inputs.lock", "requests.txt",
             "dependencies.patch", "SHA256SUMS",
         )}
-        expected = headlamp | dex
+        image_locks = {
+            "deploy/ebpf-witness/aggregator/client.go.mod",
+            "deploy/ebpf-witness/aggregator/client.go.sum",
+            "deploy/helm/kars/Chart.lock",
+            "deploy/helm/kars/charts/kars-datapath-witness-0.1.0.tgz",
+            "sandbox-images/hermes/hermes-core-constraints.txt",
+            "sandbox-images/hermes/hermes-uv.lock",
+            "sandbox-images/k8s-sidecar/requirements.lock",
+        } | {
+            f"sandbox-images/{directory}/{name}.go.{suffix}"
+            for directory, name in (
+                ("json-exporter", "json-exporter"), ("kube-state-metrics", "metrics"),
+                ("node-exporter", "node-exporter"), ("prometheus-operator", "operator"),
+                ("prometheus", "prometheus"), ("webhook-certgen", "certgen"),
+            )
+            for suffix in ("mod", "sum")
+        }
+        expected = headlamp | dex | image_locks
         generated = {p for p, r in self.policy["files"].items() if r["category"] == "generated"}
         self.assertEqual(generated, expected)
         for name in expected:
@@ -469,6 +600,11 @@ class HeaderTests(unittest.TestCase):
             self.assertEqual(rule["notice"], "NOTICE")
             if name in headlamp:
                 self.assertIn("tools/headlamp-plugin/package.json", rule["reason"])
+            body = b"upstream generated bytes\x00\n"
+            path = self.write(name, body)
+            result, = headers.process(self.root, [name], self.policy, apply=True)
+            self.assertEqual(result["status"], "covered-without-header")
+            self.assertEqual(path.read_bytes(), body)
         for name in (
             "tools/headlamp-plugin/dist/authored.ts",
             "tools/headlamp-plugin/dist/authored.d.ts",
@@ -489,6 +625,44 @@ class HeaderTests(unittest.TestCase):
             result, = headers.process(self.root, [name], self.policy, apply=True)
             self.assertEqual(result["status"], "covered-without-header")
             self.assertEqual(path.read_bytes(), body)
+
+    def test_build_tool_legal_coverage_preserves_bytes_without_exempting_neighbors(self):
+        name = "tools/headlamp-plugin/build-tool/LICENSE.upstream"
+        body = b"Original upstream legal text\n"
+        path = self.write(name, body)
+        result, = headers.process(self.root, [name], self.policy, apply=True)
+        self.assertEqual(result["category"], "legal")
+        self.assertEqual(result["status"], "covered-without-header")
+        self.assertEqual(path.read_bytes(), body)
+        with self.assertRaises(headers.CoverageError):
+            headers.classification("tools/headlamp-plugin/build-tool/unreviewed.upstream", self.policy)
+        for suffix in ("prepare.py", "checks.node.mjs", "README.md"):
+            self.assertEqual(headers.classification("tools/headlamp-plugin/build-tool/" + suffix, self.policy)["category"], "header")
+
+    def test_packaged_upstream_inputs_have_only_exact_coverage(self):
+        names = (
+            "tools/headlamp-plugin/build-tool/headlamp-plugin-0.13.1-kars.tgz",
+            "bridge/idp/patches/0001-refresh-storage-deadlock.patch",
+            "deploy/helm/kars/charts/kube-prometheus-stack-85.3.3.tgz",
+            "runtimes/wheels/amd64/agent_control_specification-0.4.0b0-cp311-abi3-linux_x86_64.whl",
+            "sandbox-images/hermes/hermes-dependency-fixes.patch",
+            "sandbox-images/hermes/hermes-foundry-bounds.patch",
+            "sandbox-images/hermes/hermes-foundry-responses.patch",
+            "sandbox-images/hermes/node22-SHASUMS256.txt",
+            "sandbox-images/openclaw/node24-SHASUMS256.txt",
+        )
+        for name in names:
+            with self.subTest(name=name):
+                body = b"upstream immutable input\x00\n"
+                path = self.write(name, body)
+                result, = headers.process(self.root, [name], self.policy, apply=True)
+                self.assertEqual(result["category"], "third-party")
+                self.assertEqual(result["status"], "covered-without-header")
+                self.assertEqual(path.read_bytes(), body)
+                with self.assertRaises(headers.CoverageError):
+                    headers.classification(str(Path(name).with_name("unreviewed" + Path(name).suffix)), self.policy)
+        for name in ("sandbox-images/hermes/new.py", "deploy/helm/kars/charts/new.ts"):
+            self.assertEqual(headers.classification(name, self.policy)["category"], "header")
 
     def test_generated_rules_cannot_be_format_wide(self):
         for name in ("LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.txt"):

@@ -10,9 +10,9 @@ use super::models::{MissionResultDto, MissionTelemetryDto};
 use super::presentation::{classify_blocked, deliverable_text, is_real_deliverable};
 
 mod contract;
-pub(crate) mod efficiency;
 #[cfg(test)]
 mod contract_tests;
+pub(crate) mod efficiency;
 pub(crate) mod live;
 
 const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
@@ -29,6 +29,7 @@ pub struct MissionRunEvidenceDto {
     pub sandbox_uid: String,
     pub pod_uid: String,
     pub runtime_boot_id: String,
+    pub runtime: Option<String>,
     pub status: String,
     pub started_at: String,
     pub finished_at: String,
@@ -114,10 +115,14 @@ fn did(value: &str) -> bool {
 
 fn terminal(data: &BTreeMap<String, String>) -> Option<(MissionRunEvidenceDto, Option<Evidence>)> {
     let raw = data.get("evidence.json")?;
-    if raw.len() > 192 * 1024 {
+    if raw.len() > super::router_activity::MAX_MISSION_BYTES {
         return None;
     }
-    let reply: Reply = serde_json::from_str(raw).ok()?;
+    let value: Value = serde_json::from_str(raw).ok()?;
+    if !contract::within_wire_bound(&value) {
+        return None;
+    }
+    let reply: Reply = serde_json::from_value(value).ok()?;
     let expected_status = match reply.status.as_str() {
         "succeeded" => "ok",
         "failed" => "failed",
@@ -209,6 +214,7 @@ fn terminal(data: &BTreeMap<String, String>) -> Option<(MissionRunEvidenceDto, O
             sandbox_uid: reply.sandbox_uid,
             pod_uid: reply.pod_uid,
             runtime_boot_id: reply.boot_id,
+            runtime: None,
             status: reply.status,
             started_at,
             finished_at,
@@ -216,6 +222,21 @@ fn terminal(data: &BTreeMap<String, String>) -> Option<(MissionRunEvidenceDto, O
         },
         reply.evidence,
     ))
+}
+
+/// Add historical runtime only after the retained attempt matches the committed result.
+pub(crate) fn mission_result_with_attempt(
+    data: &BTreeMap<String, String>,
+    attempt: Option<&k8s_openapi::api::core::v1::ConfigMap>,
+) -> MissionResultDto {
+    let mut result = mission_result(data);
+    if let Some(run) = result.run_evidence.as_mut() {
+        run.runtime = attempt
+            .and_then(|attempt| efficiency::from_attempt(data, attempt))
+            .map(|measurement| measurement.harness)
+            .filter(|runtime| !runtime.is_empty());
+    }
+    result
 }
 
 /// Input must already pass the current Task UID/run/owner ConfigMap fence.
@@ -412,6 +433,27 @@ mod tests {
         assert!(result.run_evidence.is_some());
         assert!(!result.reviewable && !result.usage_known);
         assert!(result.total_tokens.is_none());
+    }
+
+    #[test]
+    fn failed_explanation_is_bound_diagnostic_not_reviewable_delivery() {
+        let mut data = output();
+        let mut reply: Value = serde_json::from_str(&data["evidence.json"]).unwrap();
+        reply["status"] = json!("failed");
+        reply["output"] = json!("I need exact-host approval before the source can be fetched.");
+        reply["error"] = json!("Required exports missing");
+        data.insert("status".into(), "failed".into());
+        data.insert("output".into(), reply["output"].as_str().unwrap().into());
+        data.insert("error".into(), reply["error"].as_str().unwrap().into());
+        data.insert("evidence.json".into(), reply.to_string());
+        let result = mission_result(&data);
+        assert_eq!(Some(&result.output), data.get("output"));
+        assert_eq!(result.error.as_ref(), data.get("error"));
+        assert!(result.run_evidence.is_some());
+        assert!(!result.reviewable);
+        data.insert("output".into(), "Unbound explanation".into());
+        let result = mission_result(&data);
+        assert!(result.run_evidence.is_none() && !result.reviewable);
     }
 
     #[test]

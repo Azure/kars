@@ -2,7 +2,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-FROM mcr.microsoft.com/azurelinux/base/python:3.12@sha256:d1a693353b7db0383e66a61416a049f617fdfb89435dcaac543749fb4f14950a AS build
+FROM mcr.microsoft.com/azurelinux/base/python:3.12@sha256:71a1f5a1821f4c56e45aff52e792ed6c0500631e201cfc140c4c9d22886b29f9 AS build
 RUN tdnf update -y --refresh && tdnf clean all
 COPY runtimes/wheels/ /tmp/agt-wheels/
 COPY runtimes/install-agt-wheels.py /tmp/install-agt-wheels.py
@@ -12,7 +12,7 @@ RUN python3 /tmp/install-agentmesh.py
 ARG COMPONENT=registry
 RUN python3 -c 'import sys; assert sys.argv[1] in ("registry", "relay"), "Unsupported AgentMesh component"' "${COMPONENT}"
 
-FROM mcr.microsoft.com/azurelinux/distroless/python:3.12@sha256:88eb935992271c4ab82773efbb34290e7448c9df778c9505d0e5b184ec25d07e
+FROM mcr.microsoft.com/azurelinux/distroless/python:3.12@sha256:10bcfa3c563fd05f9b11495551bd36bfe919b4a2f32b68388e1c393bbeea64ac
 ARG COMPONENT=registry
 COPY --from=build /opt/agentmesh /opt/agentmesh
 COPY sandbox-images/agentmesh/entrypoint.py /opt/kars/launch-agentmesh.py

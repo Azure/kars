@@ -111,6 +111,8 @@ export interface EgressApproval {
 
 export interface GithubApp {
   configured: boolean;
+  /** Exact, validated store enrollment; false requires operator setup first. */
+  storage_ready: boolean;
   slug: string | null;
   install_url: string | null;
 }
@@ -124,6 +126,27 @@ export interface DiscoveredModel {
 }
 
 // ─── kars-SRE self-remediation proposals ────────────────────────────────────
+
+export interface SreReport {
+  state: "observed" | "stale" | "missing" | "revoked" | "replaced" | "invalid" | "unavailable";
+  latest: null | {
+    version: number;
+    identity: { registration_uid: string; source_namespace: string; source_uid: string; namespace_uid: string };
+    privacy_epoch: string;
+    accepted_at_ms: number;
+    digest: string;
+    report: {
+      sweep_id: string;
+      started_at_ms: number;
+      finished_at_ms: number;
+      turn_status: "finished" | "failed" | "blocked" | "timeout";
+      text: string;
+      truncated: boolean;
+      interval_seconds: number;
+      timeout_seconds: number;
+    };
+  };
+}
 
 export interface SreAction {
   name: string;

@@ -9,7 +9,7 @@ mod producer;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::process::Command;
-use wiremock::matchers::{header, method};
+use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const FORMAT_ENV: &str = "KARS_EVAL_REPORT_FORMAT";
@@ -79,6 +79,139 @@ async fn server(mixed: bool, allow_all: bool) -> MockServer {
             .await;
     }
     server
+}
+
+#[tokio::test]
+async fn memory_rest_access_refusals_are_errors_not_policy_failures_or_acceptance() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/memory_stores/bound-store:search_memories"))
+        .respond_with(ResponseTemplate::new(403).set_body_string("Memory store access forbidden"))
+        .expect(5)
+        .mount(&server)
+        .await;
+    let output = Command::new(env!("CARGO_BIN_EXE_kars-conformance-runner"))
+        .args([
+            "--corpus",
+            "builtin:memory-isolation",
+            "--memory-store",
+            "bound-store",
+            "--router-base",
+            &server.uri(),
+            "--output",
+            "/dev/stdout",
+        ])
+        .env(FORMAT_ENV, "v2")
+        .output()
+        .await
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["total"], 5);
+    assert_eq!(report["passed"], 0);
+    assert_eq!(report["failed"], 0);
+    assert_eq!(report["errored"], 5);
+    assert!(
+        report["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|case| { case["actual"].is_null() && case["verdict"]["result"] == "Errored" })
+    );
+    assert!(!report.to_string().contains("Memory store access forbidden"));
+    let bytes = kars_eval_corpus::builtin_bytes("memory-isolation").unwrap();
+    let corpus = kars_eval_corpus::parse(bytes).unwrap();
+    let digest = format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
+    let parsed = consumer::parse(&report.to_string(), &corpus, &digest, &server.uri()).unwrap();
+    assert!(!parsed.ready());
+    assert_eq!(parsed.failed, 0);
+}
+
+#[tokio::test]
+async fn memory_missing_or_invalid_store_reports_evaluator_errors_without_io() {
+    let server = MockServer::start().await;
+    for store in [None, Some("Invalid/store"), Some(""), Some("-store")] {
+        for format in ["v1", "v2"] {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_kars-conformance-runner"));
+            command
+                .args([
+                    "--corpus",
+                    "builtin:memory-isolation",
+                    "--router-base",
+                    &server.uri(),
+                    "--output",
+                    "/dev/stdout",
+                ])
+                .env(FORMAT_ENV, format);
+            if let Some(store) = store {
+                command.arg(format!("--memory-store={store}"));
+            }
+            let output = command.output().await.unwrap();
+            assert_eq!(output.status.code(), Some(2));
+            if format == "v1" {
+                assert!(output.stdout.is_empty());
+                continue;
+            }
+            let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(report["total"], 5);
+            assert_eq!(report["passed"], 0);
+            assert_eq!(report["failed"], 0);
+            assert_eq!(report["errored"], 5);
+            for case in report["results"].as_array().unwrap() {
+                assert!(case["actual"].is_null());
+                assert_eq!(case["verdict"]["result"], "Errored");
+                assert_eq!(case["verdict"]["category"], "Protocol");
+            }
+        }
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn memory_wrong_store_denials_cannot_pass_scope_isolation_corpus() {
+    for (reason, exit, passed, failed) in [
+        ("memory store or operation is not authorized", 1, 0, 5),
+        ("memory scope is not authorized", 0, 5, 0),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/memory_stores/bound-store:search_memories"))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .insert_header("x-kars-decision", "Blocked")
+                    .insert_header("x-kars-decision-by", "KarsMemory")
+                    .insert_header("x-kars-decision-reason", reason)
+                    .set_body_json(json!({"error": "memory scope is not authorized"})),
+            )
+            .expect(5)
+            .mount(&server)
+            .await;
+        let output = Command::new(env!("CARGO_BIN_EXE_kars-conformance-runner"))
+            .args([
+                "--corpus",
+                "builtin:memory-isolation",
+                "--router-base",
+                &server.uri(),
+                "--memory-store",
+                "bound-store",
+                "--output",
+                "/dev/stdout",
+            ])
+            .env(FORMAT_ENV, "v2")
+            .output()
+            .await
+            .unwrap();
+        assert_eq!(output.status.code(), Some(exit));
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["passed"], passed);
+        assert_eq!(report["failed"], failed);
+        assert_eq!(report["errored"], 0);
+        let bytes = kars_eval_corpus::builtin_bytes("memory-isolation").unwrap();
+        let corpus = kars_eval_corpus::parse(bytes).unwrap();
+        let digest = format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
+        let parsed = consumer::parse(&report.to_string(), &corpus, &digest, &server.uri()).unwrap();
+        assert_eq!(parsed.ready(), exit == 0);
+    }
 }
 
 #[tokio::test]

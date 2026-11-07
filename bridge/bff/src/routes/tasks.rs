@@ -19,7 +19,10 @@ mod models;
 mod presentation;
 mod queries;
 mod reviewed_execution;
-pub(crate) use reviewed_execution::read as read_reviewed_execution;
+mod reviewed_summary;
+pub(crate) use reviewed_execution::{
+    ReviewedPhaseDto, read as read_reviewed_execution, read_live as read_reviewed_live,
+};
 mod revision;
 mod router_activity;
 pub(crate) use router_activity::ARTIFACT as ROUTER_OBSERVATIONS_ARTIFACT;
@@ -31,6 +34,7 @@ mod tests;
 pub(crate) use artifacts::artifact_key;
 pub use artifacts::download_artifact;
 pub use creation::create_task;
+pub(crate) use creation::mission_github_write_enabled;
 pub use diagnostics::{TroubleshootDto, troubleshoot_task};
 pub use egress::{
     EgressModeRequest, EgressRequest, get_learned_egress, request_egress, set_egress_mode,

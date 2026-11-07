@@ -14,7 +14,8 @@
 //!   `chat_completions.rs`. Unavailable calendar accounting returns HTTP 503.
 //! * Managed calendars record Begin at the final provider-send boundary and
 //!   Finish from complete provider usage before returning the final result.
-//!   Interrupted work blocks replacement writers; no empty restart is admitted.
+//!   Interrupted work blocks replacement writers by default. Explicit operator
+//!   record-only policy retains that liability while admitting new work; it never resets usage.
 //!   This is completed-usage accounting, not a token-amount reservation.
 //!   `record_usage` only updates the legacy local/file backend.
 //! * `check_per_request(total)` is the existing warn-only response-side
@@ -35,8 +36,10 @@
 //!
 //! Persistence file is JSON of shape
 //! `{ "sandboxes": { "<name>": { "day_key", "daily", "month_key",
-//! "monthly" } } }`. Atomic-rename pattern: write to `*.tmp`, fsync,
-//! rename over the target. On startup we load on best-effort — a
+//! "monthly" } } }`. Atomic-rename pattern: exclusively create a private,
+//! uniquely named sibling file, write, fsync, then rename over the target.
+//! The operator-configured parent directory must not be writable by sandbox agents.
+//! On startup we load on best-effort — a
 //! corrupt or missing legacy file starts fresh and cannot establish a durable
 //! quota. Calendar accounts instead reject missing/replaced/corrupt state.
 
@@ -177,6 +180,21 @@ impl TokenBudgetTracker {
     }
 
     pub async fn observed_usage(&self, sandbox: &str) -> Result<(u64, u64), CheckError> {
+        let (usage, _, _) = self.observed_accounting(sandbox).await?;
+        Ok(usage)
+    }
+
+    pub async fn observed_accounting(
+        &self,
+        sandbox: &str,
+    ) -> Result<
+        (
+            (u64, u64),
+            crate::inference_budget_contract::calendar::Policy,
+            Option<u64>,
+        ),
+        CheckError,
+    > {
         if let Some(calendar) = &self.calendar {
             if sandbox != calendar.sandbox() {
                 return Err(CheckError::unavailable(
@@ -188,14 +206,22 @@ impl TokenBudgetTracker {
                 .await
                 .map_err(|error| CheckError::unavailable(error.to_string()))?;
             let now = self.clock.now();
-            if remote.day > day_key(now) || remote.month > month_key(now) {
+            if remote.usage.day > day_key(now) || remote.usage.month > month_key(now) {
                 return Err(CheckError::unavailable(
                     "Calendar accounting clock mismatch",
                 ));
             }
-            return Ok(remote.current(day_key(now), month_key(now)));
+            return Ok((
+                remote.usage.current(day_key(now), month_key(now)),
+                remote.policy,
+                remote.pending_requests,
+            ));
         }
-        Ok(self.get_usage(sandbox).await)
+        Ok((
+            self.get_usage(sandbox).await,
+            crate::inference_budget_contract::calendar::Policy::Enforce,
+            None,
+        ))
     }
 
     /// Construct an in-memory tracker (no persistence) with the
@@ -299,7 +325,10 @@ impl TokenBudgetTracker {
         daily_limit: Option<u64>,
         monthly_limit: Option<u64>,
     ) -> Result<(), CheckError> {
-        let (daily_used, monthly_used) = self.observed_usage(sandbox).await?;
+        let ((daily_used, monthly_used), policy, _) = self.observed_accounting(sandbox).await?;
+        if policy == crate::inference_budget_contract::calendar::Policy::RecordOnly {
+            return Ok(());
+        }
         let daily_effective = daily_limit.unwrap_or(self.daily_default);
         let monthly_effective = monthly_limit.unwrap_or(0);
         if daily_effective == 0 && monthly_effective == 0 {
@@ -325,6 +354,27 @@ impl TokenBudgetTracker {
             });
         }
         Ok(())
+    }
+
+    pub async fn check_governed_budget(
+        &self,
+        sandbox: &str,
+        daily_limit: Option<u64>,
+        monthly_limit: Option<u64>,
+        authority: Option<&crate::inference_budget::Client>,
+    ) -> Result<(), CheckError> {
+        let result = self.check_budget(sandbox, daily_limit, monthly_limit).await;
+        // An allowance can override a ceiling, never missing or uncertain accounting.
+        if result.as_ref().is_err_and(|error| !error.unavailable)
+            && let Some(authority) = authority
+            && authority
+                .tokens_unbounded(sandbox)
+                .await
+                .map_err(|error| CheckError::unavailable(error.to_string()))?
+        {
+            return Ok(());
+        }
+        result
     }
 
     /// Compat shim for the legacy single-limit path. New code should
@@ -439,26 +489,189 @@ impl TokenBudgetTracker {
     }
 }
 
-/// Atomic write helper: serialize → tmp → fsync → rename. Failures
-/// surface to the caller, which logs and continues (counter
-/// in-memory remains authoritative for the current process).
+/// Atomic write in the operator-owned directory. Exclusive creation prevents
+/// following pre-existing staging symlinks or truncating another writer's file.
+/// Failures leave the prior target intact and the in-memory counters authoritative.
 fn persist_atomically(target: &Path, state: &PersistedState) -> std::io::Result<()> {
+    use std::io::Write;
+
     let bytes = serde_json::to_vec(state).map_err(std::io::Error::other)?;
-    let tmp = target.with_extension("tmp");
-    {
-        use std::io::Write;
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(&bytes)?;
-        f.sync_all()?;
+    let parent = target.parent().unwrap_or_else(|| Path::new("."));
+    let staging = parent.join(format!(
+        ".kars-token-budgets-{:032x}.tmp",
+        rand::random::<u128>()
+    ));
+    let mut file = create_budget_staging_file(&staging)?;
+    let result = (|| {
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&staging, target)
+    })();
+    drop(file);
+    if result.is_err() {
+        // Only remove a staging file this invocation successfully created.
+        let _ = std::fs::remove_file(&staging);
     }
-    std::fs::rename(&tmp, target)?;
-    Ok(())
+    result
+}
+
+fn create_budget_staging_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn persistence_staging_creation_never_truncates_an_existing_file() {
+        let dir = tempfile::tempdir_in(".").unwrap();
+        let path = dir.path().join("occupied");
+        std::fs::write(&path, b"existing accounting").unwrap();
+        let error = create_budget_staging_file(&path).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&path).unwrap(), b"existing accounting");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persistence_staging_creation_rejects_existing_and_dangling_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir_in(".").unwrap();
+        let victim = dir.path().join("victim");
+        let staging = dir.path().join("occupied");
+        symlink("victim", &staging).unwrap();
+        assert!(create_budget_staging_file(&staging).is_err());
+        assert!(
+            !victim.exists(),
+            "a dangling symlink must not create its target"
+        );
+        std::fs::write(&victim, b"do not truncate").unwrap();
+        assert!(create_budget_staging_file(&staging).is_err());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"do not truncate");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persistence_replaces_target_symlink_without_following_it_or_legacy_staging() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let dir = tempfile::tempdir_in(".").unwrap();
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, b"do not truncate").unwrap();
+        let target = dir.path().join("budgets.json");
+        symlink("victim", &target).unwrap();
+        symlink("victim", target.with_extension("tmp")).unwrap();
+        let state = PersistedState {
+            sandboxes: HashMap::from([(
+                "sandbox".into(),
+                SandboxCounters {
+                    day_key: 739749,
+                    daily: 12345,
+                    month_key: 24322,
+                    monthly: 67890,
+                },
+            )]),
+        };
+        persist_atomically(&target, &state).unwrap();
+        assert_eq!(std::fs::read(&victim).unwrap(), b"do not truncate");
+        assert!(
+            std::fs::symlink_metadata(target.with_extension("tmp"))
+                .unwrap()
+                .is_symlink()
+        );
+        assert!(!std::fs::symlink_metadata(&target).unwrap().is_symlink());
+        let restored: PersistedState =
+            serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+        assert_eq!(restored.sandboxes, state.sandboxes);
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 3);
+    }
+
+    #[test]
+    fn persistence_failed_rename_cleans_staging_and_preserves_existing_target() {
+        let dir = tempfile::tempdir_in(".").unwrap();
+        let target = dir.path().join("existing-directory");
+        std::fs::create_dir(&target).unwrap();
+        let retained = target.join("retained");
+        std::fs::write(&retained, b"retained accounting").unwrap();
+        assert!(persist_atomically(&target, &PersistedState::default()).is_err());
+        assert_eq!(std::fs::read(&retained).unwrap(), b"retained accounting");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn persistence_request_data_cannot_select_the_configured_path() {
+        use axum::{Json, Router, body::Body, extract::State, http::Request, routing::post};
+        use tower::ServiceExt;
+
+        async fn record(
+            State(tracker): State<TokenBudgetTracker>,
+            Json((sandbox, tokens)): Json<(String, u64)>,
+        ) {
+            // Exercise the destructured State binding across an async capture, too.
+            async move { tracker.record_usage(&sandbox, tokens).await }.await;
+        }
+
+        let dir = tempfile::tempdir_in(".").unwrap();
+        let storage = dir.path().join("operator-owned");
+        std::fs::create_dir(&storage).unwrap();
+        let path = storage.join("budgets.json");
+        let victim = dir.path().join("victim.json");
+        std::fs::write(&victim, b"unrelated file").unwrap();
+        let absolute_victim = std::fs::canonicalize(&victim).unwrap();
+        let tracker = TokenBudgetTracker::with_persistence(0, 0, &path);
+        let app = Router::new()
+            .route("/record", post(record))
+            .with_state(tracker.clone());
+        let names = [
+            "../victim.json".to_owned(),
+            absolute_victim.to_string_lossy().into_owned(),
+            r"..\victim.json".to_owned(),
+            "budgets.json.tmp".to_owned(),
+        ];
+        for (index, name) in names.iter().enumerate() {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/record?persist_path=../victim.json")
+                        .header("content-type", "application/json")
+                        .header("x-persist-path", "../victim.json")
+                        .body(Body::from(
+                            serde_json::to_vec(&(name, index as u64 + 1)).unwrap(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+        }
+        assert_eq!(tracker.persist_path.as_ref(), Some(&path));
+        let snapshot: PersistedState =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(snapshot.sandboxes.len(), names.len());
+        for (index, name) in names.iter().enumerate() {
+            assert_eq!(snapshot.sandboxes[name].daily, index as u64 + 1);
+            assert_eq!(snapshot.sandboxes[name].monthly, index as u64 + 1);
+        }
+        assert_eq!(std::fs::read(&victim).unwrap(), b"unrelated file");
+        assert_eq!(std::fs::read_dir(&storage).unwrap().count(), 1);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
 
     /// Test clock holding a fixed `DateTime<Utc>` (mutable via
     /// `set`). Lets us cross UTC midnight + month boundary

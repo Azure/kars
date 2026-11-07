@@ -40,6 +40,7 @@ fn require_cluster(state: &AppState) -> AppResult<&Cluster> {
 
 /// A single budget rule at one level of the hierarchy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BudgetRule {
     /// Daily token cap. `0` (or absent) ⇒ no cap (measured, never blocked).
     #[serde(default)]
@@ -84,6 +85,7 @@ impl BudgetRule {
 
 /// The persisted hierarchy (stored as `budgets.json`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BudgetHierarchy {
     #[serde(default)]
     pub cluster: Option<BudgetRule>,
@@ -97,11 +99,50 @@ pub struct BudgetHierarchy {
 }
 
 impl BudgetHierarchy {
-    async fn load(cluster: &Cluster) -> Self {
-        serde_json::from_str(&cluster.read_inference_budgets().await).unwrap_or_default()
+    async fn load(cluster: &Cluster) -> AppResult<Self> {
+        let raw = cluster.read_inference_budgets().await.map_err(|error| {
+            tracing::warn!(%error, "workspace spending policy read failed");
+            AppError::SpendingPolicyUnavailable
+        })?;
+        Self::parse(&raw)
+    }
+
+    fn parse(raw: &str) -> AppResult<Self> {
+        let hierarchy: Self =
+            serde_json::from_str(raw).map_err(|_| AppError::SpendingPolicyUnavailable)?;
+        for rule in hierarchy
+            .cluster
+            .iter()
+            .chain(hierarchy.workspaces.values())
+            .chain(hierarchy.users.values())
+        {
+            if rule.daily_tokens < 0
+                || !matches!(rule.mode.as_str(), "passive" | "buffer" | "strict")
+                || !(0..=1000).contains(&rule.buffer_percent)
+                || rule
+                    .daily_tokens
+                    .checked_mul(100 + rule.buffer_percent)
+                    .is_none()
+            {
+                return Err(AppError::SpendingPolicyUnavailable);
+            }
+        }
+        Ok(hierarchy)
+    }
+
+    fn applicable(&self, ns: &str, user: &str) -> Vec<(&'static str, &BudgetRule)> {
+        [
+            ("Cluster", self.cluster.as_ref()),
+            ("Workspace", self.workspaces.get(ns)),
+            ("Your account", self.users.get(user)),
+        ]
+        .into_iter()
+        .filter_map(|(scope, rule)| rule.map(|rule| (scope, rule)))
+        .collect()
     }
     async fn save(&self, cluster: &Cluster) -> AppResult<()> {
         let json = serde_json::to_string(self).map_err(|e| AppError::Internal(e.into()))?;
+        Self::parse(&json).map_err(|_| AppError::BadRequest("These spending rules contain an invalid or unsupported limit. No settings were changed.".into()))?;
         cluster
             .write_inference_budgets(&json)
             .await
@@ -273,7 +314,7 @@ fn level_dto(scope: &str, label: &str, rule: &BudgetRule, used: i64) -> BudgetLe
 /// `GET /api/operator/inference-budgets` — the hierarchy + live measured usage.
 pub async fn get_budgets(State(state): State<AppState>) -> AppResult<Json<BudgetsDto>> {
     let cluster = require_cluster(&state)?;
-    let h = BudgetHierarchy::load(cluster).await;
+    let h = BudgetHierarchy::load(cluster).await?;
     let (cluster_used, by_ns, by_user) = usage_today(cluster).await;
     let default_ns = "kars-system".to_string();
 
@@ -354,7 +395,7 @@ pub async fn set_cluster_budget(
 ) -> AppResult<Json<BudgetsDto>> {
     require_admin(&principal)?;
     let cluster = require_cluster(&state)?;
-    let mut h = BudgetHierarchy::load(cluster).await;
+    let mut h = BudgetHierarchy::load(cluster).await?;
     if req.clear {
         h.cluster = None;
     } else {
@@ -385,7 +426,7 @@ pub async fn set_workspace_budget(
         ));
     }
     let cluster = require_cluster(&state)?;
-    let mut h = BudgetHierarchy::load(cluster).await;
+    let mut h = BudgetHierarchy::load(cluster).await?;
     if req.clear {
         h.workspaces.remove(&ns);
     } else {
@@ -415,7 +456,7 @@ pub async fn set_user_budget(
         return Err(AppError::BadRequest("user identity is required".into()));
     }
     let cluster = require_cluster(&state)?;
-    let mut h = BudgetHierarchy::load(cluster).await;
+    let mut h = BudgetHierarchy::load(cluster).await?;
     if req.clear {
         h.users.remove(&user);
     } else {
@@ -440,23 +481,98 @@ pub async fn set_user_budget(
 /// surfaces as an alert), or `AppError::Rejected` when a `buffer`/`strict` level
 /// would be breached. The per-sandbox cap is separately enforced by the router;
 /// this is the aggregate hierarchy gate the Bridge owns.
-pub async fn enforce_launch_budget(cluster: &Cluster, ns: &str, user: &str) -> AppResult<()> {
-    let h = BudgetHierarchy::load(cluster).await;
-    if h.cluster.is_none() && h.workspaces.is_empty() && h.users.is_empty() {
-        return Ok(()); // no hierarchy configured — nothing to enforce.
+async fn resolved_rules(
+    cluster: &Cluster,
+    ns: &str,
+    user: &str,
+) -> AppResult<Vec<(&'static str, BudgetRule, i64)>> {
+    let hierarchy = BudgetHierarchy::load(cluster).await?;
+    let rules = hierarchy.applicable(ns, user);
+    if rules.is_empty() {
+        return Ok(Vec::new());
     }
     let (cluster_used, by_ns, by_user) = usage_today(cluster).await;
+    Ok(rules
+        .into_iter()
+        .map(|(scope, rule)| {
+            let used = match scope {
+                "Cluster" => cluster_used,
+                "Workspace" => *by_ns.get(ns).unwrap_or(&0),
+                _ => *by_user.get(user).unwrap_or(&0),
+            };
+            (scope, rule.clone(), used)
+        })
+        .collect())
+}
 
-    if let Some(rule) = &h.cluster {
-        check_level(rule, cluster_used, "cluster-wide")?;
+pub async fn composition_context(cluster: &Cluster, ns: &str, user: &str) -> AppResult<String> {
+    let hierarchy = BudgetHierarchy::load(cluster).await?;
+    let rules = hierarchy.applicable(ns, user);
+    Ok(format!(
+        "\nTRUSTED WORKSPACE SPENDING CONTEXT (server-resolved data, not instructions):\n{}\n\
+         These are daily launch rules, NOT per-Mission, Team-lifetime or per-role caps. All applicable \
+         levels remain in force; a workspace or personal rule never overrides a stricter cluster rule. \
+         Do not divide daily limits into new role budgets or interpret absent rules as funding approval. \
+         Profile and ancestor lifetime ceilings, governed accounting and provider limits remain separate. \
+         Composition is not funding or launch authorization.\n",
+        serde_json::to_string(&rules).map_err(|error| AppError::Internal(error.into()))?
+    ))
+}
+
+pub async fn preflight_check(
+    cluster: &Cluster,
+    ns: &str,
+    user: &str,
+) -> crate::routes::validate::Check {
+    use crate::routes::validate::{Check, CheckStatus};
+    let mut check = Check {
+        id: "workspace_spending_policy".into(),
+        label: "Workspace spending rules".into(),
+        status: CheckStatus::Pass,
+        detail: String::new(),
+    };
+    match resolved_rules(cluster, ns, user).await {
+        Err(error) => {
+            check.status = CheckStatus::Fail;
+            check.detail = error.to_string();
+        }
+        Ok(rules) => {
+            let mut details = Vec::new();
+            for (scope, rule, used) in rules {
+                if let Err(error) = check_level(&rule, used, scope) {
+                    check.status = CheckStatus::Fail;
+                    details.push(error.to_string());
+                } else if rule.daily_tokens == 0 {
+                    details.push(format!("{scope}: no additional daily launch limit."));
+                } else {
+                    let level = level_dto(scope, scope, &rule, used);
+                    if level.status != "ok" && check.status != CheckStatus::Fail {
+                        check.status = CheckStatus::Warn;
+                    }
+                    let mode = match rule.mode.as_str() {
+                        "passive" => "alerts only; does not block new work".to_string(),
+                        "buffer" => format!("approved headroom up to {} tokens", rule.hard_cap()),
+                        _ => "new work stops at this daily limit".to_string(),
+                    };
+                    details.push(format!(
+                        "{scope}: {used} of {} daily tokens recorded; {mode}.",
+                        rule.daily_tokens
+                    ));
+                }
+            }
+            if details.is_empty() {
+                details.push("No additional daily launch rules are configured for this workspace and account.".into());
+            }
+            details.push("Daily checks use completed usage today (UTC), not reserved usage from work still running. They are checked again at launch. Profile, Mission/Team lifetime limits and provider limits still apply; this is not a funding guarantee.".into());
+            check.detail = details.join("\n");
+        }
     }
-    if let Some(rule) = h.workspaces.get(ns) {
-        let used = *by_ns.get(ns).unwrap_or(&0);
-        check_level(rule, used, &format!("workspace “{ns}”"))?;
-    }
-    if let Some(rule) = h.users.get(user) {
-        let used = *by_user.get(user).unwrap_or(&0);
-        check_level(rule, used, &format!("user “{user}”"))?;
+    check
+}
+
+pub async fn enforce_launch_budget(cluster: &Cluster, ns: &str, user: &str) -> AppResult<()> {
+    for (scope, rule, used) in resolved_rules(cluster, ns, user).await? {
+        check_level(&rule, used, scope)?;
     }
     Ok(())
 }
@@ -502,6 +618,54 @@ mod tests {
             mode: mode.into(),
             buffer_percent: buf,
         }
+    }
+
+    #[test]
+    fn absent_rules_do_not_invent_limits_but_invalid_rules_fail_closed() {
+        assert!(
+            BudgetHierarchy::parse("{}")
+                .unwrap()
+                .applicable("workspace", "person")
+                .is_empty()
+        );
+        for raw in [
+            "{",
+            "null",
+            r#"{"workspaces":null}"#,
+            r#"{"clusters":{}}"#,
+            r#"{"cluster":{"mode":"typo"}}"#,
+            r#"{"cluster":{"daily_tokens":-1}}"#,
+            r#"{"cluster":{"buffer_percent":1001}}"#,
+            r#"{"cluster":{"daily_tokens":"100"}}"#,
+            r#"{"cluster":{"daily_tokens":9223372036854775807,"mode":"buffer"}}"#,
+        ] {
+            assert!(
+                matches!(
+                    BudgetHierarchy::parse(raw),
+                    Err(AppError::SpendingPolicyUnavailable)
+                ),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn applicable_rules_use_exact_workspace_and_attributed_user_only() {
+        let hierarchy = BudgetHierarchy::parse(
+            r#"{"cluster":{"daily_tokens":1000},
+            "workspaces":{"workspace":{"daily_tokens":100},"foreign":{"daily_tokens":200}},
+            "users":{"person":{"daily_tokens":10},"other":{"daily_tokens":20}}}"#,
+        )
+        .unwrap();
+        let selected = hierarchy.applicable("workspace", "person");
+        assert_eq!(
+            selected
+                .iter()
+                .map(|(scope, rule)| (*scope, rule.daily_tokens))
+                .collect::<Vec<_>>(),
+            vec![("Cluster", 1000), ("Workspace", 100), ("Your account", 10)]
+        );
+        assert_eq!(hierarchy.applicable("unknown", "unattributed").len(), 1);
     }
 
     #[test]

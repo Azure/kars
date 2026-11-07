@@ -32,10 +32,19 @@ export function DatapathSetup({ ownerRelease }: { ownerRelease?: DatapathWitness
           From the reviewed public Kars source, set <code>KARS_CONTEXT</code> explicitly and
           <code> WITNESS_VALUES</code> to a reviewed values file containing a built, published,
           pullable AL3 runtime digest for both <code>aggregator.image</code> and
-          <code> gadget.image</code>, plus explicit sandbox names. The maintained runtime includes
+          <code> gadget.image</code>, plus <code>scope: all</code> and <code>sandboxes: []</code>
+          for dynamic all-sandbox sampling, including new Team and Mission workers.
+          Keep an explicit, reviewed node selection. The maintained runtime includes
           both the client and daemon; this source does not promise a prepublished image.
           Linux nodes need readable kernel BTF and
           compatible eBPF support. The elevated IG DaemonSet uses a dedicated privileged-PSS namespace.
+        </p>
+        <p>
+          The collector rediscovers KarsSandbox objects in <code>kars-system</code> each sample
+          and bounds capture to their namespaces. Scope is not proof of full coverage; Bridge
+          only reads the reported sample. For a deliberately limited legacy selection, use
+          <code> scope: selected</code> with up to 50 exact sandbox names in <code>sandboxes</code>.
+          Omitting scope preserves selected mode, not automatic fleet discovery.
         </p>
         <p>
           {ownerRelease === "kars-datapath-witness"

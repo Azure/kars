@@ -30,6 +30,7 @@ struct Revision {
     name: String,
     uid: String,
     nonce: String,
+    reviewed_pin: Option<String>,
 }
 
 impl Revision {
@@ -40,6 +41,7 @@ impl Revision {
             && task.name_any() == self.name
             && task.uid().as_deref() == Some(self.uid.as_str())
             && task.annotations().get("kars.azure.com/run-requested") == Some(&self.nonce)
+            && task.annotations().get("kars.azure.com/reviewed-state") == self.reviewed_pin.as_ref()
     }
 
     fn completed(&self, output: &BTreeMap<String, String>) -> bool {
@@ -52,6 +54,51 @@ impl Revision {
             )
             && (!output.contains_key("evidence.json")
                 || mission_result(output).run_evidence.is_some())
+    }
+}
+
+#[derive(Default)]
+struct ReviewedStreamPins(BTreeMap<String, live::StreamPin>);
+
+impl ReviewedStreamPins {
+    fn observe(
+        &mut self,
+        phases: Vec<crate::routes::tasks::ReviewedPhaseDto>,
+        root_run_id: &str,
+    ) -> Vec<Event> {
+        let mut snapshots: BTreeMap<_, _> = phases
+            .into_iter()
+            .map(|phase| {
+                (
+                    serde_json::json!([phase.role, phase.phase]).to_string(),
+                    phase.live_activity,
+                )
+            })
+            .collect();
+        // Keep tombstones: a disappeared or replaced assignment cannot restart in this stream.
+        for key in self.0.keys() {
+            snapshots.entry(key.clone()).or_default();
+        }
+        snapshots
+            .into_iter()
+            .filter_map(|(key, snapshot)| {
+                let pin = self.0.entry(key.clone()).or_default();
+                let visible = pin.has_snapshot();
+                let activity = match pin.observe(snapshot) {
+                    live::StreamUpdate::Snapshot(snapshot) => {
+                        serde_json::from_str::<serde_json::Value>(&snapshot).ok()?
+                    }
+                    live::StreamUpdate::Revoked if visible => serde_json::Value::Null,
+                    _ => return None,
+                };
+                Event::default()
+                    .event("reviewed-phase-activity")
+                    .json_data(serde_json::json!({
+                        "run_nonce": root_run_id, "phase_key": key, "activity": activity,
+                    }))
+                    .ok()
+            })
+            .collect()
     }
 }
 
@@ -99,12 +146,17 @@ pub async fn stream_mission(
         name,
         uid,
         nonce,
+        reviewed_pin: task
+            .annotations()
+            .get("kars.azure.com/reviewed-state")
+            .cloned(),
     };
     if !revision.matches(&task, &principal) {
         return Err(AppError::NotFound);
     }
     let s = async_stream::stream! {
         let mut live_pin = live::StreamPin::default();
+        let mut phase_pins = ReviewedStreamPins::default();
         for poll in 0..150 {
             let task = require_owned_task(&cluster, &revision.namespace, &revision.name, &principal).await;
             if !task.as_ref().is_ok_and(|task| revision.matches(task, &principal)) {
@@ -116,7 +168,15 @@ pub async fn stream_mission(
             }
             let output = cluster.read_mission_output(&revision.name).await;
             let trace = cluster.read_current_mission_trace(&revision.name).await;
-            let attempt = cluster.read_mission_attempt(&revision.uid, &revision.nonce).await;
+            let attempt = cluster.read_mission_attempt(&revision.uid, &revision.nonce).await
+                .unwrap_or_else(|error| {
+                    tracing::warn!(%error, "live mission attempt unavailable");
+                    None
+                });
+            let phases = match task.as_ref() {
+                Ok(task) => crate::routes::tasks::read_reviewed_live(&cluster, task, &principal).await,
+                Err(_) => unreachable!("task revision checked above"),
+            };
             // Recheck after all evidence reads, before returning any bytes.
             let task = require_owned_task(&cluster, &revision.namespace, &revision.name, &principal).await;
             if !task.as_ref().is_ok_and(|task| revision.matches(task, &principal)) {
@@ -126,6 +186,15 @@ pub async fn stream_mission(
                 yield Ok(Event::default().event("end").data("revision unavailable"));
                 return;
             }
+            let phases = match phases {
+                Ok(phases) => phases,
+                Err(error) => {
+                    tracing::warn!(%error, "live reviewed phase custody unavailable");
+                    // Hide all provisional data; retry a fully validated read after reservation/API races.
+                    yield Ok(Event::default().event("renew").data("reviewed phase evidence unavailable"));
+                    return;
+                }
+            };
             if output.as_ref().is_some_and(|output| revision.completed(output)) {
                 if !task.as_ref().is_ok_and(|task| {
                     task.annotations().get("kars.azure.com/run-completed") == Some(&revision.nonce)
@@ -151,6 +220,9 @@ pub async fn stream_mission(
                 ));
                 break;
             }
+            for event in phase_pins.observe(phases, &revision.nonce) {
+                yield Ok(event);
+            }
             let snapshot = attempt.as_ref().zip(task.as_ref().ok())
                 .and_then(|(attempt, task)| live::from_attempt(attempt, task));
             match live_pin.observe(snapshot) {
@@ -165,6 +237,11 @@ pub async fn stream_mission(
                     yield Ok(Event::default().event("unavailable").data("revision-bound detailed trace unavailable"));
                 }
                 _ => {}
+            }
+            if poll == 149 {
+                // EOF renews EventSource without discarding its client-side custody pins.
+                yield Ok(Event::default().event("renew").data("bounded stream renewal"));
+                return;
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
@@ -196,6 +273,7 @@ mod tests {
             name: "briefing".into(),
             uid: "task-uid".into(),
             nonce: "run-1".into(),
+            reviewed_pin: None,
         }
     }
 
@@ -215,6 +293,7 @@ mod tests {
         for (key, value) in [
             ("kars.azure.com/owner-sub", "new-owner"),
             ("kars.azure.com/run-requested", "run-2"),
+            ("kars.azure.com/reviewed-state", "changed-reservation"),
         ] {
             let mut changed = task.clone();
             changed
@@ -232,9 +311,10 @@ mod tests {
         replaced.metadata.namespace = Some("another".into());
         assert!(!revision().matches(&replaced, &principal));
         replaced = task;
-        replaced.metadata.deletion_timestamp = Some(
-            k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(chrono::Utc::now()),
-        );
+        replaced.metadata.deletion_timestamp =
+            Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                k8s_openapi::jiff::Timestamp::now(),
+            ));
         assert!(!revision().matches(&replaced, &principal));
     }
 
@@ -265,6 +345,132 @@ mod tests {
             "briefing.md".into(),
             "artifact bytes".into()
         )])));
+    }
+
+    fn phase(
+        role: &str,
+        activity: Option<live::LiveActivity>,
+    ) -> crate::routes::tasks::ReviewedPhaseDto {
+        crate::routes::tasks::ReviewedPhaseDto {
+            role: role.into(),
+            phase: "research".into(),
+            task_name: Some("briefing".into()),
+            task_uid: Some("task-uid".into()),
+            run_nonce: Some("run-1".into()),
+            state: "active",
+            result: None,
+            failure_diagnostic: None,
+            router_activity: None,
+            live_activity: activity,
+            stopped_activity: None,
+        }
+    }
+
+    async fn phase_frames(events: Vec<Event>) -> Vec<Value> {
+        let body = Sse::new(tokio_stream::iter(
+            events.into_iter().map(Ok::<_, Infallible>),
+        ))
+        .into_response()
+        .into_body();
+        let bytes = to_bytes(body, 128 * 1024).await.unwrap();
+        String::from_utf8(bytes.to_vec())
+            .unwrap()
+            .lines()
+            .filter_map(|line| line.strip_prefix("data:"))
+            .map(|data| serde_json::from_str(data.trim()).unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn reviewed_phases_stream_independently_and_disappearance_revokes_only_its_pin() {
+        let (task, cm, mut attempt) = fixture();
+        let mut pins = ReviewedStreamPins::default();
+        let first = phase_frames(pins.observe(
+            vec![
+                phase("researcher", live::from_attempt(&cm, &task)),
+                phase("reviewer", live::from_attempt(&cm, &task)),
+            ],
+            "root-run",
+        ))
+        .await;
+        assert_eq!(first.len(), 2);
+        assert!(
+            first.iter().all(|frame| frame["run_nonce"] == "root-run"
+                && frame["activity"]["run_nonce"] == "run-1")
+        );
+        assert!(
+            pins.observe(
+                vec![
+                    phase("researcher", live::from_attempt(&cm, &task)),
+                    phase("reviewer", live::from_attempt(&cm, &task)),
+                ],
+                "root-run"
+            )
+            .is_empty()
+        );
+        append_progress(&mut attempt);
+        let advanced = record(&cm, &attempt);
+        let next = phase_frames(pins.observe(
+            vec![phase("reviewer", live::from_attempt(&advanced, &task))],
+            "root-run",
+        ))
+        .await;
+        assert_eq!(next.len(), 2);
+        assert!(next.iter().any(
+            |frame| frame["phase_key"] == "[\"researcher\",\"research\"]"
+                && frame["activity"].is_null()
+        ));
+        assert!(
+            next.iter()
+                .any(|frame| frame["phase_key"] == "[\"reviewer\",\"research\"]"
+                    && frame["activity"]["progress_sequence"] == 3)
+        );
+        assert!(
+            pins.observe(
+                vec![
+                    phase("researcher", live::from_attempt(&cm, &task)),
+                    phase("reviewer", live::from_attempt(&advanced, &task)),
+                ],
+                "root-run"
+            )
+            .is_empty(),
+            "a revoked phase cannot reappear in this connection"
+        );
+    }
+
+    #[tokio::test]
+    async fn reviewed_phase_replacement_revokes_and_private_live_data_is_not_a_retained_result() {
+        let (task, cm, _) = fixture();
+        let dto = phase("researcher", live::from_attempt(&cm, &task));
+        let serialized = serde_json::to_value(&dto).unwrap();
+        assert!(serialized.get("live_activity").is_none());
+        assert!(serialized["result"].is_null());
+        let mut pins = ReviewedStreamPins::default();
+        assert_eq!(pins.observe(vec![dto], "root-run").len(), 1);
+        let mut changed = cm.clone();
+        changed.metadata.uid = Some("replacement-attempt".into());
+        let frames = phase_frames(pins.observe(
+            vec![phase("researcher", live::from_attempt(&changed, &task))],
+            "root-run",
+        ))
+        .await;
+        assert_eq!(frames.len(), 1);
+        assert!(frames[0]["activity"].is_null());
+    }
+
+    #[tokio::test]
+    async fn invalid_reviewed_reservation_prevents_any_principal_or_phase_payload() {
+        let mut task = owned_task();
+        task.metadata
+            .annotations
+            .as_mut()
+            .unwrap()
+            .insert("kars.azure.com/reviewed-state".into(), "invalid pin".into());
+        let (_, cm, _) = fixture();
+        let (state, _) = stream_fixture(vec![Some(task)], vec![Some(cm)], vec![None]);
+        let bytes = stream_bytes(state).await;
+        assert_eq!(event_names(&bytes), ["renew"]);
+        assert!(!bytes.contains("assignment-1"));
     }
 
     fn owned_task() -> KarsTask {
@@ -417,7 +623,7 @@ mod tests {
         assert_eq!(snapshots[1]["observations"], observed());
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 21);
-        for poll in calls[1..].chunks_exact(5) {
+        for poll in calls[1..].as_chunks::<5>().0 {
             assert!(poll[0].ends_with("/karstasks/briefing"));
             assert!(poll[3].contains("kars-mission-attempt-"));
             assert!(poll[4].ends_with("/karstasks/briefing"));
@@ -487,9 +693,10 @@ mod tests {
                         .insert("kars.azure.com/run-requested".into(), "run-2".into());
                 }
                 "deleted" => {
-                    changed.metadata.deletion_timestamp = Some(
-                        k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(chrono::Utc::now()),
-                    )
+                    changed.metadata.deletion_timestamp =
+                        Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                            k8s_openapi::jiff::Timestamp::now(),
+                        ))
                 }
                 _ => {}
             }

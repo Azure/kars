@@ -64,7 +64,8 @@ pub(super) async fn reconcile(
             &namespace,
             governed_services::credentials::OBSERVER_TLS,
         )
-        .await?;
+        .await
+        .map_err(|error| error.to_string())?;
         let tls = if let Some(existing) = existing_tls.filter(|value| {
             value["identity"] == identity
                 && value["serverName"] == server_name

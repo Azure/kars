@@ -17,6 +17,59 @@ ValidatingAdmissionPolicy and CEL authorizer checks. The controller refuses
 privilege until all fourteen policies are observed, type-checked without
 warnings, and bound with `Deny`.
 
+Private workload admission evaluates the registrar exemption in its match phase,
+then checks cluster-wide Pod or ReplicaSet creation authority in validation.
+This preserves the same allowed actors while keeping each CEL expression within
+two authorization checks. Three sequential checks can exceed Kubernetes'
+per-expression cost limit and prevent the Deployment controller from creating
+the SRE ReplicaSet. Namespaced workload permissions alone remain insufficient.
+
+The registered SRE router receives exact canonical Kubernetes Service/ready
+endpoint egress rules. On an installed Cilium cluster, the controller also
+represents that path with a namespaced `kars-sre-api` CiliumNetworkPolicy:
+only the SRE Sandbox selector, `kube-apiserver` entity and canonical TCP ports.
+It shares discovery/rendering with observer API policies, not observer authority.
+The policy is registration-owned and pinned to source/runtime namespace UIDs;
+updates and retirement use UID/resourceVersion fences. Authority loss or
+disablement retires it, and foreign policies are never adopted or deleted.
+An absent Cilium API keeps standard NetworkPolicy behavior; discovery failures
+do not authorize a fallback or broader egress. Agent UID1000 remains loopback/DNS
+only; this policy does not bypass the router or grant Kubernetes permissions.
+
+Autonomous Hermes sweeps pass both the pinned loopback provider and the model
+from the installed Hermes configuration to the oneshot CLI. Missing model
+configuration blocks the sweep before inference; ambient model defaults cannot
+substitute a different model. Diagnostic failures remain visible in the local
+SRE report and never count as a healthy sweep.
+All ten registered SRE handlers return JSON text, as required by Hermes' native
+tool dispatcher; their internal implementations retain structured results.
+Read errors and pending proposal identifiers are preserved across that boundary.
+
+Status publication errors (including Kubernetes resourceVersion conflicts) retry
+through the next complete authority reconciliation. They do not revoke validated
+grants or retire the private ServiceAccount, token anchors, or API egress policy.
+UID/resourceVersion fences remain in place; a failed write is not reported as a
+successful qualification. Actual identity, admission, credential-privacy, and
+ownership failures still revoke owned authority and fail closed.
+
+Routine Sandbox cleanup does not invalidate unrelated workers' privacy authority.
+After validating the namespace claim and Secret denial, a terminating namespace
+can finish cleanup without blocking global readiness when it has no Pods, or
+when every remaining Pod is bound to its already-qualified credential epoch and
+exact Secret version. Prior-epoch caches still block migration; deleting only
+the Sandbox does not establish namespace retirement. If namespace collection
+races the credential inventory, a fresh Secret read must confirm absence before
+ignoring that stale inventory entry. API errors and changed identities remain
+fail-closed, and cleanup does not rotate or reissue credentials.
+
+Sandbox startup creates its private control credential before its Deployment.
+The authority scan tolerates that gap only while the registration is already
+qualified, the credential validates against the live Sandbox/namespace claim and
+current privacy epoch, and a namespace-wide Pod read confirms no consumers.
+This read-only check neither issues nor rotates credentials. Old epochs,
+unqualified registration, invalid credentials, remaining Pods, and failed reads
+still fail closed; an absent Deployment alone never proves privacy.
+
 ## Fresh installation
 
 Install the core prerequisite controller and router first. SRE remains disabled
@@ -30,6 +83,43 @@ The CLI stages only supporting policies and a genuinely new source CR, using
 atomic CREATE and its returned UID. A racing existing CR is never fetched and
 adopted. It waits for that UID's complete namespace claim and backlink before
 enrollment. No privileged RoleBinding is emitted by Helm.
+
+For a fresh SRE source in an existing Helm Core release with the governed
+inference broker already configured, add `--lifetime-tokens <approved-tokens>`
+and `--funding-expires-at <future-UTC-timestamp>` to the same install command.
+Both are required together; installation never chooses or increases a budget
+implicitly. The expiry uses `YYYY-MM-DDTHH:mm:ssZ` (optional milliseconds).
+When the existing release has `inferenceBudget.enabled: true`, omitting these
+options for a new source is an error, not permission to start calendar-only SRE.
+Existing registered installations and explicitly non-governed releases retain
+their previous behavior; this command does not migrate their history.
+
+The installer uses the actual CREATE-returned source UID and observed workspace,
+cluster and runtime namespace UIDs. It checks for calendar history or a prior
+consumer, preserves the other built-in grant, and refuses drift between live
+funding and saved Helm values. The final Core upgrade publishes the grant to
+both the live catalog and release values **before** authority enrollment.
+Publication failure leaves the new source unenrolled; it does not fall back to
+calendar-only inference. These steps are not an atomic cross-resource transaction:
+retain a partially staged source for explicit review rather than deleting it
+or rerunning installation to adopt it. Registered/legacy SRE sources, template-only
+installs and missing broker configuration are rejected by this funding path.
+This installs an explicit funding declaration, not evidence that an autonomous
+health sweep has succeeded.
+
+When enabling SRE in an existing Core release, installation stages its saved
+SRE policy settings before enrollment, including provider, token ceilings and
+content-safety requirements. An explicit `--model` overrides the saved model.
+Staging must not temporarily substitute more permissive chart defaults while
+waiting for the final Helm upgrade.
+
+Complete SRE installation before qualifying private Console writer authority.
+The shared Core upgrade preflight refuses a release containing a protected
+controller root, even when the requested values only enable SRE. The CLI reports
+`KARS_PRIVATE_ROOT_UPGRADE_BLOCKED` rather than hiding the refusal behind a
+generic Helm error. Do not work around it with a direct Helm upgrade: changing
+the pinned controller template invalidates existing private writer qualification.
+Original grant recovery does not authorize a controller upgrade.
 
 If either the source or runtime namespace already exists, use explicit review
 below instead. A foreign `kars-sre` occupant remains untouched and receives no
@@ -49,7 +139,12 @@ kars sre authority stage --namespace kars-system --release kars \
 ```
 
 Review the output, then run the same command without `--dry-run`. Staging does
-not enroll an occupant or issue private SRE credentials.
+not enroll an occupant or issue private SRE credentials. For an enabled Helm
+installation, staging retains its installed SRE provider/model selection,
+including selections inherited from the old chart's defaults. Resetting to the
+new chart defaults alone would discard those selections. Explicit empty SRE
+overrides continue to inherit the configured Core inference defaults; staging
+does not choose a replacement provider or model.
 
 SRE installation and staging inspect all Helm release statuses. Helm 3 uses
 `list --all`; Helm 4 removed that flag and lists all statuses by default. The
@@ -73,8 +168,12 @@ It does not adopt the old object or rewrite its other fields or metadata.
 Known API defaults are tolerated; foreign installation ownership,
 custom schemas/versions/validators, replacements, and API failures stop
 staging. Resolve those conflicts through explicit installation/schema review,
-not force adoption. Both registration and action APIs must be established
-before their dependent policies can be used.
+not force adoption. The current durable-execution action schema is recognized
+only for creation when absent or an exact, ownership-verified installed match;
+its execution-claim fields are never stripped or treated as legacy params.
+This recognition does not extend the closed BASE365 migration to current charts.
+Both registration and action APIs must be established before their dependent
+policies can be used.
 
 ```sh
 kars sre authority preview --namespace kars-system --release kars
@@ -145,6 +244,23 @@ The controller also rotates proven owned `router-services-admin` credentials,
 if any exist, and restarts their owned consumers. Their absence on the
 prerequisite base is normal. Later governed-service issuers must call
 `sre_authority::privacy_epoch` immediately before issuance.
+
+During a control-credential cutover, an old router cannot remain alive merely
+because its replacement is waiting for privacy-dependent accounting readiness.
+The controller temporarily drains that verified owned Deployment, recording its
+original replica count against the exact privacy epoch. It restores that count
+only after the scale-down generation is observed and all Pods, including
+terminating ones, have disappeared. UID/resourceVersion checks protect both
+writes; a changed epoch or replica intent stops recovery for operator review.
+Readiness and accounting gates remain enforced throughout the cutover.
+
+Ordinary owned Sandbox/namespace retirement is a migration wait, not loss of
+SRE authority. The controller waits for garbage collection and a fresh credential
+inventory without revoking standing SRE credentials or restarting its Pod.
+A disappearing Sandbox requires the surviving terminating namespace's complete
+UID-bound claim; an active orphan, changed UID, invalid claim, or API denial
+still fails closed. Waiting does not qualify stale credentials or complete
+privacy readiness while retiring consumers remain in the inventory.
 
 ### Legacy token Secrets and watch-only grants
 
@@ -301,6 +417,12 @@ fences deletion of its owned SRE Deployment; it does not leave that protected
 object for the unprivileged namespace controller. Foreign/replaced consumers
 and external finalizers are preserved, not adopted or forced. Retained Retired
 records can finish this owned cleanup without reissuing authority.
+When re-enrolling the same source, a quarantined control credential may remain
+without its deleted Deployment. Qualification verifies its live source/namespace
+ownership, legacy credential denial, and absence of all Pods (including terminating
+Pods), then leaves that credential quarantined. Normal governed issuance recreates
+the consumer only after qualification. An unretired credential, unknown consumer,
+or failed inventory still blocks enrollment; retirement does not reset accounting.
 Name-sensitive admission also inspects the actual object/oldObject name when
 collection DELETE omits `request.name`: ordinary collection cleanup remains
 valid, while protected items still require registrar authority.

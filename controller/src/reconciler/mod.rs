@@ -21,10 +21,7 @@ use k8s_openapi::api::{
 use kube::{
     Client, ResourceExt,
     api::{Api, DeleteParams, ListParams, Patch, PatchParams},
-    runtime::{
-        controller::{Action, Controller},
-        reflector::ObjectRef,
-    },
+    runtime::controller::{Action, Controller},
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -34,6 +31,7 @@ use crate::crd::KarsSandbox;
 use crate::fedcred::{FedCredConfig, FedCredManager};
 
 mod agent_env;
+mod builtin_memory;
 pub(crate) mod byo_contract;
 pub(crate) mod credential_sources;
 mod dev_env;
@@ -41,6 +39,7 @@ mod github_services;
 pub(crate) mod governance_mounts;
 pub(crate) mod governed_services;
 mod inference;
+mod inference_watch;
 mod legacy_blocklist;
 mod mcp_binding;
 mod mcp_egress;
@@ -48,6 +47,10 @@ pub(crate) mod namespace_ownership;
 mod skills;
 mod sre_writer;
 pub(crate) mod trustgraph_mount;
+mod watch;
+mod witness_baseline;
+
+use watch::{deployment_to_sandbox_ref, task_to_sandbox_ref};
 
 use mcp_egress::mcp_egress_rule;
 
@@ -173,6 +176,14 @@ struct Context {
 
 /// Main reconciliation function — called whenever a KarsSandbox changes.
 async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Action, ReconcileError> {
+    // Keep the sandbox state machine off the watcher and metrics futures' stacks.
+    Box::pin(reconcile_inner(sandbox, ctx)).await
+}
+
+async fn reconcile_inner(
+    sandbox: Arc<KarsSandbox>,
+    ctx: Arc<Context>,
+) -> Result<Action, ReconcileError> {
     let name = sandbox.name_any();
 
     // Validate sandbox name — must be K8s-safe (alphanumeric + hyphens)
@@ -207,29 +218,15 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         }
     };
 
-    // The label selects SRE behavior, but never grants it. The cluster-scoped
-    // registration and live UID/namespace checks below authorize that behavior.
-    let is_sre_sandbox = sandbox
-        .metadata
-        .labels
-        .as_ref()
-        .and_then(|l| l.get("kars.azure.com/role"))
-        .map(|v| v == "sre")
-        .unwrap_or(false);
-
-    // The router's apiserver egress uses the cluster's own Service address.
-    let apiserver_ip =
-        std::env::var("KUBERNETES_SERVICE_HOST").unwrap_or_else(|_| "10.96.0.1".to_string());
-    let apiserver_port = std::env::var("KUBERNETES_SERVICE_PORT_HTTPS")
-        .or_else(|_| std::env::var("KUBERNETES_SERVICE_PORT"))
-        .unwrap_or_else(|_| "443".to_string());
-
     tracing::info!("Reconciling KarsSandbox {name}");
 
     // ── Finalizer: cascading namespace deletion ──────────────────────────
     if sandbox.metadata.deletion_timestamp.is_some() {
         tracing::info!("KarsSandbox {name} is being deleted — cleaning up namespace {sandbox_ns}");
 
+        builtin_memory::cleanup(client, &sandbox)
+            .await
+            .map_err(|error| ReconcileError::Configuration(error.to_string()))?;
         namespace_ownership::delete(client, &sandbox, owned_namespace.as_ref()).await?;
 
         // Clean up the spawner ClusterRoleBinding
@@ -306,6 +303,22 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         return Ok(Action::await_change());
     }
 
+    // Optional observer failures revoke only its owned grants and never gate Core.
+    let mut witness_pending = false;
+    if let Some(namespace) = owned_namespace.as_ref()
+        && let Err(error) = witness_baseline::reconcile(client, &sandbox, namespace).await
+    {
+        witness_pending = true;
+        tracing::warn!(sandbox = %name, error = %error, "Datapath witness baseline unavailable; Core reconciliation continues");
+    }
+
+    if crate::mission_delivery::terminal_run(client, &sandbox)
+        .await
+        .map_err(|error| ReconcileError::Configuration(error.to_string()))?
+    {
+        return Ok(Action::requeue(Duration::from_secs(5)));
+    }
+
     let sre_projection = match crate::sre_authority::pod::authorize(
         client,
         &sandbox,
@@ -341,6 +354,67 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         &ctx.sandbox_image,
     )
     .await?;
+
+    // Keep the namespace lock through provisioning, but not its large state machine
+    // in this preflight/error poll frame. The factory also isolates construction.
+    reconcile_provisioning(
+        sandbox,
+        ctx,
+        owned_namespace,
+        witness_pending,
+        sre_projection,
+        credentials,
+    )
+    .await
+}
+
+fn reconcile_provisioning(
+    sandbox: Arc<KarsSandbox>,
+    ctx: Arc<Context>,
+    owned_namespace: Option<Namespace>,
+    witness_pending: bool,
+    sre_projection: Option<crate::sre_authority::pod::Projection>,
+    credentials: credential_sources::Mode,
+) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<Action, ReconcileError>> + Send>> {
+    Box::pin(reconcile_provisioning_inner(
+        sandbox,
+        ctx,
+        owned_namespace,
+        witness_pending,
+        sre_projection,
+        credentials,
+    ))
+}
+
+async fn reconcile_provisioning_inner(
+    sandbox: Arc<KarsSandbox>,
+    ctx: Arc<Context>,
+    owned_namespace: Option<Namespace>,
+    witness_pending: bool,
+    sre_projection: Option<crate::sre_authority::pod::Projection>,
+    credentials: credential_sources::Mode,
+) -> Result<Action, ReconcileError> {
+    let name = sandbox.name_any();
+    let sandbox_ns = format!("kars-{name}");
+    let client = &ctx.client;
+
+    // The label selects SRE behavior, but never grants it. The cluster-scoped
+    // registration and live UID/namespace checks above authorize that behavior.
+    let is_sre_sandbox = sandbox
+        .metadata
+        .labels
+        .as_ref()
+        .and_then(|l| l.get("kars.azure.com/role"))
+        .map(|v| v == "sre")
+        .unwrap_or(false);
+
+    // The router's apiserver egress uses the cluster's own Service address.
+    let apiserver_ip =
+        std::env::var("KUBERNETES_SERVICE_HOST").unwrap_or_else(|_| "10.96.0.1".to_string());
+    let apiserver_port = std::env::var("KUBERNETES_SERVICE_PORT_HTTPS")
+        .or_else(|_| std::env::var("KUBERNETES_SERVICE_PORT"))
+        .unwrap_or_else(|_| "443".to_string());
+
     let skill_catalog = match skills::project(
         client,
         &sandbox,
@@ -476,6 +550,9 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             crate::status::stamp_degraded(client, &sandbox, &name, $reason, &$msg).await;
             return Ok(Action::requeue(Duration::from_secs(60)));
         }};
+    }
+    if let Err(message) = agent_env::validate_instructions(agent_config.instructions.as_deref()) {
+        degrade!(SPEC_INVALID, message);
     }
     if !["standard", "enhanced", "confidential"].contains(&isolation.as_str()) {
         tracing::error!("Invalid isolation level: {isolation}");
@@ -980,14 +1057,42 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         .extend(inference::configured_local_egress_rules().map_err(ReconcileError::Configuration)?);
     egress_rules.extend(crate::inference_budget::pod::egress(&sandbox)?);
 
+    let builtin_memory_enabled =
+        ctx.foundry_project_endpoint.trim().is_empty() && spec.memory_ref.is_none();
+    if builtin_memory_enabled {
+        let rules = sre_egress::rules(client, &apiserver_ip, &apiserver_port)
+            .await
+            .map_err(ReconcileError::Configuration)?;
+        builtin_memory::api_egress(
+            client,
+            &sandbox,
+            owned_namespace.as_ref().ok_or_else(|| {
+                ReconcileError::Configuration("Sandbox namespace is absent".into())
+            })?,
+            &rules,
+        )
+        .await
+        .map_err(|error| ReconcileError::Configuration(error.to_string()))?;
+        egress_rules.extend(rules);
+    }
+
     // Policy enforcement may observe the API's post-DNAT endpoint IP/port.
     // Only registered routers receive exact targets; UID 1000 stays locked down.
     if sre_projection.is_some() {
-        egress_rules.extend(
-            sre_egress::rules(client, &apiserver_ip, &apiserver_port)
-                .await
-                .map_err(ReconcileError::Configuration)?,
-        );
+        let rules = sre_egress::rules(client, &apiserver_ip, &apiserver_port)
+            .await
+            .map_err(ReconcileError::Configuration)?;
+        crate::sre_authority::api_egress::ensure(
+            client,
+            &sandbox,
+            owned_namespace.as_ref().ok_or_else(|| {
+                ReconcileError::Configuration("Sandbox namespace is absent".into())
+            })?,
+            &rules,
+        )
+        .await
+        .map_err(ReconcileError::Configuration)?;
+        egress_rules.extend(rules);
     }
 
     // Add user-defined allowed endpoints (for the inference-router to reach
@@ -1084,6 +1189,9 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
     } else {
         vec![operator_policy_echo_ingress]
     };
+
+    let mut ingress_rules = ingress_rules;
+    ingress_rules.push(governed_services::control_transport::ingress());
 
     let netpol: NetworkPolicy = serde_json::from_value(json!({
         "apiVersion": "networking.k8s.io/v1",
@@ -1637,10 +1745,14 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         // map is sourced from the matching variant struct via
         // `runtime::build_runtime_plan`. Keys are validated against
         // reserved prefixes regardless of source.
-        agent_env::merge(&mut openclaw_env, &runtime_plan);
+        agent_env::merge(
+            &mut openclaw_env,
+            &runtime_plan,
+            agent_config.instructions.as_deref(),
+        );
 
         // Build the inference-router env array
-        let service_identity = match governed_services::ensure(
+        let mut service_identity = match governed_services::ensure(
             client,
             &sandbox,
             owned_namespace.as_ref().ok_or_else(|| {
@@ -1650,7 +1762,29 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         .await
         {
             Ok(projection) => projection,
-            Err(detail) => degrade!("GovernedServicePrivacyNotReady", detail),
+            Err(error @ governed_services::credentials::IssuanceError::PrivacyPending) => {
+                let patch = crate::status::build_pending_status_patch(
+                    &sandbox,
+                    "GovernedServicePrivacyPending",
+                    &error.to_string(),
+                );
+                let current = serde_json::to_value(&sandbox.status)?;
+                if patch["status"]
+                    .as_object()
+                    .is_some_and(|fields| fields.iter().any(|(key, value)| current[key] != *value))
+                {
+                    Api::<KarsSandbox>::namespaced(
+                        client.clone(),
+                        &sandbox.namespace().unwrap_or_default(),
+                    )
+                    .patch_status(&name, &PatchParams::default(), &Patch::Merge(patch))
+                    .await?;
+                }
+                return Ok(Action::requeue(Duration::from_secs(10)));
+            }
+            Err(governed_services::credentials::IssuanceError::Rejected(detail)) => {
+                degrade!("GovernedServicePrivacyNotReady", detail)
+            }
         };
         let mut router_env = vec![
             json!({"name": "AZURE_OPENAI_ENDPOINT", "value": &ctx.openai_endpoint}),
@@ -1670,6 +1804,10 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             json!({"name": "RUST_LOG", "value": "info,inference_router=debug"}),
         ];
         router_env.extend(router_agt_env);
+        router_env.extend(pod_spec::memory_model_env(
+            std::env::var("FOUNDRY_MEMORY_CHAT_MODEL").ok(),
+            std::env::var("FOUNDRY_MEMORY_EMBEDDING_MODEL").ok(),
+        ));
         if let Some(default_model) = pod_spec::cluster_default_model() {
             router_env.push(json!({"name": "DEFAULT_MODEL", "value": default_model}));
         }
@@ -2070,7 +2208,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         if let Some(digest) = &skill_catalog {
             governance_mounts::inject_configmap_mount(
                 &mut pod_spec,
-                "openclaw",
+                agent_container_name,
                 crate::skill_delivery::CATALOG_NAME,
                 "approved-skills",
                 crate::skill_delivery::CATALOG_PATH,
@@ -2079,6 +2217,26 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         }
 
         service_identity.mount(&mut pod_spec);
+        if builtin_memory_enabled {
+            if let Err(error) = service_identity
+                .ensure_builtin_memory(
+                    client,
+                    &sandbox,
+                    owned_namespace.as_ref().ok_or_else(|| {
+                        ReconcileError::Configuration("Sandbox namespace is absent".into())
+                    })?,
+                )
+                .await
+            {
+                if error.is::<crate::reviewed_execution::TaskSnapshotChanged>()
+                    || error.is::<builtin_memory::CredentialEpochChanged>()
+                {
+                    return Ok(Action::requeue(Duration::from_secs(1)));
+                }
+                degrade!("BuiltinMemoryNotReady", error.to_string());
+            }
+            builtin_memory::mount(&mut pod_spec);
+        }
         crate::credential_grants::mount_observations(&mut pod_spec, &sandbox);
 
         // Set runtimeClassName for Kata (confidential) isolation
@@ -2273,10 +2431,16 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         // agent process therefore carries no Foundry contract knowledge
         // and never reads `binding.json` directly.
         //
-        // Failure mode: source missing → mount omitted, router boots
-        // without a binding loaded (digest absent in
-        // `/internal/policy-status`, KarsMemory stays `Compiled`).
+        // Source missing → mount omitted, but memory remains required.
+        // Missing or malformed bindings must fail closed, never fall back
+        // to a convention-based store or scope.
         if let Some(memory_ref) = spec.memory_ref.as_ref() {
+            governance_mounts::inject_container_env(
+                &mut pod_spec,
+                "inference-router",
+                "MEMORY_BINDING_REQUIRED",
+                "true",
+            );
             let memory_name = memory_ref.name.trim();
             if !memory_name.is_empty() {
                 let mem_cm = format!("karsmemory-{memory_name}-binding");
@@ -2309,7 +2473,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                             cm = %mem_cm,
                             reason = %reason,
                             "KarsMemory binding ConfigMap not mirrored; \
-                             router will start without KarsMemory binding loaded",
+                             router memory access remains blocked until a valid binding loads",
                         );
                     }
                     Err(e) => {
@@ -2684,6 +2848,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             },
             "spec": {
                 "replicas": desired_replicas,
+                "strategy": pod_spec::singleton_rollout_strategy(),
                 "selector": {
                     "matchLabels": {"kars.azure.com/sandbox": name}
                 },
@@ -2720,6 +2885,9 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         service_identity.decorate(&mut deployment);
         crate::credential_grants::decorate_observations(&mut deployment, &sandbox);
         let mission = crate::mission_delivery::prepare(client, &sandbox, &mut deployment).await;
+        if matches!(mission, Err(crate::mission_delivery::Error::Completed)) {
+            return Ok(Action::requeue(Duration::from_secs(5)));
+        }
         if matches!(mission, Err(crate::mission_delivery::Error::NotReady(_))) {
             match crate::mission_delivery::defer_until_ready(client, &sandbox, &mut deployment)
                 .await
@@ -2979,6 +3147,29 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         );
     }
 
+    let human_requests = service_projection
+        .as_ref()
+        .is_some_and(|projection| projection.identity["task"].is_object())
+        && !spec.suspended.unwrap_or(false);
+    if human_requests && let Some(namespace) = owned_namespace.as_ref() {
+        match tokio::time::timeout(
+            Duration::from_secs(20),
+            Box::pin(governed_services::access_requests::reconcile(
+                client, &sandbox, namespace,
+            )),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(reason)) => {
+                tracing::warn!(sandbox = %name, reason, "Human request Inbox synchronization pending")
+            }
+            Err(_) => {
+                tracing::warn!(sandbox = %name, "Human request Inbox synchronization timed out; retrying")
+            }
+        }
+    }
+
     // ── Step 5: Update status ────────────────────────────────────────────
     // Idempotency guard: skip the patch when the desired status already
     // matches reality. Without this, every reconcile bumps
@@ -3109,9 +3300,11 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
     }
 
     tracing::info!("KarsSandbox {name} reconciled successfully");
-    Ok(Action::requeue(if mission_pending {
+    Ok(Action::requeue(if mission_pending || human_requests {
         Duration::from_secs(5)
-    } else if sre_projection.is_some() || !governance_config.effective_mcp_server_refs().is_empty()
+    } else if witness_pending
+        || sre_projection.is_some()
+        || !governance_config.effective_mcp_server_refs().is_empty()
     {
         Duration::from_secs(30)
     } else {
@@ -3324,7 +3517,46 @@ pub async fn run(client: Client) -> Result<()> {
         agent_id_cache: Arc::new(crate::agent_id_provisioning::ProvisionerCache::new()),
     });
 
-    Controller::new(sandboxes, crate::watch_config::bounded())
+    let controller = Controller::new(sandboxes, crate::watch_config::bounded());
+    let sandbox_store = controller.store();
+    let witness_settings_store = controller.store();
+    let witness_observer_store = controller.store();
+    controller
+        .watches(
+            Api::<ConfigMap>::namespaced(ctx.client.clone(), witness_baseline::WORKSPACE),
+            crate::watch_config::bounded()
+                .fields(&format!("metadata.name={}", witness_baseline::SETTINGS)),
+            move |settings| {
+                witness_baseline::affected_sandboxes(
+                    &settings.metadata,
+                    witness_baseline::SETTINGS,
+                    witness_baseline::WORKSPACE,
+                    &witness_settings_store.state(),
+                )
+            },
+        )
+        .watches(
+            Api::<ServiceAccount>::namespaced(
+                ctx.client.clone(),
+                witness_baseline::OBSERVER_NAMESPACE,
+            ),
+            crate::watch_config::bounded()
+                .fields(&format!("metadata.name={}", witness_baseline::OBSERVER)),
+            move |observer| {
+                witness_baseline::affected_sandboxes(
+                    &observer.metadata,
+                    witness_baseline::OBSERVER,
+                    witness_baseline::OBSERVER_NAMESPACE,
+                    &witness_observer_store.state(),
+                )
+            },
+        )
+        .watches(
+            Api::<ConfigMap>::all(ctx.client.clone()),
+            crate::watch_config::bounded()
+                .labels("kars.azure.com/artifact=inference-policy-profile"),
+            move |profile| inference_watch::referencing_sandboxes(&profile, &sandbox_store.state()),
+        )
         .owns(
             Api::<Secret>::all(ctx.client.clone()),
             crate::watch_config::bounded(),
@@ -3376,149 +3608,3 @@ pub async fn run(client: Client) -> Result<()> {
 mod tests;
 
 pub mod runtime;
-
-/// Phase G P1 #5 — Deployment-to-KarsSandbox parent mapper.
-///
-/// Triggers a reconcile on the parent KarsSandbox whenever a child
-/// Deployment is created, updated, or deleted. Combined with
-/// `Controller::watches`, this closes the gap that previously let
-/// manual `kubectl edit deploy` / `kubectl scale` mutations linger
-/// for up to 5 minutes (the periodic requeue interval) before the
-/// reconciler restored the desired state.
-///
-/// Cross-namespace constraint: K8s does not allow ownerReferences
-/// across namespaces, and the Deployment lives in `kars-{name}`
-/// while the parent KarsSandbox can live in any namespace. We
-/// therefore identify the parent by the labels we stamp at
-/// Deployment-creation time:
-///
-/// * `kars.azure.com/component=sandbox` — required (filters
-///   out unrelated Deployments).
-/// * `kars.azure.com/sandbox=<name>` — parent CR name.
-/// * `kars.azure.com/parent-namespace=<ns>` — parent CR
-///   namespace.
-///
-/// Deployments that pre-date this PR carry the first two labels but
-/// not the third. They are silently skipped by the mapper; the next
-/// periodic 5-minute requeue re-applies the Deployment with the new
-/// label, after which subsequent edits trigger this watch.
-fn deployment_to_sandbox_ref(d: Deployment) -> Option<ObjectRef<KarsSandbox>> {
-    let labels = d.metadata.labels.as_ref()?;
-    if labels.get("kars.azure.com/component").map(|s| s.as_str()) != Some("sandbox") {
-        return None;
-    }
-    let sandbox_name = labels.get("kars.azure.com/sandbox")?;
-    let parent_ns = labels.get("kars.azure.com/parent-namespace")?;
-    if sandbox_name.is_empty() || parent_ns.is_empty() {
-        return None;
-    }
-    Some(ObjectRef::<KarsSandbox>::new(sandbox_name).within(parent_ns))
-}
-
-// Annotation-only run requests must refresh the installed admission without waiting for a spec change.
-fn task_to_sandbox_ref(task: crate::kars_task::KarsTask) -> Option<ObjectRef<KarsSandbox>> {
-    let name = task.metadata.name.as_deref().filter(|v| !v.is_empty())?;
-    let namespace = task
-        .metadata
-        .namespace
-        .as_deref()
-        .filter(|v| !v.is_empty())?;
-    Some(ObjectRef::<KarsSandbox>::new(name).within(namespace))
-}
-
-#[cfg(test)]
-mod watch_tests {
-    use super::*;
-    use std::collections::BTreeMap;
-
-    #[test]
-    fn task_mapper_requires_nonempty_name_and_namespace() {
-        let mut task = crate::kars_task::KarsTask::new("writer", Default::default());
-        task.metadata.namespace = Some("team-work".into());
-        let reference = task_to_sandbox_ref(task.clone()).unwrap();
-        assert_eq!(reference.name, "writer");
-        assert_eq!(reference.namespace.as_deref(), Some("team-work"));
-        for value in [None, Some(String::new())] {
-            let mut missing_name = task.clone();
-            missing_name.metadata.name = value.clone();
-            assert!(task_to_sandbox_ref(missing_name).is_none());
-            let mut missing_namespace = task.clone();
-            missing_namespace.metadata.namespace = value;
-            assert!(task_to_sandbox_ref(missing_namespace).is_none());
-        }
-    }
-
-    fn deploy_with_labels(labels: BTreeMap<String, String>) -> Deployment {
-        Deployment {
-            metadata: kube::api::ObjectMeta {
-                labels: Some(labels),
-                ..Default::default()
-            },
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn mapper_returns_ref_for_well_labeled_deployment() {
-        let mut labels = BTreeMap::new();
-        labels.insert(
-            "kars.azure.com/component".to_string(),
-            "sandbox".to_string(),
-        );
-        labels.insert("kars.azure.com/sandbox".to_string(), "my-agent".to_string());
-        labels.insert(
-            "kars.azure.com/parent-namespace".to_string(),
-            "kars-system".to_string(),
-        );
-        let r = deployment_to_sandbox_ref(deploy_with_labels(labels)).expect("ref");
-        assert_eq!(r.name, "my-agent");
-        assert_eq!(r.namespace.as_deref(), Some("kars-system"));
-    }
-
-    #[test]
-    fn mapper_skips_unlabeled_deployment() {
-        assert!(deployment_to_sandbox_ref(deploy_with_labels(BTreeMap::new())).is_none());
-    }
-
-    #[test]
-    fn mapper_skips_wrong_component() {
-        let mut labels = BTreeMap::new();
-        labels.insert("kars.azure.com/component".to_string(), "router".to_string());
-        labels.insert("kars.azure.com/sandbox".to_string(), "my-agent".to_string());
-        labels.insert(
-            "kars.azure.com/parent-namespace".to_string(),
-            "kars-system".to_string(),
-        );
-        assert!(deployment_to_sandbox_ref(deploy_with_labels(labels)).is_none());
-    }
-
-    #[test]
-    fn mapper_skips_pre_pr_deployment_without_parent_namespace() {
-        // Deployments created before this PR have component+sandbox
-        // labels but lack parent-namespace. They MUST be skipped (the
-        // periodic requeue re-applies them with the new label, then
-        // subsequent edits start triggering this watch).
-        let mut labels = BTreeMap::new();
-        labels.insert(
-            "kars.azure.com/component".to_string(),
-            "sandbox".to_string(),
-        );
-        labels.insert("kars.azure.com/sandbox".to_string(), "my-agent".to_string());
-        assert!(deployment_to_sandbox_ref(deploy_with_labels(labels)).is_none());
-    }
-
-    #[test]
-    fn mapper_skips_empty_label_values() {
-        let mut labels = BTreeMap::new();
-        labels.insert(
-            "kars.azure.com/component".to_string(),
-            "sandbox".to_string(),
-        );
-        labels.insert("kars.azure.com/sandbox".to_string(), "".to_string());
-        labels.insert(
-            "kars.azure.com/parent-namespace".to_string(),
-            "kars-system".to_string(),
-        );
-        assert!(deployment_to_sandbox_ref(deploy_with_labels(labels)).is_none());
-    }
-}

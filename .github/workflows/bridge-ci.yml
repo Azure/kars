@@ -89,7 +89,7 @@ jobs:
             routes::operator::copilot_transport::tests::github_tls_transport_preserves_oauth_and_copilot_requests \
             routes::operator::copilot_transport::tests::github_tls_transport_does_not_follow_redirects \
             routes::operator::copilot_transport::tests::github_transport_rejects_untrusted_certificates_and_hostnames \
-            routes::tasks::artifacts::tests::active_and_unknown_artifacts_download_unchanged_from_live_or_retained_tasks \
+            routes::tasks::artifacts::tests::active_and_unknown_artifacts_require_a_current_task_and_download_unchanged \
             routes::tasks::artifacts::tests::passive_artifact_previews_keep_inline_viewing_without_mime_sniffing_or_byte_changes \
             routes::tasks::artifacts::tests::artifact_head_has_the_same_protection_and_filename_is_header_safe \
             routes::tasks::artifacts::tests::artifact_response_hardening_preserves_ownership_and_missing_file_denials \
@@ -445,7 +445,6 @@ jobs:
       - name: Build the public witness image without publishing
         run: |
           docker build --platform linux/amd64 \
-            --build-arg PYTHON_BASE=python:3.12-alpine3.22@sha256:a190708a2dec1bd18b1decb539f8e8f5407abaa9bf39cacda583f7f8c11db322 \
             --build-arg SOURCE_REVISION="$GITHUB_SHA" \
             --file deploy/ebpf-witness/aggregator/Dockerfile \
             --tag kars-witness-qualification:latest .

@@ -197,6 +197,9 @@ async fn main() -> Result<()> {
     }
 
     let state = routes::AppState::new(&config).await?;
+    let _control_tls = kars_inference_router::service_control_tls::start(state.clone())
+        .await
+        .map_err(anyhow::Error::msg)?;
     let _observation_tls = kars_inference_router::service_observation_tls::start(state.clone())
         .await
         .map_err(anyhow::Error::msg)?;
@@ -480,6 +483,7 @@ async fn main() -> Result<()> {
             .merge(build_platform_mcp_router(
                 Some(memory_binding_for_platform),
                 Some(policy_status_for_platform),
+                observation_state.governance.clone(),
                 Some(telemetry),
             ));
 
@@ -835,9 +839,11 @@ fn build_platform_mcp_router(
     policy_status: Option<
         std::sync::Arc<kars_inference_router::policy_status::PolicyStatusRegistry>,
     >,
+    governance: Arc<kars_inference_router::governance::Governance>,
     telemetry: Option<Arc<kars_inference_router::task_telemetry::TaskTelemetry>>,
 ) -> Router {
-    let mut state = routes::McpRouteState::platform(memory_binding, policy_status);
+    let mut state =
+        routes::McpRouteState::platform(memory_binding, policy_status, Some(governance));
     state.task_telemetry = telemetry;
     tracing::info!(
         "Mounting /platform/mcp (Foundry-shim discovery surface, loopback-only, no OAuth)"

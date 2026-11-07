@@ -167,18 +167,21 @@ export function capturedRetirement(state: RootRetirement, scopes: NamespaceRevie
   return new Map(scopes.map(scope => [scope.namespace.name, new Set(state.captured[scope.namespace.uid] ?? [])]));
 }
 
+export class PrivateBudgetRotationRequiredError extends Error {
+  constructor() {
+    super("Retired root requires budget TLS operator rotation and public-CA update; keep it paused and re-preview afterwards");
+    this.name = "PrivateBudgetRotationRequiredError";
+  }
+}
+
 export async function qualifyRetiredBudget(
   execute: Execute, activation: PrivateActivation, scope: NamespaceReview, state: RootRetirement,
 ): Promise<RootRetirement> {
   await assertRetiredRoot(execute, activation, state);
   const budget = activation.root.budgetTls;
   if (state.phase === "pausing") {
-    const next: RootRetirement = { ...state, phase: "retired", ...(budget ? {
-      baseline: { secretUid: budget.secret.uid, resourceVersion: budget.secret.resourceVersion, keyDigest: budget.keyDigest },
-      exposedKeys: [...new Set([...state.exposedKeys, budget.keyDigest])].sort(),
-    } : {}) };
-    await saveRetirement(execute, scope, state, next);
-    if (budget) throw new Error("Retired root requires budget TLS operator rotation and public-CA update; keep it paused and re-preview afterwards");
+    const next = await recordRetiredBudgetBaseline(execute, activation, scope, state);
+    if (budget) throw new PrivateBudgetRotationRequiredError();
     return next;
   }
   if (budget && (!state.baseline || state.baseline.secretUid !== budget.secret.uid
@@ -186,4 +189,19 @@ export async function qualifyRetiredBudget(
     throw new Error("Budget TLS public key is unchanged or previously exposed; copying or pre-retirement rotation cannot qualify");
   }
   return state;
+}
+
+/** Records actual retirement, not qualification; a budget key still requires subsequent operator rotation. */
+export async function recordRetiredBudgetBaseline(
+  execute: Execute, activation: PrivateActivation, scope: NamespaceReview, state: RootRetirement,
+): Promise<RootRetirement> {
+  if (state.phase !== "pausing") throw new Error(failure);
+  await assertRetiredRoot(execute, activation, state);
+  const budget = activation.root.budgetTls;
+  const next: RootRetirement = { ...state, phase: "retired", ...(budget ? {
+    baseline: { secretUid: budget.secret.uid, resourceVersion: budget.secret.resourceVersion, keyDigest: budget.keyDigest },
+    exposedKeys: [...new Set([...state.exposedKeys, budget.keyDigest])].sort(),
+  } : {}) };
+  await saveRetirement(execute, scope, state, next);
+  return next;
 }

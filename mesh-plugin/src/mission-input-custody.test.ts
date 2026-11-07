@@ -2,11 +2,13 @@
 // Licensed under the MIT License.
 
 import { describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { nativeMissionLimits } from "./mission-phase.js";
 import { missionAttemptName, missionContentDigest, type MissionAttempt, type MissionCandidate } from "./mission-dispatcher.js";
 import { readRetainedMissionInputs } from "./mission-input-custody.js";
 import { missionInputContentDigest, type MissionInputReference } from "./mission-inputs.js";
 import { missionContract, type MissionAssignment, type MissionReply } from "./mission-protocol.js";
-import { missionRecordOwner, missionResultMaps, unpackMissionAttempt, type MissionConfigMap } from "./mission-record.js";
+import { missionRecordOwner, missionResultMaps, packMissionAttempt, unpackMissionAttempt, type MissionConfigMap } from "./mission-record.js";
 
 const content = "# Upstream draft\r\nCafé — 日本語 🌍\n";
 function harness(version: 1 | 2 | 3 = 1) {
@@ -53,6 +55,123 @@ function harness(version: 1 | 2 | 3 = 1) {
 }
 
 describe("shared durable mission records", () => {
+  it.each([false, true, "full"])("retains native Activity and full input custody within transport and ConfigMap budgets (continuity=%s)", continuity => {
+    const h = harness(3);
+    const toolCount = continuity === "full" ? 64 : 128;
+    const cycle = JSON.parse(readFileSync(new URL("../../inference-router/tests/fixtures/router-observation-tool-cycle.json", import.meta.url), "utf8"));
+    const events = Array.from({ length: toolCount }, (_, i) => cycle.filter((e: any) => !e.reported_in_round).map((e: any) => ({
+      ...e, round: i + 1, seq: i * 7 + e.seq, ...(e.call_id ? { call_id: `call-${i + 1}` } : {}),
+    }))).flat();
+    const rounds = Array.from({ length: toolCount }, (_, i) => i + 1);
+    const routerObservations = JSON.stringify({ version: 1, source: "runtime-forwarded-router-observations",
+      coverage: "native-tool-correlated-only", correlated_tools: toolCount, scope_id: cycle[0].scope_id, rounds, state: "observed",
+      trace: { scope_id: cycle[0].scope_id, rounds, coverage: "native-tool-correlated-only", durable: false,
+        missing_rounds: [], dropped_events: 0, truncated: false, events } });
+    h.candidate.content = "Reviewed research instructions. ".repeat(256);
+    h.candidate.reviewedPhase = { ...h.candidate.reviewedPhase!, executionMode: "native", maxToolCalls: 128 };
+    h.candidate.inputArtifacts![0].content = "x".repeat(60 * 1024);
+    h.candidate.inputArtifacts![0].sha256 = missionInputContentDigest(h.candidate.inputArtifacts![0].content);
+    if (continuity) {
+      const source = h.candidate.inputArtifacts![0].source;
+      const memory = [29571,13205,19474,43332,17511,5728,4869].map((bytes,index) => ({
+        name:`memory-0-document-${index}.md`,source:{...source,artifactName:`document-${index}.md`},
+        content:"x".repeat(bytes),sha256:missionInputContentDigest("x".repeat(bytes)),
+      }));
+      memory[0].content += "x".repeat(143430 - Buffer.byteLength(JSON.stringify(memory)));
+      memory[0].sha256 = missionInputContentDigest(memory[0].content);
+      expect(Buffer.byteLength(JSON.stringify(memory))).toBe(143430);
+      h.candidate.inputArtifacts = [...memory,...[12000,7200,1000].map((bytes,index)=>({
+        name:`peer-${index}.md`,source:{...source,artifactName:`peer-${index}.md`},
+        content:"y".repeat(bytes),sha256:missionInputContentDigest("y".repeat(bytes)),
+      }))];
+    }
+    if (continuity === "full") {
+      const source = h.candidate.inputArtifacts![0].source;
+      h.candidate.inputArtifacts = Array.from({ length: 6 }, (_, i) => ({ name: `source-${i}.md`,
+        source: { ...source, artifactName: `source-${i}.md` }, content: "x".repeat(58 * 1024),
+        sha256: missionInputContentDigest("x".repeat(58 * 1024)) }));
+      h.candidate.inputArtifacts[0].content += "x".repeat(363508 - Buffer.byteLength(JSON.stringify(h.candidate.inputArtifacts)));
+      h.candidate.inputArtifacts[0].sha256 = missionInputContentDigest(h.candidate.inputArtifacts[0].content);
+      expect(Buffer.byteLength(JSON.stringify(h.candidate.inputArtifacts))).toBe(363508);
+    }
+    const contract = missionContract(h.candidate.reviewedPhase, h.candidate.inputArtifacts);
+    Object.assign(h.attempt.assignment, contract, { content: h.candidate.content, inputArtifacts:h.candidate.inputArtifacts,
+      activityFormat: "router-observations-v1" });
+    expect(Buffer.byteLength(JSON.stringify(h.attempt.assignment))).toBeLessThan((continuity === "full" ? 576 : 192) * 1024);
+    h.attempt.contentDigest = missionContentDigest(h.candidate.content);
+    const evidence = { model: "reviewed", rounds: toolCount + 1, usage: { promptTokens: 1548000, completionTokens: 38700, totalTokens: 1586700 },
+      phase: { name: "prepare-draft", attemptedToolCalls: toolCount, successfulToolCalls: toolCount, minToolCalls: 1, maxToolCalls: 128 } };
+    h.attempt.reply = { ...h.attempt.reply!, ...contract, evidence, status: "running", output: undefined, artifacts: undefined,
+      activityFormat: "router-observations-v1", routerObservations };
+    h.attempt.phase = "running";
+    h.attempt.events = Array.from({ length: nativeMissionLimits(h.candidate.reviewedPhase)!.events - 1 }, () => ({
+      at: h.attempt.updatedAt, status: "running", evidence }));
+    h.saveAttempt();
+    if (continuity === "full") h.record.data["attempt.json"] = packMissionAttempt(h.attempt);
+    expect(unpackMissionAttempt(h.record, h.candidate).attempt.reply?.routerObservations).toBe(routerObservations);
+    expect(JSON.stringify(h.attempt.events)).not.toContain("routerObservations");
+    h.attempt.phase = "succeeded";
+    Object.assign(h.attempt.reply, { status: "succeeded", routerObservations: undefined, output: "Report attached",
+      artifacts: { "draft.md": "x".repeat((continuity ? 20 : 120) * 1024), "kars-router-observations.json": routerObservations } });
+    h.attempt.events.push({ at: h.attempt.updatedAt, status: "succeeded", evidence });
+    h.saveAttempt();
+    if (continuity === "full") h.record.data["attempt.json"] = packMissionAttempt(h.attempt);
+    const retained = unpackMissionAttempt(h.record, h.candidate).attempt;
+    const maps = missionResultMaps(retained);
+    expect(maps.artifacts.data["kars-router-observations.json"]).toBe(routerObservations);
+    expect(Buffer.byteLength(h.record.data["attempt.json"])).toBeLessThan(900 * 1024);
+    for (const cm of [h.record, maps.output, maps.artifacts]) {
+      expect(Buffer.byteLength(JSON.stringify(cm))).toBeLessThan(1024 * 1024);
+    }
+    if (continuity) {
+      h.attempt.reply!.artifacts!["draft.md"] = "x".repeat(120 * 1024);
+      h.saveAttempt();
+      expect(() => unpackMissionAttempt(h.record, h.candidate)).toThrow("storage bounds");
+      h.record.data["attempt.json"] = packMissionAttempt(h.attempt);
+      expect(unpackMissionAttempt(h.record, h.candidate).attempt).toEqual(JSON.parse(JSON.stringify(h.attempt)));
+      expect(Buffer.byteLength(h.record.data["attempt.json"])).toBeLessThan(900 * 1024);
+    }
+  });
+  it("round-trips referenced inputs and retains exact custody and canonical projections", async () => {
+    const h = harness(3);
+    const original = JSON.stringify(h.attempt);
+    h.record.data["attempt.json"] = packMissionAttempt(h.attempt);
+    expect(JSON.stringify(h.attempt)).toBe(original);
+    const stored = JSON.parse(h.record.data["attempt.json"]);
+    expect(stored.inputArtifactsFromAssignment).toBe(true);
+    expect(stored.candidate).not.toHaveProperty("inputArtifacts");
+    expect(stored.assignment.inputArtifacts).toEqual(h.candidate.inputArtifacts);
+    const decoded = unpackMissionAttempt(h.record, h.candidate).attempt;
+    expect(decoded).toEqual(JSON.parse(original));
+    expect(missionResultMaps(decoded)).toEqual(missionResultMaps(h.attempt));
+    expect(await readRetainedMissionInputs([h.reference], h.reader)).toEqual([
+      { ...h.reference, content },
+    ]);
+  });
+  it.each([false, null, "true"])("rejects unsupported input reference marker %s", marker => {
+    const h = harness(3);
+    const stored = JSON.parse(packMissionAttempt(h.attempt));
+    stored.inputArtifactsFromAssignment = marker;
+    h.record.data["attempt.json"] = JSON.stringify(stored);
+    expect(() => unpackMissionAttempt(h.record, h.candidate)).toThrow("storage reference");
+  });
+  it("rejects ambiguous references, missing bundles and changed input digests", () => {
+    const h = harness(3);
+    for (const mutate of [
+      (stored: any) => { stored.candidate.inputArtifacts = null; },
+      (stored: any) => { stored.candidate.inputArtifacts = stored.assignment.inputArtifacts; },
+      (stored: any) => { delete stored.assignment.inputArtifacts; },
+      (stored: any) => { stored.assignment.inputArtifacts = null; },
+      (stored: any) => { stored.assignment.inputArtifacts[0].content += "tampered"; },
+    ]) {
+      const stored = JSON.parse(packMissionAttempt(h.attempt));
+      mutate(stored);
+      h.record.data["attempt.json"] = JSON.stringify(stored);
+      expect(() => unpackMissionAttempt(h.record, h.candidate)).toThrow();
+    }
+    h.attempt.assignment.inputArtifacts = [];
+    expect(() => packMissionAttempt(h.attempt)).toThrow("inputs differ");
+  });
   it.each([1, 2, 3] as const)("decodes v%i journals and builds canonical/current projections from one contract", version => {
     const h = harness(version);
     expect(unpackMissionAttempt(h.record, h.candidate)).toEqual({ revision: "5", attempt: JSON.parse(JSON.stringify(h.attempt)) });
@@ -103,6 +222,42 @@ describe("shared durable mission records", () => {
     h.saveAttempt();
     expect(() => unpackMissionAttempt(h.record, h.candidate)).toThrow("Malformed durable mission attempt");
     expect(() => missionResultMaps(h.attempt)).toThrow("no valid terminal reply");
+  });
+
+  it.each([1, 2, 3] as const)("retains v%i failure Activity without exposing failed deliverables", version => {
+    const h = harness(version);
+    const activity = JSON.stringify({ version: 1, source: "runtime-forwarded-router-observations",
+      coverage: "returned-responses-only", responses: 1, rounds: [1], state: "unavailable", reason: "Trace expired" });
+    h.attempt.assignment.activityFormat = "router-observations-v1";
+    h.attempt.phase = "failed";
+    h.attempt.reply = { ...h.attempt.reply!, status: "failed", output: undefined, artifacts: undefined,
+      error: "Write failed", activityFormat: "router-observations-v1", routerObservations: activity };
+    h.attempt.events[0].status = "failed";
+    h.saveAttempt();
+    const retained = unpackMissionAttempt(h.record, h.candidate).attempt;
+    const maps = missionResultMaps(retained);
+    expect(maps.output.data).toMatchObject({ status: "failed", output: "", error: "Write failed", artifactCount: "1" });
+    expect(maps.artifacts.data).toEqual({ "kars-router-observations.json": activity });
+    expect(missionResultMaps(retained, "current").artifacts.data).toEqual(maps.artifacts.data);
+    expect(retained.reply).not.toHaveProperty("artifacts");
+    expect(JSON.stringify(retained.events)).not.toContain("routerObservations");
+  });
+
+  it.each([1, 2, 3] as const)("retains v%i failed explanations as diagnostics, never artifacts", version => {
+    const h = harness(version);
+    h.attempt.phase = "failed";
+    h.attempt.reply = { ...h.attempt.reply!, status: "failed", output: "Exact-host approval is needed.",
+      artifacts: undefined, error: "Required exports missing" };
+    h.attempt.events[0].status = "failed";
+    h.saveAttempt();
+    const retained = unpackMissionAttempt(h.record, h.candidate).attempt;
+    for (const role of ["canonical", "current"] as const) {
+      const maps = missionResultMaps(retained, role);
+      expect(maps.output.data).toMatchObject({ status: "failed", output: h.attempt.reply.output,
+        error: "Required exports missing", artifactCount: "0" });
+      expect(maps.artifacts.data).toEqual({});
+      expect(JSON.parse(maps.output.data["evidence.json"]).output).toBe(h.attempt.reply.output);
+    }
   });
 
   it("keeps failed terminal projections empty and rejects mismatched journals", () => {

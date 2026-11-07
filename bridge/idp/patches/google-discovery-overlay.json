@@ -1,0 +1,5 @@
+{
+  "Replace": {
+    "connector/google/kars_discovery_test.go": "/packaging/patches/google_discovery_test.go"
+  }
+}

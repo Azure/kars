@@ -16,6 +16,192 @@ use crate::routes::tasks::require_cluster;
 pub use super::work::TeamTask as TeamTaskDto;
 use super::{require_owned_team, work};
 
+pub(crate) fn validate_work_intent(
+    team: &crate::kars::team::KarsTeam,
+    item: &TeamTaskDto,
+) -> AppResult<()> {
+    work::validate_run_intent(
+        team.spec
+            .display_name
+            .as_deref()
+            .unwrap_or_else(|| team.metadata.name.as_deref().unwrap_or_default()),
+        &team.spec.charter,
+        item,
+    )
+    .map_err(|error| AppError::BadRequest(error.to_string()))
+}
+
+pub(crate) fn validate_revision_plan(
+    team: &crate::kars::team::KarsTeam,
+    items: &[TeamTaskDto],
+) -> AppResult<()> {
+    if work::next_pending(items).is_some_and(|item| {
+        work::revision_source(item).is_some() || work::revision_diagnostic_source(item).is_some()
+    }) && let Some(plan) = team
+        .spec
+        .blueprint
+        .as_ref()
+        .and_then(|blueprint| blueprint.execution_plan.as_ref())
+    {
+        crate::kars::task::execution_plan::validate_retained_input_execution(Some(plan), 1)
+            .map_err(AppError::BadRequest)?;
+    }
+    Ok(())
+}
+
+fn validate_rejection_feedback(
+    team: &crate::kars::team::KarsTeam,
+    item: &TeamTaskDto,
+    feedback: Option<&str>,
+) -> AppResult<()> {
+    let feedback = feedback
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            AppError::BadRequest("requesting changes requires written feedback".into())
+        })?;
+    let mut next = item.clone();
+    next.feedback = Some(feedback.to_owned());
+    validate_work_intent(team, &next)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AmendFeedbackRequest {
+    pub team_uid: String,
+    pub expected: TeamTaskDto,
+    #[serde(deserialize_with = "Option::<String>::deserialize")]
+    pub feedback: Option<String>,
+}
+
+fn require_feedback_team(team: &crate::kars::team::KarsTeam, expected_uid: &str) -> AppResult<()> {
+    work_owner(team)?;
+    if expected_uid.is_empty() || team.metadata.uid.as_deref() != Some(expected_uid) {
+        return Err(AppError::Conflict(
+            "Team identity changed; refresh before editing feedback".into(),
+        ));
+    }
+    if !team.spec.paused {
+        return Err(AppError::Conflict(
+            "Pause the Team before editing queued feedback".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// PATCH only next-run feedback; never rewrite the prior checkpoint decision.
+pub async fn amend_team_task_feedback(
+    State(state): State<crate::state::AppState>,
+    Extension(principal): Extension<Principal>,
+    Path((ns, name, task_id)): Path<(String, String, String)>,
+    Json(body): Json<AmendFeedbackRequest>,
+) -> AppResult<Json<TeamTaskDto>> {
+    let cluster = require_cluster(&state)?;
+    let team = require_owned_team(cluster, &ns, &name, &principal).await?;
+    require_feedback_team(&team, &body.team_uid)?;
+    if body.expected.id != task_id {
+        return Err(AppError::BadRequest(
+            "expected item ID must match the route".into(),
+        ));
+    }
+    let mut proposed = body.expected.clone();
+    proposed.feedback = body.feedback.clone();
+    validate_work_intent(&team, &proposed)?;
+    let owner = work_owner(&team)?;
+    let api = cluster.configmaps(&ns);
+    let (cm, _) = work::read(&api, &owner)
+        .await
+        .map_err(work_error)?
+        .ok_or(AppError::NotFound)?;
+    let updated = work::update_guarded(
+        &api,
+        &owner,
+        cm.metadata.uid.as_deref(),
+        false,
+        |items| work::amend_pending_feedback(items, &body.expected, body.feedback.clone()),
+        || async {
+            let fresh = require_owned_team(cluster, &ns, &name, &principal)
+                .await
+                .map_err(|error| work::Error::Conflict(error.to_string()))?;
+            require_feedback_team(&fresh, &body.team_uid)
+                .map_err(|error| work::Error::Conflict(error.to_string()))?;
+            if fresh.metadata.resource_version != team.metadata.resource_version {
+                return Err(work::Error::Conflict(
+                    "Team changed while editing; refresh before retrying".into(),
+                ));
+            }
+            Ok(())
+        },
+    )
+    .await
+    .map_err(work_error)?;
+    Ok(Json(updated))
+}
+
+/// The generic Inbox must validate the same exact next-run intent as Team review.
+pub(crate) async fn preflight_checkpoint_rejection(
+    cluster: &crate::kars::cluster::Cluster,
+    ns: &str,
+    approval: &crate::kars::approval::KarsApproval,
+    feedback: Option<&str>,
+) -> AppResult<()> {
+    if approval.spec.action.kind != "checkpoint" {
+        return Ok(());
+    }
+    let Some(raw) = approval.annotations().get(work::ANNOTATION) else {
+        // Milestone labels without a binding cannot safely identify queued work.
+        if approval.labels().contains_key("kars.azure.com/milestone")
+            || approval
+                .annotations()
+                .contains_key("kars.azure.com/milestone")
+        {
+            return Err(AppError::Conflict(
+                "Team checkpoint has no work binding; refresh before deciding".into(),
+            ));
+        }
+        return Ok(());
+    };
+    let binding: work::Binding = serde_json::from_str(raw)
+        .map_err(|_| AppError::Conflict("invalid Team checkpoint work binding".into()))?;
+    let owner_ref = approval
+        .metadata
+        .owner_references
+        .as_ref()
+        .and_then(|owners| {
+            owners.iter().find(|owner| {
+                owner.controller == Some(true)
+                    && owner.kind == "KarsTeam"
+                    && owner.api_version == "kars.azure.com/v1alpha1"
+            })
+        })
+        .ok_or_else(|| AppError::Conflict("Team checkpoint has no Team owner".into()))?;
+    let team = cluster
+        .teams(ns)
+        .get(&owner_ref.name)
+        .await
+        .map_err(|error| AppError::Upstream(error.to_string()))?;
+    let owner = work_owner(&team)?;
+    let (cm, items) = work::read(&cluster.configmaps(ns), &owner)
+        .await
+        .map_err(work_error)?
+        .ok_or(AppError::NotFound)?;
+    let item = items
+        .iter()
+        .find(|item| item.id == binding.item_id)
+        .ok_or_else(|| AppError::Conflict("reviewed work disappeared".into()))?;
+    if cm.uid().as_deref() != Some(binding.backlog_uid.as_str())
+        || work::request_digest(item).map_err(|error| AppError::Upstream(error.to_string()))?
+            != binding.request_digest
+        || item.status != "awaiting_review"
+        || !checkpoint_matches(approval, &team, item, raw)
+        || !review_ready(approval, item)
+    {
+        return Err(AppError::Conflict(
+            "Team checkpoint or work changed; refresh before deciding".into(),
+        ));
+    }
+    validate_rejection_feedback(&team, item, feedback)
+}
+
 #[derive(Debug, Serialize)]
 pub struct WorkReviewDto {
     pub task_id: String,
@@ -199,6 +385,12 @@ pub async fn add_team_task(
     if b.title.trim().is_empty() {
         return Err(AppError::BadRequest("task title is required".into()));
     }
+    if b.acceptance_criteria.len() > 20 {
+        return Err(AppError::BadRequest(format!(
+            "acceptance criteria actual: {}, allowed: 20; reduce the criteria count",
+            b.acceptance_criteria.len(),
+        )));
+    }
     let existing_tasks = read_tasks(cluster, &team).await?;
     if let Some(missing) = b.depends_on.iter().find(|dependency| {
         !existing_tasks
@@ -247,7 +439,6 @@ pub async fn add_team_task(
             .into_iter()
             .map(|criterion| criterion.trim().to_string())
             .filter(|criterion| !criterion.is_empty())
-            .take(20)
             .collect(),
         review_required: b.review_required,
         status: "pending".into(),
@@ -258,6 +449,7 @@ pub async fn add_team_task(
         assignment_nonce: None,
         ..Default::default()
     };
+    validate_work_intent(&team, &task)?;
     let owner = work_owner(&team)?;
     work::update(&cluster.configmaps(&ns), &owner, None, true, |items| {
         if items.iter().any(|existing| existing.id == task.id) {
@@ -368,21 +560,18 @@ pub async fn review_team_task(
     let feedback = body
         .feedback
         .as_deref()
-        .map(str::trim)
-        .filter(|feedback| !feedback.is_empty())
+        .filter(|feedback| !feedback.trim().is_empty())
         .map(str::to_string);
-    if body.decision == "request_changes" && feedback.is_none() {
-        return Err(AppError::BadRequest(
-            "request_changes requires written feedback".into(),
-        ));
-    }
-    if feedback
-        .as_ref()
-        .is_some_and(|text| text.chars().count() > 4096)
-    {
-        return Err(AppError::BadRequest(
-            "review feedback must be at most 4096 characters".into(),
-        ));
+    if body.decision == "request_changes" {
+        validate_rejection_feedback(&team, &existing, feedback.as_deref())?;
+    } else if let Some(text) = &feedback {
+        let actual = text.chars().count();
+        let allowed = work::MAX_OBJECTIVE_CHARS;
+        if actual > allowed {
+            return Err(AppError::BadRequest(format!(
+                "review feedback actual: {actual} characters, allowed: {allowed}; shorten the feedback"
+            )));
+        }
     }
     let approvals = cluster.approvals(&ns);
     let binding = work::Binding {
@@ -444,6 +633,10 @@ pub async fn review_team_task(
         .ok_or(AppError::NotFound)?;
     Ok(Json(updated))
 }
+
+#[cfg(test)]
+#[path = "feedback_tests.rs"]
+mod feedback_tests;
 
 #[cfg(test)]
 mod tests {

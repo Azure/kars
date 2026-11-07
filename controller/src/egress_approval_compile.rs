@@ -68,6 +68,76 @@ pub const EGRESS_APPROVAL_MERGED_FILENAME: &str = "merged-allowlist.json";
 /// breaking layout change (the router refuses to parse mismatched
 /// versions).
 pub const APPROVAL_FILE_SCHEMA_VERSION: u32 = 1;
+pub const REQUEST_SCOPE: &str = "kars.azure.com/access-request-scope";
+pub const REQUEST_ID: &str = "kars.azure.com/access-request-id";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RequestBinding {
+    pub scope: String,
+    pub request: String,
+}
+
+pub(crate) fn valid_request_scope(scope: &str) -> bool {
+    scope.len() <= 64
+        && scope.split_once(':').is_some_and(|(nonce, generation)| {
+            nonce.len() == 32
+                && nonce.bytes().all(|b| b.is_ascii_hexdigit())
+                && !generation.is_empty()
+                && generation.bytes().all(|b| b.is_ascii_digit())
+                && generation.parse::<u64>().is_ok()
+        })
+}
+
+#[cfg(test)]
+#[path = "egress_approval_binding_tests.rs"]
+mod binding_tests;
+
+impl RequestBinding {
+    pub(crate) fn from_annotations(
+        annotations: Option<&std::collections::BTreeMap<String, String>>,
+    ) -> Result<Option<Self>, &'static str> {
+        let scope = annotations.and_then(|a| a.get(REQUEST_SCOPE));
+        let request = annotations.and_then(|a| a.get(REQUEST_ID));
+        match (scope, request) {
+            (None, None) => Ok(None),
+            (Some(scope), Some(request))
+                if valid_request_scope(scope)
+                    && request.len() <= 96
+                    && request
+                        .strip_prefix(&format!("{scope}:"))
+                        .is_some_and(|sequence| {
+                            !sequence.is_empty()
+                                && sequence.bytes().all(|b| b.is_ascii_digit())
+                                && sequence.parse::<u64>().is_ok_and(|value| value > 0)
+                        }) =>
+            {
+                Ok(Some(Self {
+                    scope: scope.clone(),
+                    request: request.clone(),
+                }))
+            }
+            _ => Err("Egress request binding must contain one exact scope and request ID"),
+        }
+    }
+
+    pub(crate) fn compile(&self, mut document: Value) -> Result<Value, &'static str> {
+        let object = document
+            .as_object_mut()
+            .ok_or("Egress approval document invalid")?;
+        let hosts = object
+            .remove("hosts")
+            .ok_or("Egress approval hosts missing")?;
+        if hosts.as_array().is_none_or(|hosts| hosts.len() != 1) {
+            return Err("Scoped egress approval requires one endpoint");
+        }
+        // Old routers only understand hosts: omission makes version downgrade fail closed.
+        object.insert("schemaVersion".into(), json!(2));
+        object.insert("requestScope".into(), json!(self.scope));
+        object.insert("requestId".into(), json!(self.request));
+        object.insert("scopedHosts".into(), hosts);
+        Ok(document)
+    }
+}
 
 /// ConfigMap name template for the per-sandbox approvals collection.
 /// One CM per sandbox; one key per approval (`approval-{name}.json`).

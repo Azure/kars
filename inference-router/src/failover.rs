@@ -37,6 +37,7 @@ use crate::proxy::failure::{ForwardFailure, retryable_failure};
 use crate::proxy::{AuthenticationProvenance, UpstreamConfig, forward};
 
 mod stream;
+pub(crate) use stream::forward_stream_with_authorization;
 pub use stream::forward_stream_with_failover;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

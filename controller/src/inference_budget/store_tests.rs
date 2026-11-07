@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 
 use super::*;
+#[path = "history_tests.rs"]
+mod history_tests;
 use crate::inference_budget_contract::{
     Amounts, AttemptCommand, AttemptKey, BudgetScope, ExecutionIdentity, Limits, ReserveRequest,
     ResourceIdentity, RootKind, TaskAuthority,
@@ -121,7 +123,7 @@ fn reserve(pod: &str) -> ReserveRequest {
         identity: identity(pod),
         sequence: 1,
         wire_digest: format!("sha256:{}", "a".repeat(64)),
-        quote,
+        quote: quote.into(),
     }
 }
 
@@ -141,6 +143,8 @@ struct State {
     fault: Fault,
     version: u64,
     writes: usize,
+    history: std::collections::BTreeMap<String, k8s_openapi::api::core::v1::ConfigMap>,
+    fail_history: bool,
 }
 
 #[derive(Clone)]
@@ -161,7 +165,35 @@ fn response(value: &KarsBudgetAccount) -> ResponseTemplate {
 impl Respond for Server {
     fn respond(&self, request: &Request) -> ResponseTemplate {
         let mut state = self.0.lock().unwrap();
+        const HISTORY: &str = "/api/v1/namespaces/kars-system/configmaps";
         match (request.method.as_str(), request.url.path()) {
+            ("POST", HISTORY) => {
+                if state.fail_history {
+                    return failure(503);
+                }
+                let mut object: k8s_openapi::api::core::v1::ConfigMap =
+                    serde_json::from_slice(&request.body).unwrap();
+                let name = object.name_any();
+                if state.history.contains_key(&name) {
+                    return failure(409);
+                }
+                object.metadata.uid = Some(format!("page-{}", state.history.len()));
+                object.metadata.resource_version = Some("1".into());
+                state.history.insert(name, object.clone());
+                ResponseTemplate::new(201).set_body_json(object)
+            }
+            ("GET", path) if path.starts_with(&format!("{HISTORY}/")) => {
+                if state.fail_history {
+                    return failure(503);
+                }
+                state
+                    .history
+                    .get(path.rsplit('/').next().unwrap())
+                    .map_or_else(
+                        || failure(404),
+                        |object| ResponseTemplate::new(200).set_body_json(object),
+                    )
+            }
             ("GET", OBJECT) if matches!(state.fault, Fault::FailRead) => failure(503),
             ("GET", OBJECT) => state
                 .account
@@ -270,6 +302,14 @@ impl Respond for Server {
     }
 }
 
+fn test_client(server: &MockServer) -> Client {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let config = crate::kube_client_config::preserve_request_semantics(kube::Config::new(
+        server.uri().parse().unwrap(),
+    ));
+    Client::try_from(config).unwrap()
+}
+
 async fn setup(
     account: Option<KarsBudgetAccount>,
     fault: Fault,
@@ -280,14 +320,139 @@ async fn setup(
         fault,
         version: 100,
         writes: 0,
+        history: Default::default(),
+        fail_history: false,
     }));
     Mock::given(wiremock::matchers::any())
         .respond_with(Server(state.clone()))
         .mount(&server)
         .await;
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
+    let client = test_client(&server);
     (server, Store::new(client, "kars-system"), state)
+}
+
+fn top_up_fixture() -> (
+    KarsBudgetAccount,
+    crate::inference_budget_contract::ledger::TokenTopUp,
+) {
+    let mut account = account();
+    account.spec.root.kind = RootKind::KarsTeam;
+    let ledger = account.status.as_mut().unwrap().ledger.as_mut().unwrap();
+    ledger.root.kind = RootKind::KarsTeam;
+    let grant = crate::inference_budget_contract::ledger::TokenTopUp {
+        funding_renewal: None,
+        id: "extension-1".into(),
+        config_uid: "config-uid".into(),
+        account_uid: "account-uid".into(),
+        root: ledger.root.clone(),
+        original_limits: ledger.limits,
+        tokens: 100,
+        expires_at: "2030-01-01T00:00:00Z".into(),
+        nodes: std::collections::BTreeMap::from([(
+            "root".into(),
+            authorization().authorization_digest,
+        )]),
+    };
+    (account, grant)
+}
+
+#[tokio::test]
+async fn top_up_cas_preserves_concurrent_reservations_and_idempotent_receipts() {
+    let (account, grant) = top_up_fixture();
+    let (_server, store, state) = setup(Some(account), Fault::ReserveOnConflict).await;
+    let reads = std::sync::atomic::AtomicUsize::new(0);
+    store
+        .transact_prepared(
+            &grant.root,
+            "account-uid",
+            || async {
+                reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(grant.clone())
+            },
+            |ledger, grant| ledger.apply_token_top_up(&grant, 100),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 2);
+    store
+        .transact(&grant.root, "account-uid", |ledger| {
+            ledger.apply_token_top_up(&grant, 100)
+        })
+        .await
+        .unwrap();
+    let state = state.lock().unwrap();
+    let ledger = Store::ledger(state.account.as_ref().unwrap()).unwrap();
+    assert_eq!(ledger.meters.reserved.tokens, 30);
+    assert_eq!(ledger.sessions["a"].next_sequence, 2);
+    assert_eq!(ledger.attempts.len(), 1);
+    assert_eq!(ledger.token_top_ups.len(), 1);
+    assert_eq!(ledger.effective_limits().unwrap().tokens, Some(150));
+    assert_eq!(ledger.limits.tokens, Some(50));
+    assert_eq!(state.writes, 1);
+}
+
+#[tokio::test]
+async fn top_up_lost_ack_is_idempotent_and_replaced_accounts_are_rejected() {
+    let (account, grant) = top_up_fixture();
+    let (_server, store, state) = setup(Some(account.clone()), Fault::CommitThenFail).await;
+    assert!(
+        store
+            .transact(&grant.root, "account-uid", |ledger| ledger
+                .apply_token_top_up(&grant, 100))
+            .await
+            .is_err()
+    );
+    store
+        .transact(&grant.root, "account-uid", |ledger| {
+            ledger.apply_token_top_up(&grant, 100)
+        })
+        .await
+        .unwrap();
+    assert_eq!(state.lock().unwrap().writes, 1);
+    assert_eq!(
+        Store::ledger(state.lock().unwrap().account.as_ref().unwrap())
+            .unwrap()
+            .token_top_ups
+            .len(),
+        1
+    );
+    let (_server, store, state) = setup(Some(account), Fault::RecreateOnWrite).await;
+    assert!(
+        store
+            .transact(&grant.root, "account-uid", |ledger| ledger
+                .apply_token_top_up(&grant, 100))
+            .await
+            .is_err()
+    );
+    assert_eq!(state.lock().unwrap().writes, 0);
+}
+
+#[tokio::test]
+async fn top_up_retry_rereads_revoked_authority_and_retains_new_usage() {
+    let (account, grant) = top_up_fixture();
+    let (_server, store, state) = setup(Some(account), Fault::ReserveOnConflict).await;
+    let reads = std::sync::atomic::AtomicUsize::new(0);
+    let result = store
+        .transact_prepared(
+            &grant.root,
+            "account-uid",
+            || async {
+                if reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) != 0 {
+                    return Err(BudgetError::Authorization.into());
+                }
+                Ok(grant.clone())
+            },
+            |ledger, grant| ledger.apply_token_top_up(&grant, 100),
+        )
+        .await;
+    assert!(matches!(
+        result,
+        Err(StoreError::Ledger(BudgetError::Authorization))
+    ));
+    let state = state.lock().unwrap();
+    let ledger = Store::ledger(state.account.as_ref().unwrap()).unwrap();
+    assert!(ledger.token_top_ups.is_empty());
+    assert_eq!(ledger.meters.reserved.tokens, 30);
 }
 
 #[tokio::test]

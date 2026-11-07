@@ -119,6 +119,17 @@ describe("mission runtime binding bootstrap", () => {
     await expect(initializeMissionBinding(env)).rejects.toThrow("already attempted");
     expect(acquireMissionWriter).toHaveBeenCalledTimes(1);
   });
+  it("installs the complete bounded 64-phase peer map", async () => {
+    const peerContext = { rootUid: "root", stateName: `kars-reviewed-${"a".repeat(40)}`, slot: "r0-p0",
+      peers: Array.from({ length: 8 }, (_, r) => Array.from({ length: 8 }, (_, p) => ({
+        role: `role-${r}-${"x".repeat(40)}`, phase: `phase-${p}-${"x".repeat(39)}`, slot: `r${r}-p${p}`,
+        agentName: `rp-${"a".repeat(20)}-r${r}-p${p}`,
+      }))).flat() };
+    const expected = missionContract(contract.reviewedPhase, undefined, [], peerContext);
+    const value = JSON.stringify(expected);
+    expect(Buffer.byteLength(value)).toBeGreaterThan(8192);
+    expect((await initializeMissionBinding({ ...env, KARS_MISSION_CONTRACT: value }))?.contract).toEqual(expected);
+  });
   it("accepts the exact configuration byte bound", async () => {
     const value = JSON.stringify(contract).padEnd(8192, " ");
     expect(Buffer.byteLength(value)).toBe(8192);

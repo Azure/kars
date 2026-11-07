@@ -3,8 +3,9 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import type { IMeshTransport } from "./transport-interface.js";
+import { MessageWaitTimeoutError } from "./local-inbox.js";
 import { MAX_MISSION_MESSAGE_BYTES, missionContract, missionEvidenceAdvances, parseMissionMessage, sameMissionContract, sameMissionTarget, snapshotMissionData, type MissionAssignment, type MissionReply, type MissionTarget } from "./mission-protocol.js";
-import type { FilesystemPhase } from "./mission-phase.js";
+import { nativeMissionLimits, type FilesystemPhase } from "./mission-phase.js";
 import type { MissionRuntime } from "./mission-runtime.js";
 import { missionInputs, type MissionInput } from "./mission-inputs.js";
 
@@ -17,6 +18,7 @@ export interface MissionCandidate extends MissionTarget {
   reviewedPhase?: FilesystemPhase;
   inputArtifacts?: readonly MissionInput[];
   requiredOutputs?: readonly string[];
+  peerContext?: import("./mission-protocol.js").MissionPeerContext;
 }
 export interface MissionAttempt {
   version: 1;
@@ -34,6 +36,7 @@ export interface MissionAttempt {
 export interface StoredMissionAttempt { revision: string; attempt: MissionAttempt }
 export interface MissionAttemptStore {
   isCurrent(candidate: MissionCandidate): Promise<boolean>;
+  workloadInterrupted(candidate: MissionCandidate): Promise<boolean>;
   get(candidate: MissionCandidate): Promise<StoredMissionAttempt | null>;
   create(attempt: MissionAttempt): Promise<StoredMissionAttempt | null>;
   replace(previous: StoredMissionAttempt, attempt: MissionAttempt): Promise<StoredMissionAttempt>;
@@ -45,6 +48,7 @@ export const missionContentDigest = (content: string): string => `sha256:${creat
 export const missionAttemptName = (target: Pick<MissionTarget, "taskUid" | "runNonce">): string =>
   `kars-mission-attempt-${createHash("sha256").update(JSON.stringify([target.taskUid, target.runNonce])).digest("hex").slice(0, 40)}`;
 const terminal = (phase: MissionAttempt["phase"]): boolean => ["succeeded", "failed", "rejected"].includes(phase);
+export const MISSION_WORKLOAD_INTERRUPTED = "The worker handling this run was replaced or removed before its final result was saved. Retained evidence and usage are preserved; this attempt was not replayed.";
 
 function parseRuntimeReply(payload: unknown, runtime: MissionRuntime) {
   // Python MeshClient preserves its bytes API by JSON-wrapping UTF-8 payloads.
@@ -70,8 +74,9 @@ export class MissionDispatcher {
   async dispatch(candidate: MissionCandidate): Promise<DispatchOutcome> {
     candidate = snapshotMissionData(candidate) as MissionCandidate;
     const inputs = candidate.inputArtifacts === undefined ? undefined : missionInputs(candidate.inputArtifacts);
-    const contract = missionContract(candidate.reviewedPhase, inputs, candidate.requiredOutputs);
+    const contract = missionContract(candidate.reviewedPhase, inputs, candidate.requiredOutputs, candidate.peerContext);
     if (contract.reviewedPhase) candidate = Object.freeze({ ...candidate, reviewedPhase: contract.reviewedPhase,
+      ...(contract.peerContext ? { peerContext: contract.peerContext } : {}),
       ...(inputs ? { inputArtifacts: inputs } : {}) });
     const { taskName, taskUid, sandboxUid, podUid, runNonce, agentDid, dispatcherDid, content } = candidate;
     const target: MissionTarget = { taskName, taskUid, sandboxUid, podUid, runNonce, agentDid, dispatcherDid };
@@ -121,7 +126,8 @@ export class MissionDispatcher {
       if (!this.mesh.isConnected || this.mesh.currentDid !== dispatcherDid || this.mesh.isPlaintextPeer(agentDid)) {
         throw new Error("Encrypted transport binding changed after the durable claim");
       }
-      const deadline = Date.now() + this.timeoutMs;
+      const limits = nativeMissionLimits(candidate.reviewedPhase);
+      const deadline = Date.now() + Math.max(this.timeoutMs, limits?.timeoutMs ?? 0);
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         await Promise.race([
@@ -139,7 +145,15 @@ export class MissionDispatcher {
             && message.bootId === assignment.bootId && message.assignmentId === assignment.assignmentId
             && message.activityFormat === assignment.activityFormat
             && (message.artifactFormat === undefined || message.artifactFormat === assignment.artifactFormat) ? message : null;
-        }, Math.max(1, deadline - Date.now()), { consume: true });
+        }, Math.max(1, Math.min(5_000, deadline - Date.now())), { consume: true }).catch(error => {
+          if (error instanceof MessageWaitTimeoutError) return null;
+          throw error;
+        });
+        if (!reply) {
+          // The timed-out waiter is removed before checking the workload; no orphan can consume a later handback.
+          if (await this.store.workloadInterrupted(candidate)) throw new Error(MISSION_WORKLOAD_INTERRUPTED);
+          continue;
+        }
         const previous = stored.attempt;
         // A succeeded/failed reply is authoritative even when the earlier acceptance frame was lost.
         if (reply.status === "accepted" && previous.phase === "running") continue;
@@ -147,7 +161,7 @@ export class MissionDispatcher {
         if (reply.status === "running" && previous.reply?.evidence && reply.evidence
           && reply.evidence.rounds < previous.reply.evidence.rounds) continue;
         if (assignment.version !== 1 && !missionEvidenceAdvances(previous.reply?.evidence, reply.evidence)) continue;
-        if (previous.events.length >= 128) throw new Error("Mission reply event limit exceeded");
+        if (previous.events.length >= (limits?.events ?? 128)) throw new Error("Mission reply event limit exceeded");
         const receivedAt = this.now();
         stored = await this.store.replace(stored, {
           ...previous, phase: reply.status as MissionAttempt["phase"], reply, updatedAt: receivedAt,

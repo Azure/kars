@@ -9,7 +9,18 @@ on:
   pull_request:
     branches: [main, dev, kars-bridge, 'public/pr*']
   workflow_call:      # allow reuse from release.yml
-  workflow_dispatch:  # manual trigger
+    inputs:
+      benchmark_base_sha:
+        description: Established ancestor commit for manually triggered benchmark comparisons
+        type: string
+        required: false
+        default: ''
+  workflow_dispatch:
+    inputs:
+      benchmark_base_sha:
+        description: Full ancestor commit SHA to compare against (must differ from candidate)
+        type: string
+        required: true
 
 permissions:
   contents: read
@@ -262,11 +273,21 @@ jobs:
         with:
           sparse-checkout: |
             /*
-            !/bridge/
+            !/bridge/*
+            /bridge/deploy/
+            !/bridge/deploy/*
+            /bridge/deploy/rbac.yaml
+            /bridge/deploy/helm/
+            !/bridge/deploy/helm/*
+            /bridge/deploy/helm/kars-bridge/
           sparse-checkout-cone-mode: false
-      - name: Require standalone core checkout
+      - name: Require CLI charts without Bridge runtime sources
         working-directory: .
-        run: test ! -e bridge
+        run: |
+          test -f deploy/helm/kars/Chart.yaml
+          test -f bridge/deploy/helm/kars-bridge/Chart.yaml
+          test ! -e bridge/bff
+          test ! -e bridge/web
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: v4.1.3
@@ -341,6 +362,122 @@ jobs:
       - name: npm audit (Mesh Plugin dependencies)
         working-directory: mesh-plugin
         run: node ../ci/npm-audit-bulk.mjs package-lock.json
+
+  headlamp-plugin-build:
+    name: Headlamp Plugin Build & Test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: tools/headlamp-plugin
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+      - run: npm ci
+      - run: npm test
+      - name: Exercise patched checker with real TypeScript workers
+        run: node --test checker/compile.node.mjs
+      - run: npm run build
+      - name: Headlamp frontend preparation contracts
+        run: node --test ../../sandbox-images/headlamp/build-frontend.test.mjs patch-build-tool.test.mjs
+      - name: Compile patched Headlamp build-tool examples
+        run: |
+          set -euo pipefail
+          go version
+          for example in consume publish; do
+            (
+              cd "node_modules/@kinvolk/headlamp-plugin/official-plugins/keda/test-files/$example"
+              go test -mod=readonly ./...
+            )
+          done
+      - name: npm audit (Headlamp dependencies)
+        run: node ../../ci/npm-audit-bulk.mjs package-lock.json
+      - name: Build the shipping Headlamp image without publishing
+        id: headlamp_image
+        working-directory: .
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/headlamp-evidence"
+          docker build --platform linux/amd64 --progress=plain \
+            --tag kars-headlamp:latest --file sandbox-images/headlamp/Dockerfile . \
+            2>&1 | tee "$RUNNER_TEMP/headlamp-evidence/build.log"
+          docker image inspect kars-headlamp:latest > "$RUNNER_TEMP/headlamp-evidence/image.json"
+      - name: Extract and verify Headlamp build inputs
+        id: headlamp_inputs
+        working-directory: .
+        run: |
+          set -euo pipefail
+          image_id="$(docker image inspect --format '{{.Id}}' kars-headlamp:latest)"
+          container_id="$(docker create "$image_id")"
+          trap 'docker rm "$container_id" >/dev/null' EXIT
+          docker cp "$container_id:/usr/share/kars/headlamp/." "$RUNNER_TEMP/headlamp-evidence/"
+          python3 ci/headlamp_build_evidence.py "$RUNNER_TEMP/headlamp-evidence"
+          (
+            cd "$RUNNER_TEMP/headlamp-evidence/frontend-build"
+            node "$GITHUB_WORKSPACE/sandbox-images/headlamp/build-frontend.mjs" verify-lock
+          )
+      - name: Scan shipping Headlamp image at every severity
+        id: headlamp_scan
+        if: ${{ !cancelled() && steps.headlamp_image.outcome == 'success' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.70.0
+          cache: 'false'
+          scan-type: image
+          image-ref: kars-headlamp:latest
+          scanners: vuln
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          ignore-unfixed: false
+          list-all-pkgs: 'true'
+          exit-code: '1'
+          format: json
+          output: ${{ runner.temp }}/headlamp-evidence/image-scan.json
+      - name: Scan canonical Headlamp lock inventory and plugin at every severity
+        if: ${{ !cancelled() && steps.headlamp_inputs.outcome == 'success' }}
+        working-directory: .
+        run: |
+          set -euo pipefail
+          trivy --version | tee "$RUNNER_TEMP/headlamp-evidence/trivy-version.txt"
+          grep -Eq '^Version: 0[.]70[.]0([[:space:]]|$)' "$RUNNER_TEMP/headlamp-evidence/trivy-version.txt"
+          failed=0
+          for source in frontend-lock frontend-inventory plugin-lock; do
+            case "$source" in
+              frontend-lock) mode=fs; input="$RUNNER_TEMP/headlamp-evidence/frontend-build" ;;
+              frontend-inventory) mode=sbom; input="$RUNNER_TEMP/headlamp-evidence/frontend.cdx.json" ;;
+              plugin-lock) mode=fs; input=tools/headlamp-plugin ;;
+            esac
+            options=()
+            if [ "$mode" = fs ]; then options+=(--include-dev-deps); fi
+            trivy "$mode" "${options[@]}" --scanners vuln --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+              --ignore-unfixed=false --list-all-pkgs --format json --exit-code 1 \
+              --output "$RUNNER_TEMP/headlamp-evidence/$source-scan.json" "$input" || failed=1
+            if [ "$mode" = fs ]; then
+              python3 ci/headlamp_build_evidence.py --npm-inventory \
+                "$RUNNER_TEMP/headlamp-evidence/$source-scan.json" || failed=1
+            fi
+          done
+          exit "$failed"
+      - name: Export qualified Headlamp image for same-run Kind
+        working-directory: .
+        run: docker save --output "$RUNNER_TEMP/headlamp-image.tar" kars-headlamp:latest
+      - name: Retain qualified Headlamp image for same-run Kind
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: kind-headlamp-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/headlamp-image.tar
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+      - name: Retain Headlamp qualification evidence including failures
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: headlamp-qualification-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/headlamp-evidence/
+          if-no-files-found: warn
 
   managed-mcp:
     name: Managed MCP Dependencies & Protocol
@@ -424,6 +561,26 @@ jobs:
           # sandbox-images/hermes/Dockerfile.
           pip install -e runtimes/agt-mesh-python
           pip install -e "runtimes/hermes[dev]"
+      - name: Install the image-pinned Hermes runtime for native tests
+        env:
+          HERMES_DISABLE_LAZY_INSTALLS: '1'
+          HERMES_SKIP_NODE_BOOTSTRAP: '1'
+        run: |
+          hermes_commit=$(sed -n 's/^ARG HERMES_COMMIT=\([a-f0-9]\{40\}\)$/\1/p' sandbox-images/hermes/Dockerfile)
+          test "${#hermes_commit}" -eq 40
+          hermes_source="$RUNNER_TEMP/kars-hermes-source"
+          git init -q "$hermes_source"
+          git -C "$hermes_source" fetch --depth=1 https://github.com/NousResearch/hermes-agent.git "$hermes_commit"
+          git -C "$hermes_source" checkout --detach -q FETCH_HEAD
+          test "$(git -C "$hermes_source" rev-parse HEAD)" = "$hermes_commit"
+          (cd sandbox-images/hermes && sha256sum --strict --check hermes-source-SHA256SUMS)
+          git -C "$hermes_source" apply "$GITHUB_WORKSPACE/sandbox-images/hermes/hermes-dependency-fixes.patch"
+          cp sandbox-images/hermes/hermes-uv.lock "$hermes_source/uv.lock"
+          git -C "$hermes_source" apply "$GITHUB_WORKSPACE/sandbox-images/hermes/hermes-foundry-bounds.patch"
+          git -C "$hermes_source" apply "$GITHUB_WORKSPACE/sandbox-images/hermes/hermes-foundry-responses.patch"
+          cp sandbox-images/hermes/azure-foundry-provider.py "$hermes_source/plugins/model-providers/azure-foundry/__init__.py"
+          python -m pip install --constraint sandbox-images/hermes/hermes-core-constraints.txt --editable "$hermes_source"
+          python -c "import importlib.metadata as m, importlib.util; assert m.version('hermes-agent') == '0.21.5'; assert importlib.util.find_spec('run_agent') is not None"
       - name: Run hermes ruff lint
         run: |
           cd runtimes/hermes
@@ -494,7 +651,7 @@ jobs:
       - name: Require the compiled production schema request helper
         run: node tests/e2e/sre_authority/task_schema_payload.mjs check
       - name: Check public-schema diagnostic privacy
-        run: PYTHONPATH=tests/e2e python3 -m unittest sre_authority.registration_schema_test sre_authority.bootstrap_probe_test sre_authority.binding_probe_test sre_authority.legacy_crds_test sre_authority.connection_proxy_test credential_schema_test credential_policy_schema_test sandbox_condition_schema_test eval_pod_admission_test private_consumption_test receipt_log_rotation_test governed_services_test cr_status_test
+        run: PYTHONPATH=tests/e2e python3 -m unittest sre_authority.registration_schema_test sre_authority.bootstrap_probe_test sre_authority.binding_probe_test sre_authority.legacy_crds_test sre_authority.connection_proxy_test sre_authority.stage_diagnostics_test credential_schema_test credential_policy_schema_test sandbox_condition_schema_test eval_pod_admission_test private_consumption_test receipt_log_rotation_test governed_services_test cr_status_test
       - name: Create the same disposable API server as the real harness
         run: kind create cluster --name kars-e2e --config tests/e2e/kind-config.yaml --kubeconfig "$KUBECONFIG"
       - name: Prove native Sandbox condition generation pruning, retention and type validation
@@ -518,9 +675,6 @@ jobs:
         if: ${{ !cancelled() && steps.sre_schema.outcome == 'success' }}
         id: sre_bootstrap
         run: PYTHONPATH=tests/e2e python3 -m sre_authority.bootstrap_probe --retirement-bind-proof
-      - name: Collect nil-schema adapter candidate evidence without weakening production gates
-        if: failure() && steps.sre_bootstrap.outcome == 'failure'
-        run: PYTHONPATH=tests/e2e python3 -m sre_authority.bootstrap_probe --json-params-candidate
       - name: Collect namespace-accessor candidate evidence without relaxing the failing production gate
         if: failure() && steps.sre_schema.outcome == 'failure'
         run: python3 tests/e2e/sre_authority/registration_schema.py --namespace-accessor-candidate --exercise
@@ -541,7 +695,6 @@ jobs:
             e2e-sre-schema-diag/namespace-accessor-candidate.json
             e2e-sre-schema-diag/namespace-accessor-candidate-instances.json
             e2e-sre-schema-diag/bootstrap-*.json
-            e2e-sre-schema-diag/candidate-bootstrap-*.json
           if-no-files-found: warn
           retention-days: 7
       - name: Remove disposable schema cluster
@@ -731,9 +884,55 @@ jobs:
       # The fault-injection tests live exclusively in `tests/chaos/`.
       - run: cargo test --package kars-chaos-tests --features chaos --tests --no-fail-fast
 
+  kind-addon-images:
+    name: AL3 add-on images for Kind
+    needs: [changes, headlamp-plugin-build]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+      - name: Build locked CLI image catalog
+        working-directory: cli
+        run: npm ci && npm run build
+      - name: Install Helm for pinned chart contracts
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+      - name: Test candidate image preparation and actual chart contracts
+        run: node --test tests/e2e/addon-images.test.mjs tests/e2e/addon-chart.test.mjs tests/e2e/addon-kubelet-trust.test.mjs
+      - name: Download qualified same-run Headlamp image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: kind-headlamp-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/kind-headlamp
+      - name: Import qualified Headlamp image
+        run: docker load --input "$RUNNER_TEMP/kind-headlamp/headlamp-image.tar"
+      - name: Build enabled add-ons using maintained AL3 recipes
+        env:
+          KARS_E2E_PREBUILT_HEADLAMP: '1'
+        run: |
+          set -euo pipefail
+          node tests/e2e/addon-images.mjs build
+          node tests/e2e/addon-images.mjs export
+      - name: Retain same-source Kind images and identity receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: kind-addons-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            .e2e-addon-images.tar
+            .e2e-addon-images.json
+          include-hidden-files: true
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+
   e2e-kind:
     name: E2E (Kind)
-    needs: [changes, build-rust]
+    needs: [changes, build-rust, kind-addon-images]
     # Phase 3 S4: closes the audit gap "make test-e2e is not in CI".
     # Runs on every push to dev/main, manual dispatch, and PRs that
     # touch the runtime surface area (controller, router, helm chart,
@@ -753,11 +952,21 @@ jobs:
           fetch-depth: 0
           sparse-checkout: |
             /*
-            !/bridge/
+            !/bridge/*
+            /bridge/deploy/
+            !/bridge/deploy/*
+            /bridge/deploy/rbac.yaml
+            /bridge/deploy/helm/
+            !/bridge/deploy/helm/*
+            /bridge/deploy/helm/kars-bridge/
           sparse-checkout-cone-mode: false
-      - name: Require standalone core checkout
+      - name: Require CLI charts without Bridge runtime sources
         working-directory: .
-        run: test ! -e bridge
+        run: |
+          test -f deploy/helm/kars/Chart.yaml
+          test -f bridge/deploy/helm/kars-bridge/Chart.yaml
+          test ! -e bridge/bff
+          test ! -e bridge/web
 
       - name: Detect runtime-affecting changes
         id: paths
@@ -860,6 +1069,15 @@ jobs:
           load: true
           # No cargo cache needed — the Dockerfile is a 5-line COPY now.
 
+      - name: Download same-source enabled add-on images
+        if: steps.paths.outputs.run == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: kind-addons-${{ github.sha }}-${{ github.run_attempt }}
+      - name: Import add-on images for fresh Kind
+        if: steps.paths.outputs.run == 'true'
+        run: docker load --input .e2e-addon-images.tar
+
       - name: Run e2e
         if: steps.paths.outputs.run == 'true'
         env:
@@ -876,6 +1094,7 @@ jobs:
           # tell the harness to skip its in-process `docker build` and
           # just `kind load` the existing tags.
           KARS_E2E_SKIP_IMAGE_BUILD: "1"
+          KARS_E2E_PREBUILT_ADDONS: "1"
         run: |
           set -euo pipefail
           make test-e2e
@@ -907,32 +1126,110 @@ jobs:
     name: Bench Regression (criterion)
     needs: [changes, build-rust]
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
-    # Phase 2 S16. Compiles + runs criterion benches and fails if median
-    # exceeds the value in `<crate>/benches/baselines.json` by more than 25%.
-    # Runs on every PR (cheap to compile) but only enforces regression on
-    # PRs that touch controller or router source paths — see paths filter
-    # in the workflow trigger when expanding to a separate workflow file.
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    # Compare both revisions on this runner, not against historical machine timings.
+    # Normalize the bench profile explicitly; release package overrides otherwise
+    # leak into benches and made the old measurements incomparable.
+    env:
+      RUSTUP_TOOLCHAIN: '1.99.1'
+      RUSTFLAGS: ''
+      CARGO_ENCODED_RUSTFLAGS: ''
+      RUSTC_WRAPPER: ''
+      CARGO_PROFILE_BENCH_OPT_LEVEL: '3'
+      CARGO_PROFILE_BENCH_LTO: thin
+      CARGO_PROFILE_BENCH_CODEGEN_UNITS: '1'
+      CARGO_PROFILE_BENCH_DEBUG: '0'
+      CARGO_PROFILE_BENCH_DEBUG_ASSERTIONS: 'false'
+      CARGO_PROFILE_BENCH_OVERFLOW_CHECKS: 'false'
+      CARGO_PROFILE_BENCH_INCREMENTAL: 'false'
+      CARGO_PROFILE_BENCH_STRIP: symbols
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Test benchmark gate
+        run: python3 -m unittest ci.test_bench_regression
+      - name: Resolve trusted event baseline
+        id: baseline
+        env:
+          BENCHMARK_BASE_SHA: ${{ inputs.benchmark_base_sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p bench-evidence
+          python3 ci/bench_regression.py --resolve-base | tee bench-evidence/base-output.txt >> "$GITHUB_OUTPUT"
+          git rev-parse HEAD > bench-evidence/candidate.sha
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.baseline.outputs.base_sha }}
+          path: .bench-baseline
+          persist-credentials: false
+      - name: Verify comparable Criterion harnesses
+        env:
+          BENCH_BASE_SHA: ${{ steps.baseline.outputs.base_sha }}
+        run: python3 ci/bench_regression.py --check-harness .bench-baseline "$BENCH_BASE_SHA"
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: '1.99.1'
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: rust-glibc-release
           save-if: false
-      - name: Build benches (compile-only on every PR)
-        # Scope to the two benches we actually execute. `--workspace` would
-        # compile every bench target in every crate; we only run two.
+      - name: Measure baseline and candidate
+        id: measure
+        shell: bash
         run: |
-          cargo bench --no-run --bench reconciler_bench --package kars-controller
-          cargo bench --no-run --bench proxy_bench --package kars-inference-router
-      - name: Run controller bench + compare to baseline
+          set -euo pipefail
+          export CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target"
+          rustc --version --verbose > bench-evidence/compiler.txt
+          cargo --version > bench-evidence/cargo.txt
+          lscpu > bench-evidence/cpu.txt
+          env | sort | grep '^CARGO_PROFILE_BENCH_' > bench-evidence/profile.txt
+          echo 'profile.bench.package.kars-controller.codegen-units=16' >> bench-evidence/profile.txt
+          for revision in baseline candidate; do
+            source="$GITHUB_WORKSPACE"
+            if [[ "$revision" == baseline ]]; then source="$GITHUB_WORKSPACE/.bench-baseline"; fi
+            for component in controller router; do
+              package=kars-controller
+              bench=reconciler_bench
+              crate=controller
+              if [[ "$component" == router ]]; then
+                package=kars-inference-router
+                bench=proxy_bench
+                crate=inference-router
+              fi
+              cp "$source/$crate/benches/baselines.json" "bench-evidence/$revision-$component-policy.json"
+              export CRITERION_HOME="$GITHUB_WORKSPACE/bench-evidence/$revision-$component-criterion"
+              mkdir "$CRITERION_HOME"
+              (cd "$source" && cargo bench --locked --package "$package" --bench "$bench" \
+                --config 'profile.bench.package.kars-controller.codegen-units=16' \
+                -- --save-baseline "$revision" --output-format bencher) 2>&1 \
+                | tee "bench-evidence/$revision-$component.txt"
+            done
+          done
+      - name: Compare controller on the same runner
+        if: ${{ !cancelled() && steps.measure.outcome == 'success' }}
+        shell: bash
         run: |
-          cargo bench --bench reconciler_bench -- --save-baseline pr --output-format bencher \
-            | tee bench-controller.txt
-          python3 ci/bench_regression.py controller/benches/baselines.json bench-controller.txt
-      - name: Run router bench + compare to baseline
+          set -euo pipefail
+          python3 ci/bench_regression.py bench-evidence/baseline-controller-policy.json \
+            bench-evidence/baseline-controller-criterion bench-evidence/candidate-controller-criterion \
+            2>&1 | tee bench-evidence/comparison-controller.txt
+      - name: Compare router on the same runner
+        if: ${{ !cancelled() && steps.measure.outcome == 'success' }}
+        shell: bash
         run: |
-          cargo bench --bench proxy_bench -- --save-baseline pr --output-format bencher \
-            | tee bench-router.txt
-          python3 ci/bench_regression.py inference-router/benches/baselines.json bench-router.txt
+          set -euo pipefail
+          python3 ci/bench_regression.py bench-evidence/baseline-router-policy.json \
+            bench-evidence/baseline-router-criterion bench-evidence/candidate-router-criterion \
+            2>&1 | tee bench-evidence/comparison-router.txt
+      - name: Retain benchmark evidence, including failures
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: bench-comparison-${{ github.run_id }}-${{ github.run_attempt }}
+          path: bench-evidence/
+          if-no-files-found: warn
+          retention-days: 7

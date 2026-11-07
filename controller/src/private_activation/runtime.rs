@@ -240,17 +240,20 @@ pub(crate) async fn apply_deployment(
     {
         return Err(ERROR.into());
     }
-    let key = format!("{PREFIX}parent-{uid}");
-    if fresh
-        .metadata
-        .annotations
-        .as_ref()
-        .and_then(|a| a.get(&key))
-        != Some(&epoch)
+    let mut annotations = BTreeMap::from([(format!("{PREFIX}parent-{uid}"), epoch.clone())]);
+    if let Some((key, value)) =
+        super::reconciliation::record(client, sandbox, &fresh, deployment, &applied, &epoch).await?
     {
+        annotations.insert(key, value);
+    }
+    if !fresh.metadata.annotations.as_ref().is_some_and(|current| {
+        annotations
+            .iter()
+            .all(|(key, value)| current.get(key) == Some(value))
+    }) {
         Api::<Namespace>::all(client.clone()).patch(&namespace_name, &PatchParams::default(), &Patch::Merge(json!({
             "metadata":{"uid":fresh.metadata.uid,"resourceVersion":fresh.metadata.resource_version,
-                "annotations":{key:epoch}}
+                "annotations":annotations}
         }))).await.map_err(|_| ERROR)?;
     }
     Ok(true)

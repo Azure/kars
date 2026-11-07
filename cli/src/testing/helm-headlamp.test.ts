@@ -68,6 +68,37 @@ describe("Bridge cross-node router API proxy", () => {
   });
 });
 
+describe("operator-owned Headlamp reader prerequisite", () => {
+  it("grants only explicit reads to the mapped human group, independently of Core", () => {
+    const objects = parseAllDocuments(readFileSync(`${root}deploy/headlamp-reader-rbac.yaml`, "utf8"))
+      .map(document => document.toJSON());
+    expect(objects.map(object => object.kind)).toEqual(["ClusterRole", "ClusterRoleBinding"]);
+    const [role, ...bindings] = objects;
+    expect(role.rules.every((rule: { verbs: string[] }) =>
+      JSON.stringify(rule.verbs) === JSON.stringify(["get", "list", "watch"]))).toBe(true);
+    expect(role.rules.map((rule: { apiGroups: string[]; resources: string[] }) => [rule.apiGroups, rule.resources]))
+      .toEqual([
+        [[""], ["nodes", "namespaces", "pods", "pods/log", "services", "endpoints", "configmaps", "events", "resourcequotas", "limitranges", "persistentvolumes", "persistentvolumeclaims"]],
+        [["apps"], ["deployments", "daemonsets", "statefulsets", "replicasets", "controllerrevisions"]],
+        [["batch"], ["jobs", "cronjobs"]],
+        [["autoscaling"], ["horizontalpodautoscalers"]],
+        [["networking.k8s.io"], ["networkpolicies", "ingresses", "ingressclasses"]],
+        [["policy"], ["poddisruptionbudgets"]],
+        [["discovery.k8s.io"], ["endpointslices"]],
+        [["events.k8s.io"], ["events"]],
+        [["rbac.authorization.k8s.io"], ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]],
+        [["apiextensions.k8s.io"], ["customresourcedefinitions"]],
+        [["metrics.k8s.io"], ["nodes", "pods"]],
+        [["kars.azure.com"], ["karssandboxes", "inferencepolicies", "karsmemories", "mcpservers",
+          "a2aagents", "toolpolicies", "trustgraphs", "karspairings", "karsevals", "egressapprovals", "karssreactions"]],
+      ]);
+    expect(bindings.map(binding => binding.roleRef.name)).toEqual([role.metadata.name]);
+    for (const binding of bindings) {
+      expect(binding.subjects).toEqual([{ apiGroup: "rbac.authorization.k8s.io", kind: "Group", name: "kars:operators" }]);
+    }
+  });
+});
+
 describe("Core-managed AL3 Headlamp", () => {
   it("owns the namespace, immutable plugin runtime, service and isolated networking in Core", async () => {
     const objects = (await core()).filter(o => o.metadata?.namespace === "headlamp" || o.metadata?.name === "headlamp");
@@ -177,6 +208,71 @@ describe("Core-managed AL3 Headlamp", () => {
       expect(pod.volumes).toEqual([{ name: "config", configMap: { name: "dex" } }]);
       expect(pod.containers[0].ports).toEqual([{ containerPort: 5556 }]);
       expect(pod.containers[0].env).toHaveLength(1);
+    });
+
+    describe("persistent Dex sessions", () => {
+      const persistentArgs = ["--set", "idp.enabled=true", "--set", "idp.dex.persistence.enabled=true"];
+
+      it("keeps memory storage and no claim as the compatibility default", async () => {
+        const objects = await bridge(["--set", "idp.enabled=true"]);
+        expect(dexConfig(objects).storage).toEqual({ type: "memory" });
+        expect(objects.some(o => o.kind === "PersistentVolumeClaim")).toBe(false);
+        expect(objects.find(o => o.kind === "Deployment" && o.metadata.name === "dex").spec.strategy)
+          .toBeUndefined();
+      });
+
+      it("mounts a retained SQLite claim as the non-root single writer", async () => {
+        const objects = await bridge(persistentArgs);
+        expect(dexConfig(objects).storage).toEqual({ type: "sqlite3", config: { file: "/var/lib/dex/dex.db" } });
+        const claim = objects.find(o => o.kind === "PersistentVolumeClaim");
+        expect(claim.metadata).toMatchObject({ name: "dex-data", namespace: "kars-system",
+          annotations: { "helm.sh/resource-policy": "keep" } });
+        expect(claim.spec).toEqual({ accessModes: ["ReadWriteOnce"], resources: { requests: { storage: "1Gi" } } });
+        const pod = dexPod(objects);
+        expect(pod.securityContext).toMatchObject({ runAsNonRoot: true, runAsUser: 1001, fsGroup: 1001 });
+        expect(pod.volumes).toContainEqual({ name: "storage", persistentVolumeClaim: { claimName: "dex-data" } });
+        expect(pod.containers[0].volumeMounts).toContainEqual({ name: "storage", mountPath: "/var/lib/dex" });
+        const deployment = objects.find(o => o.kind === "Deployment" && o.metadata.name === "dex");
+        expect(deployment.spec.replicas).toBe(1);
+        expect(deployment.spec.strategy).toEqual({ type: "Recreate" });
+        expect(pod.initContainers).toBeUndefined();
+      });
+
+      it.each(["standard", ""])("honors explicit storage class %j", async storageClass => {
+        const objects = await bridge([...persistentArgs, "--set-string", `idp.dex.persistence.storageClass=${storageClass}`,
+          "--set-string", "idp.dex.persistence.size=2Gi"]);
+        expect(objects.find(o => o.kind === "PersistentVolumeClaim").spec).toMatchObject({
+          storageClassName: storageClass, resources: { requests: { storage: "2Gi" } },
+        });
+      });
+
+      it("uses an existing claim without adopting or creating one, alongside TLS", async () => {
+        const objects = await bridge([...tlsArgs, "--set", "idp.dex.persistence.enabled=true",
+          "--set-string", "idp.dex.persistence.existingClaim=retained-dex"]);
+        expect(objects.some(o => o.kind === "PersistentVolumeClaim")).toBe(false);
+        expect(dexPod(objects).volumes).toContainEqual({ name: "storage", persistentVolumeClaim: { claimName: "retained-dex" } });
+        expect(dexPod(objects).volumes).toContainEqual(expect.objectContaining({ name: "tls" }));
+        expect(dexConfig(objects).staticClients).toHaveLength(2);
+      });
+
+      it("opts Kind beta into persistent storage without enabling or creating an issuer", async () => {
+        const profile = parse(readFileSync(`${root}bridge/deploy/helm/kars-bridge/values-kind-beta.yaml`, "utf8"));
+        expect(profile.idp.enabled).toBe(false);
+        expect(profile.idp.dex.persistence.enabled).toBe(true);
+        const objects = await bridge(["--set", "idp.dex.persistence.enabled=true"]);
+        expect(objects.some(o => o.kind === "PersistentVolumeClaim" || o.metadata.name === "dex")).toBe(false);
+      });
+
+      it.each([
+        [["--set-string", "idp.dex.persistence.enabled=false"], "enabled must be a boolean"],
+        [["--set", "idp.dex.persistence.enabled=false", "--set-string", "idp.dex.persistence.existingClaim=retained-dex"], "existingClaim requires persistence.enabled"],
+        [["--set-string", "idp.dex.persistence.size="], "size must be a nonempty Kubernetes storage quantity"],
+        [["--set", "idp.dex.persistence.storageClass=true"], "storageClass must be a string or null"],
+        [["--set", "idp.dex.persistence.existingClaim=true"], "existingClaim must be a string"],
+        [["--set-string", "idp.dex.persistence.existingClaim= "], "existingClaim must be a valid PVC name"],
+      ])("refuses malformed persistence settings %j", async (args, message) => {
+        await expect(bridge([...persistentArgs, ...args])).rejects.toThrow(message);
+      });
     });
 
     it("uses native TLS with an existing readonly Secret and a separate confidential client", async () => {
@@ -315,8 +411,8 @@ describe("Core-managed AL3 Headlamp", () => {
     ["headlamp.oidc.issuerURL", "https://identity.example.test:65536", "port must"],
     ["headlamp.oidc.issuerURL", "https://identity.example.test:0", "port must"],
     ["headlamp.oidc.clientID", " ", "must not be blank"],
-    ["headlamp.oidc.clientSecret.name", "", "existing Secret"],
-    ["headlamp.oidc.clientSecret.key", "", "existing Secret"],
+    ["headlamp.oidc.clientSecret.name", "", "must reference a Secret in headlamp"],
+    ["headlamp.oidc.clientSecret.key", "", "must reference a Secret in headlamp"],
     ["headlamp.oidc.callbackURL", "http://headlamp.example.test/oidc-callback", "HTTP only on loopback"],
     ["headlamp.oidc.callbackURL", "https://headlamp.example.test/other", "HTTP only on loopback"],
     ["headlamp.oidc.callbackURL", "https://headlamp.example.test/oidc-callback#token", "HTTP only on loopback"],
@@ -442,11 +538,11 @@ describe("Core-managed AL3 Headlamp", () => {
     expect(recipe).toContain("mcr.microsoft.com/azurelinux/distroless/base:3.0");
     expect(recipe).toContain("RUN npm ci --no-audit --no-fund");
     expect(recipe).toContain("RUN npm run build");
-    expect(recipe).toContain("FROM golang:1.27.2-bookworm AS backend");
-    expect(recipe).toContain("RUN sh /usr/local/bin/build-headlamp-backend /download");
+    expect(recipe).toContain("FROM golang:1.27.3-bookworm@sha256:d9b6a1beb9474adc2a1ce842573639b44b2a0dd49b6669f51d3821baf9ec37c9 AS backend");
+    expect(recipe).toContain("RUN sh /usr/local/lib/kars-headlamp/build-backend.sh /download");
     const runtime = recipe.split("FROM ${AZURELINUX_DISTROLESS}")[1];
-    expect(runtime).toContain("COPY --from=plugin /build/dist /headlamp/plugins/kars");
-    expect(runtime).toContain("COPY --from=plugin /build/package.json /headlamp/plugins/kars/package.json");
+    expect(runtime).toContain("COPY --from=plugin --chmod=0555 /build/dist /headlamp/plugins/kars");
+    expect(runtime).toContain("COPY --from=plugin --chmod=0444 /build/package.json /headlamp/plugins/kars/package.json");
     expect(runtime).toContain("COPY --from=backend /download/headlamp-server /headlamp/headlamp-server");
     expect(runtime).toContain("COPY --from=frontend /build/frontend/build /headlamp/frontend");
     expect(runtime).not.toContain("COPY --from=upstream /headlamp/frontend");
@@ -465,28 +561,69 @@ describe("Core-managed AL3 Headlamp", () => {
   });
 
   it("patches frontend dependencies without changing product identity or unrelated upstream configuration", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "kars-headlamp-frontend-"));
+    const directory = mkdtempSync(join(root, "sandbox-images/headlamp/.cli-frontend-"));
     try {
       mkdirSync(join(directory, "frontend"));
       mkdirSync(join(directory, "app"));
       writeFileSync(join(directory, "app/package.json"), JSON.stringify({ version: "0.41.0", productName: "Headlamp" }));
       const manifest = {
-        dependencies: { "js-yaml": "^4.1.1", lodash: "^4.17.23", vite: "^6.4.1", react: "^18.3.1" },
+        dependencies: {
+          "js-yaml": "^4.1.1", yaml: "^2.7.0", lodash: "^4.17.23", vite: "^6.4.1", react: "^18.3.1",
+          "vite-plugin-node-polyfills": "^0.23.0", "vite-plugin-svgr": "^4.3.0", eslint: "^8.57.0",
+        },
         overrides: { "js-yaml": "^4.1.1", cheerio: "1.0.0-rc.12" },
-        devDependencies: { vitest: "^3.0.5" },
+        devDependencies: { vitest: "^3.0.5", "@storybook/react-vite": "^9.1.19" },
+        scripts: { build: "vite build", storybook: "storybook dev" },
+        eslintConfig: { extends: ["@headlamp-k8s"] },
       };
+      const config = `import { nodePolyfills } from 'vite-plugin-node-polyfills';
+import svgr from 'vite-plugin-svgr';
+export default {
+  define: { global: 'globalThis' },
+  envPrefix: 'REACT_APP_',
+  plugins: [
+    svgr(),
+    nodePolyfills({
+      include: ['process', 'buffer', 'stream'],
+    }),
+  ],
+  build: { outDir: 'build', commonjsOptions: { transformMixedEsModules: true } },
+};
+`;
+      const configFile = join(directory, "frontend/vite.config.ts");
+      writeFileSync(configFile, config);
+      writeFileSync(join(directory, "frontend/rsbuild.config.ts"), "export default {};");
+      mkdirSync(join(directory, "frontend/.storybook"));
+      writeFileSync(join(directory, "frontend/.storybook/main.ts"), "export default {};");
       const file = join(directory, "frontend/package.json");
       writeFileSync(file, JSON.stringify(manifest));
       const prepare = () => execa(process.execPath, [`${root}sandbox-images/headlamp/build-frontend.mjs`, "prepare"],
         { cwd: join(directory, "frontend") });
       await prepare();
       const result = JSON.parse(readFileSync(file, "utf8"));
-      expect(result.dependencies).toEqual({ "js-yaml": "4.3.2", lodash: "4.18.1", vite: "6.4.3", react: "^18.3.1" });
-      expect(result.devDependencies).toEqual(manifest.devDependencies);
+      expect(result.dependencies).toEqual({
+        "js-yaml": "4.3.2", yaml: "2.8.3", lodash: "4.18.1", vite: "6.4.5", react: "^18.3.1",
+        "vite-plugin-svgr": "^4.3.0", "@rollup/plugin-inject": "5.0.5", buffer: "6.0.3", process: "0.11.10", "stream-browserify": "3.0.0",
+      });
+      expect(result.devDependencies).toBeUndefined();
+      expect(result.eslintConfig).toBeUndefined();
+      expect(result.scripts).toEqual({ build: "node --max-old-space-size=3072 kars-build.mjs build" });
       expect(result.overrides).toEqual({
         "js-yaml": "$js-yaml", lodash: "$lodash", cheerio: "1.0.0-rc.12",
-        "fast-uri@^3.0.0": "3.1.7", "nanoid@^3.0.0": "3.3.18",
+        "fast-uri@^3.0.0": "3.1.9", "nanoid@^3.0.0": "3.3.18",
+        "@babel/core": "7.29.6", browserslist: "4.28.7", "picomatch@^2.0.0": "2.3.2", "picomatch@^4.0.0": "4.0.4",
+        postcss: "8.5.23", "source-map-js": "1.2.2", "yaml@^1.0.0": "1.10.3", "yaml@^2.0.0": "$yaml",
       });
+      const preparedConfig = config
+        .replace("import { nodePolyfills } from 'vite-plugin-node-polyfills';\n", "// Node polyfills are supplied by kars-build.mjs for the production build.\n")
+        .replace("    nodePolyfills({\n      include: ['process', 'buffer', 'stream'],\n    }),\n", "");
+      expect(readFileSync(configFile, "utf8")).toBe(preparedConfig);
+      for (const removed of ["rsbuild.config.ts", ".storybook/main.ts"]) {
+        expect(() => readFileSync(join(directory, "frontend", removed))).toThrow();
+      }
+      await prepare();
+      expect(JSON.parse(readFileSync(file, "utf8"))).toEqual(result);
+      expect(readFileSync(configFile, "utf8")).toBe(preparedConfig);
       expect(readFileSync(join(directory, "frontend/.env"), "utf8")).toBe(
         "REACT_APP_HEADLAMP_VERSION=0.41.0\n" +
         "REACT_APP_HEADLAMP_GIT_VERSION=066c5be9deb14b12bcef3485b531c64a84a2a219\n" +
@@ -515,7 +652,17 @@ describe("Core-managed AL3 Headlamp", () => {
       const matrix = workflow.jobs[job].strategy.matrix[key];
       expect(matrix.find((image: { name: string }) => image.name === "headlamp"))
         .toMatchObject({ dockerfile: "sandbox-images/headlamp/Dockerfile" });
-      if (file.startsWith("release-")) {
+      if (file === "release-public-interim") {
+        const steps = workflow.jobs[job].steps;
+        expect(steps.find((step: { name: string }) => step.name === "Record image build receipt"))
+          .toMatchObject({ env: { DIGEST: "${{ steps.push.outputs.digest }}" },
+            run: expect.stringContaining("image-receipts/${{ matrix.image.ghcr }}.json") });
+        expect(steps.find((step: { with?: { name?: string } }) => step.with?.name === "image-${{ matrix.image.ghcr }}-${{ env.VERSION }}").with)
+          .toMatchObject({ path: "image-receipts/*.json", "if-no-files-found": "error" });
+        expect(workflow.jobs["cli-pack"].needs).toContain("build-images");
+        expect(workflow.jobs["cli-pack"].steps.find((step: { with?: { pattern?: string } }) => step.with?.pattern === "image-*-${{ env.VERSION }}").with)
+          .toMatchObject({ path: "image-receipts", "merge-multiple": true });
+      } else if (file === "release-internal") {
         expect(workflow.jobs[job].outputs.headlamp_digest).toBe("${{ steps.digests.outputs.headlamp }}");
         expect(text).toContain("${{ needs.build-images.outputs.headlamp_digest }}");
       }

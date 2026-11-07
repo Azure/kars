@@ -6,12 +6,15 @@ import { OrchestrationCube } from "@/components/orchestration-cube";
 import { Icon } from "@/components/icon";
 import { JourneyRail } from "@/components/journey-rail";
 import { humanizeMcp } from "@/lib/format";
-import { RepoAccess } from "@/components/repo-access";
+import { RepoAccess, missionGithubWriteEnabled } from "@/components/repo-access";
 import { EnvelopeReveal } from "../envelope-reveal";
 import { CreateButton, EgressEditor, PackageSection } from "./controls";
-import { ValidationChecks } from "@/components/validation-checks";
+import { CompositionNote, ValidationChecks } from "@/components/validation-checks";
+import { RoleBudgetFields } from "@/components/role-budget-fields";
+import { roleBudgetError } from "@/lib/budget-review";
 import { modelKey, moveFallback } from "./helpers";
 import type { ReviewProps } from "./review-types";
+import { QualificationChoice } from "./qualification-choice";
 
 const TIER_CONSEQUENCE: Record<number, string> = {
   1: "Manual — the mission proposes every step and does nothing on its own. You perform each action.",
@@ -22,13 +25,19 @@ const TIER_CONSEQUENCE: Record<number, string> = {
 };
 
 export function renderReview({
+  canQualify,
+  qualificationRun,
+  changeQualification,
   formAction,
   objective,
   tier,
   budgetTokens,
   launch,
   blueprint,
+  selectedRepos = [],
+  changeSelectedRepos,
   delegation,
+  setDelegation,
   rationale,
   proposed,
   composeSource,
@@ -63,8 +72,6 @@ export function renderReview({
   mcpNeedsPolicy,
   skills,
   setSkills,
-  setEgressMode,
-  egressMode,
   egress,
   setEgress,
   isolation,
@@ -83,17 +90,38 @@ export function renderReview({
   state,
   goBack,
 }: ReviewProps) {
+  function changeExecutionPlan(next: string) {
+    setExecutionPlanDraft(next);
+    if (next.trim() === "") {
+      setDelegation({ mode: "single-agent", roles: [], max_parallel: 1 });
+      setExecutionPlan(null);
+      setExecutionPlanError(null);
+      return;
+    }
+    try {
+      const parsed = JSON.parse(next) as import("@/lib/types").ExecutionPlan;
+      setExecutionPlan(parsed);
+      setExecutionPlanError(roleBudgetError(parsed));
+    } catch {
+      setExecutionPlanError("The execution plan must be valid JSON before validation or launch.");
+    }
+  }
+  const planError = executionPlanError ?? roleBudgetError(blueprint.execution_plan) ?? (!blueprint.execution_plan
+    ? "Every Mission needs a reviewed capability plan. For one agent, use roles=[] and a native principal synthesis; do not remove the entire plan."
+    : null);
   return (
     <form action={formAction} className="space-y-5">
       <input type="hidden" name="objective" value={objective} />
       <input type="hidden" name="tier" value={tier} />
       <input type="hidden" name="budget_tokens" value={budgetTokens} />
-      <input type="hidden" name="budget_scope" value={budgetTokens.trim() === "" ? "" : "GovernedInference"} />
+      <input type="hidden" name="budget_scope" value="GovernedInference" />
       <input type="hidden" name="launch" value={launch ? "on" : "off"} />
       <input type="hidden" name="blueprint_json" value={JSON.stringify(blueprint)} />
       <input type="hidden" name="delegation_json" value={JSON.stringify(delegation)} />
 
+      {canQualify && <input type="hidden" name="qualification_run" value={qualificationRun ? "on" : "off"} />}
       <JourneyRail current={launch ? "launch" : "review"} />
+      <QualificationChoice canQualify={canQualify} checked={qualificationRun} onChange={changeQualification} />
 
       {rationale !== null || proposed ? (
         <EnvelopeReveal
@@ -109,7 +137,7 @@ export function renderReview({
       ) : null}
       {composeNote && (
         <div className="rounded-xl border border-border bg-surface-muted/50 p-4 text-sm text-foreground-muted">
-          {composeNote}
+          <CompositionNote detail={composeNote} />
         </div>
       )}
 
@@ -143,7 +171,7 @@ export function renderReview({
             <Icon name="link" size={16} />
             <div className="min-w-0">
               <p className="text-xs font-medium">
-                This cluster serves models via{" "}
+                Cluster default provider:{" "}
                 <span className="text-foreground">{options.provider.label}</span>
                 <span className="ml-1.5 rounded bg-surface px-1.5 py-0.5 text-[10px] font-normal text-foreground-muted">
                   inherited
@@ -173,15 +201,15 @@ export function renderReview({
               >
                 {options.models.map((m) => (
                   <option key={modelKey(m.provider, m.deployment)} value={modelKey(m.provider, m.deployment)}>
-                    {m.deployment}
+                    {m.deployment} · {m.provider}
                     {m.is_default ? " (default)" : ""}
                   </option>
                 ))}
               </select>
             )}
             <p className="mt-1 text-[11px] text-foreground-muted">
-              A default is pre-selected for the objective; switch to any model
-              {options.provider ? ` ${options.provider.label}` : " your cluster"} serves.
+              Select a model from the connected providers without changing the cluster default.
+              Pre-flight checks the selected route before launch.
             </p>
             <label className="mt-3 block text-xs text-foreground-muted">
               Qualified fallback routes
@@ -294,33 +322,16 @@ export function renderReview({
         title="Execution plan"
         subtitle="Roles, dependencies, phases, capabilities, tool-call bounds, synthesis, and deliverables. This is typed and runtime-neutral."
       >
-        {executionPlanDraft ? (
-          <>
-            <textarea
-              value={executionPlanDraft}
-              onChange={(event) => {
-                const next = event.target.value;
-                setExecutionPlanDraft(next);
-                try {
-                  const parsed = JSON.parse(next) as import("@/lib/types").ExecutionPlan;
-                  setExecutionPlan(parsed);
-                  setExecutionPlanError(null);
-                } catch {
-                  setExecutionPlanError("The execution plan must be valid JSON before validation or launch.");
-                }
-              }}
-              rows={18}
-              spellCheck={false}
-              className="w-full resize-y rounded-lg border border-border bg-surface px-3 py-2 font-mono text-xs leading-relaxed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal"
-            />
-            {executionPlanError && (
-              <p className="mt-2 text-xs text-danger">{executionPlanError}</p>
-            )}
-          </>
-        ) : (
-          <p className="text-xs text-foreground-muted">
-            Single-agent execution — no worker plan was proposed. Recompose the mission to request decomposition.
-          </p>
+        <textarea
+          aria-label="Execution plan"
+          value={executionPlanDraft}
+          onChange={(event) => changeExecutionPlan(event.target.value)}
+          rows={18}
+          spellCheck={false}
+          className="w-full resize-y rounded-lg border border-border bg-surface px-3 py-2 font-mono text-xs leading-relaxed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+        />
+        {planError && (
+          <p className="mt-2 text-xs text-danger">{planError}</p>
         )}
       </PackageSection>
 
@@ -474,30 +485,11 @@ export function renderReview({
         title="Network egress"
         subtitle="Exactly which external hosts the mission may reach. Empty means no extra egress beyond the model path."
       >
-        <div className="mb-3 inline-flex rounded-lg border border-border bg-surface p-1 text-xs">
-          <button
-            type="button"
-            onClick={() => setEgressMode("strict")}
-            className={`rounded-md px-3 py-1.5 font-medium transition ${egressMode === "strict" ? "bg-signal text-signal-fg" : "text-foreground-muted hover:text-foreground"}`}
-          >
-            Strict
-          </button>
-          <button
-            type="button"
-            onClick={() => setEgressMode("learning")}
-            className={`rounded-md px-3 py-1.5 font-medium transition ${egressMode === "learning" ? "bg-accent text-accent-fg" : "text-foreground-muted hover:text-foreground"}`}
-          >
-            Learning
-          </button>
-        </div>
         <p className="mb-3 text-xs text-foreground-muted">
-          {egressMode === "strict"
-            ? "Only the hosts below are reachable from the first run — everything else is denied. The safe default."
-            : "The mission starts in Learn mode: it observes which hosts the agent actually reaches (nothing is blocked yet), so you can review and enforce the learned set afterward. Use for exploratory work when the host set isn't known up front."}
+          Strict · reviewed hosts only. Governed model and connected-service access remain subject to their policies.
+          Request approved access during a run for new destinations. Datapath observations do not grant access.
         </p>
-        <div className={egressMode === "learning" ? "opacity-50" : ""}>
-          <EgressEditor egress={egress} onChange={setEgress} />
-        </div>
+        <EgressEditor egress={egress} onChange={setEgress} />
       </PackageSection>
 
       <PackageSection title="Isolation" subtitle="The sandbox hardening the mission runs inside.">
@@ -555,26 +547,30 @@ export function renderReview({
         </p>
       </PackageSection>
 
-      <PackageSection title="Budget" subtitle="Aggregate governed-inference token cap — this mission and its delegated tasks, across retries and reruns.">
-        <div className="flex items-center gap-2">
+      <PackageSection title="Spending limits" subtitle="Existing workspace rules apply automatically. Add a limit only if you want a tighter cap for this Mission and its roles, including retries and reruns.">
+        <label htmlFor="mission-budget-tokens" className="mb-2 block text-sm font-medium">Total token limit (optional)</label>
+        <div className="flex flex-wrap items-center gap-2">
           <input
-            aria-label="Aggregate inference token cap"
+            id="mission-budget-tokens"
+            aria-describedby="mission-budget-help"
             type="number"
             min={1}
             step={1}
             value={budgetTokens}
             onChange={(e) => setBudgetTokens(e.target.value)}
-            placeholder="e.g. 200000"
+            placeholder="Use existing controls"
             className="w-48 rounded-lg border border-border bg-surface px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal"
           />
-          <span className="text-xs text-foreground-muted">tokens — blank means no aggregate cap</span>
+          <span className="text-xs text-foreground-muted">tokens — leave blank to use existing controls</span>
         </div>
-        <p className="mt-2 text-xs text-foreground-muted">
-          A finite cap explicitly enrolls this new mission in GovernedInference accounting.
-          Input, output, and reasoning tokens count; tools, infrastructure and other costs do not.
-          Launch requires the configured broker and model contract. Each request reserves the
-          model’s full input bound plus its output limit, even for a short prompt.
+        <p id="mission-budget-help" className="mt-2 max-w-prose text-sm leading-relaxed text-foreground-muted">
+          Tokens measure text the AI reads and writes; they are not dollars. Blank means no shared
+          token limit is requested here. Role, profile and workspace limits still apply, and usage
+          is always recorded. This does not limit tools or infrastructure costs. Confirm any limit
+          here, even if you mentioned it in your request. Estimates do not change these settings.
         </p>
+        <RoleBudgetFields draft={executionPlanDraft} onChange={changeExecutionPlan} idPrefix="mission-role-budget" />
+        {planError && <p role="alert" className="mt-2 text-xs text-danger">{planError}</p>}
       </PackageSection>
 
       <PackageSection title="Governance envelope" subtitle="The hard limits this mission runs under.">
@@ -591,21 +587,21 @@ export function renderReview({
 
       {/* Pre-flight validation (§20) — prove launch-ready before anything runs. */}
       <section className="rounded-2xl border border-border bg-surface p-5 shadow-sm">
-        <div className="flex items-start justify-between gap-3">
+        <div className="flex flex-col items-start justify-between gap-3 sm:flex-row">
           <div>
-            <h2 className="text-sm font-semibold">Pre-flight check</h2>
-            <p className="mt-0.5 text-xs text-foreground-muted">
-              Validate the package against the live cluster before anything runs — tools, services,
-              memory, model, and network are checked.
+            <h2 className="text-sm font-semibold">Check before starting</h2>
+            <p className="mt-1 max-w-prose text-sm leading-relaxed text-foreground-muted">
+              Check that your chosen AI, connected services, permissions and spending settings
+              are ready. This does not start the work or test the quality of its results.
             </p>
           </div>
           <button
             type="button"
             onClick={runValidation}
-            disabled={validating || mcpNeedsPolicy || executionPlanError !== null}
+            disabled={validating || mcpNeedsPolicy || planError !== null}
             className="shrink-0 rounded-lg border border-border bg-surface px-3 py-1.5 text-xs font-medium transition hover:bg-surface-muted disabled:opacity-50"
           >
-            {validating ? "Checking…" : "Validate package"}
+            {validating ? "Checking…" : validation || validationError ? "Check again" : "Check readiness"}
           </button>
         </div>
         {/* Validation animates the same orchestration cube with a live feed of
@@ -645,7 +641,9 @@ export function renderReview({
                 You edited the package since this ran — these results are stale. Re-validate to launch.
               </p>
             )}
-            <ValidationChecks checks={validation.checks} />
+            <ValidationChecks checks={validation.checks}
+              budget={validationFresh ? { blueprint, tokens: budgetTokens.trim() === "" ? null : Number(budgetTokens) } : undefined}
+              onReviewBudget={() => document.getElementById("mission-budget-tokens")?.focus()} />
             {validationFresh && !validation.ok && (
               <p className="mt-2 text-xs font-medium text-danger">
                 Fix the failing checks above before launching.
@@ -655,7 +653,11 @@ export function renderReview({
         )}
       </section>
 
-      <RepoAccess />
+      <RepoAccess selected={selectedRepos} onSelectionChange={changeSelectedRepos}
+        readOnly={!missionGithubWriteEnabled(blueprint.execution_plan)} />
+      {selectedRepos.length > 0 && !(validationFresh && validation?.ok) && (
+        <p className="text-xs text-danger">Check readiness for these repositories before creating a draft. Nothing has started yet.</p>
+      )}
 
       <label className="flex items-center gap-2.5 rounded-lg border border-border bg-surface px-4 py-3 text-sm">
         <input
@@ -691,11 +693,11 @@ export function renderReview({
           <CreateButton
             disabled={
               mcpNeedsPolicy
-              || executionPlanError !== null
-              || (launch && !(validationFresh && validation!.ok))
+              || planError !== null
+              || ((launch || selectedRepos.length > 0) && !(validationFresh && validation?.ok))
             }
             launch={launch}
-            needsValidation={launch && !(validationFresh && validation?.ok === true)}
+            needsValidation={(launch || selectedRepos.length > 0) && !(validationFresh && validation?.ok === true)}
           />
         </div>
       </div>

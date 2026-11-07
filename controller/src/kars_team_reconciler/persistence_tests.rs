@@ -16,6 +16,8 @@ mod budget_interleavings;
 #[path = "harvest_tests.rs"]
 mod harvest;
 
+#[path = "qualification_attempt_tests.rs"]
+mod qualification_attempt_tests;
 #[path = "request_tests.rs"]
 mod requests_tests;
 #[path = "work_tests.rs"]
@@ -177,12 +179,13 @@ impl Respond for KubeServer {
             return failure(404);
         };
         if method == "GET" {
-            if !is_task && name.starts_with("kars-mission-output-") {
-                if let Some(task) = store.task_on_output_read.take() {
-                    store
-                        .tasks
-                        .insert(task["metadata"]["name"].as_str().unwrap().into(), task);
-                }
+            if !is_task
+                && name.starts_with("kars-mission-output-")
+                && let Some(task) = store.task_on_output_read.take()
+            {
+                store
+                    .tasks
+                    .insert(task["metadata"]["name"].as_str().unwrap().into(), task);
             }
             return match if is_task {
                 store.tasks.get(name)
@@ -243,12 +246,10 @@ impl Respond for KubeServer {
             return response(200, task);
         }
         if method == "PUT" {
-            if is_task {
-                if let Some(task) = store.task_on_retirement.take() {
-                    store
-                        .tasks
-                        .insert(task["metadata"]["name"].as_str().unwrap().into(), task);
-                }
+            if is_task && let Some(task) = store.task_on_retirement.take() {
+                store
+                    .tasks
+                    .insert(task["metadata"]["name"].as_str().unwrap().into(), task);
             }
             if !is_task && store.fail_commons_write {
                 return failure(409);
@@ -321,6 +322,41 @@ async fn setup(team: &KarsTeam) -> (MockServer, Client, Arc<Mutex<Store>>) {
 }
 
 #[tokio::test]
+async fn unchanged_team_reconcile_preserves_resource_version_and_observation() {
+    let mut team = team();
+    team.spec.envelope.budget = None;
+    let (server, client, store) = setup(&team).await;
+    let ctx = Arc::new(Ctx { client });
+    reconcile(Arc::new(team), ctx.clone()).await.unwrap();
+    let original = store.lock().unwrap().team.clone();
+    let status_writes = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.method.as_str() == "PATCH" && r.url.path().ends_with("/karsteams/eng/status"))
+        .count();
+    assert_eq!(status_writes, 1);
+    for _ in 0..3 {
+        let fresh = serde_json::from_value(store.lock().unwrap().team.clone()).unwrap();
+        reconcile(Arc::new(fresh), ctx.clone()).await.unwrap();
+        assert_eq!(store.lock().unwrap().team, original);
+    }
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| {
+                r.method.as_str() == "PATCH" && r.url.path().ends_with("/karsteams/eng/status")
+            })
+            .count(),
+        status_writes
+    );
+}
+
+#[tokio::test]
 async fn concurrent_team_status_write_preserves_progress_and_retries() {
     let mut team = team();
     team.spec.envelope.budget = None;
@@ -330,6 +366,8 @@ async fn concurrent_team_status_write_preserves_progress_and_retries() {
     let (fresh, status, tasks) = {
         let mut state = store.lock().unwrap();
         state.conflict_status_once = true;
+        state.team["status"]["tokensObservedAt"] =
+            json!((Utc::now() - chrono::Duration::seconds(60)).to_rfc3339());
         (
             serde_json::from_value(state.team.clone()).unwrap(),
             state.team["status"].clone(),
@@ -496,9 +534,20 @@ async fn digest_create_is_namespace_owned_and_retry_deduplicated() {
     let team = team();
     let (_server, client, store) = setup(&team).await;
     for _ in 0..2 {
-        crate::team_digest::publish(&client, &team, None, "Healthy", "report", 1, 1, 25, 1)
-            .await
-            .unwrap();
+        crate::team_digest::publish(
+            &client,
+            &team,
+            None,
+            "Healthy",
+            "report",
+            1,
+            1,
+            Some(25),
+            crate::inference_budget::team::SYNTHESIS_SCOPE,
+            1,
+        )
+        .await
+        .unwrap();
     }
     let state = store.lock().unwrap();
     let cm = &state.cms["kars-team-digest-eng"];
@@ -507,6 +556,113 @@ async fn digest_create_is_namespace_owned_and_retry_deduplicated() {
     let log: Vec<crate::team_digest::DigestEntry> =
         serde_json::from_str(cm["data"]["log.json"].as_str().unwrap()).unwrap();
     assert_eq!(log.len(), 1);
+    assert_eq!(log[0].tokens_spent, Some(25));
+    assert_eq!(
+        log[0].tokens_spent_scope.as_deref(),
+        Some(crate::inference_budget::team::SYNTHESIS_SCOPE)
+    );
+    let mut legacy = serde_json::to_value(&log[0]).unwrap();
+    legacy.as_object_mut().unwrap().remove("tokens_spent_scope");
+    let legacy: crate::team_digest::DigestEntry = serde_json::from_value(legacy).unwrap();
+    assert_eq!(legacy.tokens_spent, Some(25));
+    assert!(legacy.tokens_spent_scope.is_none());
+}
+
+fn budget_observation() -> crate::inference_budget_contract::TeamBudgetObservation {
+    serde_json::from_value(json!({
+        "account":{"namespace":"kars-system","name":"inference-budget-team-uid","uid":"account-uid"},
+        "team":{"namespace":"tenant-a","name":"eng","uid":"team-uid"},
+        "originalLimits":{"tokens":5000000,"usdMicros":10000},
+        "effectiveLimits":{"tokens":6000000,"usdMicros":10000},
+        "phase":"Active","unboundedTokens":false,"priceCoverageComplete":true,
+        "settled":{"tokens":37488,"usdMicros":50},
+        "reserved":{"tokens":0,"usdMicros":0},"uncertain":{"tokens":7,"usdMicros":2}
+    })).unwrap()
+}
+
+#[tokio::test]
+async fn budget_observation_transition_removes_old_finite_limit_without_a_write_loop() {
+    let mut team = team();
+    let status = team.status.get_or_insert_with(Default::default);
+    status.tokens_spent_total = Some(37488);
+    status.tokens_spent_scope = Some(crate::inference_budget::team::LIFETIME_SCOPE.into());
+    status.tokens_observed_at = Some(Utc::now().to_rfc3339());
+    status.inference_budget_observation = Some(budget_observation());
+    let (_server, client, store) = setup(&team).await;
+    let mut desired = team.status.clone().unwrap();
+    let observation = desired.inference_budget_observation.as_mut().unwrap();
+    observation.unbounded_tokens = true;
+    observation.effective_limits.tokens = None;
+    let teams = Api::namespaced(client, "tenant-a");
+    let updated = write_status(&teams, &team, desired.clone()).await.unwrap();
+    {
+        let state = store.lock().unwrap();
+        let budget = &state.team["status"]["inferenceBudgetObservation"];
+        assert!(budget["effectiveLimits"].get("tokens").is_none());
+        assert_eq!(budget["effectiveLimits"]["usdMicros"], 10000);
+        assert_eq!(budget["originalLimits"]["tokens"], 5000000);
+        assert_eq!(budget["settled"]["tokens"], 37488);
+        assert_eq!(budget["unboundedTokens"], true);
+    }
+    let again = write_status(&teams, &updated, desired).await.unwrap();
+    assert_eq!(
+        again.metadata.resource_version,
+        updated.metadata.resource_version
+    );
+}
+
+#[tokio::test]
+async fn governed_degraded_status_clears_stale_usage_and_digest_preserves_unavailable() {
+    let mut team = team();
+    let status = team.status.get_or_insert_with(Default::default);
+    status.tokens_spent_total = Some(37488);
+    status.tokens_spent_scope = Some(crate::inference_budget::team::LIFETIME_SCOPE.into());
+    status.tokens_observed_at = Some("2026-10-15T00:00:00Z".into());
+    status.inference_budget_observation = Some(budget_observation());
+    let (_server, client, store) = setup(&team).await;
+    write_degraded(
+        &Api::namespaced(client.clone(), "tenant-a"),
+        &team,
+        "account unreadable",
+    )
+    .await
+    .unwrap();
+    {
+        let state = store.lock().unwrap();
+        assert!(state.team["status"]["tokensSpentTotal"].is_null());
+        assert!(state.team["status"]["tokensObservedAt"].is_null());
+        assert!(state.team["status"]["inferenceBudgetObservation"].is_null());
+        assert_eq!(
+            state.team["status"]["tokensSpentScope"],
+            crate::inference_budget::team::LIFETIME_SCOPE
+        );
+    }
+    crate::team_digest::publish(
+        &client,
+        &team,
+        None,
+        "Degraded",
+        "usage unavailable",
+        1,
+        1,
+        None,
+        crate::inference_budget::team::LIFETIME_SCOPE,
+        1,
+    )
+    .await
+    .unwrap();
+    let state = store.lock().unwrap();
+    let log: serde_json::Value = serde_json::from_str(
+        state.cms["kars-team-digest-eng"]["data"]["log.json"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(log[0]["tokens_spent"].is_null());
+    assert_eq!(
+        log[0]["tokens_spent_scope"],
+        crate::inference_budget::team::LIFETIME_SCOPE
+    );
 }
 
 #[tokio::test]
@@ -582,11 +738,13 @@ async fn five_entry_history_recovers_cadence_after_oversized_objective_rejection
         crate::team_commons::record_run(
             &client,
             &team,
-            &format!("00000000-0000-4000-8000-{n:012}"),
-            &team.spec.charter,
-            &format!("engineering-run-{n:032x}"),
-            &format!("engineering-run-{n:032x}"),
-            &"f".repeat(400),
+            crate::team_commons::RunSummary {
+                id: &format!("00000000-0000-4000-8000-{n:012}"),
+                title: &team.spec.charter,
+                author: &format!("engineering-run-{n:032x}"),
+                source_task: &format!("engineering-run-{n:032x}"),
+                content: &"f".repeat(400),
+            },
             None,
         )
         .await

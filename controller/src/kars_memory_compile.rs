@@ -46,6 +46,7 @@ pub const MEMORY_BINDING_FILENAME: &str = "binding.json";
 ///   "storeName": "...",
 ///   "sandboxRef": { "name": "..." },
 ///   "scope": "...",
+///   "sharedScopes": [],
 ///   "retentionDays": 30 | null,
 ///   "deleteOnSandboxDelete": true,
 ///   "displayName": "..." | null
@@ -57,6 +58,7 @@ pub fn compile_to_binding(spec: &KarsMemorySpec) -> Value {
         "storeName": spec.store_name.clone().unwrap_or_default(),
         "sandboxRef": { "name": spec.sandbox_ref.name },
         "scope": spec.scope.clone().unwrap_or_default(),
+        "sharedScopes": spec.shared_scopes.clone().unwrap_or_default(),
         "retentionDays": spec.retention_days,
         "deleteOnSandboxDelete": spec.delete_on_sandbox_delete.unwrap_or(true),
         "displayName": spec.display_name,
@@ -126,6 +128,7 @@ mod tests {
                 name: "agent-x".into(),
             },
             scope: Some("agent_agent-x".into()),
+            shared_scopes: Some(vec!["team_project".into()]),
             retention_days: Some(30),
             delete_on_sandbox_delete: Some(true),
             display_name: Some("Agent X memory".into()),
@@ -147,6 +150,7 @@ mod tests {
         assert_eq!(binding["storeName"], "minimal");
         assert_eq!(binding["sandboxRef"]["name"], "agent");
         assert_eq!(binding["scope"], "agent_agent");
+        assert_eq!(binding["sharedScopes"], json!([]));
         assert!(binding["retentionDays"].is_null());
         // delete_on_sandbox_delete defaults to true at compile time
         // (preserving the prior bool-default semantics).
@@ -160,6 +164,7 @@ mod tests {
         assert_eq!(binding["storeName"], "agent-x-mem");
         assert_eq!(binding["sandboxRef"]["name"], "agent-x");
         assert_eq!(binding["scope"], "agent_agent-x");
+        assert_eq!(binding["sharedScopes"], json!(["team_project"]));
         assert_eq!(binding["retentionDays"], 30);
         assert_eq!(binding["deleteOnSandboxDelete"], true);
         assert_eq!(binding["displayName"], "Agent X memory");
@@ -191,6 +196,23 @@ mod tests {
     }
 
     #[test]
+    fn shared_grant_changes_compiled_digest() {
+        let mut spec = full_spec();
+        let digest = |spec: &KarsMemorySpec| {
+            let bytes = serde_json::to_vec(&compile_to_binding(spec)).unwrap();
+            kars_memory_digest(&bytes)
+        };
+        let shared = digest(&spec);
+        spec.shared_scopes = Some(vec!["team_other".into()]);
+        assert_ne!(shared, digest(&spec));
+        spec.shared_scopes = None;
+        let private = digest(&spec);
+        assert_ne!(shared, private);
+        spec.shared_scopes = Some(vec![]);
+        assert_eq!(private, digest(&spec));
+    }
+
+    #[test]
     fn version_hash_is_stable_across_serde_round_trip() {
         let spec = full_spec();
         let binding_a = compile_to_binding(&spec);
@@ -208,7 +230,7 @@ mod tests {
 
     #[test]
     fn kars_memory_digest_uses_sha256_prefix_and_64_hex() {
-        let body = br#"{"storeName":"x","scope":"agent:x"}"#;
+        let body = br#"{"storeName":"x","scope":"agent_x"}"#;
         let d = kars_memory_digest(body);
         assert!(d.starts_with("sha256:"));
         assert_eq!(d.len(), "sha256:".len() + 64);

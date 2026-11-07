@@ -41,7 +41,7 @@ class HermesImageDependenciesTests(unittest.TestCase):
         run = next(run for run in RUNS if "git init -q /opt/hermes" in run)
         self.assertIn("ARG HERMES_COMMIT=f97608f178d1ffeca59860195ab7da295f7c8e5f", DOCKERFILE)
         self.assertIn("1a98d5528c88ddc3d4e32439d3e8322487ce31bc", run)
-        self.assertIn("2c87202b1566e4daed16b1472bc5d5e3651af9f6fd64acc953412f43432fefb0", run)
+        self.assertIn("c5863a93d8ccf31a8eb0c8bf66a35c638966457d79238a6d9486b600b37aac87", run)
         for digest in (
             "6dd85804ac28a0f2d326030e69c4f65a9ae8968478af87d2267d6ad89cc7230a",
             "2eee7bf49d29e6d0b218dcc960a174b99cc177039f6941f0355ebff9a93e33f7",
@@ -67,6 +67,20 @@ class HermesImageDependenciesTests(unittest.TestCase):
                     lock, rf'(?m)^name = "{name}"\nversion = "{re.escape(version)}"$',
                 )
                 self.assertIn(f"{name}=={version}", constraints)
+
+    def test_certifi_distrust_update_is_locked_in_both_python_images(self):
+        patch = (IMAGE / "hermes-dependency-fixes.patch").read_text()
+        lock = (IMAGE / "hermes-uv.lock").read_text()
+        constraints = (IMAGE / "hermes-core-constraints.txt").read_text().splitlines()
+        self.assertIn('+  "certifi==2026.10.23",', patch)
+        self.assertRegex(lock, r'(?m)^name = "certifi"\nversion = "2026\.10\.23"$')
+        self.assertIn("certifi==2026.10.23", constraints)
+        sidecar = (ROOT / "sandbox-images/k8s-sidecar/requirements.lock").read_text()
+        self.assertIn(
+            "certifi==2026.10.23 --hash=sha256:"
+            "e9b54de76e530bb6cf0ccd036787103acb58fd42ba930ea8bf948ddbaa2f61d1",
+            sidecar.splitlines(),
+        )
 
     def test_ui_builds_locked_workspaces_and_selects_prebuilt_paths(self):
         run = next(run for run in RUNS if "npm ci" in run)
@@ -183,6 +197,27 @@ class HermesImageDependenciesTests(unittest.TestCase):
         )
         self.assertIn("COPY sandbox-images/hermes/entrypoint.sh", runtime)
         self.assertEqual(runtime.strip().splitlines()[-1], "USER 1000")
+
+    def test_foundry_profile_replacement_is_bound_and_applied_to_runtime_refreshes(self):
+        runtime = DOCKERFILE.split("FROM ${HERMES_RUNTIME_BASE} AS runtime")[1]
+        self.assertIn("COPY sandbox-images/hermes/azure-foundry-provider.py", runtime)
+        run = next(run for run in RUNS if "7463d513a89aebcaaead8888038493e5dbbe4e630b49d5b8970b4eef4fddbdb9" in run)
+        self.assertNotIn("cmp -s", run)
+        self.assertIn("python3 -c", run)
+        self.assertIn(".read_bytes() != Path(", run)
+        self.assertIn("sha256sum --check -", run)
+        self.assertLess(run.index("sha256sum"), run.index("install -m 0644"))
+        self.assertIn("&& rm /tmp/kars-azure-foundry-provider.py", run)
+        self.assertIn("/opt/hermes/plugins/model-providers/azure-foundry/__init__.py", run)
+
+    def test_foundry_auxiliary_bounds_patch_rejects_source_drift(self):
+        runtime = DOCKERFILE.split("FROM ${HERMES_RUNTIME_BASE} AS runtime")[1]
+        self.assertIn("COPY sandbox-images/hermes/hermes-foundry-bounds.patch", runtime)
+        run = next(run for run in RUNS if "e83807074f3577ac3980f43bfd578ffcc95efb591e38a9427d0e7d33ec7d8e4a" in run)
+        self.assertIn("e4971c76a209d5dfb70a5dcf9bcbf4f9038c7ebe1f5d21e00984a419e5b2a36a", run)
+        self.assertLess(run.index("sha256sum --check -"), run.index("apply --check"))
+        self.assertIn("&& git -C /opt/hermes apply /tmp/hermes-foundry-bounds.patch", run)
+        self.assertIn("&& rm /tmp/hermes-foundry-bounds.patch", run)
 
     def test_slack_installs_and_checks_the_async_adapter_dependencies(self):
         run = next(run for run in RUNS if '"python-telegram-bot' in run)

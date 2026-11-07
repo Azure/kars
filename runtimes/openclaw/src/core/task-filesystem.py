@@ -21,6 +21,8 @@ DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 def parent_directory(path, create):
     if not isinstance(path, str) or not path.startswith("/") or "\0" in path:
         raise ValueError("path must be absolute")
+    if ".kars-github" in path.split("/"):
+        raise ValueError("Private Git transaction state is not a filesystem tool path")
     path = posixpath.normpath(path)
     root = next((root for root in ("/sandbox", "/tmp") if path.startswith(root + "/")), None)
     if root is None or len(path.encode("utf-8")) > 4096:

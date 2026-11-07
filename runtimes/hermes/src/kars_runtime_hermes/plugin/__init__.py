@@ -94,6 +94,8 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
     from . import http_fetch  # noqa: PLC0415
 
     http_fetch.register(ctx)
+    from . import access_request  # noqa: PLC0415
+    access_request.register(ctx)
     from . import mcp_bridge  # noqa: PLC0415
 
     mcp_bridge.register(ctx)

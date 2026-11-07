@@ -3,18 +3,41 @@
 
 import type { MissionArtifact, TaskDetail, TeamDetail, TeamRole } from "./types";
 import { mergeRevisionActivity, missionRunState } from "./mission-run-evidence";
-import { isSystemEvidenceArtifact, type BoundRouterActivity } from "./router-activity";
+import { isSystemEvidenceArtifact, routerObservationKey, stoppedRouterActivity, type BoundRouterActivity, type RouterActivityEvent } from "./router-activity";
 import type { ReviewedExecution } from "./types/missions";
 
 export function reviewedPhaseRouterActivity(phase: ReviewedExecution["phases"][number]): BoundRouterActivity | null {
-  const producer = phase.result?.run_evidence;
-  if (!producer || !phase.task_uid || producer.task_uid !== phase.task_uid
-    || !phase.run_nonce || producer.run_nonce !== phase.run_nonce) return null;
-  const { routerActivity } = missionRunState({
-    current_run_nonce: phase.run_nonce, result: phase.result, assignment: null,
-    router_activity: phase.router_activity,
-  });
-  return routerActivity ? { producer, observations: routerActivity, provisional: false } : null;
+  const result = phase.result;
+  const producer = result?.run_evidence;
+  if (!result || !producer || !phase.task_uid || producer.task_uid !== phase.task_uid
+    || !phase.run_nonce || producer.run_nonce !== phase.run_nonce
+    || result.assignment_nonce !== phase.run_nonce || result.source !== "durable_agent") return null;
+  // Match the BFF's retained observation contract, not the successful-delivery gate.
+  const terminal = (result.status === "ok" && producer.status === "succeeded")
+    || (result.status === "failed" && producer.status === "failed");
+  return terminal && phase.router_activity
+    ? { producer, observations: phase.router_activity, provisional: false } : null;
+}
+
+export function displayedPhaseRouterActivity(phase: ReviewedExecution["phases"][number]): BoundRouterActivity | null {
+  const retained = reviewedPhaseRouterActivity(phase);
+  if (retained) return retained;
+  if (!phase.result && phase.state === "stopped") {
+    const snapshot = stoppedRouterActivity(phase.stopped_activity, phase.run_nonce);
+    return snapshot && phase.task_uid === snapshot.producer.task_uid ? snapshot : null;
+  }
+  const live = phase.live_router_activity;
+  return !phase.result && (phase.state === "active" || phase.state === "held")
+    && live && phase.task_uid === live.task_uid && phase.run_nonce === live.run_nonce
+    ? { producer: live, observations: live.observations, provisional: true } : null;
+}
+
+export function hasActiveReviewedPhases(task: TaskEvidenceInput): boolean {
+  const execution = task.reviewed_execution;
+  return Boolean(execution && !execution.issue && task.current_run_nonce
+    && execution.run_nonce === task.current_run_nonce
+    && execution.phases.some(phase => phase.state === "active" && !phase.result
+      && phase.task_name && phase.task_uid && phase.run_nonce));
 }
 
 export interface CollaborationEvent {
@@ -31,24 +54,25 @@ export interface CollaborationEvent {
 export interface ResearchEvent {
   at: string | null;
   agent: string | null;
-  url: string;
+  url: string | null;
   host: string | null;
   outcome: string | null;
   status: number | null;
   digest: string | null;
-  source: "router" | "agent-reported";
+  source: "router" | "router-policy" | "agent-reported";
+  operation?: Extract<RouterActivityEvent, { kind: "router_operation" }>;
 }
 
 export interface RoleEvidence {
   role: TeamRole;
-  state: "delivered" | "skipped" | "working" | "missing" | "failed";
+  state: "delivered" | "skipped" | "working" | "missing" | "failed" | "uncertain" | "held" | "stopped";
   artifacts: MissionArtifact[];
   handbacks: CollaborationEvent[];
   artifactAttribution: "recorded" | "inferred" | "none";
 }
 
 export interface TeamRunEvidence {
-  outcome: "paused" | "running" | "delivered" | "delivered_with_issues" | "incomplete" | "failed";
+  outcome: "running" | "delivered" | "delivered_with_issues" | "incomplete" | "failed" | "held";
   roles: RoleEvidence[];
   collaboration: CollaborationEvent[];
   research: ResearchEvent[];
@@ -65,6 +89,7 @@ export type TaskEvidenceInput = Pick<
   | "result"
   | "launched"
   | "execution_phase"
+  | "execution_detail"
   | "assignment"
   | "assignment_events"
   | "current_run_nonce"
@@ -74,21 +99,29 @@ export type TaskEvidenceInput = Pick<
   | "router_activity"
 >;
 
+function reviewedRunHeld(task: TaskEvidenceInput): boolean {
+  return task.execution_phase === "Degraded"
+    && task.execution_detail?.startsWith("reviewed execution held:") === true;
+}
+
 export function reviewedPhases(task: TaskEvidenceInput) {
   const execution = task.reviewed_execution;
   if (!execution || execution.issue || !task.current_run_nonce
     || execution.run_nonce !== task.current_run_nonce) return null;
-  return execution.phases.map((phase) => {
+  const phases = execution.phases.map((phase) => {
     const terminal = phase.result?.run_evidence;
     const bound = terminal && phase.task_uid && phase.run_nonce
       && terminal.task_uid === phase.task_uid && terminal.run_nonce === phase.run_nonce
       && phase.result?.assignment_nonce === phase.run_nonce;
-    if (phase.result && !bound) return { ...phase, state: "unavailable" as const, result: null, router_activity: null };
+    if (phase.result && !bound) return { ...phase, state: "unavailable" as const, result: null, failure_diagnostic: null, router_activity: null };
     if (phase.state === "completed" && (!bound || phase.result?.reviewable !== true)) {
       return { ...phase, state: "unavailable" as const };
     }
     return phase;
   });
+  const held = reviewedRunHeld(task) || phases.some((phase) => phase.state === "uncertain");
+  return phases.map((phase) => held && phase.state === "active"
+    ? { ...phase, state: "held" as const } : phase);
 }
 
 export function teamRunMetrics(task: TaskEvidenceInput) {
@@ -229,6 +262,7 @@ function rolePlan(task: TaskEvidenceInput): {
 
 export function analyzeTeamRun(team: TeamEvidenceInput, task: TaskEvidenceInput): TeamRunEvidence {
   const phases = reviewedPhases(task);
+  const held = reviewedRunHeld(task) || (phases?.some((phase) => phase.state === "uncertain") ?? false);
   const currentTaskId = task.current_run_nonce ?? task.assignment?.task_id ?? null;
   const currentAssignment =
     task.assignment != null
@@ -324,6 +358,36 @@ export function analyzeTeamRun(team: TeamEvidenceInput, task: TaskEvidenceInput)
       }];
     });
 
+  const { currentResult, routerActivity } = missionRunState(task);
+  const bindings: BoundRouterActivity[] = phases?.flatMap(phase => {
+    const binding = reviewedPhaseRouterActivity(phase);
+    return binding ? [binding] : [];
+  }) ?? [];
+  if (routerActivity && currentResult?.run_evidence) {
+    bindings.unshift({ producer: currentResult.run_evidence, observations: routerActivity, provisional: false });
+  }
+  const seen = new Set<string>();
+  for (const { producer, observations } of bindings) {
+    if (observations.state !== "observed") continue;
+    for (const event of observations.trace.events) {
+      if (event.kind !== "router_operation" || event.operation === "tool_policy") continue;
+      const key = routerObservationKey(producer, event);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      research.push({
+        at: event.observed_at ?? null,
+        agent: producer.agent_name,
+        url: null,
+        host: event.destination_host,
+        outcome: null,
+        status: event.http_status,
+        digest: null,
+        source: event.source,
+        operation: event,
+      });
+    }
+  }
+
   const evidenceArtifacts = task.artifacts.filter(
     (a) =>
       !isSystemEvidenceArtifact(a.name) &&
@@ -396,13 +460,16 @@ export function analyzeTeamRun(team: TeamEvidenceInput, task: TaskEvidenceInput)
         : recorded?.length
           ? recorded.some((phase) => phase.state === "failed") ? "failed"
             : recorded.every((phase) => phase.state === "completed") ? "delivered"
-              : recorded.some((phase) => phase.state === "active") ? "working" : "missing"
+              : recorded.some((phase) => phase.state === "uncertain") ? "uncertain"
+                : recorded.some((phase) => phase.state === "held") ? "held"
+                  : recorded.some((phase) => phase.state === "active") ? "working"
+                    : recorded.some((phase) => phase.state === "stopped") ? "stopped" : "missing"
         : handbacks.length > 0
           ? "delivered"
           : failed
             ? "failed"
             : lifecycleAssigned && task.result == null
-              ? "working"
+              ? held ? "held" : "working"
               : "missing",
       artifacts,
       handbacks,
@@ -470,21 +537,21 @@ export function analyzeTeamRun(team: TeamEvidenceInput, task: TaskEvidenceInput)
     (task.result == null || !resultMatchesCurrentRun) &&
     !rootFailed &&
     !phaseFailed &&
+    !held &&
     (awaitingAssignment ||
       assignmentState === "assigned" ||
       assignmentState === "acknowledged" ||
       assignmentState === "running" ||
       task.execution_phase === "Running");
-  const currentResult = missionRunState(task).currentResult;
   const failed =
     rootFailed || phaseFailed || (currentResult != null && ["error", "failed", "rejected"].includes(currentResult.status ?? ""));
   const blocked = resultMatchesCurrentRun && Boolean(task.result?.blocked);
-  const outcome = team.paused && running
-    ? "paused"
-    : running
+  const outcome = running
       ? "running"
     : failed
       ? "failed"
+      : held
+        ? "held"
       : blocked || (!reviewedComplete && (!hasAssignmentLedger || !rootCompleted)) || missingRoles
         ? "incomplete"
         : partialArtifacts

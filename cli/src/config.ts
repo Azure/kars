@@ -224,6 +224,8 @@ export async function promptAndSaveCredentials(options?: {
   heading?: string;
   /** Force a specific provider (skip the choice prompt) */
   provider?: "foundry" | "github-models" | "github-copilot";
+  /** Reviewed installation values: ask only for missing Foundry fields. */
+  foundry?: { endpoint?: string; model?: string };
 }): Promise<KarsConfig> {
   const existing = loadConfig();
 
@@ -277,7 +279,7 @@ export async function promptAndSaveCredentials(options?: {
   if (provider === "github-copilot") {
     return promptGithubCopilot(existing, options?.skipVerify);
   }
-  return promptFoundry(existing, options?.skipVerify);
+  return promptFoundry(existing?.provider === "foundry" ? existing : null, options?.skipVerify, options?.foundry);
 }
 
 /**
@@ -641,12 +643,14 @@ export async function validateGithubModelsConfig(
 async function promptFoundry(
   existing: KarsConfig | null,
   skipVerify?: boolean,
+  supplied?: { endpoint?: string; model?: string },
 ): Promise<KarsConfig> {
   const answers = await inquirer.prompt([
     {
       type: "input",
       name: "endpoint",
       message: "Azure OpenAI endpoint:",
+      when: () => !supplied?.endpoint,
       default: existing?.endpoint || "https://your-resource.openai.azure.com",
       validate: (input: string) => {
         if (!input.startsWith("https://")) return "Endpoint must start with https://";
@@ -659,6 +663,7 @@ async function promptFoundry(
       type: "input",
       name: "model",
       message: "Model deployment name (must already exist in your Azure OpenAI resource):",
+      when: () => !supplied?.model,
       default: existing?.model || "gpt-4.1",
     },
     {
@@ -672,6 +677,9 @@ async function promptFoundry(
       },
     },
   ]);
+
+  if (supplied?.endpoint) answers.endpoint = supplied.endpoint;
+  if (supplied?.model) answers.model = supplied.model;
 
   // Verify (best-effort).
   //

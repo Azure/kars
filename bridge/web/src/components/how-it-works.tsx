@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import Link from "next/link";
+import Link from "@/components/navigation-link";
 
 /// The three-beat "how kars Bridge works" explainer. Extracted so it can be
 /// shown BOTH in the first-run empty state AND via a persistent "How it works"

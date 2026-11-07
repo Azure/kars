@@ -416,7 +416,7 @@ pub async fn get_team_ledger(
                     .collect::<String>()
             );
             let title = match cm.get(&key) {
-                Some(c) => commons_title(&e.title, &deliverable_text(c), &charter_line),
+                Some(c) => commons_title(&e.title, &deliverable_text(c), charter_line),
                 None => e.title.clone(),
             };
             events.push(LedgerEvent {

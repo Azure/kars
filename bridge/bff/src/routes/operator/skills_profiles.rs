@@ -352,6 +352,7 @@ async fn save_skill(
                 package::LOCKED_UID,
                 package::LOCKED_GENERATION,
                 package::APPROVED_BY_SUB,
+                package::APPROVED_BY_ROLE,
             ] {
                 body["metadata"]["annotations"][key] = serde_json::Value::Null;
             }
@@ -393,7 +394,7 @@ pub(super) async fn edit_skill(
     }
     Ok(Json(
         serde_json::json!({"applied":true,"kind":"KarsSkill","name":name_of(&applied),
-        "namespace":ns_of(&applied),"note":"Saved pending independent review of the current content."}),
+        "namespace":ns_of(&applied),"note":"Saved pending operator review of the current content; administrators may review their own submissions."}),
     ))
 }
 
@@ -443,11 +444,15 @@ pub async fn approve_skill(
         .as_ref()
         .and_then(|a| a.get(ANN_UPLOADED_BY_SUB))
         .cloned();
-    if uploader_subject.as_deref().is_none_or(str::is_empty)
-        || uploader_subject.as_deref() == Some(principal.sub.as_str())
-    {
+    let is_admin = crate::auth::require_admin(&principal).is_ok();
+    if uploader_subject.as_deref().is_none_or(str::is_empty) {
         return Err(AppError::Forbidden(
-            "skill submitter cannot approve their own package".into(),
+            "skill submitter identity is missing; resubmit the package before review".into(),
+        ));
+    }
+    if uploader_subject.as_deref() == Some(principal.sub.as_str()) && !is_admin {
+        return Err(AppError::Forbidden(
+            "only an administrator can approve their own skill package".into(),
         ));
     }
     let digest = package::validated_digest(&serde_json::json!(obj)).map_err(AppError::Conflict)?;
@@ -478,6 +483,7 @@ pub async fn approve_skill(
                         (package::LOCKED_UID):obj.metadata.uid,
                         (package::LOCKED_GENERATION):obj.metadata.generation.map(|g| g.to_string()),
                         (package::APPROVED_BY_SUB):principal.sub,
+                        (package::APPROVED_BY_ROLE):if is_admin { "admin" } else { "operator" },
                         ANN_APPROVED_BY:by, ANN_APPROVED_AT:now
                     }
                 }
@@ -513,7 +519,8 @@ pub async fn revoke_skill(
                     "annotations":{
                         ANN_REVIEW:"pending", ANN_LOCKED_DIGEST:null,
                         (package::LOCKED_UID):null, (package::LOCKED_GENERATION):null,
-                        (package::APPROVED_BY_SUB):null, ANN_APPROVED_BY:null, ANN_APPROVED_AT:null
+                        (package::APPROVED_BY_SUB):null, (package::APPROVED_BY_ROLE):null,
+                        ANN_APPROVED_BY:null, ANN_APPROVED_AT:null
                     }
                 }
             }),
@@ -543,14 +550,14 @@ pub struct RevokeSkillRequest {
     pub uid: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ProfileRoleDto {
     pub name: String,
     pub system_prompt: Option<String>,
     pub skills: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ProfileDto {
     pub name: String,
     pub namespace: String,

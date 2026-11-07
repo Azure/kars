@@ -5,7 +5,7 @@
 
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import Link from "next/link";
+import Link from "@/components/navigation-link";
 import type {
   EngineeringSignal,
   EngineeringSource,

@@ -135,7 +135,7 @@ pub async fn get_efficiency(
 ) -> AppResult<Json<EfficiencyDto>> {
     let cluster = state.cluster().ok_or(AppError::ClusterUnavailable)?;
     let owner = (!principal_can_view_all(&principal)).then_some(principal.sub.as_str());
-    Ok(Json(compute_efficiency_for_owner(cluster, owner).await))
+    Ok(Json(compute_efficiency_for_owner(cluster, owner).await?))
 }
 
 /// One run's derived metrics — the honest per-run record, assembled from the
@@ -324,20 +324,19 @@ fn classify_fault(accepted: bool, tool_fail: i64, finish: &str) -> &'static str 
 /// Shared by the `/api/efficiency` route and the orchestrators (mission +
 /// team) so the LLM's recommendation is grounded in the same learned facts the
 /// operator sees — never a separate heuristic.
-pub async fn compute_efficiency(cluster: &crate::kars::cluster::Cluster) -> EfficiencyDto {
+pub async fn compute_efficiency(
+    cluster: &crate::kars::cluster::Cluster,
+) -> AppResult<EfficiencyDto> {
     compute_efficiency_for_owner(cluster, None).await
 }
 
 pub async fn compute_efficiency_for_owner(
     cluster: &crate::kars::cluster::Cluster,
     owner_subject: Option<&str>,
-) -> EfficiencyDto {
+) -> AppResult<EfficiencyDto> {
     // Reuse the maintained ownership/UID/commit fence, including historical
     // revisions. Raw output maps omit ownerSub on modern producer records.
-    let outputs = cluster
-        .list_mission_deliverables()
-        .await
-        .unwrap_or_default();
+    let outputs = cluster.list_mission_deliverables().await?;
     let mut runs: Vec<RunMetrics> = Vec::with_capacity(outputs.len());
 
     for record in &outputs {
@@ -348,29 +347,41 @@ pub async fn compute_efficiency_for_owner(
         {
             continue;
         }
-        let review = cluster.read_review(task).await.unwrap_or_default();
+        let review = cluster
+            .review_snapshot("kars-system", task)
+            .await?
+            .and_then(|snapshot| snapshot.data)
+            .unwrap_or_default();
         let attempt = match (data.get("taskUid"), data.get("assignmentNonce")) {
             (Some(uid), Some(nonce)) if data.contains_key("evidence.json") => {
-                cluster.read_mission_attempt(uid, nonce).await
+                cluster.read_mission_attempt(uid, nonce).await?
             }
             _ => None,
         };
         let trace = if !data.contains_key("evidence.json") {
             cluster
-                .read_mission_trace(&record.output.evidence_key)
-                .await
+                .configmap_data_result(&format!(
+                    "kars-mission-trace-{}",
+                    record.output.evidence_key
+                ))
+                .await?
+                .and_then(|data| data.get("trace.json").cloned())
         } else {
             None
         };
-        runs.push(normalize_run(
-            data,
-            &review,
-            attempt.as_ref(),
-            trace.as_deref(),
-        ));
+        let mut run = normalize_run(data, &review, attempt.as_ref(), trace.as_deref());
+        if run.verified
+            && run.delivered
+            && !run.accepted
+            && super::teams::accepted_work_output(cluster, record).await?
+        {
+            run.accepted = true;
+            run.fault.clear();
+        }
+        runs.push(run);
     }
 
-    aggregate(runs, &load_price_table())
+    Ok(aggregate(runs, &load_price_table()))
 }
 
 /// Inputs come from the fenced deliverable reader. Modern terminal evidence

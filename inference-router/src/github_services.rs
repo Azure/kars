@@ -38,7 +38,9 @@ pub(crate) struct GitHubServices {
     #[cfg(test)]
     path: PathBuf,
     identity: Option<Identity>,
-    client: reqwest::Client,
+    pub(crate) client: reqwest::Client,
+    pub(crate) slots: Arc<tokio::sync::Semaphore>,
+    observed: std::sync::atomic::AtomicBool,
     loaded: Mutex<Option<Loaded>>,
 }
 
@@ -49,19 +51,38 @@ impl GitHubServices {
             path: CONFIG_PATH.into(),
             identity,
             client,
+            slots: Arc::new(tokio::sync::Semaphore::new(2)),
+            // A required projection exists before the router starts. Remember it
+            // even if revoked before the first fetch; an empty optional mount is
+            // the only startup case that retains ordinary public-fetch fallback.
+            observed: std::sync::atomic::AtomicBool::new(
+                std::fs::symlink_metadata(CONFIG_PATH)
+                    .map(|_| true)
+                    .unwrap_or_else(|error| error.kind() != std::io::ErrorKind::NotFound),
+            ),
             loaded: Mutex::new(None),
         }
+    }
+
+    pub(crate) fn was_configured(&self) -> bool {
+        self.observed.load(std::sync::atomic::Ordering::Acquire)
     }
 
     pub(crate) async fn current(&self) -> Result<Option<Arc<GitHubApp>>, Error> {
         let mut loaded = self.loaded.lock().await;
         let bytes = match self.read() {
-            Ok(Some(bytes)) => bytes,
+            Ok(Some(bytes)) => {
+                self.observed
+                    .store(true, std::sync::atomic::Ordering::Release);
+                bytes
+            }
             Ok(None) => {
                 *loaded = None;
                 return Ok(None);
             }
             Err(error) => {
+                self.observed
+                    .store(true, std::sync::atomic::Ordering::Release);
                 *loaded = None;
                 return Err(error);
             }

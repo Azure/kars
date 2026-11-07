@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 import { execFileSync } from "node:child_process";
-import { copyFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,11 +18,16 @@ function renderLegacy(localInference?: unknown) {
   const fixture = join(chart, "tests", `.render-fixture-${process.pid}-${++fixtureNumber}`);
   mkdirSync(join(fixture, "templates"), { recursive: true });
   try {
-    copyFileSync(join(chart, "Chart.yaml"), join(fixture, "Chart.yaml"));
-    copyFileSync(
-      join(chart, "templates/controller-deployment.yaml"),
-      join(fixture, "templates/controller-deployment.yaml"),
-    );
+    // Qualify the real controller template and its helpers, not dependency
+    // workloads with separate installation preflights.
+    const chartMetadata = parse(readFileSync(join(chart, "Chart.yaml"), "utf8"));
+    delete chartMetadata.dependencies;
+    writeFileSync(join(fixture, "Chart.yaml"), JSON.stringify(chartMetadata));
+    for (const name of readdirSync(join(chart, "templates"))) {
+      if ((name.startsWith("_") && name.endsWith(".tpl")) || name === "controller-deployment.yaml") {
+        copyFileSync(join(chart, "templates", name), join(fixture, "templates", name));
+      }
+    }
     // No new chart defaults may fill the missing map: this models Helm's
     // --reuse-values path, not a normal old-values/new-defaults coalescing.
     writeFileSync(join(fixture, "values.yaml"), "{}\n");

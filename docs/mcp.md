@@ -24,6 +24,101 @@ auto-derivation and session keepalive.
 > [`examples/playwright-mcp/`](../examples/playwright-mcp/) — a browser agent on
 > the official Playwright MCP, end to end.
 
+## Native Team and Mission proposals
+
+Add the server through the workspace catalogue, then describe the task. The
+orchestrator can propose relevant installed servers for review using their
+discovered tool names. In a native execution plan, phases that need MCP use the
+`network` capability and the proposal's `mcp_servers` binding. The native
+OpenClaw and Hermes loops discover and call tools through the existing router
+MCP bridge; do not prescribe a sequence of MCP calls in `required_tool_calls`
+or use the unsupported standalone phase capability `mcp`.
+
+This does not remove MCP qualification: a selected server still adds `mcp` to
+the complete route's qualification requirements, including resource-specific
+schema evidence where required. The router continues to enforce the server
+binding, tool policy and credential scope. A network grant alone does not grant
+access to arbitrary MCP servers. Registration and a valid proposal are not
+proof of execution; verify actual router-correlated calls and useful results in
+the retained run.
+
+### Reviewed Team member resources
+
+The Team roster review exposes each member's **resources** separately from its
+runtime/model route. Select the exact MCP servers and host/port destinations that
+member needs from the Team's reviewed selections. These persist in its complete
+member blueprint; OpenClaw and Hermes use the same binding path. Team tasks
+continue to enforce Strict egress and router governance.
+
+For the API, `roles[].resources` contains `mcp_servers` and `egress` arrays.
+Explicit empty arrays select neither; they do not inherit the Team's resources.
+Preflight, creation and roster edits reject selections outside the Team scope.
+Removing a Team resource requires removing affected member selections in the
+same update. Composition proposes the selections; it never grants access itself.
+Malformed composed resource inputs invalidate the proposed execution plan for
+review rather than silently granting inherited access.
+
+For existing API clients, omitting `resources` preserves the original semantics:
+no route override inherits the Team blueprint; a runtime/model override remains
+a complete blueprint without implicit MCP/egress inheritance. Arbitrary CRD
+blueprints are not merged. Existing roster edits retain the read-back selections,
+and the UI identifies legacy omitted selections before conversion to explicit
+ones. Skills remain separately approved; resource binding does not grant memory,
+Git writes, credentials or phase capabilities. Source/test qualification is not
+installed customer acceptance.
+
+### One reviewed standing-Team qualification attempt
+
+When required-mode evidence does not yet exist for the reviewed Team routes or
+resources, an operator/admin can explicitly select **Operator qualification**
+in the Team composer. This does not change global admission mode or claim
+qualified evidence. Keep the proposed per-role runtimes and provider/model
+routes, review the finite Team budget and first independent backlog milestone,
+and select **Approve one attempt, then pause**. Alternatively create paused and
+approve the exact next pending item on the Team detail page. Engineering intake
+and ordinary Run/Resume are unavailable during qualification.
+
+Controller status updates do not invalidate an otherwise unchanged review:
+creation binding and one-attempt approval retry at most three Kubernetes CAS
+writes, preserving the original approval and request nonce. Changes to Team
+identity, spec, ownership, annotations or execution state still fail closed.
+If creation stopped before binding, resubmitting the identical reviewed Create
+request can finish that same owner's paused, never-requested Team instead of
+creating a replacement. It does not overwrite its spec, renew a bound or expired
+approval, replay a consumed attempt, or reset accounting. Execution still
+requires approval of the exact pending backlog item. Recovery recognizes only
+one schema-normalized difference: an explicit Strict egress request matches the
+implicit Strict mode enforced for Team tasks when Kubernetes prunes that
+unsupported blueprint field. Endpoint changes, Learn mode and unknown fields
+are not normalized away.
+
+The designation expires after 45 minutes. Approval binds the Team UID and full
+specification (including credentials), current resource identities/versions and
+independent skill approval, backlog UID, exact work intent and canonical request.
+Core checks these before activation, seals them into the reserved Task, consumes
+that Task UID durably, and suppresses cadence or another request. An already
+admitted attempt may finish after approval expiry; expiry never grants a retry.
+Completion, stopping, or retirement of that consumed Task pauses the Team.
+Policy, router permissions, isolation, credential checks and finite governed
+budgets are unchanged. Changed or replaced packages fail closed, not renewed.
+MCP resources must be Ready for their current generation. Managed servers also
+require their discovered tool-schema digest. External servers without a discovered
+schema bind their reconciled endpoint and full configuration instead; this is not
+a tool-schema observation or a successful MCP call. Switching binding type or
+changing the resource identity, configuration, endpoint or observed schema
+invalidates the reviewed resource binding.
+
+Use the real catalogue → task → reviewed proposal → native Team execution flow
+to collect router-correlated calls and delivery evidence; registration or a
+synthetic tool call is not qualification. After recording independently reviewed
+route/resource evidence, an operator must separately select **Check qualified
+evidence and release — remain paused**. Release verifies the original package,
+resource versions, consumed admission and absence of launched owned Tasks or
+attempt descendants (including after root retirement), then
+applies full ordinary admission checks. It archives the attempt and leaves the
+Team paused. There is no automatic transition or permanent qualification mode.
+A changed package requires a freshly reviewed Team, not reuse of this approval.
+
 ## The model: `McpServer` CR + `mcpServerRefs`
 
 Two pieces, both declarative:

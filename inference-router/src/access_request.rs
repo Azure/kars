@@ -19,6 +19,10 @@ pub use scope::{Identity, Scope};
 #[path = "access_request/dispatch_tests.rs"]
 mod dispatch_tests;
 
+#[cfg(test)]
+#[path = "access_request/reviewed_tier_tests.rs"]
+mod reviewed_tier_tests;
+
 const CAPACITY: usize = 64;
 const REQUESTS_PER_MINUTE: u32 = 32;
 const TTL: Duration = Duration::from_secs(15 * 60);
@@ -58,10 +62,18 @@ pub struct Entry {
     pub port: Option<u16>,
     pub status: Status,
     pub decision: Option<Status>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answer: Option<String>,
+    /// Why a reviewed tier request cannot take effect in this assignment.
+    /// Cancellation is not a denial of the human review or a policy grant.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<String>,
     pub count: u32,
     pub first_seen_unix: u64,
     pub expires_at_unix: u64,
     pub dispatch_active: bool,
+    #[serde(skip)]
+    dispatch_count: usize,
     #[serde(skip)]
     expires: Instant,
 }
@@ -116,7 +128,8 @@ impl Drop for DispatchClaim<'_> {
                     .iter_mut()
                     .find(|entry| &entry.request_id == id)
             {
-                entry.dispatch_active = false;
+                entry.dispatch_count = entry.dispatch_count.saturating_sub(1);
+                entry.dispatch_active = entry.dispatch_count > 0;
             }
         }
         self.buffer.notify();
@@ -240,10 +253,13 @@ impl AccessRequestBuffer {
             port: request.port,
             status: Status::Pending,
             decision: None,
+            answer: None,
+            explanation: None,
             count: 1,
             first_seen_unix: now,
             expires_at_unix: now.saturating_add(self.ttl.as_secs()),
             dispatch_active: false,
+            dispatch_count: 0,
             expires: Instant::now() + self.ttl,
         };
         inner.requests.push_back(entry.clone());
@@ -260,6 +276,44 @@ impl AccessRequestBuffer {
     }
 
     pub fn transition(&self, scope: &str, id: &str, status: Status) -> Result<Entry, Error> {
+        self.transition_with_outcome(scope, id, status, None, None)
+    }
+
+    pub fn decide(
+        &self,
+        scope: &str,
+        id: &str,
+        status: Status,
+        answer: Option<String>,
+    ) -> Result<Entry, Error> {
+        if !matches!(status, Status::Approved | Status::Denied) {
+            return Err(Error::Invalid);
+        }
+        self.transition_with_outcome(scope, id, status, answer, None)
+    }
+
+    /// Finish the current assignment's request without altering its authority
+    /// or rewriting the separate, durable human approval.
+    pub fn cancel_reviewed_tier(
+        &self,
+        scope: &str,
+        id: &str,
+        explanation: String,
+    ) -> Result<Entry, Error> {
+        if explanation.trim().is_empty() || explanation.len() > 8192 {
+            return Err(Error::Invalid);
+        }
+        self.transition_with_outcome(scope, id, Status::Cancelled, None, Some(explanation))
+    }
+
+    fn transition_with_outcome(
+        &self,
+        scope: &str,
+        id: &str,
+        status: Status,
+        answer: Option<String>,
+        explanation: Option<String>,
+    ) -> Result<Entry, Error> {
         if !matches!(
             status,
             Status::Approved | Status::Denied | Status::Cancelled
@@ -285,10 +339,30 @@ impl AccessRequestBuffer {
         {
             return Err(Error::Terminal);
         }
+        if explanation.is_some()
+            && (entry.kind != "tier"
+                || entry.status != Status::Pending
+                || status != Status::Cancelled)
+        {
+            return Err(Error::Invalid);
+        }
+        let clarification = entry.kind == "clarification" && status == Status::Approved;
+        if clarification {
+            if answer
+                .as_deref()
+                .is_none_or(|text| text.trim().is_empty() || text.len() > 8192)
+            {
+                return Err(Error::Invalid);
+            }
+        } else if answer.is_some() {
+            return Err(Error::Invalid);
+        }
         if matches!(status, Status::Approved | Status::Denied) {
             entry.decision = Some(status);
+            entry.answer = answer;
         }
         entry.status = status;
+        entry.explanation = explanation;
         let entry = entry.clone();
         drop(inner);
         self.notify();
@@ -338,6 +412,27 @@ impl AccessRequestBuffer {
             .ok_or(Error::Missing)
     }
 
+    pub(crate) fn authorizes_egress_grant(
+        &self,
+        scope: &str,
+        id: &str,
+        host: &str,
+        port: u16,
+    ) -> bool {
+        let Ok(inner) = self.inner.lock() else {
+            return false;
+        };
+        inner.scope.id == scope
+            && inner.requests.iter().any(|entry| {
+                entry.request_id == id
+                    && entry.kind == "egress"
+                    && entry.target == host
+                    && entry.port == Some(port)
+                    && entry.expires > Instant::now()
+                    && matches!(entry.status, Status::Approved | Status::DispatchClaimed)
+            })
+    }
+
     fn dispatch_ready(
         inner: &mut Inner,
         scope: &str,
@@ -383,8 +478,44 @@ impl AccessRequestBuffer {
         id: Option<&str>,
         shutdown: &CancellationToken,
     ) -> Result<DispatchClaim<'_>, Error> {
+        self.claim_dispatch_inner(scope, id, shutdown, false)
+    }
+
+    pub(crate) fn claim_grant_dispatch(
+        &self,
+        scope: &str,
+        id: &str,
+        shutdown: &CancellationToken,
+    ) -> Result<DispatchClaim<'_>, Error> {
+        self.claim_dispatch_inner(scope, Some(id), shutdown, true)
+    }
+
+    fn claim_dispatch_inner(
+        &self,
+        scope: &str,
+        id: Option<&str>,
+        shutdown: &CancellationToken,
+        reuse_grant: bool,
+    ) -> Result<DispatchClaim<'_>, Error> {
         let mut inner = self.inner.lock().map_err(|_| Error::Unavailable)?;
-        Self::dispatch_ready(&mut inner, scope, id, shutdown)?;
+        if reuse_grant {
+            Self::dispatch_ready(&mut inner, scope, None, shutdown)?;
+            let entry = inner
+                .requests
+                .iter()
+                .find(|entry| Some(entry.request_id.as_str()) == id)
+                .ok_or(Error::Missing)?;
+            if entry.expires <= Instant::now() {
+                return Err(Error::Expired);
+            }
+            if entry.kind != "egress"
+                || !matches!(entry.status, Status::Approved | Status::DispatchClaimed)
+            {
+                return Err(Error::Terminal);
+            }
+        } else {
+            Self::dispatch_ready(&mut inner, scope, id, shutdown)?;
+        }
         let active = inner.active_dispatches.checked_add(1).ok_or(Error::Full)?;
         if let Some(id) = id {
             let entry = inner
@@ -393,6 +524,7 @@ impl AccessRequestBuffer {
                 .find(|entry| entry.request_id == id)
                 .ok_or(Error::Missing)?;
             entry.status = Status::DispatchClaimed;
+            entry.dispatch_count += 1;
             entry.dispatch_active = true;
         }
         inner.active_dispatches = active;

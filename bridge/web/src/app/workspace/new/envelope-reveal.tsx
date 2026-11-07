@@ -71,13 +71,15 @@ export function EnvelopeReveal({
       label: "Execution strategy",
       value:
         executionPlan
-          ? `Principal + ${executionPlan.roles.length} planned workers`
+          ? (executionPlan.roles.length ? `Principal + ${executionPlan.roles.length} planned workers` : "Single agent · reviewed native execution")
           : delegation.mode === "principal-specialists"
           ? `Principal + ${delegation.roles.length} legacy leaf specialists`
           : "Single agent",
       why:
         executionPlan
-          ? `${executionWhy} · up to ${executionPlan.max_parallel} in parallel.`
+          ? (executionPlan.roles.length
+            ? `${executionWhy} · up to ${executionPlan.max_parallel} in parallel.`
+            : `${executionPlan.synthesis.objective} · ${executionPlan.synthesis.capabilities.join(", ") || "no tools"} · up to ${executionPlan.synthesis.max_tool_calls} tool calls.`)
           : delegation.mode === "principal-specialists"
           ? `${delegation.roles.map((role) => role.name).join(", ")} · up to ${delegation.max_parallel} in parallel.`
           : "Best for small, tightly coupled work where delegation would add overhead.",

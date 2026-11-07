@@ -4,6 +4,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { MissionDispatcher, missionAttemptName, missionContentDigest, type MissionAttemptStore, type MissionCandidate, type StoredMissionAttempt } from "./mission-dispatcher.js";
 import type { IMeshTransport, MessageSecurity } from "./transport-interface.js";
+import { LocalInbox } from "./local-inbox.js";
 import { MAX_MISSION_MESSAGE_BYTES, missionContract, type MissionAssignment, type MissionProbe, type MissionReply } from "./mission-protocol.js";
 import { missionInputContentDigest, missionInputs, type MissionInput } from "./mission-inputs.js";
 
@@ -21,7 +22,8 @@ function harness() {
   let stored: StoredMissionAttempt | null = null;
   let revision = 0;
   const store: MissionAttemptStore = {
-    isCurrent: vi.fn(async () => true), get: vi.fn(async () => structuredClone(stored)),
+    isCurrent: vi.fn(async () => true), workloadInterrupted: vi.fn(async () => false),
+    get: vi.fn(async () => structuredClone(stored)),
     create: vi.fn(async attempt => {
       if (stored) return null;
       stored = { revision: String(++revision), attempt: structuredClone(attempt) };
@@ -78,6 +80,115 @@ function harness() {
   };
 }
 
+describe.each(["OpenClaw", "Hermes"] as const)("%s worker interruption", runtime => {
+  function waitingHarness() {
+    const h = harness();
+    const inbox = new LocalInbox({ buildHash: "test" });
+    if (runtime === "Hermes") h.encodeReply(JSON.stringify);
+    const send = vi.mocked(h.mesh.send).getMockImplementation()!;
+    vi.mocked(h.mesh.send).mockImplementation(async (...args) => {
+      const id = await send(...args);
+      for (const message of h.inbox.splice(0)) inbox.deliver(message.from, message.payload, message.security);
+      return id;
+    });
+    h.mesh.waitForMessage = vi.fn(inbox.waitForMessage.bind(inbox));
+    const selected: MissionCandidate = { ...phasedCandidate, runtime,
+      reviewedPhase: { ...phasedCandidate.reviewedPhase!, executionMode: "native", maxToolCalls: 128 } };
+    return { ...h, inbox, selected };
+  }
+
+  it("holds a removed worker promptly while preserving running evidence and the one send", async () => {
+    vi.useFakeTimers();
+    try {
+      const h = waitingHarness();
+      h.setStatuses(["accepted", "running"]);
+      vi.mocked(h.store.workloadInterrupted).mockResolvedValue(true);
+      const result = h.dispatcher().dispatch(h.selected);
+      await vi.advanceTimersByTimeAsync(5_001);
+      expect(await result).toBe("uncertain");
+      expect(h.state()?.attempt.error).toContain("worker handling this run was replaced or removed");
+      expect(h.state()?.attempt.reply?.status).toBe("running");
+      expect(h.state()?.attempt.reply?.evidence?.usage.totalTokens).toBe(50);
+      expect(h.state()?.attempt.events).toHaveLength(2);
+      expect(h.store.workloadInterrupted).toHaveBeenCalledWith(h.selected);
+      expect(h.mesh.send).toHaveBeenCalledTimes(1);
+      expect(h.store.publish).not.toHaveBeenCalled();
+      expect(await h.dispatcher().dispatch(h.selected)).toBe("already-claimed");
+      expect(h.mesh.send).toHaveBeenCalledTimes(1);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("keeps waiting after a quiet interval and accepts the later encrypted handback", async () => {
+    vi.useFakeTimers();
+    try {
+      const h = waitingHarness();
+      h.setStatuses(["accepted", "running"]);
+      const result = h.dispatcher().dispatch(h.selected);
+      await vi.advanceTimersByTimeAsync(10_001);
+      expect(h.store.workloadInterrupted).toHaveBeenCalledTimes(2);
+      expect(h.state()?.attempt.phase).toBe("running");
+      const reply = { ...h.state()!.attempt.reply!, status: "succeeded", output: "Retained application output." };
+      h.inbox.deliver(candidate.agentDid, runtime === "Hermes" ? JSON.stringify(reply) : reply, "encrypted");
+      expect(await result).toBe("succeeded");
+      expect(h.state()?.attempt.events).toHaveLength(3);
+      expect(h.inbox.getInbox()).toHaveLength(0);
+      expect(h.store.publish).toHaveBeenCalledTimes(1);
+      expect(h.mesh.send).toHaveBeenCalledTimes(1);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("does not overwrite a terminal handback saved during the continuity check", async () => {
+    vi.useFakeTimers();
+    try {
+      const h = waitingHarness();
+      h.setStatuses(["accepted", "running"]);
+      vi.mocked(h.store.workloadInterrupted).mockImplementation(async () => {
+        const previous = (await h.store.get(h.selected))!;
+        const reply = { ...previous.attempt.reply!, status: "succeeded" as const, output: "Retained application output." };
+        await h.store.replace(previous, { ...previous.attempt, phase: "succeeded", reply,
+          events: [...previous.attempt.events, { at: previous.attempt.updatedAt, status: "succeeded", evidence: reply.evidence }] });
+        return true;
+      });
+      const result = expect(h.dispatcher().dispatch(h.selected)).rejects.toThrow("worker handling this run");
+      await vi.advanceTimersByTimeAsync(5_001);
+      await result;
+      expect(h.state()?.attempt.phase).toBe("succeeded");
+      expect(h.state()?.attempt.reply?.output).toBe("Retained application output.");
+      expect(h.mesh.send).toHaveBeenCalledTimes(1);
+    } finally { vi.useRealTimers(); }
+  });
+});
+
+describe("native reviewed execution headroom", () => {
+  it.each(["OpenClaw", "Hermes"] as const)("retains more than 128 %s events beyond the legacy deadline", async runtime => {
+    const h = harness();
+    h.setStatuses(["accepted", ...Array<MissionReply["status"]>(260).fill("running"), "succeeded"]);
+    const selected: MissionCandidate = { ...phasedCandidate, runtime,
+      reviewedPhase: { ...phasedCandidate.reviewedPhase!, executionMode: "native", maxToolCalls: 128 } };
+    const wait = vi.mocked(h.mesh.waitForMessage).getMockImplementation()!;
+    let now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    vi.mocked(h.mesh.waitForMessage).mockImplementation(async (...args) => {
+      now += 10_000;
+      return wait(...args);
+    });
+    try {
+      expect(await h.dispatcher().dispatch(selected)).toBe("succeeded");
+      expect(h.state()?.attempt.events).toHaveLength(262);
+      expect(h.store.publish).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(h.mesh.waitForMessage).mock.calls[0][1]).toBe(5_000);
+      expect(await h.dispatcher().dispatch(selected)).toBe("already-claimed");
+    } finally { clock.mockRestore(); }
+  });
+  it("retains the legacy progress event boundary", async () => {
+    const h = harness();
+    h.setStatuses(["accepted", ...Array<MissionReply["status"]>(128).fill("running"), "succeeded"]);
+    expect(await h.dispatcher().dispatch(candidate)).toBe("uncertain");
+    expect(h.state()?.attempt.error).toContain("reply event limit");
+    expect(h.store.publish).not.toHaveBeenCalled();
+  });
+});
+
 describe("provisional router activity dispatch", () => {
   const routerObservations = JSON.stringify({ version: 1, source: "runtime-forwarded-router-observations", coverage: "returned-responses-only",
     responses: 1, rounds: [1], state: "unavailable", reason: "Router observations unavailable after execution (reset, expiry or read failure)" });
@@ -112,6 +223,32 @@ describe("provisional router activity dispatch", () => {
 });
 
 describe("runtime-bound mission dispatch", () => {
+  const peerContext = { rootUid: "reviewed-root", stateName: `kars-reviewed-${"a".repeat(40)}`, slot: "r0-p0",
+    peers: [{ role: "writer", phase: "write-briefing", slot: "r0-p0", agentName: `rp-${"a".repeat(20)}-r0-p0` }] };
+  it.each(["OpenClaw", "Hermes"] as const)("preserves v5 %s context through probe, publication and recovery", async runtime => {
+    const h = harness();
+    if (runtime === "Hermes") h.encodeReply(JSON.stringify);
+    const selected = { ...phasedCandidate, runtime, requiredOutputs: [], peerContext };
+    expect(await h.dispatcher().dispatch(selected)).toBe("succeeded");
+    expect(vi.mocked(h.mesh.sendWithAck).mock.calls[0][1]).toMatchObject({ version: 5, peerContext });
+    const attempt = h.state()!.attempt;
+    expect(attempt.candidate.peerContext).toEqual(peerContext);
+    expect(attempt.assignment).toMatchObject({ version: 5, peerContext });
+    expect(attempt.reply).toMatchObject({ version: 5, peerContext });
+    expect(h.store.publish).toHaveBeenCalled();
+    expect(await h.dispatcher().dispatch(selected)).toBe("already-claimed");
+    expect(h.mesh.send).toHaveBeenCalledTimes(1);
+  });
+  it.each(["omit", "change"])("rejects %s peer context before publishing a result", async mutation => {
+    const h = harness();
+    h.alterReply(reply => {
+      if (mutation === "omit") delete reply.peerContext;
+      else reply.peerContext = { ...reply.peerContext!, rootUid: "different-root" };
+      return reply;
+    });
+    expect(await h.dispatcher().dispatch({ ...phasedCandidate, requiredOutputs: [], peerContext })).toBe("uncertain");
+    expect(h.store.publish).not.toHaveBeenCalled();
+  });
   it("accepts the Python MeshClient JSON-string wire format without changing the retained contract", async () => {
     const h = harness();
     h.encodeReply(JSON.stringify);

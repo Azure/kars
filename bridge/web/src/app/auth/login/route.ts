@@ -43,6 +43,14 @@ export async function GET(req: Request): Promise<Response> {
     );
   }
 
+  // Background navigation must not replace a document login's PKCE/state cookie.
+  if (req.headers.get("rsc") === "1") {
+    return NextResponse.json(
+      { error: { code: "unauthorized", message: "Sign in using a full-page navigation." } },
+      { status: 401, headers: { "cache-control": "private, no-store", vary: "RSC" } },
+    );
+  }
+
   const redirectUri = cfg.redirectUri ?? `${await requestOrigin()}/auth/callback`;
   const returnTo = safeReturnTo(new URL(req.url).searchParams.get("returnTo"));
   const authReq = await buildAuthorizationRequest(cfg, redirectUri);

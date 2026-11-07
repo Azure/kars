@@ -69,10 +69,57 @@ readiness alone does not make a deleting Pod a usable inference target.
 
 Bridge defaults to `bff.routeQualification.mode: required`: a complete runtime,
 model, capability and parallelism contract must match one retained qualification
-record. Records cannot be combined to manufacture coverage. Fresh installations
-without evidence cannot launch in this mode.
+record. Records cannot be combined to manufacture coverage. Ordinary runs without
+that evidence remain blocked.
 
-For a reviewed development qualification run, explicitly configure Bridge:
+### Operator-reviewed qualification Missions
+
+When onboarding a configured harness or provider, an **operator or admin** can
+select **Qualification run** in the Mission composer/review instead of changing
+cluster-wide admission. The BFF independently authorizes this choice; a user or
+auditor cannot obtain it by forging a request field. The optional boolean
+`qualification_run` is carried on the compose, package-validation and task-create
+requests, not inside the blueprint. It defaults to false and does not apply to
+standing Teams.
+
+Review the exact harness, provider/deployment, optional fallbacks, capabilities,
+policies and positive finite token budget before creating the Mission. Required
+mode stays enabled, including on the Kind beta profile. Missing **generic route
+or selected resource execution evidence** becomes a warning for this explicitly
+reviewed package. MCP servers require current schema metadata, memory requires a
+backend and compiled digest for its current reconciled generation in Compiled or
+Ready phase, and skills require a currently approved version. A Compiled memory
+binding permits the first router execution attempt; it does not claim an already
+confirmed live store.
+Invalid evidence configuration remains an error. Channel qualification,
+configured-runtime coverage, resource readiness, credential authority,
+authentication, isolation, tool policy, independent skill approval and the durable
+budget contract remain enforced. This permits a real native tool qualification
+attempt; it neither adds unsupported native capabilities nor certifies a resource.
+
+The server persists the approver's authenticated identity, approval time,
+45-minute admission deadline and a SHA-256 binding of the named, namespaced
+Mission's objective, envelope and reviewed blueprint. Each selected MCP, memory
+and skill resource is additionally bound by namespace, name, live UID,
+specification and current schema/backend/version metadata. A replacement or
+change invalidates admission even when its name is unchanged; missing resources
+and failed live reads fail closed. Stored validation, initial launch and new run
+admission recheck these bindings. Older approvals with no resource bindings do
+not acquire permission to qualify selected resources. Missions always use strict
+egress: its explicit and omitted/default forms share the same binding across
+Kubernetes persistence; learning mode is rejected for qualification. Allowed
+destinations remain bound. Changes to the reviewed package invalidate its
+authorization. Expiry blocks new admission, not a durable
+run already in progress. Replicas, revisions and another attempt after completion
+need a fresh separately reviewed qualification Mission; authorization is not
+inherited. The designation remains visible in the Mission detail and Activity.
+An accepted deliverable is not automatic route certification: inspect actual
+provider/runtime observations and useful output, retain genuine task/run/artifact
+evidence, add an atomic reviewed route record, and verify an **ordinary** run with
+qualification disabled. No image, provider credential, budget or evidence record
+is installed or created by the checkbox.
+
+### Runtime pull coverage
 
 Runtime preflight also needs truthful pull-coverage metadata. The existing
 controller `IMAGE_PULL_REGISTRIES` environment variable, configured through
@@ -82,7 +129,36 @@ For an anonymous local Kind registry, verify the containerd mirror on **every**
 node and anonymous access to the exact pinned runtime manifests before declaring
 that host. Negotiate OCI and Docker manifest media types when probing a registry.
 Do not invent a pull Secret or declare a private registry covered without its
-actual credential or node-identity configuration.
+actual credential or node-identity configuration. Include this declaration in
+the initial Core values so the installed native runtimes appear in Bridge.
+
+If a first-install SRE release has already completed its ordinary ownership
+transition, an upgrade may add one previously absent, nonempty literal
+`IMAGE_PULL_REGISTRIES` entry to `controller.extraEnv`. The original immutable
+adoption receipt is retained: removing only the new declaration must reproduce
+its values digest (excluding the already-supported controller image refresh).
+All other settings, existing environment entries, source identities and finite
+funding remain bound. This is not permission to replace an originally sealed
+registry declaration, use `valueFrom`, reset a ledger, or alter an agent pod.
+Verify the exact registry pull path first and review the server-side Helm diff;
+adding the metadata should change only the controller Deployment environment.
+
+SRE authority refresh revalidates the sealed intent and any adopted catalog
+transition without renewing its model contracts. An expired, unrelated route must
+not block privacy readiness or sandbox creation: expiry is enforced when the
+broker selects the actual provider/model/operation contract. Expired routes remain
+unavailable, including to an account with an unlimited token allowance. Original
+contract fields, canonical timestamps, forward-only renewals, immutable adoption
+and current funding/identity checks remain enforced.
+
+### Kind beta workflow validation
+
+For an operator-controlled Kind beta workspace, explicitly select the existing
+`validation` mode to exercise normal Mission and Team workflows without historical
+route/resource evidence becoming a prerequisite for collecting that evidence.
+This applies to the configured Bridge installation, not just one run; use it only
+in the test workspace. The default remains `required`, including the Kind profile.
+Production onboarding can continue to use per-run qualification in required mode.
 
 ```yaml
 bff:
@@ -98,12 +174,15 @@ rationale discloses the mode, and preflight reports an unqualified route as a
 **warning**, including fallback routes. Automatic fallback candidates obey the
 same admission policy. Invalid configured evidence still fails closed.
 
-This does **not** relax current-digest proof for selected MCP servers, memory,
-skills or channels. Live catalogue membership, runnable runtimes, credential
+Validation can admit MCP, memory and skills with current bound metadata but
+without retained execution evidence; it does not qualify them. Channels are not
+granted that exception. Live catalogue membership, runnable runtimes, credential
 authority, authenticated principals, admission, budgets, tool policy and approval
-requirements are unchanged. A text-only mission requiring none of those optional
-resources is an appropriate first validation run. All existing external-action
-controls still apply.
+requirements are unchanged. The Kind chart still requires NetworkPolicy and
+rejects BFF environment overrides. Exercise the intended mixed-runtime workflows
+with ample finite tool and token headroom; inspect real outputs rather than
+treating successful launch as acceptance. All existing external-action controls
+still apply.
 
 Retain genuine task/run/artifact evidence after actual execution, then provide
 reviewed route records using

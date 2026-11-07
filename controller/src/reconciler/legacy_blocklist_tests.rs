@@ -270,8 +270,15 @@ impl Respond for NamespaceReads {
 }
 
 fn api_error(code: u16) -> Value {
+    let reason = match code {
+        403 => "Forbidden",
+        404 => "NotFound",
+        409 => "Conflict",
+        500 => "InternalError",
+        _ => panic!("unexpected API error code {code}"),
+    };
     json!({"apiVersion": "v1", "kind": "Status", "status": "Failure",
-        "message": "test API rejection", "reason": "TestError", "code": code})
+        "message": "test API rejection", "reason": reason, "code": code})
 }
 
 async fn run_retire(
@@ -326,7 +333,10 @@ async fn run_retire(
         .mount(&server)
         .await;
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
+    let config = crate::kube_client_config::preserve_request_semantics(kube::Config::new(
+        server.uri().parse().unwrap(),
+    ));
+    let client = Client::try_from(config).unwrap();
     let result = retire(&client, &sandbox, &expected).await;
     (result, server.received_requests().await.unwrap())
 }

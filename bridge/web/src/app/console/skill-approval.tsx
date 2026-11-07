@@ -3,10 +3,10 @@
 
 "use client";
 
-// Independent manual review, bound to the exact package displayed to the reviewer.
+// Manual review, bound to the exact package displayed to the reviewer.
 
 import { useActionState } from "react";
-import Link from "next/link";
+import Link from "@/components/navigation-link";
 import { Icon } from "@/components/icon";
 import { reviewSkillAction, type GovState } from "./governance-actions";
 import type { SkillSummary } from "@/lib/types";

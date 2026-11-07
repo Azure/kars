@@ -41,7 +41,7 @@ Every arrow that leaves a sandbox box is enforced by the runtime. Section "Per-l
 
 | Agent | Tools used | Output |
 |---|---|---|
-| `parent` | `kars_discover`, `kars_spawn`, `kars_mesh_send`, `kars_mesh_await`, MCP `ask_question` (DeepWiki), `telegram_send_message` | Dispatch + final delivery |
+| `parent` | `kars_discover`, `kars_spawn`, `kars_mesh_send`, `kars_mesh_await`, MCP `ask_wiki_question` (DeepWiki), `telegram_send_message` | Dispatch + final delivery |
 | `analyst` | `foundry_web_search` × ≥3 queries, `file_write`, `kars_mesh_transfer_file` × 2 | `analyst.json` (≤4 KB) with trends, control categories, runtimes, metrics |
 | `viz` | `kars_mesh_await`, `file_read`, `foundry_code_execute` (matplotlib), `foundry_image_generation`, `kars_mesh_transfer_file` × 3 | `scorecard.png` (1024×640 grouped bar chart), `hero.png` (1024×1024 generated image) |
 | `writer` | `kars_mesh_await`, `file_read`, `file_write`, `kars_mesh_transfer_file` × 1 | `brief.md` (~700–800 words, two pages) |
@@ -358,7 +358,9 @@ kubectl get pod -n kars-analyst -l kars.azure.com/sandbox=analyst -o json \
 
 ### 8. MCP — only what's declared
 
-`parent`'s `McpServer/execbrief-deepwiki` declares the DeepWiki endpoint and OAuth issuer. The router exposes its tools as `execbrief_deepwiki.ask_question` etc.; any other MCP host the agent tries to dial is denied at the router. The sub-agents have **no** `mcpServerRefs` — they cannot call MCP at all. (`analyst`'s prompt explicitly says "Do NOT attempt any MCP tools — they are not available in your sandbox; web_search is sufficient.")
+DeepWiki's current focused-query tool is `ask_wiki_question`; the historical diagrams use its former name, `ask_question`. Existing registrations must replace that old allowlist entry explicitly (Console → Agent capabilities → Edit the MCP server). Keep the two read tools and the reviewed scope unchanged; do not switch to a wildcard. Rediscover the exact tool name and input schema before calling it. Startup discovery defaults to five seconds (`MCP_FORWARDER_DISCOVERY_TIMEOUT_SECS`); tool execution has a separate 30-second request deadline. Timeouts remain failures and are not automatically replayed.
+
+`parent`'s `McpServer/execbrief-deepwiki` declares the DeepWiki endpoint and OAuth issuer. The router exposes the currently discovered, allowed tools, including the focused `ask_wiki_question` operation; any other MCP host the agent tries to dial is denied at the router. The sub-agents have **no** `mcpServerRefs` — they cannot call MCP at all. (`analyst`'s prompt explicitly says "Do NOT attempt any MCP tools — they are not available in your sandbox; web_search is sufficient.")
 
 ```bash
 kubectl get karssandbox execbrief -n kars-system \

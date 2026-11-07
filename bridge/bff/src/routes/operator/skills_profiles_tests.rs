@@ -165,9 +165,16 @@ async fn skill_replacement_uses_cas_clears_review_and_removes_omitted_spec_field
     let (state, store) = fixture();
     let body = approval(&store.lock().unwrap());
     assert_eq!(
-        request(state.clone(), Method::POST, "approve", "reviewer", body)
-            .await
-            .0,
+        request_as(
+            state.clone(),
+            Method::POST,
+            "approve",
+            "author",
+            &["admin"],
+            body
+        )
+        .await
+        .0,
         StatusCode::OK
     );
     let spec = json!({"version":"2","summary":"Review only local evidence","boundingPolicy":"read-only","recipe":"Report limitations."});
@@ -194,6 +201,7 @@ async fn skill_replacement_uses_cas_clears_review_and_removes_omitted_spec_field
         package::LOCKED_UID,
         package::LOCKED_GENERATION,
         package::APPROVED_BY_SUB,
+        package::APPROVED_BY_ROLE,
         ANN_APPROVED_BY,
         ANN_APPROVED_AT,
     ] {
@@ -392,6 +400,118 @@ async fn skill_review_refuses_self_review_stale_display_and_package_mutation() {
             "{change}"
         );
         assert!(store.lock().unwrap().writes.is_empty(), "{change}");
+    }
+}
+
+#[tokio::test]
+async fn skill_admin_name_without_admin_role_cannot_self_approve() {
+    let (state, store) = fixture();
+    store.lock().unwrap().skill["metadata"]["annotations"][package::UPLOADED_BY_SUB] =
+        "admin".into();
+    let body = approval(&store.lock().unwrap());
+    let (status, response) = request(state, Method::POST, "approve", "admin", body).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{response}");
+    assert!(store.lock().unwrap().writes.is_empty());
+}
+
+#[tokio::test]
+async fn skill_admin_can_review_own_package_and_revoke_recorded_authority() {
+    let (state, store) = fixture();
+    let body = approval(&store.lock().unwrap());
+    let (status, reviewed) = request_as(
+        state.clone(),
+        Method::POST,
+        "approve",
+        "author",
+        &["admin"],
+        body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{reviewed}");
+    assert_eq!(reviewed["usable"], true);
+    {
+        let store = store.lock().unwrap();
+        let annotations = &store.skill["metadata"]["annotations"];
+        assert_eq!(annotations[package::APPROVED_BY_SUB], "author");
+        assert_eq!(annotations[package::UPLOADED_BY_SUB], "author");
+        assert_eq!(annotations[package::APPROVED_BY_ROLE], "admin");
+        assert!(annotations[ANN_APPROVED_AT].as_str().is_some());
+        assert!(package::approved_digest(&store.skill).is_ok());
+    }
+    let (status, revoked) = request_as(
+        state,
+        Method::POST,
+        "revoke",
+        "author",
+        &["admin"],
+        json!({"uid":"skill-uid"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{revoked}");
+    assert_eq!(revoked["usable"], false);
+    assert!(
+        store.lock().unwrap().skill["metadata"]["annotations"]
+            .get(package::APPROVED_BY_ROLE)
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn skill_admin_review_preserves_validation_provenance_and_cas_checks() {
+    for change in [
+        "uid",
+        "generation",
+        "digest",
+        "stale",
+        "bytes",
+        "owner",
+        "author",
+        "race",
+        "forged-role",
+    ] {
+        let (state, store) = fixture();
+        let mut body = approval(&store.lock().unwrap());
+        {
+            let mut store = store.lock().unwrap();
+            match change {
+                "uid" => body["uid"] = "old-uid".into(),
+                "generation" => body["generation"] = 1.into(),
+                "digest" => body["version_digest"] = "old-digest".into(),
+                "stale" => store.skill["status"]["observedGeneration"] = 1.into(),
+                "bytes" => store.package["data"]["2"] = "changed".into(),
+                "owner" => {
+                    store.package["metadata"]["ownerReferences"][0]["uid"] = "foreign".into()
+                }
+                "author" => {
+                    store.skill["metadata"]["annotations"][package::UPLOADED_BY_SUB] = "".into()
+                }
+                "race" => store.race = true,
+                "forged-role" => body["roles"] = json!(["admin"]),
+                _ => unreachable!(),
+            }
+        }
+        let roles = if change == "forged-role" {
+            &["operator"][..]
+        } else {
+            &["admin"][..]
+        };
+        let (status, response) =
+            request_as(state, Method::POST, "approve", "author", roles, body).await;
+        assert_eq!(
+            status,
+            if matches!(change, "author" | "forged-role") {
+                StatusCode::FORBIDDEN
+            } else {
+                StatusCode::CONFLICT
+            },
+            "{change}: {response}"
+        );
+        let store = store.lock().unwrap();
+        assert_eq!(store.writes.len(), usize::from(change == "race"));
+        assert_eq!(
+            store.skill["metadata"]["annotations"][package::REVIEW],
+            "pending"
+        );
     }
 }
 

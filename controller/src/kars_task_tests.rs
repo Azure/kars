@@ -21,6 +21,42 @@ fn sample_envelope() -> TaskEnvelope {
 }
 
 #[test]
+fn requested_tier_roundtrips_and_helm_matches_generated_review_schema() {
+    use kube::CustomResourceExt;
+    let spec: KarsTaskSpec = serde_json::from_value(serde_json::json!({
+        "objective":"review", "envelope":{"tier":1,"authorityCeiling":1}, "requestedTier":3
+    }))
+    .unwrap();
+    assert_eq!(spec.requested_tier, Some(3));
+    assert_eq!(serde_json::to_value(&spec).unwrap()["requestedTier"], 3);
+    let generated = serde_json::to_value(KarsTask::crd()).unwrap();
+    let template = include_str!("../../deploy/helm/kars/templates/crd-karstask.yaml");
+    // Compare the literal field schema, not unrelated, unrendered Helm directives.
+    let marker = "              requestedTier:\n";
+    assert_eq!(template.matches(marker).count(), 1);
+    let schema = template
+        .split_once(marker)
+        .unwrap()
+        .1
+        .lines()
+        .take_while(|line| line.starts_with("                ") || line.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let helm_field: serde_json::Value = serde_saphyr::from_str(&schema).unwrap();
+    let field = "/spec/versions/0/schema/openAPIV3Schema/properties/spec/properties/requestedTier";
+    assert!(generated.pointer(field).is_some());
+    assert_eq!(generated.pointer(field), Some(&helm_field));
+    assert_eq!(
+        generated.pointer(field).unwrap()["minimum"].as_f64(),
+        Some(1.0)
+    );
+    assert_eq!(
+        generated.pointer(field).unwrap()["maximum"].as_f64(),
+        Some(5.0)
+    );
+}
+
+#[test]
 fn envelope_digest_is_deterministic() {
     let envelope = sample_envelope();
     assert_eq!(envelope.digest(), envelope.digest());
@@ -167,11 +203,12 @@ fn spec_roundtrips_through_camelcase_yaml() {
         execution: None,
         blueprint: None,
         display_name: Some("payments-bugfix".into()),
+        requested_tier: None,
     };
-    let yaml = serde_yaml::to_string(&spec).expect("serializes");
+    let yaml = serde_saphyr::to_string(&spec).expect("serializes");
     assert!(yaml.contains("authorityCeiling:"));
     assert!(yaml.contains("delegationDepth:"));
-    let back: KarsTaskSpec = serde_yaml::from_str(&yaml).expect("roundtrips");
+    let back: KarsTaskSpec = serde_saphyr::from_str(&yaml).expect("roundtrips");
     assert_eq!(back.envelope.tier, 3);
     assert_eq!(back.envelope.authority_ceiling, 3);
 }
@@ -403,6 +440,7 @@ fn spec_with(
     KarsTaskSpec {
         objective: "x".into(),
         envelope,
+        requested_tier: None,
         parent_ref: None,
         execution: None,
         blueprint: Some(TaskBlueprint {

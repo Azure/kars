@@ -1,0 +1,171 @@
+{
+  "calendarUid": "calendar-uid",
+  "ledger": {
+    "sandbox": {
+      "namespace": "workspace",
+      "name": "sre",
+      "uid": "source-uid"
+    },
+    "runtimeNamespaceUid": "runtime-uid",
+    "usage": {
+      "day": 739904,
+      "month": 24321,
+      "daily": 529504,
+      "monthly": 1283680
+    },
+    "writers": {
+      "writer": {
+        "podUid": "old-pod-uid",
+        "sequence": 45,
+        "tokens": 0,
+        "month": 24321,
+        "event": "finish",
+        "pending": 1,
+        "orphanFinalization": {
+          "version": "calendar-never-reserved/v1",
+          "accountUid": "account-uid",
+          "accountResourceVersion": "10",
+          "calendarResourceVersion": "10",
+          "lifetimeLedgerSha256": "b3b03bcd40ec4aa9b96f14646391afe878e82e6ffde1edcd542744286f840708",
+          "maximumTokens": 0,
+          "day": 739904,
+          "month": 24321
+        }
+      },
+      "oldWriter": {
+        "podUid": "older-pod-uid",
+        "sequence": 8,
+        "tokens": 20,
+        "month": 24321,
+        "event": "finish",
+        "pending": 0
+      }
+    }
+  },
+  "audits": {
+    "writer:45": {
+      "version": "calendar-never-reserved/v1",
+      "intent": {
+        "namespace": "workspace",
+        "sandbox": "sre",
+        "sandboxUid": "source-uid",
+        "accountUid": "account-uid",
+        "calendarUid": "calendar-uid",
+        "writer": "writer",
+        "sequence": 45,
+        "maximumTokens": 0,
+        "mode": "calendar-never-reserved/v1",
+        "accountResourceVersion": "10",
+        "calendarResourceVersion": "10",
+        "podUid": "old-pod-uid",
+        "podName": "old-pod"
+      },
+      "recordedAt": "2026-10-15T13:00:00.000Z",
+      "meaning": "Operator closure of a retired, closed lifetime session that never accepted a reservation. Not a router acknowledgement or provider usage report. Calendar periods and counters are unchanged; no existing liability is refunded.",
+      "actualUsage": "unknown",
+      "lifetimeChargeChanged": false,
+      "newFunding": false,
+      "calendarUid": "calendar-uid",
+      "beforeResourceVersion": "10",
+      "beforeLedgerSha256": "1285e4384a2762a5d3f934dd83a56d8d277f739dea0e7437a7e849aadbb840f8",
+      "afterLedgerSha256": "b4e294cf8bb376e87f333de7aa40bd27e5ed90895dd23cfdf6ae4abe58ca0709",
+      "account": {
+        "namespace": "accounting",
+        "name": "account",
+        "uid": "account-uid"
+      },
+      "accountResourceVersion": "10",
+      "lifetimeLedgerSha256": "b3b03bcd40ec4aa9b96f14646391afe878e82e6ffde1edcd542744286f840708",
+      "aggregateProof": {
+        "formula": "settled.tokens + uncertain.tokens; no calendar subtraction",
+        "meters": {
+          "reserved": {
+            "tokens": 0,
+            "usdMicros": 0
+          },
+          "uncertain": {
+            "tokens": 408209,
+            "usdMicros": 0
+          },
+          "settled": {
+            "tokens": 1283703,
+            "usdMicros": 0
+          }
+        },
+        "retainedCharges": {
+          "settled": {
+            "tokens": 23,
+            "usdMicros": 0
+          },
+          "uncertain": {
+            "tokens": 408209,
+            "usdMicros": 0
+          }
+        },
+        "retiredSession": {
+          "closed": true,
+          "closedThrough": 0,
+          "nextSequence": 1,
+          "identity": {
+            "podName": "old-pod",
+            "podUid": "old-pod-uid",
+            "sandbox": {
+              "namespace": "workspace",
+              "name": "sre",
+              "uid": "source-uid"
+            },
+            "runtimeNamespaceUid": "runtime-uid",
+            "taskUid": "source-uid"
+          }
+        },
+        "sessionCount": 3,
+        "retainedAttemptCount": 3,
+        "allSessionsClosed": true,
+        "allSessionPodsAbsent": true,
+        "requestCorrelation": "unavailable",
+        "compactionPreservesCumulativeCharges": true,
+        "retiredSessionNeverReserved": true,
+        "calendarCharge": 0
+      },
+      "writerBefore": {
+        "podUid": "old-pod-uid",
+        "sequence": 45,
+        "tokens": 0,
+        "month": 24321,
+        "event": "finish",
+        "pending": 1
+      },
+      "writerAfter": {
+        "podUid": "old-pod-uid",
+        "sequence": 45,
+        "tokens": 0,
+        "month": 24321,
+        "event": "finish",
+        "pending": 1,
+        "orphanFinalization": {
+          "version": "calendar-never-reserved/v1",
+          "accountUid": "account-uid",
+          "accountResourceVersion": "10",
+          "calendarResourceVersion": "10",
+          "lifetimeLedgerSha256": "b3b03bcd40ec4aa9b96f14646391afe878e82e6ffde1edcd542744286f840708",
+          "maximumTokens": 0,
+          "day": 739904,
+          "month": 24321
+        }
+      },
+      "usageBefore": {
+        "day": 739904,
+        "month": 24321,
+        "daily": 529504,
+        "monthly": 1283680
+      },
+      "usageAfter": {
+        "day": 739904,
+        "month": 24321,
+        "daily": 529504,
+        "monthly": 1283680
+      },
+      "oldWriterPodAbsent": true
+    }
+  }
+}

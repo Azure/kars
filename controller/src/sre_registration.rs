@@ -19,6 +19,49 @@ pub const OWNER: &str = "kars.azure.com/sre-registration-uid";
 pub const EPOCH: &str = "kars.azure.com/sre-privacy-epoch";
 pub const CONTROL_VERSION: &str = "kars.azure.com/services-credential-version";
 
+pub(crate) fn control_credential_version(
+    secret: &k8s_openapi::api::core::v1::Secret,
+) -> Result<String, String> {
+    let uid = secret
+        .metadata
+        .uid
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .ok_or("Control credential UID missing")?;
+    let revision = secret
+        .metadata
+        .resource_version
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .ok_or("Control credential version missing")?;
+    let Some(data) = secret
+        .data
+        .as_ref()
+        .filter(|data| data.contains_key("builtin-memory.json"))
+    else {
+        // Token-only late-enrollment receipts retain their UID/resourceVersion fence.
+        return Ok(format!("{uid}:{revision}"));
+    };
+    if data
+        .get("control-token")
+        .is_none_or(|token| token.0.is_empty())
+    {
+        return Err("Control credential token missing".into());
+    }
+    // Memory TokenRequests renew independently. Include every other key, including
+    // control TLS configuration, so real control-material changes still retire caches.
+    let material: std::collections::BTreeMap<_, _> = data
+        .iter()
+        .filter(|(key, _)| key.as_str() != "builtin-memory.json")
+        .collect();
+    let bytes = serde_json::to_vec(&material)
+        .map_err(|_| "Control credential material could not be versioned")?;
+    Ok(format!(
+        "{uid}:control-v1:{}",
+        crate::providers::signing::sha256_hex(&bytes)
+    ))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct NamedUid {
@@ -64,6 +107,21 @@ pub struct ConsumerReview {
     pub resource_version: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FirstInstallIntent {
+    pub name: String,
+    pub uid: String,
+    pub digest: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FirstInstallFunding {
+    pub intent: FirstInstallIntent,
+    pub grant: crate::inference_budget_contract::BuiltinFunding,
+}
+
 #[derive(CustomResource, Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[kube(
     group = "kars.azure.com",
@@ -79,6 +137,8 @@ pub struct KarsSRERegistrationSpec {
     pub controller: ControllerIdentity,
     pub sandbox: Source,
     pub runtime_namespace: NamedUid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_install_funding: Option<FirstInstallFunding>,
     #[serde(default)]
     pub legacy_bindings: Vec<BindingReview>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

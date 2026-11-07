@@ -26,6 +26,14 @@ use crate::provider::{ProviderError, ProviderKind};
 use crate::safety;
 use std::sync::Arc;
 
+fn output_policy_action(sanitized: &str) -> String {
+    let mut end = sanitized.len().min(200);
+    while !sanitized.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("output:{}", &sanitized[..end])
+}
+
 /// Inject the canonical `x-kars-decision*` triplet onto a response
 /// so downstream tooling (conformance-runner, observability pipelines,
 /// HTTP clients) can read the policy decision without parsing the
@@ -214,6 +222,29 @@ pub(super) async fn enforce_openai_output_guardrails(
 pub(super) enum RouteGap {
     NonAzureProvider,
     Guardrails,
+    ContentSafety,
+}
+
+pub(super) const CONTENT_SAFETY_ROUTE_UNSUPPORTED: &str = "content_safety_route_unsupported";
+
+pub(super) fn content_safety_route_message(route: &str) -> String {
+    format!(
+        "InferencePolicy requires a content safety floor, not enforced on {route} — use \
+         /v1/chat/completions with a model that supports native Chat Completions"
+    )
+}
+
+fn content_safety_route_denial(route: &str) -> axum::response::Response {
+    let message = content_safety_route_message(route);
+    let mut response = errors::openai_coded(
+        StatusCode::FORBIDDEN,
+        &message,
+        "content_policy_violation",
+        CONTENT_SAFETY_ROUTE_UNSUPPORTED,
+    )
+    .into_response();
+    insert_decision_headers(&mut response, "blocked", "InferencePolicy", &message);
+    response
 }
 
 /// Pure classifier for [`guard_unenforced_route`]: does this policy
@@ -232,6 +263,9 @@ pub(super) fn classify_route_gap(
     if !policy.guardrails.is_empty() {
         return Err(RouteGap::Guardrails);
     }
+    if policy.content_safety.is_active() {
+        return Err(RouteGap::ContentSafety);
+    }
     Ok(())
 }
 
@@ -239,8 +273,8 @@ pub(super) fn classify_route_gap(
 /// implement provider routing or the guardrail pipeline
 /// (`completions`, `responses`, `embeddings`, image generation).
 /// Such a route would silently bypass a policy that selects a
-/// non-Azure provider or declares guardrail stages, so it refuses
-/// instead. `None` ⇒ proceed.
+/// non-Azure provider, declares guardrail stages, or requires a content-safety
+/// floor, so it refuses instead. `None` ⇒ proceed.
 pub(super) async fn guard_unenforced_route(
     state: &AppState,
     sandbox: &str,
@@ -249,6 +283,11 @@ pub(super) async fn guard_unenforced_route(
     let policy = crate::inference_policy_loader::current_snapshot(&state.inference_policy).await;
     let gap = classify_route_gap(&policy, &state.config).err()?;
     let (status, code, msg) = match gap {
+        RouteGap::ContentSafety => (
+            StatusCode::FORBIDDEN,
+            CONTENT_SAFETY_ROUTE_UNSUPPORTED,
+            content_safety_route_message(route),
+        ),
         RouteGap::NonAzureProvider => (
             StatusCode::NOT_IMPLEMENTED,
             "provider_unimplemented",
@@ -288,6 +327,24 @@ pub(super) async fn chat_completions(
     headers: HeaderMap,
     mut body: Bytes,
 ) -> impl IntoResponse {
+    // Downstream parsers may accept bodies that our policy checks cannot parse.
+    let model = match serde_json::from_slice::<serde_json::Value>(&body) {
+        Ok(request) => request
+            .get("model")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_owned(),
+        Err(_) => {
+            return errors::openai_coded(
+                StatusCode::BAD_REQUEST,
+                "Request must be valid JSON within router parsing limits",
+                "invalid_request_error",
+                "invalid_json",
+            )
+            .into_response();
+        }
+    };
+
     // The sidecar owns one sandbox; request headers cannot select another budget.
     let sandbox_name = state.sandbox_name.as_str();
 
@@ -311,10 +368,6 @@ pub(super) async fn chat_completions(
 
     // AGT policy check via the four-seam PolicyDecisionProvider.
     {
-        let model = serde_json::from_slice::<serde_json::Value>(&body)
-            .ok()
-            .and_then(|v| v.get("model")?.as_str().map(String::from))
-            .unwrap_or_default();
         let action = format!("inference:chat_completions:{model}");
         if let super::inference_policy::InferenceDecision::Deny(reason) =
             super::inference_policy::check(&state, sandbox_name, &action).await
@@ -352,7 +405,12 @@ pub(super) async fn chat_completions(
     // env-driven `TOKEN_BUDGET_DAILY` as fallback.
     if let Err(msg) = state
         .budget
-        .check_budget(sandbox_name, policy.daily_tokens, policy.monthly_tokens)
+        .check_governed_budget(
+            sandbox_name,
+            policy.daily_tokens,
+            policy.monthly_tokens,
+            state.inference_budget.as_deref(),
+        )
         .await
     {
         tracing::warn!(
@@ -553,18 +611,32 @@ pub(super) async fn chat_completions(
             .into_response();
         }
     };
-    let is_responses_only = state
+    let mut is_responses_only = state
         .responses_only_models
         .read()
         .ok()
         .map(|set| set.contains(&model_capability_key(&upstream)))
         .unwrap_or(false);
+    // A Responses-only contract cannot admit the Chat probe that populates the cache.
+    // Read current contracts without caching them; final dispatch still reserves normally.
+    if !is_responses_only && let Some(client) = &state.inference_budget {
+        is_responses_only = match client.requires_responses_contract(&upstream).await {
+            Ok(required) => required,
+            Err(error) => {
+                return crate::inference_budget::response::denial(&error.into())
+                    .expect("budget client errors have a denial response");
+            }
+        };
+    }
 
     if is_responses_only {
+        if policy.content_safety.is_active() {
+            return content_safety_route_denial("Chat Completions to Responses translation");
+        }
         // Skip chat/completions — go directly to Responses API.
         // Use a streaming response body with SSE keepalive comments to prevent
         // client timeouts while the Responses API processes (30-50s for reasoning models).
-        tracing::info!(sandbox = %sandbox_name, model = %model_name, "Using cached Responses API path");
+        tracing::info!(sandbox = %sandbox_name, model = %model_name, "Using Responses API path");
         let responses_body =
             chat_to_responses_body(&override_model_in_body(&body, &upstream.deployment));
 
@@ -645,6 +717,16 @@ pub(super) async fn chat_completions(
                     }
                     Err(e) => {
                         tracing::error!(sandbox = %sandbox_owned, "Responses API error: {e:#}");
+                        if let Some(denial) = crate::inference_budget::response::denial(&e)
+                            && let Ok(body) = axum::body::to_bytes(denial.into_body(), 8192).await
+                        {
+                            let frame = format!(
+                                "data: {}\n\ndata: [DONE]\n\n",
+                                String::from_utf8_lossy(&body)
+                            );
+                            let _ = tx.send(Ok(bytes::Bytes::from(frame))).await;
+                            return;
+                        }
                         let err_sse = format!(
                             "data: {}\n\ndata: [DONE]\n\n",
                             serde_json::json!({"error":{"message":"Failed to reach inference backend","type":"proxy_error"}})
@@ -711,6 +793,9 @@ pub(super) async fn chat_completions(
             }
             Err(e) => {
                 tracing::error!(sandbox = %sandbox_name, "Responses API error: {e:#}");
+                if let Some(denial) = crate::inference_budget::response::denial(&e) {
+                    return denial;
+                }
                 return errors::openai(
                     StatusCode::BAD_GATEWAY,
                     "Failed to reach inference backend",
@@ -766,6 +851,11 @@ pub(super) async fn chat_completions(
                 let is_unsupported = is_responses_only_error(&err_bytes);
 
                 if is_unsupported {
+                    if policy.content_safety.is_active() {
+                        return content_safety_route_denial(
+                            "Chat Completions to Responses translation",
+                        );
+                    }
                     // Cache this model as Responses-only to skip future chat/completions attempts
                     if let Ok(mut set) = state.responses_only_models.write() {
                         set.insert(model_capability_key(&selected_upstream));
@@ -1004,6 +1094,11 @@ pub(super) async fn chat_completions(
             Ok((status, _resp_headers, resp_body, selected_upstream))
                 if status == StatusCode::BAD_REQUEST && is_responses_only_error(&resp_body) =>
             {
+                if policy.content_safety.is_active() {
+                    return content_safety_route_denial(
+                        "Chat Completions to Responses translation",
+                    );
+                }
                 // Model doesn't support chat/completions — auto-fallback to Responses API.
                 // Cache this model to skip future chat/completions attempts.
                 if let Ok(mut set) = state.responses_only_models.write() {
@@ -1183,7 +1278,7 @@ pub(super) async fn chat_completions(
                             let normalized_reason = match violation.code() {
                                 "inference_policy_prompt_shields_required" => {
                                     "InferencePolicy blocked: Prompt Shields required but \
-                                     upstream had no prompt_filter_results (content safety)"
+                                     upstream lacked valid attack annotations (content safety)"
                                         .to_string()
                                 }
                                 "inference_policy_content_safety_exceeded" => format!(
@@ -1219,8 +1314,7 @@ pub(super) async fn chat_completions(
                                 state.governance.scan_response(&redacted);
 
                             // 3. Policy check — blocking (was fire-and-forget)
-                            let action =
-                                format!("output:{}", &sanitized[..sanitized.len().min(200)]);
+                            let action = output_policy_action(&sanitized);
                             if let super::inference_policy::InferenceDecision::Deny(reason) =
                                 super::inference_policy::check(&state, sandbox_name, &action).await
                             {
@@ -1511,9 +1605,53 @@ async fn filter_disallowed_tools(
 }
 
 #[cfg(test)]
+#[path = "chat_ingress_tests.rs"]
+mod ingress_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::inference_policy_loader::InferencePolicySnapshot;
+
+    #[test]
+    fn output_policy_action_preserves_ascii_and_byte_bound() {
+        for text in [
+            "".to_string(),
+            "hello".to_string(),
+            "x".repeat(200),
+            "x".repeat(201),
+        ] {
+            assert_eq!(
+                output_policy_action(&text),
+                format!("output:{}", &text[..text.len().min(200)])
+            );
+        }
+    }
+
+    #[test]
+    fn output_policy_action_never_splits_multibyte_characters() {
+        for character in ['é', '→', '🦀'] {
+            for offset in 196..=201 {
+                let text = format!("{}{character}tail", "x".repeat(offset));
+                let action = output_policy_action(&text);
+                let prefix = action.strip_prefix("output:").unwrap();
+                assert!(prefix.len() <= 200);
+                assert!(text.starts_with(prefix));
+                let next = text[prefix.len()..].chars().next().unwrap();
+                assert!(prefix.len() + next.len_utf8() > 200);
+            }
+        }
+    }
+
+    #[test]
+    fn output_policy_action_accepts_real_hermes_review_response() {
+        let text = "Written to `exports/handoff.md`.\n\nVerified:\n- Consulted all retained documents listed in the bundle.\n- Reconciled both scenarios: 70 jobs → 140 station-minute shortfall, 56 feasible jobs; 60 jobs → 40 station-minute shortfall, 56 feasible jobs, 4 unmet";
+        assert!(!text.is_char_boundary(200));
+        assert_eq!(
+            output_policy_action(text),
+            format!("output:{}", &text[..198])
+        );
+    }
 
     fn azure_cfg() -> crate::config::Config {
         // No provider endpoints/keys configured — a bare Azure box.

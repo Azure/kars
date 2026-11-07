@@ -19,7 +19,7 @@ export default function ConnectionsPage() {
     <div className="space-y-6">
       <PageHeader
         title="Connections"
-        lead="Connect the tools and channels your agents work with. GitHub is private to your signed-in user; messaging channels are workspace-wide. No agent ever handles a raw credential."
+        lead="Connect the tools and channels your agents work with. GitHub access is private to your signed-in user; messaging settings are shared across the workspace."
       />
       <Section
         title="GitHub"
@@ -29,7 +29,7 @@ export default function ConnectionsPage() {
       </Section>
       <Section
         title="Channels"
-        subtitle="Wire Telegram, Slack, Discord, or WhatsApp once for the whole workspace. Any mission or team can then report its progress and deliverables over them — agent-agnostic, harness-neutral. Tokens are stored encrypted-at-rest as a Kubernetes secret and never shown again."
+        subtitle="Set up channels for the workspace. Telegram supports proactive updates when allowed chat IDs are provided. Slack, Discord and WhatsApp support inbound conversation, not proactive reports. Saving settings does not verify delivery."
       >
         <ConnectChannels ns={ns} />
       </Section>

@@ -168,6 +168,105 @@ pub(super) fn planned_selection(
     }))
 }
 
+pub(super) fn activation_unchanged(
+    captured: &DynamicObject,
+    refreshed: &DynamicObject,
+) -> Result<bool, kube::Error> {
+    let intent = super::credential_review::intent(captured)?;
+    if super::credential_review::intent(refreshed)? == intent {
+        return Ok(true);
+    }
+    let (finalizer, manager) = match captured.types.as_ref().map(|types| types.kind.as_str()) {
+        Some("KarsTask") => (
+            "kars.azure.com/karstask-cleanup",
+            "kars-controller/karstask",
+        ),
+        Some("KarsTeam") => (
+            "kars.azure.com/karsteam-cleanup",
+            "kars-controller/karsteam",
+        ),
+        _ => return Ok(false),
+    };
+    if captured
+        .metadata
+        .finalizers
+        .as_ref()
+        .is_some_and(|values| values.iter().any(|value| value == finalizer))
+    {
+        return Ok(false);
+    }
+    let mut normalized = refreshed.clone();
+    let Some(finalizers) = normalized.metadata.finalizers.as_mut() else {
+        return Ok(false);
+    };
+    let Some(index) = finalizers.iter().position(|value| value == finalizer) else {
+        return Ok(false);
+    };
+    finalizers.remove(index);
+    if finalizers.is_empty() && captured.metadata.finalizers.is_none() {
+        normalized.metadata.finalizers = None;
+    }
+    // The controller's initial SSA cleanup registration changes no authority.
+    // Only that exact added finalizer and its field-ownership entry may differ.
+    if let Some(fields) = normalized.metadata.managed_fields.as_mut() {
+        let registration = json!({
+            "apiVersion":"kars.azure.com/v1alpha1", "manager":manager,
+            "operation":"Apply", "fieldsType":"FieldsV1",
+            "fieldsV1":{"f:metadata":{"f:finalizers":{format!("v:\"{finalizer}\""): {}}}}
+        });
+        fields.retain(|field| {
+            let mut field = field.clone();
+            field.time = None;
+            serde_json::to_value(field).ok().as_ref() != Some(&registration)
+        });
+        // Merge patches without a field manager share the creator's "unknown"
+        // Update entry. Restore it only when the added finalizer is its sole change.
+        for field in fields.iter_mut().filter(|field| {
+            field.manager.as_deref() == Some("unknown")
+                && field.operation.as_deref() == Some("Update")
+                && field.subresource.is_none()
+        }) {
+            for prior in captured.metadata.managed_fields.iter().flatten() {
+                let Ok(mut expected) = serde_json::to_value(prior) else {
+                    continue;
+                };
+                let Ok(mut actual) = serde_json::to_value(&*field) else {
+                    continue;
+                };
+                expected.as_object_mut().unwrap().remove("time");
+                actual.as_object_mut().unwrap().remove("time");
+                let Some(metadata) = expected
+                    .pointer_mut("/fieldsV1/f:metadata")
+                    .and_then(Value::as_object_mut)
+                else {
+                    continue;
+                };
+                let Some(owners) = metadata
+                    .entry("f:finalizers")
+                    .or_insert_with(|| json!({".": {}}))
+                    .as_object_mut()
+                else {
+                    continue;
+                };
+                if owners
+                    .insert(format!("v:\"{finalizer}\""), json!({}))
+                    .is_some()
+                {
+                    continue;
+                }
+                if actual == expected {
+                    *field = prior.clone();
+                    break;
+                }
+            }
+        }
+        if fields.is_empty() && captured.metadata.managed_fields.is_none() {
+            normalized.metadata.managed_fields = None;
+        }
+    }
+    Ok(super::credential_review::intent(&normalized)? == intent)
+}
+
 impl Cluster {
     pub async fn attach_created_credentials(&self, target: &Target) -> Result<(), kube::Error> {
         let grant = self.credential_grant(&target.namespace).await?;
@@ -212,6 +311,89 @@ impl Cluster {
             }
         }
         Ok(())
+    }
+
+    /// A setup hint, not launch authority: recovery still checks the acknowledged source and fences.
+    pub fn keyless_draft_setup_pending(object: &impl serde::Serialize) -> bool {
+        let Ok(object) = serde_json::to_value(object) else {
+            return false;
+        };
+        let metadata = &object["metadata"];
+        metadata["generation"].as_i64() == Some(1)
+            && metadata["deletionTimestamp"].is_null()
+            && metadata["annotations"]["kars.azure.com/halted"].is_null()
+            && metadata["annotations"]["kars.azure.com/run-requested"].is_null()
+            && !object["spec"]["execution"]["launch"]
+                .as_bool()
+                .unwrap_or(false)
+            && matches!(
+                object["status"]["executionPhase"].as_str(),
+                None | Some("Idle")
+            )
+            && object["status"]["sandboxRef"].is_null()
+            && object["status"]["assignment"].is_null()
+            && object["spec"]["blueprint"]["githubBinding"].is_object()
+            && object["spec"]["blueprint"]["credentialBindings"].is_null()
+    }
+
+    /// Resume only the empty source already acknowledged for an unchanged, never-launched draft.
+    pub async fn resume_keyless_draft_credentials(
+        &self,
+        namespace: &str,
+        name: &str,
+        uid: &str,
+        version: &str,
+    ) -> Result<DynamicObject, kube::Error> {
+        let object = object_api(self, namespace, "KarsTask")
+            .get(name)
+            .await
+            .map_err(|error| safe("Read draft credential setup", error))?;
+        if object.uid().as_deref() != Some(uid)
+            || object.resource_version().as_deref() != Some(version)
+            || !Self::keyless_draft_setup_pending(&object)
+        {
+            return Err(failure(
+                "Credential setup recovery requires the unchanged, never-launched keyless draft",
+            ));
+        }
+        let target = Target {
+            kind: "KarsTask".into(),
+            namespace: namespace.into(),
+            name: name.into(),
+            uid: uid.into(),
+        };
+        let grant = self.credential_grant(namespace).await?;
+        let source_name = input_name("KarsTask", name)?;
+        let source = grant
+            .sources
+            .iter()
+            .find(|source| {
+                source.name == source_name
+                    && source.target.as_ref() == Some(&target)
+                    && source.keys.is_empty()
+                    && source.phase == "Ready"
+            })
+            .ok_or_else(|| {
+                failure(
+                    "Draft credential source is not acknowledged; no source was created or changed",
+                )
+            })?;
+        self.bind_credential_selection_reviewed(
+            &target,
+            &grant.identity,
+            Selection {
+                scope: "target".into(),
+                source: Identity {
+                    name: source.name.clone(),
+                    uid: source.uid.clone(),
+                },
+                keys: Vec::new(),
+                owner: Some(target.clone()),
+            },
+            None,
+            super::credentials::BindingRetry::Lifecycle(Some(Box::new(object))),
+        )
+        .await
     }
 
     pub async fn finish_created_credentials(
@@ -301,8 +483,7 @@ impl Cluster {
                 "Created target resourceVersion is missing before activation",
             ));
         }
-        let activation_intent = super::credential_review::intent(&object)?;
-        let mut status_retries = 0;
+        let mut conflict_retries = 0;
         loop {
             let metadata = super::execution_plans::activation_fence(&object, active)
                 .map_err(|error| failure(&error))?;
@@ -319,7 +500,7 @@ impl Cluster {
                 Ok(_) => return Ok(()),
                 Err(error) => error,
             };
-            if status_retries == 2
+            if conflict_retries == 2
                 || !matches!(&error, kube::Error::Api(response) if response.code == 409)
             {
                 return Err(safe("Activate captured credential target", error));
@@ -328,19 +509,17 @@ impl Cluster {
                 .get(&target.name)
                 .await
                 .map_err(|error| safe("Refresh conflicted credential target", error))?;
-            // Controller status writes advance resourceVersion without changing
-            // the reviewed authority. Never retry a spec or metadata transition.
             if refreshed.metadata.resource_version == object.metadata.resource_version
-                || super::credential_review::intent(&refreshed)? != activation_intent
+                || !activation_unchanged(&object, &refreshed)?
             {
                 return Err(safe("Activate captured credential target", error));
             }
             object = refreshed;
-            status_retries += 1;
+            conflict_retries += 1;
             tracing::debug!(
                 target = %target.name,
-                status_retries,
-                "Retrying credential activation after a status-only conflict"
+                conflict_retries,
+                "Retrying credential activation after a controller lifecycle conflict"
             );
         }
     }

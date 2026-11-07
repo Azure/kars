@@ -87,6 +87,7 @@ pub(super) struct State {
     pub(super) metadata_requests: Vec<String>,
     pub(super) binding_patches: Vec<(String, bool, Value)>,
     pub(super) binding_patch_errors: BTreeMap<(String, bool), u16>,
+    pub(super) status_error: Option<u16>,
 }
 
 pub(super) async fn fixture() -> (MockServer, Client, Arc<Mutex<State>>) {
@@ -102,6 +103,7 @@ pub(super) async fn fixture() -> (MockServer, Client, Arc<Mutex<State>>) {
         metadata_requests: Vec::new(),
         binding_patches: Vec::new(),
         binding_patch_errors: BTreeMap::new(),
+        status_error: None,
     }));
     let server = MockServer::start().await;
     let handler = state.clone();
@@ -130,12 +132,28 @@ pub(super) async fn fixture() -> (MockServer, Client, Arc<Mutex<State>>) {
             state.objects.remove(path);
             return ResponseTemplate::new(200).set_body_json(json!({"kind":"Status","apiVersion":"v1","status":"Success"}));
         }
-        if request.method == "POST" && (path.ends_with("/secrets") || path.ends_with("/serviceaccounts")) {
+        if request.method == "POST" && (path.ends_with("/secrets") || path.ends_with("/serviceaccounts")
+            || path.ends_with("/ciliumnetworkpolicies") || path.ends_with("/configmaps")
+            || path.ends_with("/roles") || path.ends_with("/rolebindings") || path.ends_with("/clusterrolebindings")) {
+            if state.objects.contains_key(&format!("{path}/{}",body["metadata"]["name"].as_str().unwrap())) {
+                return api_error(409);
+            }
             let mut value = body.clone();
             value["metadata"]["uid"] = format!("uid-{}-{}", body["metadata"]["name"].as_str().unwrap(),state.calls.len()).into();
             value["metadata"]["resourceVersion"] = "1".into();
             state.objects.insert(format!("{path}/{}",body["metadata"]["name"].as_str().unwrap()),value.clone());
             return ResponseTemplate::new(201).set_body_json(value);
+        }
+        if request.method == "PUT" && (path.contains("/ciliumnetworkpolicies/")
+            || path.contains("/configmaps/") || path.contains("/roles/")) {
+            let Some(value) = state.objects.get(path) else { return api_error(404); };
+            if body["metadata"]["uid"] != value["metadata"]["uid"]
+                || body["metadata"]["resourceVersion"] != value["metadata"]["resourceVersion"] { return api_error(409); }
+            let mut updated = body;
+            updated["metadata"]["resourceVersion"] =
+                (value["metadata"]["resourceVersion"].as_str().unwrap().parse::<u32>().unwrap()+1).to_string().into();
+            state.objects.insert(path.into(),updated.clone());
+            return ResponseTemplate::new(200).set_body_json(updated);
         }
         if request.method == "PATCH" && path.contains("/secrets/") {
             let Some(value) = state.objects.get_mut(path) else { return api_error(404); };
@@ -158,6 +176,21 @@ pub(super) async fn fixture() -> (MockServer, Client, Arc<Mutex<State>>) {
             let value=patched_binding(value,&body,dry_run);
             if !dry_run {state.objects.insert(path.into(),value.clone());}
             return ResponseTemplate::new(200).set_body_json(value);
+        }
+        if request.method == "PATCH" && path.contains("/deployments/") && body["spec"]["replicas"].is_i64() {
+            let Some(value) = state.objects.get_mut(path) else { return api_error(404); };
+            if body["metadata"]["uid"] != value["metadata"]["uid"]
+                || body["metadata"]["resourceVersion"] != value["metadata"]["resourceVersion"] { return api_error(409); }
+            if !value["metadata"]["annotations"].is_object() { value["metadata"]["annotations"] = json!({}); }
+            for (key, annotation) in body["metadata"]["annotations"].as_object().unwrap() {
+                if annotation.is_null() { value["metadata"]["annotations"].as_object_mut().unwrap().remove(key); }
+                else { value["metadata"]["annotations"][key] = annotation.clone(); }
+            }
+            value["spec"]["replicas"] = body["spec"]["replicas"].clone();
+            value["metadata"]["generation"] = (value["metadata"]["generation"].as_i64().unwrap_or(1) + 1).into();
+            value["metadata"]["resourceVersion"] =
+                (value["metadata"]["resourceVersion"].as_str().unwrap().parse::<u32>().unwrap()+1).to_string().into();
+            return ResponseTemplate::new(200).set_body_json(value.clone());
         }
         let value=match (request.method.as_str(),path) {
             ("GET","/apis/kars.azure.com/v1alpha1/karssreregistrations/canonical")=>serde_json::to_value(registration()).unwrap(),
@@ -193,6 +226,7 @@ pub(super) async fn fixture() -> (MockServer, Client, Arc<Mutex<State>>) {
                     && body["spec"]["resourceAttributes"]["namespace"].as_str()==namespace.as_deref()
                     && body["spec"]["resourceAttributes"]["name"].as_str()==name.as_deref())}}),
             ("PATCH","/apis/kars.azure.com/v1alpha1/karssreregistrations/canonical/status")=>{
+                if let Some(code) = state.status_error { return api_error(code); }
                 let mut reg=state.objects.get("/apis/kars.azure.com/v1alpha1/karssreregistrations/canonical")
                     .cloned().unwrap_or_else(||serde_json::to_value(registration()).unwrap());
                 reg["status"]=body["status"].clone();
@@ -208,7 +242,10 @@ pub(super) async fn fixture() -> (MockServer, Client, Arc<Mutex<State>>) {
         ResponseTemplate::new(200).set_body_json(value)
     }).mount(&server).await;
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
+    let config = crate::kube_client_config::preserve_request_semantics(kube::Config::new(
+        server.uri().parse().unwrap(),
+    ));
+    let client = Client::try_from(config).unwrap();
     (server, client, state)
 }
 
@@ -359,6 +396,22 @@ async fn admission_requires_observed_enforced_policies_without_type_warnings() {
             "metadata":{"name":name},"spec":{"policyName":name,"validationActions":["Deny","Audit"]}}));
     }
     admission::verify(&client).await.unwrap();
+    let binding = format!(
+        "{path}/validatingadmissionpolicybindings/{}",
+        admission::POLICIES[0]
+    );
+    let original = state.lock().unwrap().objects[&binding].clone();
+    for spec in [
+        json!({}),
+        json!({"policyName":admission::POLICIES[0],"validationActions":[]}),
+        json!({"policyName":admission::POLICIES[0],"validationActions":["Audit"]}),
+        json!({"policyName":"wrong-policy","validationActions":["Deny"]}),
+    ] {
+        state.lock().unwrap().objects.get_mut(&binding).unwrap()["spec"] = spec;
+        assert!(admission::verify(&client).await.is_err());
+    }
+    state.lock().unwrap().objects.insert(binding, original);
+    admission::verify(&client).await.unwrap();
     let policy = format!(
         "{path}/validatingadmissionpolicies/{}",
         admission::POLICIES[0]
@@ -458,6 +511,42 @@ async fn credentials_are_private_bound_and_renewable_without_agent_jwt() {
 }
 
 #[tokio::test]
+async fn incomplete_token_responses_never_publish_private_credentials() {
+    for field in ["token", "expirationTimestamp"] {
+        let (server, client, state) = fixture().await;
+        let reg = registration();
+        let authority = live::verify(&client, &reg).await.unwrap();
+        let sa = credentials::ensure_service_account(&client, &reg, &authority)
+            .await
+            .unwrap();
+        let mut status = json!({"token":"test-token","expirationTimestamp":
+            (chrono::Utc::now()+chrono::Duration::hours(1)).to_rfc3339()});
+        status.as_object_mut().unwrap().remove(field);
+        Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path(format!(
+                "/api/v1/namespaces/{RUNTIME_NAMESPACE}/serviceaccounts/{ROUTER_SA}/token"
+            )))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "apiVersion":"authentication.k8s.io/v1","kind":"TokenRequest",
+                "spec":{"audiences":[]},"status":status
+            })))
+            .with_priority(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        let error = credentials::ensure_for_test(&client, &reg, &authority, &sa)
+            .await
+            .unwrap_err();
+        assert!(error.contains("TokenRequest omitted"), "{error}");
+        assert!(!error.contains("test-token"));
+        let locked = state.lock().unwrap();
+        let private =
+            &locked.objects["/api/v1/namespaces/kars-sre/secrets/sre-api-router-identity"];
+        assert!(private["data"].get("kube-token").is_none());
+    }
+}
+
+#[tokio::test]
 async fn unsafe_authorization_or_recreated_targets_never_receive_private_material() {
     for problem in [
         "secret-access",
@@ -553,10 +642,7 @@ async fn migration_waits_for_consumers_and_retires_only_owned_private_material()
     );
 }
 
-#[tokio::test]
-async fn old_control_token_consumers_must_disappear_even_after_rollout_counters_converge() {
-    let (_server, client, state) = fixture().await;
-    let reg = registration();
+fn control_consumer(state: &Arc<Mutex<State>>, reg: &KarsSRERegistration, replicas: i32) {
     let epoch = reg.epoch();
     {
         let mut locked = state.lock().unwrap();
@@ -570,7 +656,7 @@ async fn old_control_token_consumers_must_disappear_even_after_rollout_counters_
             "labels":{"kars.azure.com/sandbox":"sre"},
             "managedFields":[{"manager":crate::field_managers::CLAWSANDBOX,"operation":"Apply","apiVersion":"apps/v1",
                 "fieldsType":"FieldsV1","fieldsV1":{"f:spec":{}}}]},
-        "spec":{"replicas":0,"selector":{"matchLabels":{"app":"sre"}},"template":{"metadata":{"annotations":{EPOCH:epoch,CONTROL_VERSION:"control:1"}},
+        "spec":{"replicas":replicas,"selector":{"matchLabels":{"app":"sre"}},"template":{"metadata":{"annotations":{EPOCH:epoch,CONTROL_VERSION:"control:1"}},
             "spec":{"containers":[]}}},
         "status":{"observedGeneration":2,"updatedReplicas":0,"availableReplicas":0}}));
         locked.objects.insert(
@@ -580,6 +666,438 @@ async fn old_control_token_consumers_must_disappear_even_after_rollout_counters_
             "deletionTimestamp":"2026-09-08T00:00:00Z"},"spec":{"containers":[]}}]}),
         );
     }
+}
+
+#[tokio::test]
+async fn retired_control_without_a_deployment_requires_verified_absent_consumers() {
+    for problem in [
+        "none",
+        "unretired",
+        "false-marker",
+        "pod",
+        "pods-api",
+        "changed-claim",
+    ] {
+        let (server, client, state) = fixture().await;
+        let reg = registration();
+        control_consumer(&state, &reg, 0);
+        {
+            let mut locked = state.lock().unwrap();
+            locked
+                .objects
+                .remove("/apis/apps/v1/namespaces/kars-sre/deployments/sre");
+            let secret = &mut locked.objects.get_mut("/api/v1/secrets").unwrap()["items"][0];
+            if problem != "unretired" {
+                secret["metadata"]["annotations"]
+                    [crate::reconciler::governed_services::credentials::RETIRED] =
+                    if problem == "false-marker" {
+                        "false"
+                    } else {
+                        "true"
+                    }
+                    .into();
+            }
+            if problem != "pod" {
+                locked
+                    .objects
+                    .get_mut("/api/v1/namespaces/kars-sre/pods")
+                    .unwrap()["items"] = json!([]);
+            }
+            if problem == "changed-claim" {
+                locked.namespace["metadata"]["annotations"]["kars.azure.com/sandbox-uid"] =
+                    "replacement".into();
+            }
+        }
+        if problem == "pods-api" {
+            Mock::given(wiremock::matchers::method("GET"))
+                .and(wiremock::matchers::path("/api/v1/namespaces/kars-sre/pods"))
+                .respond_with(api_error(403))
+                .with_priority(1)
+                .mount(&server)
+                .await;
+        }
+        let before = state.lock().unwrap().objects.clone();
+        let result = migration::rotate_owned_control_credentials(&client, &reg).await;
+        assert_eq!(result.is_ok(), problem == "none", "{problem}: {result:?}");
+        let locked = state.lock().unwrap();
+        assert_eq!(locked.objects, before, "{problem}");
+        assert!(locked.calls.iter().all(|(method, path, _)|
+            method == "GET" || path.ends_with("/subjectaccessreviews")), "{problem}");
+    }
+}
+
+#[tokio::test]
+async fn newly_issued_control_without_deployment_preserves_only_qualified_empty_state() {
+    for problem in [
+        "none",
+        "unqualified",
+        "old-epoch",
+        "invalid-token",
+        "false-retired-marker",
+        "changed-claim",
+        "pod",
+        "pods-api",
+        "allowed",
+    ] {
+        let (server, client, state) = fixture().await;
+        let mut reg = registration();
+        reg.status = Some(
+            serde_json::from_value(json!({
+                "phase":"Ready", "observedGeneration":1,
+                "legacySecretAccessDenied":true,
+                "privacyRevision":crate::sre_privacy::REVISION,
+                "privacyEpoch":reg.epoch()
+            }))
+            .unwrap(),
+        );
+        control_consumer(&state, &reg, 1);
+        {
+            let mut locked = state.lock().unwrap();
+            locked
+                .objects
+                .remove("/apis/apps/v1/namespaces/kars-sre/deployments/sre");
+            let secret = &mut locked.objects.get_mut("/api/v1/secrets").unwrap()["items"][0];
+            secret["data"] = json!({"control-token":base64::engine::general_purpose::STANDARD.encode("a".repeat(64))});
+            if problem == "old-epoch" {
+                secret["metadata"]["annotations"][EPOCH] = "old".into();
+            }
+            if problem == "invalid-token" {
+                secret["data"] = json!({});
+            }
+            if problem == "false-retired-marker" {
+                secret["metadata"]["annotations"]
+                    [crate::reconciler::governed_services::credentials::RETIRED] = "false".into();
+            }
+            if problem != "pod" {
+                locked
+                    .objects
+                    .get_mut("/api/v1/namespaces/kars-sre/pods")
+                    .unwrap()["items"] = json!([]);
+            }
+            if problem == "changed-claim" {
+                locked.namespace["metadata"]["annotations"]["kars.azure.com/sandbox-uid"] =
+                    "replacement".into();
+            }
+            locked.allowed = problem == "allowed";
+        }
+        if problem == "unqualified" {
+            reg.status.as_mut().unwrap().phase = "Migrating".into();
+        }
+        if problem == "pods-api" {
+            Mock::given(wiremock::matchers::method("GET"))
+                .and(wiremock::matchers::path("/api/v1/namespaces/kars-sre/pods"))
+                .respond_with(api_error(403))
+                .with_priority(1)
+                .mount(&server)
+                .await;
+        }
+        let before = state.lock().unwrap().objects.clone();
+        let result = migration::rotate_owned_control_credentials(&client, &reg).await;
+        assert_eq!(result.is_ok(), problem == "none", "{problem}: {result:?}");
+        let locked = state.lock().unwrap();
+        assert_eq!(locked.objects, before, "{problem}");
+        assert!(locked.calls.iter().all(|(method, path, _)|
+            method == "GET" || path.ends_with("/subjectaccessreviews")), "{problem}");
+    }
+}
+
+#[tokio::test]
+async fn owned_control_retirement_waits_without_rotating_private_credentials() {
+    for retirement in [
+        "namespace",
+        "secret",
+        "source",
+        "owner-gone",
+        "namespace-gone",
+    ] {
+        let (server, client, state) = fixture().await;
+        let reg = registration();
+        let authority = live::verify(&client, &reg).await.unwrap();
+        let sa = credentials::ensure_service_account(&client, &reg, &authority)
+            .await
+            .unwrap();
+        credentials::ensure_for_test(&client, &reg, &authority, &sa)
+            .await
+            .unwrap();
+        control_consumer(&state, &reg, 1);
+        {
+            let mut locked = state.lock().unwrap();
+            if retirement == "source" {
+                locked.sandbox["metadata"]["deletionTimestamp"] = "2026-10-15T00:00:00Z".into();
+            } else {
+                locked.namespace["metadata"]["deletionTimestamp"] = "2026-10-15T00:00:00Z".into();
+            }
+            if retirement == "secret" {
+                locked.objects.get_mut("/api/v1/secrets").unwrap()["items"][0]["metadata"]["deletionTimestamp"] =
+                    "2026-10-15T00:00:00Z".into();
+            }
+            locked.calls.clear();
+        }
+        if retirement == "namespace-gone" {
+            let secret = state.lock().unwrap().objects["/api/v1/secrets"]["items"][0].clone();
+            Mock::given(wiremock::matchers::method("GET"))
+                .and(wiremock::matchers::path(
+                    "/api/v1/namespaces/kars-sre/secrets/router-services-admin",
+                ))
+                .respond_with(ResponseTemplate::new(200).set_body_json(secret))
+                .with_priority(1)
+                .mount(&server)
+                .await;
+        }
+        if retirement == "owner-gone" || retirement == "namespace-gone" {
+            let path = if retirement == "owner-gone" {
+                "/apis/kars.azure.com/v1alpha1/namespaces/kars-system/karssandboxes/sre"
+            } else {
+                "/api/v1/namespaces/kars-sre"
+            };
+            Mock::given(wiremock::matchers::method("GET"))
+                .and(wiremock::matchers::path(path))
+                .respond_with(api_error(404))
+                .with_priority(1)
+                .mount(&server)
+                .await;
+        }
+        let before = state.lock().unwrap().objects.clone();
+        let error = migration::rotate_owned_control_credentials(&client, &reg)
+            .await
+            .unwrap_err();
+        assert!(migration::is_waiting(&error), "{retirement}: {error}");
+        {
+            let locked = state.lock().unwrap();
+            assert_eq!(locked.objects, before, "{retirement}");
+            assert!(
+                locked
+                    .calls
+                    .iter()
+                    .all(|(method, path, _)| method == "GET"
+                        || path.ends_with("/subjectaccessreviews")),
+                "{retirement}"
+            );
+        }
+        state
+            .lock()
+            .unwrap()
+            .objects
+            .get_mut("/api/v1/secrets")
+            .unwrap()["items"] = json!([]);
+        migration::rotate_owned_control_credentials(&client, &reg)
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn qualified_control_cleanup_does_not_interrupt_other_workers() {
+    for case in [
+        "empty",
+        "current",
+        "owner-gone",
+        "old-secret",
+        "old-pod",
+        "old-version",
+        "unqualified",
+        "retired-secret",
+        "allowed",
+        "pods-api",
+        "source-only",
+    ] {
+        let (server, client, state) = fixture().await;
+        let mut reg = registration();
+        reg.status = Some(
+            serde_json::from_value(json!({
+                "phase":"Ready", "observedGeneration":1,
+                "legacySecretAccessDenied":true,
+                "privacyRevision":crate::sre_privacy::REVISION,
+                "privacyEpoch":reg.epoch()
+            }))
+            .unwrap(),
+        );
+        control_consumer(&state, &reg, 1);
+        {
+            let mut locked = state.lock().unwrap();
+            if case == "source-only" {
+                locked.sandbox["metadata"]["deletionTimestamp"] = "2026-10-21T23:06:00Z".into();
+            } else {
+                locked.namespace["metadata"]["deletionTimestamp"] = "2026-10-21T23:06:00Z".into();
+            }
+            let pod = &mut locked
+                .objects
+                .get_mut("/api/v1/namespaces/kars-sre/pods")
+                .unwrap()["items"][0];
+            pod["metadata"]["annotations"] =
+                json!({EPOCH:reg.epoch(), CONTROL_VERSION:"control:1"});
+            if case == "old-pod" {
+                pod["metadata"]["annotations"][EPOCH] = "old".into();
+            }
+            if case == "old-version" {
+                pod["metadata"]["annotations"][CONTROL_VERSION] = "control:0".into();
+            }
+            if case == "empty" {
+                locked
+                    .objects
+                    .get_mut("/api/v1/namespaces/kars-sre/pods")
+                    .unwrap()["items"] = json!([]);
+                reg.status = None;
+            }
+            if case == "unqualified" {
+                reg.status.as_mut().unwrap().phase = "Migrating".into();
+            }
+            let secret = &mut locked.objects.get_mut("/api/v1/secrets").unwrap()["items"][0];
+            if case == "old-secret" {
+                secret["metadata"]["annotations"][EPOCH] = "old".into();
+            }
+            if case == "retired-secret" {
+                secret["metadata"]["annotations"]
+                    [crate::reconciler::governed_services::credentials::RETIRED] = "true".into();
+            }
+            locked.allowed = case == "allowed";
+        }
+        if case == "pods-api" || case == "owner-gone" {
+            let path = if case == "pods-api" {
+                "/api/v1/namespaces/kars-sre/pods"
+            } else {
+                "/apis/kars.azure.com/v1alpha1/namespaces/kars-system/karssandboxes/sre"
+            };
+            Mock::given(wiremock::matchers::method("GET"))
+                .and(wiremock::matchers::path(path))
+                .respond_with(api_error(if case == "pods-api" { 403 } else { 404 }))
+                .with_priority(1)
+                .mount(&server)
+                .await;
+        }
+        let before = state.lock().unwrap().objects.clone();
+        let result = migration::rotate_owned_control_credentials(&client, &reg).await;
+        assert_eq!(
+            result.is_ok(),
+            matches!(case, "empty" | "current" | "owner-gone"),
+            "{case}: {result:?}"
+        );
+        let locked = state.lock().unwrap();
+        assert_eq!(locked.objects, before, "{case}");
+        assert!(locked.calls.iter().all(|(method, path, _)|
+            method == "GET" || path.ends_with("/subjectaccessreviews")), "{case}");
+    }
+}
+
+#[tokio::test]
+async fn collected_control_namespace_requires_fresh_credential_absence() {
+    for code in [404, 403, 500] {
+        let (server, client, state) = fixture().await;
+        let reg = registration();
+        control_consumer(&state, &reg, 1);
+        Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/namespaces/kars-sre"))
+            .respond_with(api_error(404))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/api/v1/namespaces/kars-sre/secrets/router-services-admin",
+            ))
+            .respond_with(api_error(code))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        let before = state.lock().unwrap().objects.clone();
+        let result = migration::rotate_owned_control_credentials(&client, &reg).await;
+        assert_eq!(result.is_ok(), code == 404, "{code}: {result:?}");
+        let locked = state.lock().unwrap();
+        assert_eq!(locked.objects, before);
+        assert!(locked.calls.iter().all(|(method, _, _)| method == "GET"));
+    }
+}
+
+#[tokio::test]
+async fn control_retirement_does_not_hide_changed_identity_or_invalid_claims() {
+    for problem in [
+        "namespace-uid",
+        "source-uid",
+        "claim-uid",
+        "claim-version",
+        "foreign-owner",
+        "prestage",
+        "namespace-rv",
+        "secret-uid",
+        "owner-gone-active",
+        "namespace-api",
+    ] {
+        let (server, client, state) = fixture().await;
+        let reg = registration();
+        control_consumer(&state, &reg, 1);
+        {
+            let mut locked = state.lock().unwrap();
+            locked.namespace["metadata"]["deletionTimestamp"] = "2026-10-15T00:00:00Z".into();
+            match problem {
+                "namespace-uid" => locked.namespace["metadata"]["uid"] = "replacement".into(),
+                "source-uid" => locked.sandbox["metadata"]["uid"] = "replacement".into(),
+                "claim-uid" => {
+                    locked.namespace["metadata"]["annotations"]["kars.azure.com/sandbox-uid"] =
+                        "replacement".into()
+                }
+                "claim-version" => {
+                    locked.namespace["metadata"]["annotations"]["kars.azure.com/namespace-claim-version"] =
+                        "untrusted".into()
+                }
+                "foreign-owner" => {
+                    locked.namespace["metadata"]["ownerReferences"] = json!([{"apiVersion":"v1","kind":"Namespace","name":"foreign","uid":"foreign"}])
+                }
+                "prestage" => {
+                    locked.namespace["metadata"]["annotations"]["kars.azure.com/namespace-prestage"] =
+                        "bind-next-sandbox".into()
+                }
+                "namespace-rv" => locked.namespace["metadata"]["resourceVersion"] = "".into(),
+                "secret-uid" => {
+                    locked.objects.get_mut("/api/v1/secrets").unwrap()["items"][0]["metadata"]["uid"] =
+                        "".into()
+                }
+                "owner-gone-active" => {
+                    locked.namespace["metadata"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("deletionTimestamp");
+                }
+                _ => {}
+            }
+        }
+        if problem == "namespace-api" {
+            Mock::given(wiremock::matchers::method("GET"))
+                .and(wiremock::matchers::path("/api/v1/namespaces/kars-sre"))
+                .respond_with(api_error(403))
+                .with_priority(1)
+                .mount(&server)
+                .await;
+        } else if !matches!(problem, "namespace-uid" | "source-uid" | "secret-uid") {
+            Mock::given(wiremock::matchers::method("GET"))
+                .and(wiremock::matchers::path(
+                    "/apis/kars.azure.com/v1alpha1/namespaces/kars-system/karssandboxes/sre",
+                ))
+                .respond_with(api_error(404))
+                .with_priority(1)
+                .mount(&server)
+                .await;
+        }
+        let error = migration::rotate_owned_control_credentials(&client, &reg)
+            .await
+            .unwrap_err();
+        assert!(!migration::is_waiting(&error), "{problem}: {error}");
+        assert!(
+            state
+                .lock()
+                .unwrap()
+                .calls
+                .iter()
+                .all(|(method, _, _)| method == "GET"),
+            "{problem}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn old_control_token_consumers_must_disappear_even_after_rollout_counters_converge() {
+    let (_server, client, state) = fixture().await;
+    let reg = registration();
+    control_consumer(&state, &reg, 0);
     let error = migration::rotate_owned_control_credentials(&client, &reg)
         .await
         .unwrap_err();
@@ -601,4 +1119,172 @@ async fn old_control_token_consumers_must_disappear_even_after_rollout_counters_
             .iter()
             .all(|(method, path, _)| method == "GET" || path.ends_with("/subjectaccessreviews"))
     );
+}
+
+#[tokio::test]
+async fn control_rotation_drains_unready_consumers_and_restores_exact_replica_intent() {
+    let (_server, client, state) = fixture().await;
+    let reg = registration();
+    control_consumer(&state, &reg, 3);
+    let path = "/apis/apps/v1/namespaces/kars-sre/deployments/sre";
+    let pods = "/api/v1/namespaces/kars-sre/pods";
+    let marker = "kars.azure.com/sre-control-drain";
+    assert!(migration::is_waiting(
+        &migration::rotate_owned_control_credentials(&client, &reg)
+            .await
+            .unwrap_err()
+    ));
+    {
+        let locked = state.lock().unwrap();
+        assert_eq!(locked.objects[path]["spec"]["replicas"], 0);
+        assert_eq!(
+            locked.objects[path]["metadata"]["annotations"][marker],
+            format!("{}:3", reg.epoch())
+        );
+    }
+    // Neither stale Deployment status nor an empty Pod list alone completes the drain.
+    state.lock().unwrap().objects.get_mut(pods).unwrap()["items"] = json!([]);
+    assert!(migration::is_waiting(
+        &migration::rotate_owned_control_credentials(&client, &reg)
+            .await
+            .unwrap_err()
+    ));
+    assert_eq!(state.lock().unwrap().objects[path]["spec"]["replicas"], 0);
+    state.lock().unwrap().objects.get_mut(path).unwrap()["status"] =
+        json!({"observedGeneration":3,"replicas":0,"availableReplicas":0});
+    state.lock().unwrap().objects.get_mut(pods).unwrap()["items"] = json!([{
+        "metadata":{"name":"terminating","deletionTimestamp":"2026-10-12T00:00:00Z"},
+        "spec":{"containers":[]}
+    }]);
+    assert!(migration::is_waiting(
+        &migration::rotate_owned_control_credentials(&client, &reg)
+            .await
+            .unwrap_err()
+    ));
+    assert_eq!(state.lock().unwrap().objects[path]["spec"]["replicas"], 0);
+    state.lock().unwrap().objects.get_mut(pods).unwrap()["items"] = json!([]);
+    assert!(migration::is_waiting(
+        &migration::rotate_owned_control_credentials(&client, &reg)
+            .await
+            .unwrap_err()
+    ));
+    {
+        let locked = state.lock().unwrap();
+        assert_eq!(locked.objects[path]["spec"]["replicas"], 3);
+        assert!(
+            locked.objects[path]["metadata"]["annotations"]
+                .get(marker)
+                .is_none()
+        );
+        let patches: Vec<_> = locked
+            .calls
+            .iter()
+            .filter(|(method, _, _)| method == "PATCH")
+            .collect();
+        assert_eq!(patches.len(), 2);
+        for (_, target, body) in patches {
+            assert_eq!(target, path);
+            assert_eq!(body["metadata"]["uid"], "consumer");
+            assert!(body["metadata"]["resourceVersion"].is_string());
+        }
+    }
+    // Restored containers need not be Ready to complete credential retirement.
+    migration::rotate_owned_control_credentials(&client, &reg)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn control_drain_rejects_changed_epoch_or_replica_intent_without_writing() {
+    for (marker, replicas) in [
+        ("wrong:3".to_string(), 0),
+        ("invalid".to_string(), 0),
+        (format!("{}:3", registration().epoch()), 4),
+    ] {
+        let (_server, client, state) = fixture().await;
+        let reg = registration();
+        control_consumer(&state, &reg, replicas);
+        let path = "/apis/apps/v1/namespaces/kars-sre/deployments/sre";
+        state.lock().unwrap().objects.get_mut(path).unwrap()["metadata"]["annotations"] =
+            json!({"kars.azure.com/sre-control-drain":marker});
+        let error = migration::rotate_owned_control_credentials(&client, &reg)
+            .await
+            .unwrap_err();
+        assert!(!migration::is_waiting(&error));
+        assert!(
+            state
+                .lock()
+                .unwrap()
+                .calls
+                .iter()
+                .all(|(method, _, _)| method != "PATCH")
+        );
+    }
+}
+
+#[tokio::test]
+async fn control_drain_and_restore_propagate_compare_and_swap_conflicts() {
+    for restoring in [false, true] {
+        let (server, client, state) = fixture().await;
+        let reg = registration();
+        control_consumer(&state, &reg, if restoring { 0 } else { 3 });
+        let path = "/apis/apps/v1/namespaces/kars-sre/deployments/sre";
+        if restoring {
+            let mut locked = state.lock().unwrap();
+            locked.objects.get_mut(path).unwrap()["metadata"]["annotations"] =
+                json!({"kars.azure.com/sre-control-drain":format!("{}:3", reg.epoch())});
+            locked
+                .objects
+                .get_mut("/api/v1/namespaces/kars-sre/pods")
+                .unwrap()["items"] = json!([]);
+        }
+        let before = state.lock().unwrap().objects[path].clone();
+        Mock::given(wiremock::matchers::method("PATCH"))
+            .and(wiremock::matchers::path(path))
+            .respond_with(api_error(409))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        let error = migration::rotate_owned_control_credentials(&client, &reg)
+            .await
+            .unwrap_err();
+        assert!(!migration::is_waiting(&error));
+        assert!(!error.contains("PRIVATE_SENTINEL"));
+        assert_eq!(state.lock().unwrap().objects[path], before);
+    }
+}
+
+#[tokio::test]
+async fn control_drain_requires_live_complete_consumer_identity_before_writing() {
+    for field in ["uid", "resourceVersion", "generation", "deletionTimestamp"] {
+        let (_server, client, state) = fixture().await;
+        let reg = registration();
+        control_consumer(&state, &reg, 3);
+        {
+            let mut locked = state.lock().unwrap();
+            let metadata = locked
+                .objects
+                .get_mut("/apis/apps/v1/namespaces/kars-sre/deployments/sre")
+                .unwrap()["metadata"]
+                .as_object_mut()
+                .unwrap();
+            if field == "deletionTimestamp" {
+                metadata.insert(field.into(), "2026-10-12T00:00:00Z".into());
+            } else {
+                metadata.remove(field);
+            }
+        }
+        let error = migration::rotate_owned_control_credentials(&client, &reg)
+            .await
+            .unwrap_err();
+        assert!(!migration::is_waiting(&error));
+        assert!(
+            state
+                .lock()
+                .unwrap()
+                .calls
+                .iter()
+                .all(|(method, _, _)| method != "PATCH")
+        );
+    }
 }

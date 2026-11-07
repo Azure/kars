@@ -7,7 +7,10 @@ import { runtimeTarget, type PushedImage } from "./image-targets.js";
 import { readDeployment, requireHealthyDeployment, type DeploymentRecord } from "./core-image-apply.js";
 
 interface SandboxRecord {
-  metadata: { name: string; namespace: string };
+  metadata: {
+    name: string; namespace: string; uid?: string;
+    ownerReferences?: Array<{ apiVersion: string; kind: string; name: string; uid: string; controller?: boolean }>;
+  };
   spec?: {
     runtime?: Record<string, unknown> & { kind?: string };
     openclaw?: { image?: string };
@@ -54,6 +57,30 @@ export function planSandboxImages(cr: SandboxRecord, deployment: DeploymentRecor
   return { cr, deployment, expected, pinned };
 }
 
+async function terminalMission(execute: Execute, cr: SandboxRecord): Promise<boolean> {
+  const owners = cr.metadata.ownerReferences?.filter(owner => owner.controller === true) ?? [];
+  if (owners.length === 0) return false;
+  const owner = owners[0];
+  if (owners.length !== 1 || owner.apiVersion !== "kars.azure.com/v1alpha1" || owner.kind !== "KarsTask" || !owner.uid) {
+    throw new Error(`Cannot verify Mission owner for sandbox ${cr.metadata.name}`);
+  }
+  const { stdout } = await execute("kubectl", ["get", "karstask", owner.name, "-n", cr.metadata.namespace, "-o", "json"], { stdio: "pipe" });
+  const task = JSON.parse(String(stdout)) as {
+    apiVersion?: string; kind?: string;
+    metadata?: { name?: string; namespace?: string; uid?: string; annotations?: Record<string, string> };
+  };
+  if (task.apiVersion !== owner.apiVersion || task.kind !== owner.kind || task.metadata?.name !== owner.name
+    || task.metadata.namespace !== cr.metadata.namespace || task.metadata.uid !== owner.uid) {
+    throw new Error(`Mission owner changed for sandbox ${cr.metadata.name}`);
+  }
+  // Match the controller's terminal-run guard, not a display phase or old completion.
+  const requested = task.metadata.annotations?.["kars.azure.com/run-requested"];
+  const terminal = typeof requested === "string" && requested.length > 0
+    && task.metadata.annotations?.["kars.azure.com/run-completed"] === requested;
+  if (terminal) console.info(`Preserving completed Mission sandbox ${cr.metadata.namespace}/${cr.metadata.name}; no image refresh or restart`);
+  return terminal;
+}
+
 export async function inspectSandboxPlans(execute: Execute, images: PushedImage[]): Promise<SandboxImagePlan[]> {
   if (!images.some(item => item.name === "router" || item.name === "sandbox" || runtimeTarget(item.name))) return [];
   const [deployments, sandboxes] = await Promise.all([
@@ -63,37 +90,53 @@ export async function inspectSandboxPlans(execute: Execute, images: PushedImage[
   const list = JSON.parse(String(deployments.stdout)) as { items?: DeploymentRecord[] };
   const crs = JSON.parse(String(sandboxes.stdout)) as { items?: SandboxRecord[] };
   if (!Array.isArray(list.items) || !Array.isArray(crs.items)) throw new Error("Cannot verify sandbox image overrides");
-  return list.items.map(deployment => {
+  return Promise.all(list.items.map(async deployment => {
     const labels = deployment.metadata?.labels ?? {};
     const name = labels["kars.azure.com/sandbox"] || deployment.metadata?.name;
     const namespace = labels["kars.azure.com/parent-namespace"];
     const candidates = crs.items!.filter(cr => cr.metadata?.name === name && (!namespace || cr.metadata.namespace === namespace));
     if (candidates.length !== 1 || !deployment.metadata.namespace) throw new Error(`Cannot identify the owning CR for sandbox deployment ${name}`);
-    return planSandboxImages(candidates[0], deployment, images);
-  });
+    const plan = planSandboxImages(candidates[0], deployment, images);
+    if (plan.expected.length > 0 && await terminalMission(execute, plan.cr)) plan.expected = [];
+    return plan;
+  }));
 }
 
-/** Let the controller materialize its new defaults from each unmodified CR.
- * Only metadata is touched, never a customer's explicit spec image pin. */
+/** Verify defaults materialized by the restarted controller without writing
+ * protected source CRs or changing a customer's explicit spec image pin. */
 export async function refreshSandboxImages(execute: Execute, plans: SandboxImagePlan[]): Promise<number> {
+  const eligiblePlans = plans.filter(item => item.expected.length > 0);
+  if (eligiblePlans.some(plan => plan.expected.some(item => !/@sha256:[a-f0-9]{64}$/.test(item.image)))) {
+    throw new Error("Sandbox image verification requires immutable artifact digests");
+  }
   let updated = 0;
-  for (const plan of plans.filter(item => item.expected.length > 0)) {
+  for (const plan of eligiblePlans) {
     const { cr, deployment } = plan;
-    // Re-read authority before triggering reconciliation; a concurrently added
-    // custom pin must be preserved, not patched back to a new default.
-    const { stdout } = await execute("kubectl", ["get", "karssandbox", cr.metadata.name, "-n", cr.metadata.namespace, "-o", "json"], { stdio: "pipe" });
-    const current = JSON.parse(String(stdout)) as SandboxRecord;
-    if (JSON.stringify(current.spec) !== JSON.stringify(cr.spec)) throw new Error(`Sandbox ${cr.metadata.name} changed during image preparation; retry with its current overrides`);
-    await execute("kubectl", ["annotate", "karssandbox", cr.metadata.name, "-n", cr.metadata.namespace,
-      `kars.azure.com/image-refresh=${Date.now()}`, "--overwrite"], { stdio: "pipe" });
-    for (const item of plan.expected) {
-      const containers = item.init ? "initContainers" : "containers";
-      await execute("kubectl", ["wait", `deployment/${deployment.metadata.name}`, "-n", deployment.metadata.namespace,
-        `--for=jsonpath={.spec.template.spec.${containers}[?(@.name=="${item.container}")].image}=${item.image}`,
-        "--timeout=180s"], { stdio: "pipe" });
+    const eligible = async () => {
+      const { stdout } = await execute("kubectl", ["get", "karssandbox", cr.metadata.name, "-n", cr.metadata.namespace, "-o", "json"], { stdio: "pipe" });
+      const current = JSON.parse(String(stdout)) as SandboxRecord;
+      if (current.metadata?.uid !== cr.metadata.uid
+        || JSON.stringify(current.metadata?.ownerReferences) !== JSON.stringify(cr.metadata.ownerReferences)
+        || JSON.stringify(current.spec) !== JSON.stringify(cr.spec)) {
+        throw new Error(`Sandbox ${cr.metadata.name} changed during image preparation; retry with its current overrides`);
+      }
+      return !await terminalMission(execute, current);
+    };
+    if (!await eligible()) continue;
+    try {
+      for (const item of plan.expected) {
+        const containers = item.init ? "initContainers" : "containers";
+        await execute("kubectl", ["wait", `deployment/${deployment.metadata.name}`, "-n", deployment.metadata.namespace,
+          `--for=jsonpath={.spec.template.spec.${containers}[?(@.name=="${item.container}")].image}=${item.image}`,
+          "--timeout=180s"], { stdio: "pipe" });
+      }
+    } catch (error) {
+      if (!await eligible()) continue;
+      throw error;
     }
+    // The controller owns workload writes; a changed immutable digest already triggers its rollout.
+    if (!await eligible()) continue;
     if ((deployment.spec.replicas ?? 1) > 0) {
-      await execute("kubectl", ["rollout", "restart", `deployment/${deployment.metadata.name}`, "-n", deployment.metadata.namespace], { stdio: "pipe" });
       await execute("kubectl", ["rollout", "status", `deployment/${deployment.metadata.name}`, "-n", deployment.metadata.namespace, "--timeout=300s"], { stdio: "pipe" });
     }
     const actual = await readDeployment(execute, deployment.metadata.name, deployment.metadata.namespace);

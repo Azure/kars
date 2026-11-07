@@ -141,9 +141,8 @@ pub async fn request_egress(
     })))
 }
 
-/// `GET /api/namespaces/:ns/tasks/:name/egress/learned` — the domains the agent
-/// has actually reached, observed by the router in Learn mode. This is the
-/// evidence a customer reviews before promoting the mission to enforced.
+/// `GET /api/namespaces/:ns/tasks/:name/egress/learned` — reported router
+/// observations and baseline hosts. Observations are not proof of access.
 pub async fn get_learned_egress(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
@@ -164,7 +163,7 @@ pub async fn get_learned_egress(
     let mode = cluster
         .sandbox_egress_mode(&sandbox)
         .await
-        .unwrap_or_else(|| "Learn".into());
+        .unwrap_or_else(|| "Unknown".into());
     let enforced = cluster.sandbox_allowlist(&sandbox).await;
     match cluster.sandbox_learned_domains(&sandbox).await {
         Ok(domains) => Ok(Json(
@@ -176,29 +175,36 @@ pub async fn get_learned_egress(
     }
 }
 
-/// Body for flipping a mission's egress enforcement mode.
+/// Strict allowlist updates from older Mission clients. Learning is unsupported.
 #[derive(Debug, Deserialize)]
 pub struct EgressModeRequest {
-    /// `"learning"` (clear the allowlist → controller runs Learn) or
-    /// `"enforced"` (pin the allowlist → controller runs Strict).
+    #[serde(deserialize_with = "deserialize_strict_mode")]
     pub mode: String,
-    /// The hosts to enforce when `mode == "enforced"`. Typically the reviewed
-    /// subset of the learned domains.
+    /// Reviewed hosts for the Strict baseline; empty does not enable Learning.
     #[serde(default)]
     pub allow: Vec<String>,
     /// When true, UNION `allow` with the mission's current enforced allowlist
     /// instead of replacing it — so granting one host (e.g. from a blocker) can
-    /// never silently wipe previously-approved hosts. The NetworkMode panel,
-    /// which sets the full list deliberately, leaves this false (replace).
+    /// never silently wipe previously-approved hosts. False replaces the list.
     #[serde(default)]
     pub merge: bool,
 }
 
-/// `POST /api/namespaces/:ns/tasks/:name/egress-mode` — promote a mission from
-/// learning (monitoring) to enforced, or back. This drives the REAL lever: the
-/// controller derives `egressMode: Strict` + an allowlist when the blueprint
-/// names egress hosts, and `Learn` when it is empty. Operator-gated; the
-/// controller re-reconciles the sandbox, so this is durable, not a UI toggle.
+fn deserialize_strict_mode<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<String, D::Error> {
+    let mode = <String as serde::Deserialize>::deserialize(deserializer)?;
+    match mode.trim().to_ascii_lowercase().as_str() {
+        "strict" | "enforced" => Ok("strict".into()),
+        _ => Err(serde::de::Error::custom(
+            "Missions use Strict egress; Learning cannot be enabled by clearing reviewed hosts",
+        )),
+    }
+}
+
+/// Compatibility for older clients updating a Strict allowlist. Remove this
+/// route when those clients are retired; new clients request approved access.
+/// An empty allowlist remains Strict, not Learn.
 pub async fn set_egress_mode(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
@@ -207,17 +213,11 @@ pub async fn set_egress_mode(
 ) -> AppResult<Json<serde_json::Value>> {
     let cluster = require_cluster(&state)?;
     let task = require_owned_task(cluster, &ns, &name, &principal).await?;
-    let enforced = match req.mode.as_str() {
-        "enforced" | "strict" => true,
-        "learning" | "learn" => false,
-        _ => {
-            return Err(AppError::BadRequest(
-                "mode must be 'enforced' or 'learning'".into(),
-            ));
-        }
-    };
+    if req.mode != "strict" {
+        return Err(AppError::BadRequest("Missions use Strict egress".into()));
+    }
     // Parse "host" or "host:port" into the blueprint egress shape.
-    let egress: Vec<serde_json::Value> = if enforced {
+    let egress: Vec<serde_json::Value> = {
         let mut parsed: Vec<serde_json::Value> = req
             .allow
             .iter()
@@ -264,18 +264,9 @@ pub async fn set_egress_mode(
                 }
             }
         }
-        if parsed.is_empty() {
-            return Err(AppError::BadRequest(
-                "enforcing requires at least one allowed host — review the learned domains first"
-                    .into(),
-            ));
-        }
         parsed
-    } else {
-        Vec::new()
     };
-    // Patch the mission's blueprint egress; the controller compiles it into the
-    // sandbox's networkPolicy (Strict + allowlist, or Learn when empty).
+    // Empty reviewed hosts do not disable Strict enforcement.
     let patch = serde_json::json!({ "spec": { "blueprint": { "egress": egress } } });
     cluster
         .tasks(&ns)
@@ -288,11 +279,7 @@ pub async fn set_egress_mode(
         .map_err(map_kube_err)?;
     Ok(Json(serde_json::json!({
         "updated": true,
-        "mode": if enforced { "enforced" } else { "learning" },
-        "note": if enforced {
-            "Promoted to enforced — the sandbox will deny anything outside the approved allowlist on its next reconcile."
-        } else {
-            "Back to learning — the sandbox observes and records every domain it reaches without denying."
-        }
+        "mode": "enforced",
+        "note": "Strict baseline hosts updated for reconciliation. This is not confirmation that the router has installed the change; governed model, MCP and temporary access remain separately controlled."
     })))
 }

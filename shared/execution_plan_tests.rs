@@ -19,6 +19,98 @@ pub fn plan() -> ExecutionPlan {
 }
 
 #[test]
+fn unsupported_plan_tool_allowlists_fail_closed_instead_of_discarding_authority() {
+    let plan = filesystem_plan();
+    validate_retained_input_execution(Some(&plan), 1).unwrap();
+    for field in ["tool_allowlist", "toolAllowlist"] {
+        for tools in [
+            json!([]),
+            json!(["file_read"]),
+            json!(["file_write"]),
+            json!(["*"]),
+            json!(["file_*"]),
+        ] {
+            for location in ["", "/roles/0", "/roles/0/phases/0", "/synthesis"] {
+                let mut supplied = serde_json::to_value(&plan).unwrap();
+                supplied.pointer_mut(location).unwrap()[field] = tools.clone();
+                let original = supplied.clone();
+                let error = serde_json::from_value::<ExecutionPlan>(supplied.clone()).unwrap_err();
+                assert!(error.to_string().contains("unknown field"), "{error}");
+                assert_eq!(supplied, original);
+            }
+        }
+    }
+}
+
+#[test]
+fn retained_revision_inputs_require_explicit_read_authority_without_mutation() {
+    let mut plan = filesystem_plan();
+    plan.roles[0].phases[0].execution_mode = Some("native".into());
+    plan.roles[0].phases[0].capabilities = vec!["network".into(), "filesystem-write".into()];
+    plan.synthesis.execution_mode = Some("native".into());
+    let mut researcher = plan.roles[0].clone();
+    researcher.name = "benchmark-research".into();
+    plan.roles.push(researcher);
+    let original = plan.clone();
+    validate_activation(Some(&plan), None, true).unwrap();
+    validate_retained_input_execution(Some(&plan), 0).unwrap();
+    let error = validate_retained_input_execution(Some(&plan), 1).unwrap_err();
+    assert!(error.starts_with("This run cannot start because"));
+    assert!(error.ends_with("[ReviewedInputCapabilityRequired]"));
+    for text in [
+        "ReviewedInputCapabilityRequired",
+        "writer",
+        "benchmark-research",
+        "permission to read",
+        "Edit",
+        "previous work",
+    ] {
+        assert!(error.contains(text), "{error}");
+    }
+    assert_eq!(
+        plan, original,
+        "validation must not widen the reviewed plan"
+    );
+    for role in &mut plan.roles {
+        role.phases[0].capabilities.push("filesystem-read".into());
+    }
+    let reviewed = plan.clone();
+    validate_retained_input_execution(Some(&plan), 16).unwrap();
+    assert_eq!(plan, reviewed);
+    plan.roles[1].phases[0].max_tool_calls = 0;
+    assert!(
+        validate_retained_input_execution(Some(&plan), 1)
+            .unwrap_err()
+            .contains("benchmark-research")
+    );
+    plan = reviewed;
+    plan.synthesis
+        .capabilities
+        .retain(|capability| capability != "filesystem-read");
+    assert!(
+        validate_retained_input_execution(Some(&plan), 1)
+            .unwrap_err()
+            .contains("principal synthesis")
+    );
+    assert!(validate_retained_input_execution(None, 1).is_err());
+    assert!(validate_retained_input_execution(None, 0).is_ok());
+}
+
+#[test]
+fn retained_input_allowance_includes_base_files_and_preserves_zero_denials() {
+    let mut plan = filesystem_plan();
+    // Scripted execution needs one read per input in addition to its handoff.
+    assert!(validate_retained_input_execution(Some(&plan), 2).is_ok());
+    assert!(validate_retained_input_execution(Some(&plan), 3).is_err());
+    plan.roles[0].phases[0].execution_mode = Some("native".into());
+    plan.synthesis.execution_mode = Some("native".into());
+    plan.roles[0].phases[0].max_tool_calls = 1;
+    assert!(validate_retained_input_execution(Some(&plan), 3).is_ok());
+    plan.roles[0].phases[0].max_tool_calls = 0;
+    assert!(validate_retained_input_execution(Some(&plan), 3).is_err());
+}
+
+#[test]
 fn drafts_validate_but_current_executor_cannot_activate_them() {
     let plan = plan();
     assert!(validate_activation(Some(&plan), Some("execution-plan/v1"), false).is_ok());
@@ -38,6 +130,328 @@ fn drafts_validate_but_current_executor_cannot_activate_them() {
     }
 }
 
+#[test]
+fn reviewed_exact_public_fetch_activates_without_dropping_requirements() {
+    let mut value = serde_json::to_value(filesystem_plan()).unwrap();
+    value["roles"][0]["phases"][0]["capabilities"] =
+        json!(["filesystem-read", "filesystem-write", "network"]);
+    value["roles"][0]["phases"][0]["requiredToolCalls"] = json!([
+        {"name":"http_fetch","arguments":{"method":"GET","url":"https://www.example.com/pricing?q=public%20plans"}}
+    ]);
+    let candidate: ExecutionPlan = serde_json::from_value(value.clone()).unwrap();
+    let original = candidate.clone();
+    assert!(validate_activation(Some(&candidate), None, true).is_ok());
+    assert_eq!(candidate, original);
+    for (path, replacement) in [
+        ("/roles/0/phases/0/maxToolCalls", json!(1)),
+        ("/roles/0/phases/0/requiredToolCalls", json!([])),
+        (
+            "/roles/0/phases/0/capabilities",
+            json!(["filesystem-read", "filesystem-write"]),
+        ),
+        (
+            "/roles/0/phases/0/requiredToolCalls/0/arguments/method",
+            json!("POST"),
+        ),
+        (
+            "/roles/0/phases/0/requiredToolCalls/0/name",
+            json!("web_search"),
+        ),
+    ] {
+        let mut changed = value.clone();
+        *changed.pointer_mut(path).unwrap() = replacement;
+        let changed = serde_json::from_value(changed).unwrap();
+        assert!(
+            validate_activation(Some(&changed), None, true).is_err(),
+            "{path}"
+        );
+    }
+    let mut duplicate = candidate.clone();
+    duplicate.roles[0].phases[0]
+        .required_tool_calls
+        .push(candidate.roles[0].phases[0].required_tool_calls[0].clone());
+    assert!(validate_activation(Some(&duplicate), None, true).is_err());
+    let mut headers = candidate.clone();
+    headers.roles[0].phases[0].required_tool_calls[0]
+        .arguments
+        .insert("headers".into(), "{}".into());
+    assert!(validate_activation(Some(&headers), None, true).is_err());
+}
+
+#[test]
+fn native_headroom_is_reviewed_not_clipped_to_legacy_bounds() {
+    for maximum in [33, 128, i32::MAX] {
+        let mut plan = filesystem_plan();
+        plan.roles[0].phases[0].execution_mode = Some("native".into());
+        plan.roles[0].phases[0].min_tool_calls = maximum;
+        plan.roles[0].phases[0].max_tool_calls = maximum;
+        plan.synthesis.execution_mode = Some("native".into());
+        plan.synthesis.max_tool_calls = maximum;
+        assert!(validate_activation(Some(&plan), None, true).is_ok());
+        let approved = plan.clone();
+        plan.roles[0].phases[0].execution_mode = None;
+        assert!(validate_execution_plan(&plan).is_err());
+        plan = approved.clone();
+        plan.synthesis.execution_mode = None;
+        assert!(validate_execution_plan(&plan).is_err());
+        plan = approved;
+        plan.roles[0].phases[0].max_tool_calls = -1;
+        assert!(validate_execution_plan(&plan).is_err());
+    }
+}
+
+#[test]
+fn native_execution_separates_permissions_from_prescribed_tool_calls() {
+    let mut native = filesystem_plan();
+    let phase = &mut native.roles[0].phases[0];
+    phase.execution_mode = Some("native".into());
+    phase.capabilities = vec!["filesystem-write".into(), "network".into()];
+    phase.min_tool_calls = 0;
+    phase.max_tool_calls = 1;
+    native.synthesis.execution_mode = Some("native".into());
+    native.synthesis.max_tool_calls = 1;
+    let original = native.clone();
+    assert!(validate_activation(Some(&native), None, true).is_ok());
+    assert_eq!(native, original);
+    native.roles[0].phases[0].execution_mode = None;
+    assert!(validate_activation(Some(&native), None, true).is_err());
+    native = original.clone();
+    native.roles[0].phases[0].fresh_context = false;
+    assert!(
+        validate_activation(Some(&native), None, true)
+            .unwrap_err()
+            .contains("cross-phase conversation reuse is not supported")
+    );
+    native = original.clone();
+    native.synthesis.execution_mode = None;
+    assert!(validate_activation(Some(&native), None, true).is_err());
+    for capability in ["shell", "web-search", "mcp"] {
+        native = original.clone();
+        native.roles[0].phases[0]
+            .capabilities
+            .push(capability.into());
+        assert!(
+            validate_activation(Some(&native), None, true).is_err(),
+            "{capability}"
+        );
+    }
+    native = original.clone();
+    native.roles[0].phases[0].execution_mode = Some("future".into());
+    assert!(validate_execution_plan(&native).is_err());
+    native = original;
+    native.synthesis.execution_mode = Some("future".into());
+    assert!(validate_execution_plan(&native).is_err());
+}
+
+#[test]
+fn native_single_agent_uses_explicit_principal_permissions_without_child_roles() {
+    let mut single = filesystem_plan();
+    single.roles.clear();
+    single.synthesis.execution_mode = Some("native".into());
+    single.synthesis.capabilities = vec!["filesystem-write".into(), "network".into()];
+    single.synthesis.max_tool_calls = 16;
+    let original = single.clone();
+    assert!(validate_activation(Some(&single), None, true).is_ok());
+    assert_eq!(single, original);
+    single.synthesis.execution_mode = None;
+    assert!(validate_activation(Some(&single), None, true).is_err());
+    single = original.clone();
+    single.max_parallel = 2;
+    assert!(validate_activation(Some(&single), None, true).is_err());
+    single = original.clone();
+    single.synthesis.max_tool_calls = 0;
+    assert!(validate_activation(Some(&single), None, true).is_err());
+    single = original.clone();
+    single.synthesis.capabilities = vec!["network".into()];
+    assert!(validate_activation(Some(&single), None, true).is_err());
+    for capability in ["shell", "web-search", "mcp"] {
+        single = original.clone();
+        single.synthesis.capabilities.push(capability.into());
+        assert!(validate_activation(Some(&single), None, true).is_err());
+    }
+    single = original;
+    single.deliverables.clear();
+    single.synthesis.capabilities.clear();
+    assert!(validate_activation(Some(&single), None, true).is_ok());
+}
+
+#[test]
+fn github_pr_requires_native_authority_and_never_decomposed_synthesis() {
+    let mut plan = filesystem_plan();
+    plan.roles[0].phases[0]
+        .capabilities
+        .push("github-pr".into());
+    assert!(validate_activation(Some(&plan), None, true).is_err());
+    plan.roles[0].phases[0].execution_mode = Some("native".into());
+    assert!(validate_activation(Some(&plan), None, true).is_ok());
+    plan.synthesis.capabilities.push("github-pr".into());
+    plan.synthesis.execution_mode = Some("native".into());
+    assert!(validate_activation(Some(&plan), None, true).is_err());
+    plan.roles.clear();
+    assert!(validate_activation(Some(&plan), None, true).is_ok());
+    plan.synthesis.execution_mode = None;
+    assert!(validate_activation(Some(&plan), None, true).is_err());
+}
+
+#[test]
+fn python_execute_requires_explicit_native_file_and_network_authority() {
+    let mut plan = filesystem_plan();
+    plan.roles[0].phases[0].execution_mode = Some("native".into());
+    plan.roles[0].phases[0].capabilities = [
+        "filesystem-read",
+        "filesystem-write",
+        "network",
+        "memory",
+        "github-pr",
+        "python-execute",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    let original = plan.clone();
+    assert!(validate_activation(Some(&plan), None, true).is_ok());
+    assert_eq!(plan, original);
+    for missing in ["filesystem-read", "filesystem-write", "network"] {
+        let mut rejected = original.clone();
+        rejected.roles[0].phases[0]
+            .capabilities
+            .retain(|c| c != missing);
+        assert!(
+            validate_activation(Some(&rejected), None, true).is_err(),
+            "{missing}"
+        );
+    }
+    plan.roles[0].phases[0].execution_mode = None;
+    assert!(validate_activation(Some(&plan), None, true).is_err());
+    plan = original.clone();
+    plan.synthesis.execution_mode = Some("native".into());
+    plan.synthesis.capabilities = original.roles[0].phases[0].capabilities.clone();
+    assert!(validate_activation(Some(&plan), None, true).is_err());
+    plan.roles.clear();
+    assert!(validate_activation(Some(&plan), None, true).is_ok());
+    for missing in ["filesystem-read", "filesystem-write", "network"] {
+        let mut rejected = plan.clone();
+        rejected.synthesis.capabilities.retain(|c| c != missing);
+        assert!(
+            validate_activation(Some(&rejected), None, true).is_err(),
+            "{missing}"
+        );
+    }
+    plan.synthesis.execution_mode = None;
+    assert!(validate_activation(Some(&plan), None, true).is_err());
+}
+
+#[test]
+fn memory_requires_native_authority_for_roles_and_synthesis() {
+    let mut plan = filesystem_plan();
+    plan.roles[0].phases[0].capabilities.push("memory".into());
+    assert!(validate_activation(Some(&plan), None, true).is_err());
+    plan.roles[0].phases[0].execution_mode = Some("native".into());
+    assert!(validate_activation(Some(&plan), None, true).is_ok());
+    plan.synthesis.capabilities.push("memory".into());
+    assert!(validate_activation(Some(&plan), None, true).is_err());
+    plan.synthesis.execution_mode = Some("native".into());
+    assert!(validate_activation(Some(&plan), None, true).is_ok());
+    plan.roles.clear();
+    assert!(validate_activation(Some(&plan), None, true).is_ok());
+    plan.synthesis.execution_mode = None;
+    assert!(validate_activation(Some(&plan), None, true).is_err());
+}
+
+#[test]
+fn native_execution_mode_requires_explicit_supported_nonnull_authority() {
+    let legacy = serde_json::to_value(filesystem_plan()).unwrap();
+    assert!(
+        legacy["roles"][0]["phases"][0]
+            .get("executionMode")
+            .is_none()
+    );
+    assert!(legacy["synthesis"].get("executionMode").is_none());
+    for target in ["/roles/0/phases/0", "/synthesis"] {
+        for invalid in [json!(null), json!("future"), json!(true), json!(1)] {
+            let mut changed = legacy.clone();
+            changed.pointer_mut(target).unwrap()["executionMode"] = invalid;
+            assert!(serde_json::from_value::<ExecutionPlan>(changed).is_err());
+        }
+        let mut changed = legacy.clone();
+        changed.pointer_mut(target).unwrap()["executionMode"] = json!("native");
+        let parsed: ExecutionPlan = serde_json::from_value(changed.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), changed);
+    }
+}
+
+#[test]
+fn native_execution_preserves_explicit_requirements_and_retained_input_permissions() {
+    let mut native = filesystem_plan();
+    native.roles[0].phases[0].execution_mode = Some("native".into());
+    native.roles[0].phases[0]
+        .capabilities
+        .push("network".into());
+    native.roles[0].phases[0].required_tool_calls = serde_json::from_value(json!([
+        {"name":"http_fetch","arguments":{"method":"GET","url":"https://example.org/required"}}
+    ]))
+    .unwrap();
+    assert!(validate_filesystem_execution(&native).is_ok());
+    native.roles[0].phases[0]
+        .capabilities
+        .retain(|c| c != "network");
+    assert!(validate_filesystem_execution(&native).is_err());
+    native.roles[0].phases[0].required_tool_calls.clear();
+    let mut reviewer = native.roles[0].clone();
+    reviewer.name = "reviewer".into();
+    reviewer.depends_on = vec!["writer".into()];
+    reviewer.phases[0].capabilities = vec!["filesystem-write".into()];
+    native.roles.push(reviewer);
+    assert!(
+        validate_filesystem_execution(&native)
+            .unwrap_err()
+            .contains("needs filesystem-read")
+    );
+    native.roles[1].phases[0]
+        .capabilities
+        .push("filesystem-read".into());
+    assert!(validate_filesystem_execution(&native).is_ok());
+}
+
+#[test]
+fn reviewed_fetch_urls_are_exact_public_https_without_normalization() {
+    assert!(reviewed_fetch_url(
+        "https://www.example.com/pricing?q=public%20plans"
+    ));
+    for url in [
+        "http://example.com/",
+        "https://example.com",
+        "https://EXAMPLE.com/",
+        "https://example.com:443/",
+        "https://user@example.com/",
+        "https://127.0.0.1/",
+        "https://[::1]/",
+        "https://x.local/",
+        "https://x.internal/",
+        "https://example.com/#part",
+        "https://example.com/a/../b",
+        "https://example.com/%2e/b",
+        "https://example.com/%no",
+        "https://example.com/white space",
+        "https://example.com/é",
+    ] {
+        assert!(!reviewed_fetch_url(url), "{url}");
+    }
+}
+
+#[test]
+fn hosted_search_remains_outside_finite_funding() {
+    let mut candidate = plan();
+    candidate.roles[0].phases[0].required_tool_calls[0].name = "web_search".into();
+    let original = candidate.clone();
+    assert!(
+        validate_activation(Some(&candidate), None, true)
+            .unwrap_err()
+            .contains("hosted web-search is outside the finite funding contract")
+    );
+    assert_eq!(candidate, original);
+}
+
 pub fn filesystem_plan() -> ExecutionPlan {
     let mut candidate = plan();
     let capabilities = vec!["filesystem-read".into(), "filesystem-write".into()];
@@ -49,6 +463,30 @@ pub fn filesystem_plan() -> ExecutionPlan {
 }
 
 #[test]
+fn csv_deliverables_activate_unchanged_for_reviewed_and_native_execution() {
+    for native in [false, true] {
+        let mut candidate = filesystem_plan();
+        candidate.deliverables[0] = ExecutionDeliverable {
+            name: "comparison.csv".into(),
+            media_type: Some("text/csv".into()),
+        };
+        if native {
+            candidate.roles[0].phases[0].execution_mode = Some("native".into());
+            candidate.synthesis.execution_mode = Some("native".into());
+        }
+        let original = candidate.clone();
+        assert!(validate_activation(Some(&candidate), Some("execution-plan/v1"), true).is_ok());
+        assert_eq!(candidate, original);
+        candidate.deliverables[0].media_type = Some("application/pdf".into());
+        assert!(
+            validate_activation(Some(&candidate), None, true)
+                .unwrap_err()
+                .contains("media type application/pdf")
+        );
+    }
+}
+
+#[test]
 fn installed_filesystem_subset_activates_without_narrowing_unsupported_plans() {
     let original = filesystem_plan();
     assert!(validate_activation(Some(&original), Some("execution-plan/v1"), true).is_ok());
@@ -56,21 +494,36 @@ fn installed_filesystem_subset_activates_without_narrowing_unsupported_plans() {
     for (path, value) in [
         ("/roles/0/phases/0/freshContext", json!(false)),
         ("/roles/0/phases/0/capabilities", json!(["filesystem-read"])),
-        ("/roles/0/phases/0/capabilities", json!(["filesystem-read", "shell"])),
+        (
+            "/roles/0/phases/0/capabilities",
+            json!(["filesystem-read", "shell"]),
+        ),
         ("/roles/0/phases/0/minToolCalls", json!(0)),
-        ("/synthesis/capabilities", json!(["filesystem-read", "web-search"])),
+        (
+            "/synthesis/capabilities",
+            json!(["filesystem-read", "web-search"]),
+        ),
         ("/synthesis/maxToolCalls", json!(0)),
         ("/deliverables/0/mediaType", json!("application/pdf")),
     ] {
         let mut changed = original.clone();
         *changed.pointer_mut(path).unwrap() = value;
         if path.ends_with("minToolCalls") {
-            *changed.pointer_mut("/roles/0/phases/0/maxToolCalls").unwrap() = json!(0);
+            *changed
+                .pointer_mut("/roles/0/phases/0/maxToolCalls")
+                .unwrap() = json!(0);
         }
         let changed = serde_json::from_value(changed).unwrap();
-        assert!(validate_activation(Some(&changed), None, false).is_ok(), "{path}");
-        assert!(validate_activation(Some(&changed), None, true).unwrap_err()
-            .contains("TypedPlanExecutionUnavailable"), "{path}");
+        assert!(
+            validate_activation(Some(&changed), None, false).is_ok(),
+            "{path}"
+        );
+        assert!(
+            validate_activation(Some(&changed), None, true)
+                .unwrap_err()
+                .contains("TypedPlanExecutionUnavailable"),
+            "{path}"
+        );
     }
 }
 
@@ -78,7 +531,8 @@ fn installed_filesystem_subset_activates_without_narrowing_unsupported_plans() {
 fn installed_execution_reports_exact_blockers_without_tool_arguments_or_plan_mutation() {
     let mut candidate = plan();
     candidate.roles[0].phases[0].fresh_context = false;
-    candidate.roles[0].phases[0].required_tool_calls[0].arguments
+    candidate.roles[0].phases[0].required_tool_calls[0]
+        .arguments
         .insert("owner".into(), "private-argument-value".into());
     candidate.deliverables[0].media_type = Some("application/pdf".into());
     let original = candidate.clone();
@@ -100,19 +554,34 @@ fn installed_execution_reports_exact_blockers_without_tool_arguments_or_plan_mut
 #[test]
 fn installed_objective_bounds_match_trimmed_runtime_contracts() {
     let original = serde_json::to_value(filesystem_plan()).unwrap();
-    for path in ["/roles/0/objective", "/roles/0/phases/0/objective", "/synthesis/objective"] {
-        for objective in ["                    ", "   Too short to run   ", "\u{feff}  Too short to run  \u{feff}"] {
+    for path in [
+        "/roles/0/objective",
+        "/roles/0/phases/0/objective",
+        "/synthesis/objective",
+    ] {
+        for objective in [
+            "                    ",
+            "   Too short to run   ",
+            "\u{feff}  Too short to run  \u{feff}",
+        ] {
             let mut changed = original.clone();
             *changed.pointer_mut(path).unwrap() = json!(objective);
             let changed = serde_json::from_value(changed).unwrap();
             assert!(validate_activation(Some(&changed), None, false).is_ok());
-            assert!(validate_activation(Some(&changed), None, true).unwrap_err()
-                .contains("TypedPlanExecutionUnavailable"), "{path}");
+            assert!(
+                validate_activation(Some(&changed), None, true)
+                    .unwrap_err()
+                    .contains("TypedPlanExecutionUnavailable"),
+                "{path}"
+            );
         }
         let mut changed = original.clone();
         *changed.pointer_mut(path).unwrap() = json!(format!("  {}  ", "é".repeat(10)));
         let changed = serde_json::from_value(changed).unwrap();
-        assert!(validate_activation(Some(&changed), None, true).is_ok(), "{path}");
+        assert!(
+            validate_activation(Some(&changed), None, true).is_ok(),
+            "{path}"
+        );
     }
 }
 
@@ -123,8 +592,11 @@ fn installed_role_budgets_require_exact_wire_integers() {
     assert!(validate_filesystem_execution(&candidate).is_ok());
     candidate.roles[0].budget_tokens = Some(9_007_199_254_740_992);
     assert!(validate_activation(Some(&candidate), None, false).is_ok());
-    assert!(validate_filesystem_execution(&candidate).unwrap_err()
-        .contains("TypedPlanExecutionUnavailable"));
+    assert!(
+        validate_filesystem_execution(&candidate)
+            .unwrap_err()
+            .contains("TypedPlanExecutionUnavailable")
+    );
 }
 
 #[test]
@@ -134,7 +606,11 @@ fn installed_tool_allowances_cover_every_handoff_read_and_explicit_export() {
     candidate.synthesis.max_tool_calls = 2;
     assert!(validate_filesystem_execution(&candidate).is_ok());
     candidate.synthesis.max_tool_calls = 1;
-    assert!(validate_filesystem_execution(&candidate).unwrap_err().contains("synthesis needs at least 2"));
+    assert!(
+        validate_filesystem_execution(&candidate)
+            .unwrap_err()
+            .contains("synthesis needs at least 2")
+    );
     candidate.synthesis.max_tool_calls = 4;
 
     let mut reviewer = candidate.roles[0].clone();
@@ -142,20 +618,32 @@ fn installed_tool_allowances_cover_every_handoff_read_and_explicit_export() {
     reviewer.depends_on = vec!["writer".into()];
     reviewer.phases[0].name = "review".into();
     candidate.roles.push(reviewer);
-    assert!(validate_filesystem_execution(&candidate).unwrap_err().contains("phase review needs at least 2"));
+    assert!(
+        validate_filesystem_execution(&candidate)
+            .unwrap_err()
+            .contains("phase review needs at least 2")
+    );
     candidate.roles[1].phases[0].max_tool_calls = 2;
     let mut later = candidate.roles[1].phases[0].clone();
     later.name = "refine".into();
     later.max_tool_calls = 1;
     candidate.roles[1].phases.push(later);
-    assert!(validate_filesystem_execution(&candidate).unwrap_err().contains("phase refine needs at least 2"));
+    assert!(
+        validate_filesystem_execution(&candidate)
+            .unwrap_err()
+            .contains("phase refine needs at least 2")
+    );
     candidate.roles[1].phases[1].max_tool_calls = 2;
     let mut deliverable = candidate.deliverables[0].clone();
     deliverable.name = "checklist.md".into();
     candidate.deliverables.push(deliverable);
     assert!(validate_filesystem_execution(&candidate).is_ok());
     candidate.synthesis.max_tool_calls = 3;
-    assert!(validate_filesystem_execution(&candidate).unwrap_err().contains("synthesis needs at least 4"));
+    assert!(
+        validate_filesystem_execution(&candidate)
+            .unwrap_err()
+            .contains("synthesis needs at least 4")
+    );
     // Drafts retain the proposed limits for review; validation never silently widens them.
     assert!(validate_execution_plan(&candidate).is_ok());
     assert_eq!(candidate.synthesis.max_tool_calls, 3);

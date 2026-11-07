@@ -7,21 +7,33 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, Response, StatusCode};
 use axum::routing::get;
 use serde_json::{Value, json};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use tower::{ServiceExt, service_fn};
 
 fn fixture(failure: Option<&'static str>, pods: Vec<Value>, present: bool) -> AppState {
+    let source_read = Arc::new(AtomicBool::new(false));
     let service = service_fn(move |request: Request<_>| {
         let pods = pods.clone();
+        let source_read = source_read.clone();
         async move {
             assert_eq!(request.method(), "GET", "health must not invoke inference");
             let path = request.uri().path();
+            let orchestrator = json!({
+                "apiVersion":"kars.azure.com/v1alpha1", "kind":"KarsSandbox",
+                "metadata":{"name":"bridge-orchestrator","namespace":"kars-system",
+                    "uid":"orchestrator-uid","resourceVersion":"1",
+                    "labels":{"kars.azure.com/orchestrator":"true"}},
+                "spec":{"inferenceRef":{"name":"bridge-orchestrator-inference"}},
+                "status":{"phase":"Pending","namespace":"kars-bridge-orchestrator"}
+            });
             let (target, value) = if path.ends_with("/karssandboxes") {
+                source_read.store(false, Ordering::SeqCst);
                 let items = if present {
                     vec![
-                        json!({"apiVersion":"kars.azure.com/v1alpha1","kind":"KarsSandbox",
-                            "metadata":{"name":"bridge-orchestrator","namespace":"kars-system",
-                                "labels":{"kars.azure.com/orchestrator":"true"}},
-                            "status":{"phase":"Pending"}}),
+                        orchestrator,
                         json!({"apiVersion":"kars.azure.com/v1alpha1","kind":"KarsSandbox",
                             "metadata":{"name":"sre","namespace":"kars-system"},
                             "status":{"phase":"Pending"}}),
@@ -34,18 +46,27 @@ fn fixture(failure: Option<&'static str>, pods: Vec<Value>, present: bool) -> Ap
                     json!({"apiVersion":"kars.azure.com/v1alpha1",
                     "kind":"KarsSandboxList","metadata":{},"items":items}),
                 )
+            } else if path
+                == "/apis/kars.azure.com/v1alpha1/namespaces/kars-system/karssandboxes/bridge-orchestrator"
+            {
+                source_read.store(true, Ordering::SeqCst);
+                ("source", orchestrator)
             } else if path.ends_with("/pods") {
                 let target = if path == "/api/v1/pods" {
-                    if request
-                        .uri()
-                        .query()
-                        .unwrap_or("")
-                        .contains("labelSelector")
-                    {
-                        "candidates"
-                    } else {
-                        "pods"
-                    }
+                    "pods"
+                } else if path == "/api/v1/namespaces/kars-bridge-orchestrator/pods"
+                    && source_read.load(Ordering::SeqCst)
+                {
+                    // Candidate discovery uses the same scoped pod read as
+                    // health, but only after verifying the standing source.
+                    assert!(
+                        request
+                            .uri()
+                            .query()
+                            .unwrap_or("")
+                            .contains("labelSelector")
+                    );
+                    "candidates"
                 } else {
                     "health"
                 };
@@ -65,7 +86,7 @@ fn fixture(failure: Option<&'static str>, pods: Vec<Value>, present: bool) -> Ap
                     "status":"Failure","code":403,"reason":"Forbidden",
                     "message":"private cluster error detail"}),
                 )
-            } else if target == "headlamp" {
+            } else if target == "headlamp" || (target == "source" && !present) {
                 (
                     StatusCode::NOT_FOUND,
                     json!({"apiVersion":"v1","kind":"Status",
@@ -112,6 +133,7 @@ async fn unavailable_cluster_reads_never_become_healthy_or_missing_integrations(
         ("/diagnostics", "sandboxes"),
         ("/orchestrator", "sandboxes"),
         ("/orchestrator", "health"),
+        ("/orchestrator", "source"),
         ("/orchestrator", "candidates"),
         ("/integrations", "sandboxes"),
         ("/integrations", "health"),
@@ -136,7 +158,7 @@ async fn unavailable_cluster_reads_never_become_healthy_or_missing_integrations(
 #[tokio::test]
 async fn successful_empty_reads_remain_distinct_from_api_failures() {
     let app = routes(fixture(None, Vec::new(), false));
-    for route in ["/diagnostics", "/integrations"] {
+    for route in ["/diagnostics", "/integrations", "/orchestrator"] {
         let response = app
             .clone()
             .oneshot(Request::builder().uri(route).body(Body::empty()).unwrap())
@@ -149,11 +171,36 @@ async fn successful_empty_reads_remain_distinct_from_api_failures() {
             assert_eq!(body["scanned_pods"], 0);
             assert_eq!(body["scanned_sandboxes"], 0);
             assert_eq!(body["issues"], json!([]));
+        } else if route == "/orchestrator" {
+            assert_eq!(body["sandbox_present"], false);
+            assert_eq!(body["router_candidates"], 0);
         } else {
             assert_eq!(body["sre_present"], false);
             assert_eq!(body["headlamp_deployed"], false);
         }
     }
+}
+
+#[tokio::test]
+async fn orchestrator_health_resolves_candidates_from_the_verified_source() {
+    let response = routes(fixture(
+        None,
+        vec![pod("ready", "2026-10-01T00:00:00Z", "Running", true)],
+        true,
+    ))
+    .oneshot(
+        Request::builder()
+            .uri("/orchestrator")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+    assert_eq!(body["sandbox_present"], true);
+    assert_eq!(body["router_candidates"], 1);
 }
 
 #[tokio::test]

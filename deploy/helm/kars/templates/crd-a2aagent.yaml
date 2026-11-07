@@ -317,7 +317,9 @@ spec:
                 nullable: true
                 type: array
               lastCompiledAt:
-                description: RFC-3339 timestamp of the last successful compile.
+                description: |-
+                  RFC-3339 timestamp of the last changed compilation result published to status.
+                  Unchanged periodic verification preserves this timestamp.
                 nullable: true
                 type: string
               observedGeneration:
@@ -346,4 +348,3 @@ spec:
     storage: true
     subresources:
       status: {}
-

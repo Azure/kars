@@ -4,15 +4,17 @@
 """Same-Kind historical Helm wait/upgrade proof without controller execution."""
 
 from pathlib import Path
+import json
 import re
 import time
 import types
 
 from sre_authority.bootstrap_probe import converted_objects
-from sre_authority.common import CONTEXT, Harness, SYSTEM, require
+from sre_authority.common import Harness, SYSTEM, require
 from sre_authority.canonical_seed import dry_run_seed_data
 from sre_authority.task_schema_preview import exercise_task_restore_preview, require_task_payload_helper
 from sre_authority.fixtures import LEGACY_COMMIT, install_historical_chart
+from sre_authority.monitoring_dependencies import historical_stage_args, prepare_monitoring_dependencies
 from sre_authority.registration_schema import (
     CRD_NAME, CRD_PATH, create_registration_crd, kind_proxy, request, write_report,
 )
@@ -77,16 +79,18 @@ def exercise(root):
         create_registration_crd(h, obj)
         h.k("wait", "--for=condition=Established", "crd/karssreregistrations.kars.azure.com",
             "--timeout=60s", timeout=70)
-        h.run(["helm", "--kube-context", CONTEXT, "upgrade", "kars", str(root / "deploy/helm/kars"),
-               "--namespace", SYSTEM, "--reset-then-reuse-values", "--set", "sre.authorityStage=true",
-               "--dry-run=server"], timeout=90)
+        upgrade = historical_stage_args(h)
+        monitoring_schemas = prepare_monitoring_dependencies(h, upgrade)
+        h.run(["helm", *upgrade, "--dry-run=server"], timeout=90)
         write_report(root, "legacy-helm-readiness.json", {
             "apiServer": version, "legacyCommit": LEGACY_COMMIT,
             "historicalInstallAndPostInstallHook": "passed", "currentAuthorityServerDryRun": "passed",
             "historicalSeedStrictServerDryRuns": 5, "historicalSeedPersistence": "unchanged",
             "historicalNestedParamsRejection": "passed",
             "newCrdPreviewWithoutPersistedRevision": "passed",
-            "controllerReplicas": 0, "legacyCRDs": 18, "crdCreation": "native-Helm-only"})
+            "controllerReplicas": 0, "legacyCRDs": 18, "crdCreation": "native-Helm-only",
+            "monitoringDependencySchemas": monitoring_schemas,
+            "monitoringDependencyPreparation": "production-guarded-create-and-discovery"})
 
 
 if __name__ == "__main__":

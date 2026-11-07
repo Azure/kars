@@ -11,8 +11,8 @@ export function connectCommand(): Command {
   cmd
     .description("Connect to a sandbox — shell, TUI, or WebUI")
     .argument("<name>", "Sandbox name")
-    .option("--shell", "Drop to bash shell instead of OpenClaw", false)
-    .option("--web", "Open WebUI via port-forward (default for AKS)", false)
+    .option("--shell", "Use the interactive shell (Hermes: chat REPL)", false)
+    .option("--web", "Open WebUI via port-forward (default for OpenClaw on Kubernetes)", false)
     .option("--local", "Connect to local Docker sandbox (skip AKS)", false)
     .option("--cloud", "Connect to AKS cloud sandbox (skip Docker)", false)
     .option("--port <port>", "Local port for WebUI", "18789")
@@ -151,19 +151,11 @@ export function connectCommand(): Command {
         return;
       }
 
-      // Runtime-specific connect path. OpenClaw exposes an HTTP WebUI on
-      // port 18789 (gateway daemon) + a `gateway-token` Secret for bearer
-      // auth. Hermes does not — its `hermes gateway run` daemon is for
-      // channel dispatch (Telegram/Slack/etc), not a browser UI. For
-      // Hermes (and future runtimes that don't ship a webui) we drop the
-      // operator into an interactive `hermes` REPL via `kubectl exec -it`.
-      // Same UX shape as `openclaw tui` for local Docker.
-      //
-      // The exec-ban VAP only targets the literal container name
-      // `openclaw`; Hermes' container is `agent` so this is admission-
-      // compliant (see deploy/helm/kars/templates/admission-pod-exec-ban.yaml
-      // matchConditions).
-      if (runtimeKind === "Hermes") {
+      // Hermes keeps its interactive chat default. Explicit --web uses
+      // the loopback dashboard through the same foreground tunnel lifecycle
+      // as OpenClaw, without reading an OpenClaw gateway-token Secret.
+      const isHermes = runtimeKind === "Hermes";
+      if (isHermes && !options.web) {
         if (options.reset) {
           console.log(chalk.yellow("  Resetting Hermes pod (--reset)..."));
           try {
@@ -179,12 +171,7 @@ export function connectCommand(): Command {
             return;
           }
         }
-        if (options.web) {
-          console.log(chalk.yellow(`\n  Note: Hermes does not ship a browser WebUI (only OpenClaw does).`));
-          console.log(chalk.dim(`  Falling back to interactive shell on the agent container...\n`));
-        } else {
-          console.log(chalk.hex("#0078D4")(`\n  Connecting to ${chalk.bold(name)} (Hermes). Interactive agent shell:\n`));
-        }
+        console.log(chalk.hex("#0078D4")(`\n  Connecting to ${chalk.bold(name)} (Hermes). Interactive agent shell:\n`));
         console.log(chalk.dim(`  Chat:    type your prompt + Enter`));
         console.log(chalk.dim(`  Exit:    Ctrl-D or 'exit'`));
         console.log(chalk.dim(`  Tools:   /tools, /help (hermes built-ins)\n`));
@@ -220,8 +207,15 @@ export function connectCommand(): Command {
 
       // --web or --shell?
       if (options.web || !options.shell) {
-        // WebUI mode: extract token, port-forward, print link
-        console.log(chalk.hex("#0078D4")(`\n  Connecting to ${chalk.bold(name)} WebUI...\n`));
+        // Hermes' dashboard wrapper serves direct port-forwards at / and
+        // relies on loopback access plus Kubernetes port-forward RBAC.
+        const remotePort = isHermes ? 9119 : 18789;
+        if (isHermes && (!/^\d+$/.test(localPort) || Number(localPort) < 1 || Number(localPort) > 65535)) {
+          console.error(chalk.red("  --port must be an integer between 1 and 65535."));
+          process.exitCode = 1;
+          return;
+        }
+        console.log(chalk.hex("#0078D4")(`\n  Connecting to ${chalk.bold(name)} ${isHermes ? "Hermes dashboard" : "WebUI"}...\n`));
 
         // Check if this is a Kata (confidential) sandbox — port-forward doesn't work with Kata VMs
         let isKata = false;
@@ -241,7 +235,7 @@ export function connectCommand(): Command {
         // access is gated by namespaced RBAC on the Secret, no code-execution
         // path through the operator's cluster role.
         let gatewayToken = "";
-        try {
+        if (!isHermes) try {
           const { stdout: tokenB64 } = await execa("kubectl", [
             ...ctxArgs, "get", "secret", "-n", namespace, "gateway-token",
             "-o", "jsonpath={.data.token}",
@@ -253,7 +247,7 @@ export function connectCommand(): Command {
           console.log(chalk.yellow("  Could not read gateway-token Secret."));
         }
 
-        if (!gatewayToken) {
+        if (!isHermes && !gatewayToken) {
           console.log(chalk.red("  Gateway token not found. Is the sandbox running?\n"));
           return;
         }
@@ -266,7 +260,7 @@ export function connectCommand(): Command {
         // `dev`/`up` runs have spammed the gateway with old tokens
         // and triggered "too many failed authentication attempts".
         if (options.reset) {
-          console.log(chalk.yellow("  Resetting gateway lockout: restarting openclaw pod (token preserved)…"));
+          console.log(chalk.yellow(isHermes ? "  Resetting Hermes pod (--reset)..." : "  Resetting gateway lockout: restarting openclaw pod (token preserved)…"));
           try {
             await execa("kubectl", [
               ...ctxArgs, "rollout", "restart", "-n", namespace, `deploy/${name}`,
@@ -274,8 +268,8 @@ export function connectCommand(): Command {
             await execa("kubectl", [
               ...ctxArgs, "rollout", "status", "-n", namespace, `deploy/${name}`, "--timeout=120s",
             ], { stdio: "inherit" });
-            console.log(chalk.green("  Gateway lockout cleared."));
-            console.log(chalk.dim("  Tip: close any open browser tabs pointing at localhost:" + localPort + " before reopening — they may auto-reconnect with a stale token and re-trigger the lockout."));
+            console.log(chalk.green(isHermes ? "  Pod restarted." : "  Gateway lockout cleared."));
+            if (!isHermes) console.log(chalk.dim("  Tip: close any open browser tabs pointing at localhost:" + localPort + " before reopening — they may auto-reconnect with a stale token and re-trigger the lockout."));
             console.log();
           } catch (e) {
             console.log(chalk.red(`  Reset failed: ${(e as Error).message}`));
@@ -283,6 +277,12 @@ export function connectCommand(): Command {
           }
         }
 
+        if (isKata && isHermes) {
+          console.error(chalk.red("  Hermes dashboard port-forward is unavailable for Kata VM pods."));
+          console.error(chalk.dim("  Use a non-Kata sandbox for dashboard access; --web will not open a shell."));
+          process.exitCode = 1;
+          return;
+        }
         if (isKata) {
           // Kata VMs don't support kubectl port-forward — use shell mode instead
           console.log(chalk.yellow("  Note: Kata VM pods don't support port-forward (known limitation)."));
@@ -306,7 +306,8 @@ export function connectCommand(): Command {
         // or after `kars dev` already opened the WebUI). If port
         // 18789 is open AND speaks HTTP, just print the URL + open the
         // browser instead of erroring out with a Node stack trace.
-        const isPortServingHttp = await (async (): Promise<boolean> => {
+        // Never reuse an unverified listener for the tokenless Hermes dashboard.
+        const isPortServingHttp = !isHermes && await (async (): Promise<boolean> => {
           const net = await import("node:net");
           const tcpOpen = await new Promise<boolean>((resolve) => {
             const sock = net.createConnection({ host: "127.0.0.1", port: Number(localPort) });
@@ -360,12 +361,20 @@ export function connectCommand(): Command {
         // common right after `kars up` (the deploy finishes before the image
         // is pulled on the node). Poll until ready, fail fast on image-pull
         // errors, and print a clean message instead of a raw Node stack trace.
-        const podReady = await (async (): Promise<{ ok: boolean; detail: string }> => {
-          const deadlineMs = Date.now() + 180_000; // 3 min — first image pull on a fresh node can be slow
-          const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+        const waitForPodReady = async (signal?: AbortSignal, deadlineMs = Date.now() + 180_000): Promise<{ ok: boolean; detail: string }> => {
+          const sleep = (ms: number) => new Promise<void>(resolve => {
+            if (signal?.aborted) { resolve(); return; }
+            const done = () => {
+              clearTimeout(timer);
+              signal?.removeEventListener("abort", done);
+              resolve();
+            };
+            const timer = setTimeout(done, ms);
+            signal?.addEventListener("abort", done, { once: true });
+          });
           let lastPhase = "Unknown";
           let printedWait = false;
-          while (Date.now() < deadlineMs) {
+          while (!signal?.aborted && Date.now() < deadlineMs) {
             let pod: {
               status?: {
                 phase?: string;
@@ -378,10 +387,12 @@ export function connectCommand(): Command {
                 ...ctxArgs, "get", "pod", "-n", namespace,
                 "-l", `kars.azure.com/sandbox=${name}`,
                 "--sort-by=.metadata.creationTimestamp", "-o", "json",
-              ], { stdio: "pipe" });
+              ], { stdio: "pipe", cancelSignal: signal, timeout: Math.max(1, Math.min(10_000, deadlineMs - Date.now())) });
               const items = JSON.parse(stdout).items as typeof pod[];
               pod = items[items.length - 1]; // newest pod (handles rollouts)
-            } catch {
+            } catch (error) {
+              const detail = (error as { stderr?: string }).stderr || (error as Error).message;
+              if (/forbidden|unauthorized/i.test(detail)) return { ok: false, detail };
               await sleep(2500);
               continue;
             }
@@ -411,14 +422,16 @@ export function connectCommand(): Command {
             await sleep(3000);
           }
           if (printedWait) process.stdout.write("\n");
-          return { ok: false, detail: `timed out after 3m (last phase=${lastPhase})` };
-        })();
+          return { ok: false, detail: signal?.aborted ? "interrupted" : `timed out after 3m (last phase=${lastPhase})` };
+        };
+        const podReady = await waitForPodReady();
 
         if (!podReady.ok) {
           console.log();
           console.log(chalk.red(`  Sandbox '${name}' pod is not ready — ${podReady.detail}`));
           console.log(chalk.dim(`  Inspect it with:  kubectl describe pod -n ${namespace} -l kars.azure.com/sandbox=${name}`));
-          console.log(chalk.dim(`  Then retry:       kars connect ${name}\n`));
+          console.log(chalk.dim(`  Then retry:       kars connect ${name}${isHermes ? ` --web --port ${localPort}${kctx ? ` --context ${kctx}` : ""}` : ""}\n`));
+          if (isHermes) process.exitCode = 1;
           return;
         }
 
@@ -427,7 +440,9 @@ export function connectCommand(): Command {
         // free port instead of crashing with EADDRINUSE — the original
         // "address already in use" footgun when 18789 is held by a stale
         // process or an unrelated listener.
-        const effectivePort = await (async (): Promise<number> => {
+        // Hermes honors the requested port exactly; kubectl reports collisions
+        // without borrowing or terminating another session's listener.
+        const effectivePort = isHermes ? Number(localPort) : await (async (): Promise<number> => {
           const net = await import("node:net");
           const canBind = (p: number) => new Promise<boolean>((resolve) => {
             const srv = net.createServer();
@@ -445,60 +460,153 @@ export function connectCommand(): Command {
           console.log(chalk.dim(`  Port ${localPort} is in use — using ${effectivePort} instead.`));
         }
 
-        console.log(chalk.dim(`  Starting port-forward on localhost:${effectivePort}...`));
-        const pf = execa("kubectl", [
-          ...ctxArgs, "port-forward", "-n", namespace,
-          `deploy/${name}`, `${effectivePort}:18789`,
-        ], { stdio: ["ignore", "pipe", "pipe"] });
+        let reconnect: boolean;
+        let recoveryDeadline: number | undefined;
+        let browserOpened = false;
+        do {
+          reconnect = false;
+          console.log(chalk.dim(`  Starting port-forward on 127.0.0.1:${effectivePort}...`));
+          const pf = execa("kubectl", [
+            ...ctxArgs, "port-forward", "--address", "127.0.0.1", "-n", namespace,
+            `${isHermes ? "svc" : "deploy"}/${name}`, `${effectivePort}:${remotePort}`,
+          ], { stdio: ["ignore", "pipe", "pipe"] });
+          // Attach the rejection handler immediately: kubectl can fail before
+          // it binds (RBAC, occupied port, missing service, or missing binary).
+          const ended = pf.then(() => ({ error: undefined }), (error: unknown) => ({ error }));
+          let pfStderr = "";
+          let pfStdout = "";
+          let markReady!: () => void;
+          const ready = new Promise<void>(resolve => { markReady = resolve; });
+          const onStdout = (chunk: Buffer) => {
+            pfStdout += chunk.toString();
+            if (pfStdout.includes(`Forwarding from 127.0.0.1:${effectivePort} ->`)) markReady();
+          };
+          const onStderr = (chunk: Buffer) => {
+            const line = chunk.toString();
+            pfStderr += line;
+            if (/error|denied|unable|forbidden|refused|reset|EOF|lost connection/i.test(line)) {
+              process.stderr.write(chalk.dim(`    [kubectl] ${line.trim()}\n`));
+            }
+          };
+          pf.stdout?.on("data", onStdout);
+          pf.stderr?.on("data", onStderr);
 
-        let pfStderr = "";
-        pf.stderr?.on("data", (chunk: Buffer) => {
-          const line = chunk.toString();
-          pfStderr += line;
-          // Surface kubectl errors live so the operator can see e.g. auth
-          // failures, deploy-not-found, or LB resets immediately.
-          if (/error|denied|unable|forbidden|refused|reset|EOF|lost connection/i.test(line)) {
-            process.stderr.write(chalk.dim(`    [kubectl] ${line.trim()}\n`));
+          let interrupted = false;
+          const probe = new AbortController();
+          const cleanup = () => {
+            interrupted = true;
+            probe.abort();
+            pf.kill("SIGTERM");
+          };
+          process.on("SIGINT", cleanup);
+          process.on("SIGTERM", cleanup);
+          let startupTimer: ReturnType<typeof setTimeout> | undefined;
+          let probeTimer: ReturnType<typeof setTimeout> | undefined;
+          let active = false;
+          try {
+            await Promise.race([
+              ready,
+              ended.then(({ error }) => { throw error ?? new Error("kubectl exited before the port-forward was ready."); }),
+              new Promise<never>((_, reject) => {
+                startupTimer = setTimeout(() => reject(new Error("Port-forward was not ready after 30s.")), 30_000);
+              }),
+            ]);
+            clearTimeout(startupTimer);
+            if (interrupted) return;
+
+            const url = isHermes
+              ? `http://127.0.0.1:${effectivePort}/`
+              : `http://localhost:${effectivePort}/#token=${gatewayToken}`;
+            if (isHermes) {
+              probeTimer = setTimeout(() => probe.abort(), 5000);
+              try {
+                const response = await fetch(url, { signal: probe.signal, redirect: "error" });
+                await response.body?.cancel();
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+              } catch (error) {
+                throw new Error(`Hermes dashboard on port 9119 is unavailable: ${(error as Error).message}. Check that HERMES_DASHBOARD_ENABLED is not false and the dashboard is running.`, { cause: error });
+              } finally {
+                clearTimeout(probeTimer);
+              }
+            }
+            if (interrupted) return;
+            active = true;
+            recoveryDeadline = undefined;
+            console.log();
+            console.log(`  ${chalk.green("→")} ${chalk.cyan.underline(url)}`);
+            console.log();
+            console.log(chalk.dim(`  Port-forward active. Press Ctrl+C to disconnect.\n`));
+            if (isHermes && !browserOpened) {
+              browserOpened = true;
+              try {
+                const opener = process.platform === "darwin" ? "open"
+                  : process.platform === "win32" ? "start" : "xdg-open";
+                await execa(opener, [url], { stdio: "ignore", timeout: 5000 });
+              } catch {
+                console.log(chalk.dim("  Could not open a browser automatically; open the URL above."));
+              }
+            }
+            const { error } = await ended;
+            if (error && !interrupted) throw error;
+          } catch (error) {
+            if (!interrupted) {
+              const detail = pfStderr.trim() || (error as Error).message;
+              const transportCode = (error as { cause?: { cause?: { code?: string } } }).cause?.cause?.code;
+              const replacementStarting = recoveryDeadline !== undefined && (
+                /connection refused|Current status=Pending/i.test(detail)
+                || ["ECONNREFUSED", "ECONNRESET", "UND_ERR_SOCKET", "UND_ERR_CONNECT_TIMEOUT"].includes(transportCode ?? "")
+              );
+              const transient = (/connection reset by peer|lost connection to pod|unexpected EOF/i.test(detail) || replacementStarting)
+                && !/forbidden|unauthorized|address already in use/i.test(detail);
+              if ((active || recoveryDeadline !== undefined) && transient) {
+                recoveryDeadline ??= Date.now() + 180_000;
+                console.log(chalk.dim(`  Port-forward disconnected: ${detail}. Reconnecting on the same port in 1s...`));
+                await new Promise<void>(resolve => {
+                  const done = () => {
+                    clearTimeout(timer);
+                    probe.signal.removeEventListener("abort", done);
+                    resolve();
+                  };
+                  const timer = setTimeout(done, 1000);
+                  probe.signal.addEventListener("abort", done, { once: true });
+                });
+                if (interrupted) return;
+                const replacement = await waitForPodReady(probe.signal, recoveryDeadline);
+                if (interrupted) return;
+                if (replacement.ok) {
+                  reconnect = true;
+                } else {
+                  console.error(chalk.red(`  Sandbox '${name}' pod is not ready — ${replacement.detail}`));
+                  if (isHermes) process.exitCode = 1;
+                }
+              } else {
+                console.error(chalk.red(`  Port-forward failed: ${detail}`));
+                if (isHermes) {
+                  console.error(chalk.dim(`  Retry with an unused --port and the same --context; verify svc/${name} exposes dashboard port 9119 in ${namespace}.`));
+                  process.exitCode = 1;
+                }
+              }
+            }
+          } finally {
+            clearTimeout(startupTimer);
+            clearTimeout(probeTimer);
+            probe.abort();
+            pf.kill("SIGTERM");
+            await ended;
+            pf.stdout?.removeListener("data", onStdout);
+            pf.stderr?.removeListener("data", onStderr);
+            process.removeListener("SIGINT", cleanup);
+            process.removeListener("SIGTERM", cleanup);
+            if (!reconnect) console.log(chalk.dim("\n  Disconnected.\n"));
           }
-        });
-
-        // Wait for port-forward to be ready
-        await new Promise(r => setTimeout(r, 2000));
-
-        const url = `http://localhost:${effectivePort}/#token=${gatewayToken}`;
-        console.log();
-        console.log(`  ${chalk.green("→")} ${chalk.cyan.underline(url)}`);
-        console.log();
-        console.log(chalk.dim(`  Port-forward active. Press Ctrl+C to disconnect.\n`));
-
-        // Keep alive until Ctrl+C
-        const cleanup = () => {
-          pf.kill("SIGTERM");
-          console.log(chalk.dim("\n  Disconnected.\n"));
-          process.exit(0);
-        };
-        process.on("SIGINT", cleanup);
-        process.on("SIGTERM", cleanup);
-        try {
-          await pf;
-        } catch {
-          // port-forward exited
-          console.log(chalk.dim("\n  Disconnected."));
-          if (pfStderr.trim()) {
-            console.log(chalk.dim(`  kubectl said:\n${pfStderr.split("\n").map(l => "    " + l).join("\n")}`));
-          }
-          console.log();
-        } finally {
-          process.removeListener("SIGINT", cleanup);
-          process.removeListener("SIGTERM", cleanup);
-        }
+        } while (reconnect);
       } else {
         // Shell mode
         console.log(chalk.hex("#0078D4")(`\n  Connected to ${chalk.bold(name)}. Agent is ready.\n`));
         console.log(chalk.dim(`  Chat:    openclaw tui`));
         console.log(chalk.dim(`  Exit:    type "exit"\n`));
         await execa("kubectl", [
-          "exec", "-it", "-n", namespace,
+          ...ctxArgs, "exec", "-it", "-n", namespace,
           `deploy/${name}`, "-c", podContainer,
           "--", "/bin/bash", "--login",
         ], { stdio: "inherit" });

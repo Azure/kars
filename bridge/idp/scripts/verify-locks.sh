@@ -12,7 +12,7 @@ for file in go.mod go.sum api/v2/go.mod api/v2/go.sum; do
     cmp "/packaging/upstream/$file.snapshot" "/locks/upstream/$file.snapshot"
     cp "/locks/$file" "$file"
 done
-test "$(go list -m -f '{{.GoVersion}}')" = 1.26.0
+test "$(go list -m -f '{{.GoVersion}}')" = 1.27.0
 replacements="$(go list -m -f '{{if .Replace}}{{.Path}} => {{.Replace.Path}}{{end}}' all)"
 test "$(printf '%s\n' "$replacements" | sed '/^$/d')" = 'github.com/dexidp/dex/api/v2 => ./api/v2'
 while IFS=@ read -r module version; do
@@ -22,7 +22,7 @@ done < /packaging/locks/requests.txt
 (
     cd api/v2
     test "$(go list -m -f '{{.GoVersion}}')" = 1.26.0
-    test "$(go list -m -f '{{.Version}}' google.golang.org/grpc)" = v1.83.2
+    test "$(go list -m -f '{{.Version}}' google.golang.org/grpc)" = v1.84.0
     replacements="$(go list -m -f '{{if .Replace}}{{.Path}}{{end}}' all)"
     test -z "$(printf '%s\n' "$replacements" | sed '/^$/d')"
 )

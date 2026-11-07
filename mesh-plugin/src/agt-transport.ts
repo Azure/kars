@@ -22,11 +22,13 @@ import type {
   InboxMessage,
   InboxDiagnostics,
   MessageSecurity,
+  MeshSendOperation,
 } from "./transport-interface.js";
 import { LocalInbox } from "./local-inbox.js";
 import { AgtSocketOwner } from "./agt-socket.js";
 import { ed25519 } from "@noble/curves/ed25519.js";
 import * as crypto from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 const MAX_FILE_SIZE = 30 * 1024 * 1024;
 
@@ -92,6 +94,7 @@ interface AgtMeshClientOptions {
   oneTimePrekeyCount?: number;
   autoRegister?: boolean;
   autoReconnect?: boolean;
+  registryClientOptions?: { fetchImpl: typeof fetch };
 }
 
 interface AgtMeshClient {
@@ -134,6 +137,17 @@ interface AgtMeshClient {
   ) => void;
   /** The pinned SDK requires session establishment before encrypted send. */
   establishSessionWithPeer(peerId: string): Promise<unknown>;
+  getSession(peerId: string): { messageCount: number } | undefined;
+  closeSession(peerId: string): boolean;
+}
+
+interface SendCustody {
+  assertCurrent(): void;
+  signal: AbortSignal;
+  peer: string;
+  fetched: boolean;
+  messageWritten: boolean;
+  messageAttempted: boolean;
 }
 
 let agtSdkPromise: Promise<AgtSdkModule> | null = null;
@@ -196,11 +210,14 @@ export interface AgtTransportOptions {
 }
 
 export class AgtTransport implements IMeshTransport {
+  readonly supportsScopedOperations = true;
   private readonly options: AgtTransportOptions;
   private client: AgtMeshClient | null = null;
   private readonly messageHandlers: Array<
-    (from: string, payload: unknown, security: MessageSecurity) => void
+    (from: string, payload: unknown, security: MessageSecurity, ingress?: unknown) => void
   > = [];
+  private readonly ingressCaptures = new Map<typeof this.messageHandlers[number], () => unknown>();
+  private readonly receiveCustody = new AsyncLocalStorage<{ from?: string; captures: Map<unknown, unknown> }>();
   private readonly knockHandlers: Array<
     (from: string, intent: unknown) => Promise<{ accept: boolean }>
   > = [];
@@ -208,6 +225,7 @@ export class AgtTransport implements IMeshTransport {
   private _connected = false;
   private readonly inbox: LocalInbox;
   private readonly sockets: AgtSocketOwner;
+  private readonly sendCustody = new AsyncLocalStorage<SendCustody>();
   private lifecycle: Promise<void> = Promise.resolve();
   private wantConnected = false;
   private epoch = 0;
@@ -242,7 +260,33 @@ export class AgtTransport implements IMeshTransport {
     this.options = options;
     this._plaintextPeers = new Set(options.plaintextPeers ?? []);
     this.inbox = new LocalInbox({ buildHash: "agt" });
-    this.sockets = new AgtSocketOwner(options.wsFactory);
+    this.sockets = new AgtSocketOwner(options.wsFactory, data => {
+      const operation = this.sendCustody.getStore();
+      if (!operation) return;
+      operation.assertCurrent();
+      const frame = typeof data === "string" ? JSON.parse(data) : undefined;
+      if (!frame || !["knock", "message"].includes(frame.type) || frame.to !== operation.peer) {
+        throw new Error("Unexpected relay effect in scoped mesh send");
+      }
+      if (frame.type === "message") operation.messageAttempted = true;
+      return () => { if (frame.type === "message") operation.messageWritten = true; };
+    }, (data, deliver) => {
+      const captures = new Map<unknown, unknown>();
+      let from: string | undefined;
+      if (this.ingressCaptures.size) {
+        try {
+          const frame = JSON.parse(String(data));
+          if (frame.type === "message" && typeof frame.from === "string") {
+            from = frame.from;
+            for (const [handler, capture] of this.ingressCaptures) {
+              try { captures.set(handler, capture()); } catch { /* No native admission on failed custody. */ }
+            }
+          }
+        } catch { /* The SDK owns malformed-frame handling. */ }
+      }
+      // Pending-message replay and pre-KNOCK buffer drains have no live-message custody.
+      this.receiveCustody.run({ from, captures }, deliver);
+    });
   }
 
   get isConnected(): boolean {
@@ -388,6 +432,7 @@ export class AgtTransport implements IMeshTransport {
       agentDid: this.options.identity.agentId,
       displayName,
       wsFactory: this.sockets.create,
+      registryClientOptions: { fetchImpl: (input, init) => this.registryFetch(input, init) },
       plaintextPeers: [...this._plaintextPeers],
       knockTimeout: this.options.knockTimeout,
       capabilities,
@@ -406,7 +451,9 @@ export class AgtTransport implements IMeshTransport {
       // every message exactly once via either the waiter set or the FIFO.
       for (const handler of this.messageHandlers) {
         try {
-          handler(from, payload, security);
+          const ingress = this.receiveCustody.getStore();
+          if (this.ingressCaptures.has(handler)) handler(from, payload, security, ingress?.from === from ? ingress.captures.get(handler) : undefined);
+          else handler(from, payload, security);
         } catch (e) {
           // Handler errors must not poison the SDK callback chain.
           // eslint-disable-next-line no-console
@@ -494,7 +541,89 @@ export class AgtTransport implements IMeshTransport {
     return this.serialize(() => this.retireConnection());
   }
 
-  async send(toAmid: string, payload: unknown): Promise<string | undefined> {
+  private async registryFetch(input: Parameters<typeof fetch>[0], init?: RequestInit): Promise<Response> {
+    const operation = this.sendCustody.getStore();
+    if (!operation) return fetch(input, init);
+    operation.assertCurrent();
+    // Prekey GET consumes an OPK. Never replay it, including the SDK's internal retries.
+    if (operation.fetched) throw new Error("Scoped prekey request cannot be replayed");
+    const expected = `${this.options.registryUrl.replace(/\/$/, "")}/v1/agents/${encodeURIComponent(operation.peer)}/prekeys`;
+    if (String(input) !== expected || init?.method !== "GET") throw new Error("Unexpected scoped registry effect");
+    operation.fetched = true;
+    const signal = AbortSignal.any([operation.signal, ...(init?.signal ? [init.signal] : [])]);
+    const response = await fetch(input, { ...init, signal, redirect: "error" });
+    const reader = response.body?.getReader();
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    try {
+      operation.assertCurrent();
+      if (reader) for (;;) {
+        const chunk = await reader.read();
+        operation.assertCurrent();
+        if (chunk.done) break;
+        size += chunk.value.byteLength;
+        if (size > 64 * 1024) throw new Error("Prekey response exceeds 64 KiB");
+        chunks.push(chunk.value);
+      }
+      return new Response(size ? Buffer.concat(chunks) : null, { status: response.status, statusText: response.statusText, headers: response.headers });
+    } finally {
+      await reader?.cancel().catch(() => {});
+      reader?.releaseLock();
+    }
+  }
+
+  async send(toAmid: string, payload: unknown, operation?: MeshSendOperation): Promise<string | undefined> {
+    if (!operation) return this.sendUnscoped(toAmid, payload);
+    if (this._plaintextPeers.has(toAmid)) throw new Error("Scoped peer messages require encryption");
+    const client = this.client;
+    const epoch = this.epoch;
+    if (!client || !this.isConnected) throw new Error("AgtTransport not connected");
+    if (!Number.isFinite(operation.deadline) || operation.deadline > Date.now() + 30_000) throw new Error("Scoped mesh send requires a deadline within 30 seconds");
+    const abort = new AbortController();
+    const signal = AbortSignal.any([operation.signal, abort.signal]);
+    let closed = false;
+    const assertCurrent = () => {
+      signal.throwIfAborted();
+      operation.assertCurrent();
+      if (closed || Date.now() >= operation.deadline || this.client !== client || this.epoch !== epoch || !this.isConnected) {
+        throw new Error("Scoped mesh send authority expired or connection changed");
+      }
+    };
+    assertCurrent();
+    const timer = setTimeout(() => abort.abort(new Error("Scoped mesh send deadline exceeded")), operation.deadline - Date.now());
+    const custody: SendCustody = { assertCurrent, signal, peer: toAmid, fetched: false, messageWritten: false, messageAttempted: false };
+    const previous = client.getSession(toAmid);
+    let established: unknown;
+    let sendingSession: ReturnType<AgtMeshClient["getSession"]>;
+    let sendingCount: number | undefined;
+    try {
+      return await this.sendCustody.run(custody, async () => {
+        if (!this._plaintextPeers.has(toAmid)) established = await client.establishSessionWithPeer(toAmid);
+        assertCurrent();
+        sendingSession = client.getSession(toAmid);
+        sendingCount = sendingSession?.messageCount;
+        // The pinned SDK encrypts and writes synchronously inside send(). Check before
+        // ratchet advancement, and again at the actual socket boundary.
+        await client.send(toAmid, payload);
+        assertCurrent();
+        return undefined;
+      });
+    } catch (error) {
+      const current = client.getSession(toAmid);
+      // A socket veto/failure after encryption must not leave a mutated channel reusable.
+      // Do not retire another operation's replacement or a successfully used new session.
+      if (current && ((!custody.messageWritten && sendingSession === current && current.messageCount === sendingCount)
+        || (!previous && established === current && current.messageCount === 0))) client.closeSession(toAmid);
+      if (custody.messageAttempted) throw new Error("Mesh frame was issued or attempted before failure; delivery is unconfirmed and must not be replayed", { cause: error });
+      throw error;
+    } finally {
+      closed = true;
+      abort.abort();
+      clearTimeout(timer);
+    }
+  }
+
+  private async sendUnscoped(toAmid: string, payload: unknown): Promise<string | undefined> {
     const client = this.client;
     const epoch = this.epoch;
     if (!client || !this.isConnected) throw new Error("AgtTransport not connected");
@@ -532,8 +661,10 @@ export class AgtTransport implements IMeshTransport {
     return undefined;
   }
 
-  onMessage(handler: (fromAmid: string, payload: unknown, security: MessageSecurity) => void): void {
+  onMessage(handler: (fromAmid: string, payload: unknown, security: MessageSecurity, ingress?: unknown) => void,
+    captureIngress?: () => unknown): void {
     this.messageHandlers.push(handler);
+    if (captureIngress) this.ingressCaptures.set(handler, captureIngress);
   }
 
   onKnock(

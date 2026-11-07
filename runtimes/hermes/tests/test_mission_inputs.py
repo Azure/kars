@@ -6,6 +6,7 @@ import json
 import pytest
 
 from kars_runtime_hermes.plugin.mission_native import FilesystemTools, Measurements
+from kars_runtime_hermes.plugin import mission_protocol as wire
 
 
 def test_complete_input_reads_precede_exports(tmp_path, input_artifact):
@@ -51,9 +52,10 @@ def test_failed_reads_never_satisfy_input_consumption(tmp_path, failure, input_a
     assert measured.successful == 0
 
 
-def test_bundle_preserves_all_contents_and_provenance_in_one_read(tmp_path, input_artifact):
+@pytest.mark.parametrize("count", [16, 28, wire.MAX_INPUT_FILES])
+def test_bundle_preserves_all_contents_and_provenance_in_one_read(tmp_path, input_artifact, count):
     (tmp_path / "inputs").mkdir()
-    inputs = [input_artifact(f"file-{n:02}.md", f"Complete {n}\r\n✓ 日本語 🌍") for n in range(16)]
+    inputs = [input_artifact(f"file-{n:03}.md", f"Complete {n}\r\n✓ 日本語 🌍") for n in range(count)]
     for item in inputs:
         (tmp_path / "inputs" / item["name"]).write_bytes(item["content"].encode())
     measured = Measurements("model", None, lambda _: None)
@@ -61,8 +63,8 @@ def test_bundle_preserves_all_contents_and_provenance_in_one_read(tmp_path, inpu
     inputs[0]["source"]["runNonce"] = "caller-mutation"
     reply = json.loads(tools.execute("read", {"path": "inputs"}))
     records = json.loads(reply["content"])
-    assert len(reply["content"].encode()) <= 65536
-    assert len(records) == 16
+    assert len(reply["content"].encode()) <= wire.MAX_INPUT
+    assert len(records) == count
     assert records[0]["source"]["runNonce"] == "upstream-run"
     assert all(item["content"] == (tmp_path / "inputs" / item["name"]).read_bytes().decode()
                for item in records)
@@ -70,6 +72,53 @@ def test_bundle_preserves_all_contents_and_provenance_in_one_read(tmp_path, inpu
     assert measured.successful == 1
     assert "error" in json.loads(tools.execute("write", {"path": "inputs", "content": "Overwrite"}))
     assert measured.successful == 1
+
+
+@pytest.mark.parametrize("sizes", [
+    (31553, 26140, 10785),
+    (6196, 14522, 5685, 3615, 45629, 12109, 9141, 9500, 15944, 8654, 8654, 10911, 6554, 6554,
+     2264, 45629, 14522, 6196, 3615, 5685, 4201, 11018, 1031, 6672, 2080, 4430, 6387, 3899),
+    (35000, 13205, 19474, 43332, 17511, 5728, 4869, 12000, 7200),
+    (35000, 13205, 19474, 43332, 17511, 5728, 4869, 18352, 17947, 9524, 64000, 64000),
+])
+def test_research_bundle_above_64kib_preserves_all_bytes_and_custody(tmp_path, input_artifact, sizes):
+    (tmp_path / "inputs").mkdir()
+    inputs = [input_artifact(f"research-{i}.md", "x" * (size - 4) + "\n✓")
+              for i, size in enumerate(sizes)]
+    for item in inputs:
+        (tmp_path / "inputs" / item["name"]).write_bytes(item["content"].encode())
+    measured = Measurements("model", None, lambda _: None)
+    tools = FilesystemTools(tmp_path, measured, input_artifacts=inputs)
+    reply = json.loads(tools.execute("read", {"path": "inputs"}))
+    assert 65536 < len(reply["content"].encode()) <= wire.MAX_INPUT
+    assert json.loads(reply["content"]) == sorted(inputs, key=lambda item: item["name"])
+    assert tools.unread == set()
+    assert measured.successful == 1
+
+
+def test_aggregate_count_does_not_expand_per_producer_exports(input_artifact):
+    assert wire.MAX_INPUT_FILES == 8 * 16 + 8 + 16
+    documents = [input_artifact(f"file-{n:03}.md") for n in range(wire.MAX_INPUT_FILES)]
+    assert len(wire.inputs(documents)) == wire.MAX_INPUT_FILES
+    with pytest.raises(ValueError):
+        wire.inputs(documents + [input_artifact("overflow.md")])
+    with pytest.raises(ValueError):
+        wire.artifacts({f"file-{n}.md": "content" for n in range(17)})
+
+
+def test_input_capacity_counts_utf8_and_json_escaping(input_artifact):
+    prefix = [input_artifact(f"file-{i}.md", "x" * 65536) for i in range(5)]
+    remaining = wire.MAX_INPUT - len(wire.encoded(prefix + [input_artifact("last.md", "x")])) + 1
+    boundary = prefix + [input_artifact("last.md", "x" * remaining)]
+    assert len(wire.encoded(wire.inputs(boundary))) == wire.MAX_INPUT
+    assert not wire.message_fits({"inputArtifacts": boundary})
+    with pytest.raises(ValueError):
+        wire.inputs(prefix + [input_artifact("last.md", "x" * (remaining + 1))])
+    assert wire.inputs([input_artifact("escaped.md", "\n" * 40000 + "✓")])
+    with pytest.raises(ValueError):
+        wire.inputs([input_artifact(f"escaped-{i}.md", "\n" * 40000 + "✓") for i in range(5)])
+    with pytest.raises(ValueError):
+        wire.inputs([input_artifact("oversize.md", "x" * 65537)])
 
 
 @pytest.mark.parametrize("failure", ["missing", "modified", "oversize", "invalid-utf8", "symlink", "parent-symlink"])

@@ -64,8 +64,8 @@ pub struct ReceiptDetailDto {
     pub payload_type: String,
     pub signatures: Vec<SignatureDto>,
     pub claims: Vec<ClaimDto>,
-    /// The decoded in-toto Statement (the signed payload), for the evidence
-    /// view. This is exactly the bytes the signature covers.
+    /// The decoded in-toto Statement for inspection. JSON serialization need
+    /// not preserve the original DSSE payload bytes used for verification.
     pub statement: Option<Value>,
     /// Issuance time (unsigned echo), if the controller stamped it.
     pub issued_at: Option<String>,

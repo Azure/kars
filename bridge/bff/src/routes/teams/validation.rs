@@ -8,6 +8,19 @@ use crate::routes::options::{ModelOption, Options, RefOption};
 
 use super::{CreateRole, TeamModelRoutes};
 
+pub(super) fn deserialize_team_egress_mode<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    let mode = <Option<String> as serde::Deserialize>::deserialize(deserializer)?;
+    match mode {
+        None => Ok(None),
+        Some(mode) if mode.trim().eq_ignore_ascii_case("strict") => Ok(Some("strict".into())),
+        Some(_) => Err(serde::de::Error::custom(
+            "Standing Teams use Strict egress; review external hosts or request access during a run",
+        )),
+    }
+}
+
 pub(super) fn reject_budget_update<'de, D: serde::Deserializer<'de>>(_: D) -> Result<(), D::Error> {
     Err(serde::de::Error::custom(
         "Team lifetime budgets are immutable; a different limit requires a separately reviewed new Team",
@@ -28,14 +41,14 @@ pub(super) fn validate_team_budget(
             "a Team lifetime budget requires explicit GovernedInference scope".into(),
         ));
     }
+    // Explicit scope enrolls accounting even when neither spending ceiling is set.
     let limits = [budget.tokens, budget.usd_micros];
-    if limits.iter().all(Option::is_none)
-        || limits
-            .iter()
-            .flatten()
-            .any(|limit| !(1..=9_007_199_254_740_991).contains(limit))
+    if limits
+        .iter()
+        .flatten()
+        .any(|limit| !(1..=9_007_199_254_740_991).contains(limit))
     {
-        return Err(AppError::BadRequest("a Team lifetime budget requires positive safe whole-number limits; invalid or empty caps cannot be discarded".into()));
+        return Err(AppError::BadRequest("a Team lifetime budget requires positive safe whole-number limits when specified; invalid caps cannot be discarded".into()));
     }
     Ok(Some(crate::kars::task::TaskBudget {
         scope: budget.scope,
@@ -70,7 +83,7 @@ pub(super) fn build_roster(
     roles: &[CreateRole],
     tool_policy: Option<&str>,
     parent: Option<&crate::kars::task::TaskBlueprint>,
-) -> Vec<serde_json::Value> {
+) -> AppResult<Vec<serde_json::Value>> {
     roles
         .iter()
         .filter(|r| !r.name.trim().is_empty())
@@ -104,10 +117,12 @@ pub(super) fn build_roster(
                     serde_json::json!({ "provider": provider, "deployment": deployment }),
                 );
             }
+            if let Some(resources) = &r.resources {
+                resources.bind(r.name.trim(), parent, &mut bp)?;
+            }
             if !bp.is_empty() {
-                // The form's unset route fields mean Team defaults, while an
-                // explicit CRD blueprint is a complete override. Bind only the
-                // reviewed route; never inherit omitted egress or capabilities.
+                // Route defaults and explicitly selected resources are independent.
+                // An arbitrary CRD role blueprint remains a complete override.
                 if let Some(parent) = parent {
                     if !bp.contains_key("runtime")
                         && let Some(runtime) = &parent.runtime
@@ -136,7 +151,7 @@ pub(super) fn build_roster(
             if !r.skills.is_empty() {
                 role["skills"] = serde_json::json!(r.skills);
             }
-            role
+            Ok(role)
         })
         .collect()
 }
@@ -256,6 +271,14 @@ pub(super) fn validate_team_model_routes(
     options: &Options,
     routes: TeamModelRoutes<'_>,
 ) -> AppResult<()> {
+    validate_team_model_routes_for_attempt(options, routes, false)
+}
+
+pub(super) fn validate_team_model_routes_for_attempt(
+    options: &Options,
+    routes: TeamModelRoutes<'_>,
+    qualification: bool,
+) -> AppResult<()> {
     let TeamModelRoutes {
         namespace,
         total_tokens,
@@ -317,6 +340,7 @@ pub(super) fn validate_team_model_routes(
         &principal_required,
         principal_parallel,
         total_tokens,
+        qualification,
     )?;
     let principal_route_label = crate::routes::options::route_label(
         principal_runtime,
@@ -336,6 +360,7 @@ pub(super) fn validate_team_model_routes(
             option,
         ) {
             Ok(true) => {}
+            Ok(false) if qualification => {}
             Ok(false) => {
                 return Err(AppError::BadRequest(format!(
                     "MCP server `{server}` lacks retained resource qualification for {principal_route_label} at current schema {}",
@@ -362,6 +387,7 @@ pub(super) fn validate_team_model_routes(
             option,
         ) {
             Ok(true) => {}
+            Ok(false) if qualification => {}
             Ok(false) => {
                 return Err(AppError::BadRequest(format!(
                     "memory `{memory}` lacks retained resource qualification for {principal_route_label} at backend {} / compiled digest {}",
@@ -390,9 +416,24 @@ pub(super) fn validate_team_model_routes(
             .map(str::trim)
             .filter(|runtime| !runtime.is_empty())
             .unwrap_or(principal_runtime);
-        let role_required = team_role_qualification_requirements(execution_plan, &role.name);
+        let mut role_required = team_role_qualification_requirements(execution_plan, &role.name);
+        // Native plans express MCP access as network phases. Resource evidence
+        // must follow the inherited bindings, not an unsupported `mcp` phase.
+        if !mcp_servers.is_empty() {
+            role_required.insert("mcp".into());
+        }
+        if memory.is_some() {
+            role_required.insert("memory".into());
+        }
         let role_tokens = execution_plan.role_qualification_budget(&role.name, total_tokens);
-        validate_qualified_model_route(role_runtime, role_route, &role_required, 1, role_tokens)?;
+        validate_qualified_model_route(
+            role_runtime,
+            role_route,
+            &role_required,
+            1,
+            role_tokens,
+            qualification,
+        )?;
         let (provider, deployment) = role_route.split_once("::").ok_or_else(|| {
             AppError::BadRequest(format!(
                 "model route `{role_route}` must use provider::deployment"
@@ -415,6 +456,7 @@ pub(super) fn validate_team_model_routes(
                     option,
                 ) {
                     Ok(true) => {}
+                    Ok(false) if qualification => {}
                     Ok(false) => {
                         return Err(AppError::BadRequest(format!(
                             "role `{}` MCP server `{server}` lacks retained resource qualification for {role_route_label} at current schema {}",
@@ -445,6 +487,7 @@ pub(super) fn validate_team_model_routes(
                 option,
             ) {
                 Ok(true) => {}
+                Ok(false) if qualification => {}
                 Ok(false) => {
                     return Err(AppError::BadRequest(format!(
                         "role `{}` memory `{memory}` lacks retained resource qualification for {role_route_label} at backend {} / compiled digest {}",
@@ -473,6 +516,7 @@ pub(super) fn validate_team_model_routes(
                 option,
             ) {
                 Ok(true) => {}
+                Ok(false) if qualification => {}
                 Ok(false) => {
                     return Err(AppError::BadRequest(format!(
                         "role `{}` skill `{skill}` lacks retained resource qualification for {role_route_label} at current version digest {}",
@@ -511,7 +555,7 @@ pub(super) fn validate_team_model_routes(
                 role
             })
             .collect::<Vec<_>>();
-        validate_team_model_routes(
+        validate_team_model_routes_for_attempt(
             options,
             TeamModelRoutes {
                 namespace,
@@ -524,6 +568,7 @@ pub(super) fn validate_team_model_routes(
                 mcp_servers,
                 memory,
             },
+            qualification,
         )?;
     }
     Ok(())
@@ -535,6 +580,7 @@ fn validate_qualified_model_route(
     required_capabilities: &std::collections::BTreeSet<String>,
     max_parallel: i32,
     total_tokens: Option<i64>,
+    qualification: bool,
 ) -> AppResult<()> {
     let Some((provider, deployment)) = route.split_once("::") else {
         return Err(AppError::BadRequest(format!(
@@ -550,6 +596,7 @@ fn validate_qualified_model_route(
         total_tokens,
     ) {
         Ok(true) => Ok(()),
+        Ok(false) if qualification => Ok(()),
         Ok(false) => Err(AppError::BadRequest(format!(
             "runtime/model route `{runtime} · {provider}::{deployment}` has not passed the fresh E2E qualification matrix"
         ))),
@@ -559,27 +606,32 @@ fn validate_qualified_model_route(
     }
 }
 
-pub(super) fn normalize_lifecycle_mode(mode: Option<&str>) -> AppResult<Option<&'static str>> {
-    let Some(mode) = mode.map(str::trim).filter(|mode| !mode.is_empty()) else {
-        return Ok(None);
-    };
-    match mode.to_ascii_lowercase().replace(['-', '_'], "").as_str() {
-        "ephemeral" => Ok(Some("ephemeral")),
-        "resourceoptimized" => Ok(Some("resourceOptimized")),
-        "persistent" => Ok(Some("persistent")),
-        _ => Err(AppError::BadRequest(
-            "lifecycle_mode must be 'ephemeral', 'resourceOptimized', or 'persistent'".into(),
-        )),
+pub(super) fn validate_runtime_retention(
+    mode: Option<&str>,
+    seconds: Option<i64>,
+) -> AppResult<()> {
+    if mode
+        .map(str::trim)
+        .filter(|mode| !mode.is_empty())
+        .is_some_and(|mode| !mode.eq_ignore_ascii_case("ephemeral"))
+        || seconds.is_some_and(|seconds| seconds != 0)
+    {
+        return Err(AppError::BadRequest(
+            "UnsupportedTeamLifecycle: warm and always-on agent runtimes are not implemented by the current controller. Omit lifecycle_mode and warm_idle_seconds, or use ephemeral with zero warm idle. The Team charter, history, shared memory and lifetime budget persist across isolated runs.".into(),
+        ));
     }
+    Ok(())
 }
 
-pub(super) fn validate_warm_idle_seconds(seconds: Option<i64>) -> AppResult<Option<i64>> {
-    match seconds {
-        Some(seconds) if seconds < 0 => Err(AppError::BadRequest(
-            "warm_idle_seconds must be non-negative".into(),
-        )),
-        value => Ok(value),
-    }
+pub(super) fn team_github_write_enabled(
+    plan: Option<&crate::routes::tasks::ExecutionPlanDto>,
+    existing: Option<&crate::kars::task::TaskBlueprint>,
+) -> bool {
+    let existing_plan = existing
+        .and_then(|blueprint| blueprint.execution_plan.as_ref())
+        .map(crate::routes::tasks::ExecutionPlanDto::from_crd);
+    plan.or(existing_plan.as_ref())
+        .is_none_or(crate::routes::tasks::ExecutionPlanDto::github_write_enabled)
 }
 
 pub(super) fn apply_team_git_write(
@@ -636,6 +688,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn team_qualification_allows_missing_not_malformed_evidence_without_changing_normal_admission()
+    {
+        const ENV: &str = "KARS_TEAM_QUALIFICATION_ROUTE_TEST";
+        let Ok(case) = std::env::var(ENV) else {
+            for case in ["missing", "malformed"] {
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "routes::teams::validation::tests::team_qualification_allows_missing_not_malformed_evidence_without_changing_normal_admission", "--nocapture"])
+                    .env(ENV, case).env("BRIDGE_ROUTE_QUALIFICATION_MODE", "required")
+                    .env("BRIDGE_QUALIFICATION_RECORDS_JSON", if case == "missing" { "[]" } else { "not-json" })
+                    .env_remove("BRIDGE_ADDITIONAL_QUALIFICATION_RECORDS_JSON")
+                    .output().unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            return;
+        };
+        let required = ["team".into(), "telemetry".into()].into_iter().collect();
+        for (runtime, model) in [
+            ("OpenClaw", "github-copilot::principal"),
+            ("Hermes", "azure-foundry::worker"),
+        ] {
+            assert!(
+                validate_qualified_model_route(runtime, model, &required, 1, Some(10000), false)
+                    .is_err()
+            );
+            assert_eq!(
+                validate_qualified_model_route(runtime, model, &required, 1, Some(10000), true)
+                    .is_ok(),
+                case == "missing"
+            );
+            assert!(
+                validate_qualified_model_route(runtime, model, &required, 1, Some(10000), false)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
     fn roster_runtime_and_model_overrides_preserve_parent_tool_policy() {
         for runtime in [Some("OpenClaw"), Some("Hermes"), None] {
             for model in [Some("azure-foundry::gpt-5.4-mini"), None] {
@@ -645,9 +739,10 @@ mod tests {
                     runtime: runtime.map(str::to_string),
                     model: model.map(str::to_string),
                     skills: vec!["checklist-review".into()],
+                    resources: None,
                 }];
                 for policy in ["kars-default", "reviewed-read-only"] {
-                    let roster = build_roster(&roles, Some(policy), None);
+                    let roster = build_roster(&roles, Some(policy), None).unwrap();
                     assert_eq!(roster[0]["name"], "writer");
                     assert_eq!(roster[0]["systemPrompt"], "Write the reviewed checklist");
                     assert_eq!(roster[0]["skills"], serde_json::json!(["checklist-review"]));
@@ -676,8 +771,9 @@ mod tests {
             runtime: Some("OpenClaw".into()),
             model: None,
             skills: vec![],
+            resources: None,
         }];
-        let roster = build_roster(&roles, None, None);
+        let roster = build_roster(&roles, None, None).unwrap();
         assert_eq!(roster[0]["blueprint"]["runtime"], "OpenClaw");
         assert!(roster[0]["blueprint"].get("toolPolicy").is_none());
     }
@@ -701,9 +797,10 @@ mod tests {
                     skills: vec![],
                     runtime: runtime.map(str::to_string),
                     model: model.map(str::to_string),
+                    resources: None,
                 };
                 normalize_role_runtime(&mut role.runtime);
-                let roster = build_roster(&[role], Some("reviewed"), Some(&parent));
+                let roster = build_roster(&[role], Some("reviewed"), Some(&parent)).unwrap();
                 let bp = &roster[0]["blueprint"];
                 if runtime.is_none_or(str::is_empty) && model.is_none() {
                     assert!(
@@ -751,6 +848,7 @@ mod tests {
     #[test]
     fn team_budget_preserves_reviewed_limits_and_crd_camel_case() {
         for (tokens, usd) in [
+            (None, None),
             (Some(2_000_000), None),
             (None, Some(5_000_000)),
             (Some(9_007_199_254_740_991_i64), Some(5_000_000)),
@@ -774,10 +872,26 @@ mod tests {
     }
 
     #[test]
+    fn explicit_scope_only_team_budget_enrolls_without_token_or_currency_caps() {
+        for input in [
+            serde_json::json!({"scope":"GovernedInference"}),
+            serde_json::json!({"scope":"GovernedInference","tokens":null,"usd_micros":null}),
+        ] {
+            let dto = serde_json::from_value(input).unwrap();
+            let budget = validate_team_budget(Some(&dto)).unwrap().unwrap();
+            assert!(matches!(
+                budget.scope,
+                Some(crate::kars::task::BudgetScope::GovernedInference)
+            ));
+            assert_eq!(budget.tokens, None);
+            assert_eq!(budget.usd_micros, None);
+        }
+    }
+
+    #[test]
     fn team_budget_rejects_invalid_or_unscoped_caps_without_dropping_them() {
         for input in [
             serde_json::json!({}),
-            serde_json::json!({"scope":"GovernedInference"}),
             serde_json::json!({"tokens":1000}),
             serde_json::json!({"scope":null,"tokens":1000}),
         ] {
@@ -794,6 +908,10 @@ mod tests {
             for invalid in [
                 serde_json::json!(1.5),
                 serde_json::json!("2000"),
+                serde_json::json!("unlimited"),
+                serde_json::json!(u64::MAX),
+                serde_json::json!({}),
+                serde_json::json!([]),
                 serde_json::json!(true),
             ] {
                 let mut input = serde_json::json!({"scope":"GovernedInference"});
@@ -801,12 +919,22 @@ mod tests {
                 assert!(serde_json::from_value::<crate::routes::tasks::BudgetDto>(input).is_err());
             }
         }
-        assert!(
-            serde_json::from_value::<crate::routes::tasks::BudgetDto>(
-                serde_json::json!({"scope":"Planning","tokens":2000})
-            )
-            .is_err()
-        );
+        for input in [
+            serde_json::json!({"scope":"Planning","tokens":2000}),
+            serde_json::json!({"scope":"GovernedInference","usdMicros":500000}),
+            serde_json::json!({"scope":"GovernedInference","tokenLimit":2000}),
+            serde_json::json!({"scope":"GovernedInference","expiresAt":"2030-01-01T00:00:00Z"}),
+        ] {
+            assert!(
+                serde_json::from_value::<crate::routes::tasks::BudgetDto>(input.clone()).is_err()
+            );
+            assert!(
+                serde_json::from_value::<super::super::CreateTeamRequest>(
+                    serde_json::json!({"name":"example","charter":"Review work","budget":input})
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]
@@ -831,22 +959,25 @@ mod tests {
     }
 
     #[test]
-    fn team_lifecycle_modes_are_normalized_and_idle_window_is_bounded() {
-        assert_eq!(
-            normalize_lifecycle_mode(Some("resource-optimized")).expect("mode"),
-            Some("resourceOptimized")
-        );
-        assert_eq!(
-            normalize_lifecycle_mode(Some("persistent")).expect("mode"),
-            Some("persistent")
-        );
-        assert!(normalize_lifecycle_mode(Some("always-on")).is_err());
-        assert_eq!(
-            validate_warm_idle_seconds(Some(900)).expect("idle"),
-            Some(900)
-        );
-        assert_eq!(validate_warm_idle_seconds(Some(0)).expect("idle"), Some(0));
-        assert!(validate_warm_idle_seconds(Some(-1)).is_err());
+    fn team_runtime_retention_rejects_unsupported_requests_instead_of_pruning_them() {
+        for mode in [None, Some(""), Some("ephemeral"), Some(" Ephemeral ")] {
+            assert!(validate_runtime_retention(mode, None).is_ok());
+            assert!(validate_runtime_retention(mode, Some(0)).is_ok());
+        }
+        for mode in [
+            "resourceOptimized",
+            "resource-optimized",
+            "persistent",
+            "always-on",
+            "unknown",
+        ] {
+            let error = validate_runtime_retention(Some(mode), None).unwrap_err();
+            assert!(error.to_string().contains("UnsupportedTeamLifecycle"));
+        }
+        for seconds in [-1, 1, 900, i64::MAX] {
+            assert!(validate_runtime_retention(None, Some(seconds)).is_err());
+            assert!(validate_runtime_retention(Some("ephemeral"), Some(seconds)).is_err());
+        }
     }
 
     #[test]
@@ -905,6 +1036,7 @@ mod tests {
             return;
         };
         let options = Options {
+            per_run_qualification_available: true,
             models: ["primary", "specialist", "fallback"]
                 .into_iter()
                 .map(|deployment| ModelOption {
@@ -944,6 +1076,7 @@ mod tests {
                 runtime: None,
                 model: None,
                 skills: vec![],
+                resources: None,
             },
             CreateRole {
                 name: "writer".into(),
@@ -951,6 +1084,7 @@ mod tests {
                 runtime: Some("Hermes".into()),
                 model: Some("test::specialist".into()),
                 skills: vec![],
+                resources: None,
             },
         ];
         let fallbacks = vec!["test::fallback".into()];
@@ -1041,6 +1175,31 @@ mod tests {
         );
         let too_many = (0..9).map(|i| format!("mcp-{i}")).collect::<Vec<_>>();
         assert!(normalize_mcp_servers(&too_many).is_err());
+    }
+
+    #[test]
+    fn team_github_write_uses_reviewed_plan_for_creation_and_edits() {
+        let read: crate::routes::tasks::ExecutionPlanDto = serde_json::from_value(serde_json::json!({
+            "schema":"kars.execution-plan/v1", "roles":[], "max_parallel":1,
+            "synthesis":{"objective":"Read metadata", "execution_mode":"native", "capabilities":["network"], "max_tool_calls":10}
+        })).unwrap();
+        let mut write = read.clone();
+        write.synthesis.capabilities.push("github-pr".into());
+        let saved_read = crate::kars::task::TaskBlueprint {
+            execution_plan: Some(read.clone().into_crd()),
+            ..Default::default()
+        };
+        let saved_write = crate::kars::task::TaskBlueprint {
+            execution_plan: Some(write.clone().into_crd()),
+            ..Default::default()
+        };
+        assert!(!team_github_write_enabled(Some(&read), None));
+        assert!(team_github_write_enabled(Some(&write), None));
+        assert!(!team_github_write_enabled(None, Some(&saved_read)));
+        assert!(team_github_write_enabled(None, Some(&saved_write)));
+        assert!(!team_github_write_enabled(Some(&read), Some(&saved_write)));
+        assert!(team_github_write_enabled(Some(&write), Some(&saved_read)));
+        assert!(team_github_write_enabled(None, None));
     }
 
     #[test]

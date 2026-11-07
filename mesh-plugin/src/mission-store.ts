@@ -4,10 +4,10 @@
 import { isDeepStrictEqual } from "node:util";
 import { missionAdmissionAllows, parseMissionAdmission, type MissionAdmission } from "./mission-admission.js";
 import { KubernetesError, type KubernetesJson } from "./kubernetes-json.js";
-import { missionAttemptName, missionContentDigest, type MissionAttempt, type MissionAttemptStore, type MissionCandidate, type StoredMissionAttempt } from "./mission-dispatcher.js";
-import { missionContract, sameMissionContract, parseMissionContract, parseMissionMessage, type MissionContract } from "./mission-protocol.js";
+import { MISSION_WORKLOAD_INTERRUPTED, missionAttemptName, missionContentDigest, type MissionAttempt, type MissionAttemptStore, type MissionCandidate, type StoredMissionAttempt } from "./mission-dispatcher.js";
+import { missionContract, sameMissionContract, parseMissionContract, parseMissionContractConfiguration, parseMissionMessage, type MissionContract } from "./mission-protocol.js";
 import { needsReviewedAuthority, reviewedMission, ReviewedExecutionError, ReviewedSnapshotChangedError, type ReviewedTask } from "./mission-reviewed.js";
-import { missionRecordOwner as owner, missionRecordOwned as owned, missionResultMaps, unpackMissionAttempt, type MissionConfigMap as ConfigMap } from "./mission-record.js";
+import { missionRecordOwner as owner, missionRecordOwned as owned, missionResultMaps, packMissionAttempt, unpackMissionAttempt, type MissionConfigMap as ConfigMap } from "./mission-record.js";
 import { readRetainedMissionInputs } from "./mission-input-custody.js";
 import { missionInputs, type MissionInput } from "./mission-inputs.js";
 import { missionRuntime, type MissionRuntime } from "./mission-runtime.js";
@@ -71,8 +71,9 @@ function installedAdmissionMatches(deployment: MissionWorkloadResources["deploym
   const env = containers[0].env as Array<Record<string, unknown>>;
   const explicit = (name: string): unknown => {
     const matches = env.filter(e => e && e.name === name);
-    if (matches.length !== 1 || matches[0].valueFrom !== undefined || typeof matches[0].value !== "string"
-      || Buffer.byteLength(matches[0].value) > 8192) return null;
+    if (matches.length !== 1 || matches[0].valueFrom !== undefined || typeof matches[0].value !== "string") return null;
+    if (name === "KARS_MISSION_CONTRACT") return parseMissionContractConfiguration(matches[0].value);
+    if (Buffer.byteLength(matches[0].value) > 8192) return null;
     return JSON.parse(matches[0].value);
   };
   const contract = parseMissionContract(explicit("KARS_MISSION_CONTRACT"));
@@ -141,8 +142,9 @@ export class KubernetesMissionStore implements MissionAttemptStore {
       const candidate: MissionCandidate = { ...key, runtime, sandboxUid: binding.sandboxUid, podUid: binding.podUid,
         agentDid: binding.agentDid, dispatcherDid, agentName: task.spec.displayName ?? binding.sandboxName, content,
         ...(reviewed ? { reviewedPhase: reviewed.contract.reviewedPhase, requiredOutputs: reviewed.contract.requiredOutputs,
+          ...(reviewed.contract.peerContext ? { peerContext: reviewed.contract.peerContext } : {}),
           ...(reviewed.inputArtifacts ? {inputArtifacts:reviewed.inputArtifacts} : {}) } : {}) };
-      if (!parseMissionMessage({ ...candidate, inputArtifacts:undefined, ...missionContract(candidate.reviewedPhase,candidate.inputArtifacts,candidate.requiredOutputs), type: "mission:probe", challenge: "candidate-validation" })
+      if (!parseMissionMessage({ ...candidate, inputArtifacts:undefined, ...missionContract(candidate.reviewedPhase,candidate.inputArtifacts,candidate.requiredOutputs,candidate.peerContext), type: "mission:probe", challenge: "candidate-validation" })
         || !await this.isCurrent(candidate)) return null;
       return candidate;
     } catch (e) { if (isMissing(e) || e instanceof SyntaxError || e instanceof ReviewedExecutionError) return null; throw e; }
@@ -156,7 +158,7 @@ export class KubernetesMissionStore implements MissionAttemptStore {
     return !!task && supportsTaskExecution(task)
       && missionRuntime(task.spec) === (candidate.runtime === undefined ? "OpenClaw" : candidate.runtime)
       && (needsReviewedAuthority(task) ? candidate.reviewedPhase !== undefined && candidate.requiredOutputs !== undefined
-        : candidate.reviewedPhase === undefined && candidate.inputArtifacts === undefined && candidate.requiredOutputs === undefined)
+        : candidate.reviewedPhase === undefined && candidate.inputArtifacts === undefined && candidate.requiredOutputs === undefined && candidate.peerContext === undefined)
       && !task.metadata.deletionTimestamp && task.metadata.uid === candidate.taskUid
       && task.metadata.name === candidate.taskName && task.metadata.namespace === candidate.namespace
       && task.metadata.annotations?.[requested] === candidate.runNonce
@@ -199,7 +201,7 @@ export class KubernetesMissionStore implements MissionAttemptStore {
       const replicaSet = await this.api.request<MissionWorkloadResources["replicaSet"]>("GET", paths.replicaSet);
       const pod = await this.api.request<MissionWorkloadResources["pod"]>("GET", paths.pod);
       if (!currentMissionWorkload(binding, candidate.namespace, { sandbox, namespace, deployment, replicaSet, pod })
-        || !installedAdmissionMatches(deployment, binding.admission, missionContract(candidate.reviewedPhase,candidate.inputArtifacts,candidate.requiredOutputs), candidate.runtime ?? "OpenClaw")) return false;
+        || !installedAdmissionMatches(deployment, binding.admission, missionContract(candidate.reviewedPhase,candidate.inputArtifacts,candidate.requiredOutputs,candidate.peerContext), candidate.runtime ?? "OpenClaw")) return false;
       // A bounded second collection catches changes during traversal, not changes after this check.
       // This is deliberately not a multi-resource transaction or an execution lease.
       const snapshots: Array<[string, { metadata: Metadata }]> = [
@@ -216,6 +218,55 @@ export class KubernetesMissionStore implements MissionAttemptStore {
     } catch (e) { if (isMissing(e) || e instanceof SyntaxError) return false; throw e; }
   }
 
+  /** Absence of the original Pod is interruption evidence, unlike readiness or resourceVersion churn. */
+  async workloadInterrupted(candidate: MissionCandidate): Promise<boolean> {
+    try {
+      const task = await this.task(candidate);
+      if (!this.current(task, candidate) || !task.metadata.resourceVersion) return false;
+      const path = mapPath(candidate.namespace, `kars-mission-binding-${candidate.taskName}`);
+      const cm = await this.api.request<ConfigMap>("GET", path);
+      if (!owned(cm.metadata, candidate) || !cm.metadata.uid || !cm.metadata.resourceVersion
+        || cm.metadata.deletionTimestamp || cm.metadata.namespace !== candidate.namespace
+        || cm.metadata.name !== `kars-mission-binding-${candidate.taskName}`) return false;
+      const binding = parseBinding(JSON.parse(cm.data?.["binding.json"] ?? "null"));
+      if (!binding || binding.taskName !== candidate.taskName || binding.taskUid !== candidate.taskUid
+        || binding.sandboxUid !== candidate.sandboxUid || !await this.reviewedCurrent(task, candidate, binding)) return false;
+      const runtimeNamespace = `kars-${binding.sandboxName}`;
+      const namespacePath = `/api/v1/namespaces/${segment(runtimeNamespace)}`;
+      const sandboxPath = `/apis/kars.azure.com/v1alpha1/namespaces/${segment(candidate.namespace)}/karssandboxes/${segment(binding.sandboxName)}`;
+      const sandbox = await this.api.request<MissionWorkloadResources["sandbox"]>("GET", sandboxPath);
+      const namespace = await this.api.request<MissionWorkloadResources["namespace"]>("GET", namespacePath);
+      if (!owned(sandbox.metadata, candidate) || sandbox.metadata.uid !== candidate.sandboxUid
+        || sandbox.metadata.deletionTimestamp || sandbox.metadata.name !== binding.sandboxName
+        || sandbox.metadata.namespace !== candidate.namespace || sandbox.spec?.runtime?.kind !== (candidate.runtime ?? "OpenClaw")
+        || sandbox.metadata.annotations?.[`${prefix}namespace-uid`] !== binding.namespaceUid
+        || namespace.metadata.uid !== binding.namespaceUid || namespace.metadata.deletionTimestamp
+        || namespace.metadata.name !== runtimeNamespace || namespace.metadata.namespace !== undefined
+        || namespace.metadata.ownerReferences?.length || namespace.status?.phase !== "Active"
+        || namespace.metadata.annotations?.[`${prefix}namespace-claim-version`] !== "v1"
+        || namespace.metadata.annotations?.[`${prefix}sandbox-namespace`] !== candidate.namespace
+        || namespace.metadata.annotations?.[`${prefix}sandbox-name`] !== binding.sandboxName
+        || namespace.metadata.annotations?.[`${prefix}sandbox-uid`] !== candidate.sandboxUid) return false;
+      // The binding may already name a replacement Pod. Search by the retained UID, without a label filter.
+      const pods = await this.api.request<{ items: Array<{ metadata: Metadata }>; metadata?: { continue?: string } }>(
+        "GET", `${namespacePath}/pods?limit=100`);
+      if (!Array.isArray(pods.items) || pods.items.length > 100 || pods.metadata?.continue
+        || pods.items.some(pod => !pod.metadata?.uid || pod.metadata.namespace !== runtimeNamespace
+          || pod.metadata.uid === candidate.podUid)) return false;
+      for (const [resourcePath, previous] of [[namespacePath, namespace], [sandboxPath, sandbox], [path, cm]] as const) {
+        const fresh = await this.api.request<{ metadata: Metadata }>("GET", resourcePath);
+        if (!previous.metadata.resourceVersion || fresh.metadata.deletionTimestamp
+          || fresh.metadata.uid !== previous.metadata.uid || fresh.metadata.resourceVersion !== previous.metadata.resourceVersion) return false;
+      }
+      const freshTask = await this.task(candidate);
+      return this.current(freshTask, candidate) && freshTask.metadata.resourceVersion === task.metadata.resourceVersion
+        && await this.reviewedCurrent(freshTask, candidate, binding) && await this.dispatchCurrent();
+    } catch {
+      // Missing resources, partial snapshots and API failures do not establish Pod absence.
+      return false;
+    }
+  }
+
   private async reviewedCurrent(task: Task, candidate: MissionCandidate, binding?: Binding): Promise<boolean> {
     try { return await this.reviewedMatches(task,candidate,binding); }
     catch(e) { if (isMissing(e) || e instanceof SyntaxError || e instanceof ReviewedExecutionError) return false; throw e; }
@@ -230,7 +281,7 @@ export class KubernetesMissionStore implements MissionAttemptStore {
     const reviewed = await reviewedMission(this.api,task,binding?.reviewed,missionObjective,refs => this.readRetainedInputs(refs));
     // JSON persistence restores ordinary prototypes; compare validated canonical inputs.
     const inputs = candidate.inputArtifacts === undefined ? undefined : missionInputs(candidate.inputArtifacts);
-    return !!reviewed && sameMissionContract(reviewed.contract,missionContract(candidate.reviewedPhase,candidate.inputArtifacts,candidate.requiredOutputs))
+    return !!reviewed && sameMissionContract(reviewed.contract,missionContract(candidate.reviewedPhase,candidate.inputArtifacts,candidate.requiredOutputs,candidate.peerContext))
       && isDeepStrictEqual(reviewed.inputArtifacts,inputs);
   }
   private async projectionCurrent(candidate: MissionCandidate): Promise<boolean> {
@@ -252,12 +303,30 @@ export class KubernetesMissionStore implements MissionAttemptStore {
       return this.unpack(await this.api.request<ConfigMap>("GET", mapPath(candidate.namespace, missionAttemptName(candidate))), candidate);
     } catch (e) { if (isMissing(e)) return null; throw e; }
   }
+  /** Called only while the service holds its exclusive writer and verifies singleton dispatcher custody. */
+  async recoverInterrupted(candidate: MissionCandidate, ownerSession: string): Promise<boolean> {
+    if (!ownerSession) throw new Error("Missing dispatcher owner session");
+    const stored = await this.get(candidate);
+    if (!stored || stored.attempt.ownerSession === ownerSession
+      || !["dispatching", "accepted", "running"].includes(stored.attempt.phase)) return false;
+    if (!isDeepStrictEqual(stored.attempt.candidate, candidate)) return false;
+    const interrupted = await this.workloadInterrupted(candidate);
+    if (!interrupted && !await this.isCurrent(candidate)) return false;
+    // Preserve the old owner and journal. CAS fences any concurrent handback; no assignment is resent.
+    await this.replace(stored, {
+      ...stored.attempt, phase: "uncertain", updatedAt: new Date().toISOString(),
+      error: interrupted ? MISSION_WORKLOAD_INTERRUPTED
+        : "The service coordinating this run restarted before its final result was saved. Work may have continued. Retained evidence and usage are preserved; this attempt was not replayed.",
+    });
+    return true;
+  }
+
   private record(attempt: MissionAttempt, revision?: string): ConfigMap {
     const record: ConfigMap = { apiVersion: "v1", kind: "ConfigMap", metadata: {
       name: missionAttemptName(attempt.candidate), namespace: attempt.candidate.namespace,
       ...(revision ? { resourceVersion: revision } : {}), ownerReferences: [owner(attempt.candidate)],
       labels: { [`${prefix}mission-attempt`]: "true" },
-    }, data: { "attempt.json": JSON.stringify(attempt) } };
+    }, data: { "attempt.json": packMissionAttempt(attempt) } };
     this.unpack({ ...record, metadata: { ...record.metadata, resourceVersion: revision ?? "validate" } }, attempt.candidate);
     return record;
   }
@@ -306,7 +375,8 @@ export class KubernetesMissionStore implements MissionAttemptStore {
       if (!isConflict(e)) throw e;
       const prior = await this.api.request<ConfigMap>("GET", mapPath(cm.metadata.namespace!, cm.metadata.name));
       if (prior.immutable !== true || prior.metadata.deletionTimestamp
-        || !isDeepStrictEqual(prior.data, cm.data)
+        // Kubernetes omits an empty ConfigMap data map on readback.
+        || !isDeepStrictEqual(prior.data ?? {}, cm.data ?? {})
         || !isDeepStrictEqual(prior.metadata.ownerReferences, cm.metadata.ownerReferences)
         || !isDeepStrictEqual(prior.metadata.annotations, cm.metadata.annotations)
         || !isDeepStrictEqual(prior.metadata.labels, cm.metadata.labels)) throw new Error("Immutable mission evidence collision");

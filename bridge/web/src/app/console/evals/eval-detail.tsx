@@ -9,7 +9,7 @@
 // actually did). Sourced from the corpus + report ConfigMaps the controller
 // persists — real evidence, downloadable for an auditor.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { EvalReport, EvalCase } from "@/lib/types";
 
 /** Robust file download — appends the anchor to the DOM (required by Firefox)
@@ -71,38 +71,43 @@ function CaseRow({ c }: { c: EvalCase }) {
   );
 }
 
-export function EvalDetail({ name }: { name: string }) {
+export function EvalDetail({ name, version = null }: { name: string; version?: string | null }) {
   const [open, setOpen] = useState(false);
-  const [report, setReport] = useState<EvalReport | null>(null);
+  const [loaded, setLoaded] = useState<{ name: string; version: string | null; report: EvalReport } | null>(null);
+  const report = loaded?.name === name && loaded.version === version ? loaded.report : null;
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function toggle() {
-    const next = !open;
-    setOpen(next);
-    if (next && !report && !loading) {
+  useEffect(() => {
+    if (!open) return;
+    const controller = new AbortController();
+    async function load() {
       setLoading(true);
       setError(null);
       try {
         const res = await fetch(`/api/operator/evals/${encodeURIComponent(name)}/report`, {
           headers: { accept: "application/json" },
+          signal: controller.signal,
         });
         if (!res.ok) throw new Error(`load failed (${res.status})`);
-        setReport(await res.json());
+        const report: EvalReport = await res.json();
+        if (!controller.signal.aborted) setLoaded({ name, version, report });
       } catch (e) {
-        setError(e instanceof Error ? e.message : "Couldn't load the report.");
+        if (!controller.signal.aborted) setError(e instanceof Error ? e.message : "Couldn't load the report.");
       } finally {
-        setLoading(false);
+        if (!controller.signal.aborted) setLoading(false);
       }
     }
-  }
+    void load();
+    return () => controller.abort();
+  }, [name, version, open]);
 
   return (
     <div className="mt-3">
       <div className="flex items-center gap-2">
         <button
           type="button"
-          onClick={toggle}
+          onClick={() => setOpen(!open)}
           className="rounded-lg border border-border px-3 py-1.5 text-xs font-medium text-foreground-muted hover:text-foreground"
         >
           {open ? "Hide" : "View"} detailed report{report ? ` · ${report.cases.length} case${report.cases.length === 1 ? "" : "s"}` : ""}

@@ -1,8 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use super::preview::ToolPreview;
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::HashMap;
 
 pub const MAX_BODY: usize = 64 * 1024;
 pub const MAX_TOOLS: usize = 32;
@@ -39,6 +41,7 @@ pub struct Parsed {
     pub usage: Usage,
     pub finish: Option<String>,
     pub tools: Vec<(String, String)>,
+    pub argument_previews: HashMap<String, ToolPreview>,
     pub partial: bool,
     pub semantic: Option<SemanticOutcome>,
 }
@@ -93,7 +96,7 @@ pub fn merge_usage(target: &mut Usage, usage: &Value) {
     }
 }
 
-pub fn add_tool(parsed: &mut Parsed, id: &Value, name: &Value) {
+pub fn add_tool(parsed: &mut Parsed, id: &Value, name: &Value, arguments: Option<&Value>) {
     let Some(name) = name.as_str().and_then(|value| identifier(value, 128)) else {
         parsed.partial = true;
         return;
@@ -105,6 +108,18 @@ pub fn add_tool(parsed: &mut Parsed, id: &Value, name: &Value) {
     if parsed.tools.len() >= MAX_TOOLS {
         parsed.partial = true;
         return;
+    }
+    if parsed.tools.iter().any(|(existing, _)| existing == &id) {
+        parsed.argument_previews.remove(&id);
+    } else if !id.is_empty()
+        && let Some(arguments) = arguments
+    {
+        let preview = if let Some(encoded) = arguments.as_str() {
+            ToolPreview::encoded(encoded)
+        } else {
+            ToolPreview::arguments(arguments)
+        };
+        parsed.argument_previews.insert(id.clone(), preview);
     }
     parsed.tools.push((id, name));
 }
@@ -131,7 +146,12 @@ pub fn response(value: &Value, shape: Shape) -> Parsed {
                         .and_then(Value::as_array)
                     {
                         for tool in tools.iter().take(MAX_TOOLS + 1) {
-                            add_tool(&mut parsed, &tool["id"], &tool["function"]["name"]);
+                            add_tool(
+                                &mut parsed,
+                                &tool["id"],
+                                &tool["function"]["name"],
+                                tool["function"].get("arguments"),
+                            );
                         }
                     }
                 }
@@ -146,7 +166,12 @@ pub fn response(value: &Value, shape: Shape) -> Parsed {
                 parsed.partial |= items.len() > MAX_TOOLS;
                 for item in items.iter().take(MAX_TOOLS + 1) {
                     if item["type"] == "function_call" {
-                        add_tool(&mut parsed, &item["call_id"], &item["name"]);
+                        add_tool(
+                            &mut parsed,
+                            &item["call_id"],
+                            &item["name"],
+                            item.get("arguments"),
+                        );
                     }
                 }
             }
@@ -160,7 +185,7 @@ pub fn response(value: &Value, shape: Shape) -> Parsed {
                 parsed.partial |= items.len() > MAX_TOOLS;
                 for item in items.iter().take(MAX_TOOLS + 1) {
                     if item["type"] == "tool_use" {
-                        add_tool(&mut parsed, &item["id"], &item["name"]);
+                        add_tool(&mut parsed, &item["id"], &item["name"], item.get("input"));
                     }
                 }
             }

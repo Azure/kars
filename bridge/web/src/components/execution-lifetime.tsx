@@ -7,21 +7,36 @@ import { useMemo, useState } from "react";
 import { Icon } from "@/components/icon";
 import { LivePulse } from "@/components/live-refresh";
 import { actionsFromRouter } from "@/components/agent-graph/activity";
-import type { BoundRouterActivity } from "@/lib/router-activity";
+import { routerProducerKey, type BoundRouterActivity } from "@/lib/router-activity";
 import type { ActivityEvent, Approval, TaskAssignmentEvent } from "@/lib/types";
 import type { ReviewedExecution } from "@/lib/types/missions";
-import { reviewedPhaseRouterActivity } from "@/lib/team-run-evidence";
+import { displayedPhaseRouterActivity } from "@/lib/team-run-evidence";
 
 type LifetimeEvent = {
   id: string;
   at: string | null;
   seq?: number | null;
+  producer?: string;
   kind: "lifecycle" | "round" | "tool" | "approval";
   title: string;
   summary: string;
   detail: string | null;
   ok: boolean | null;
+  provisional?: boolean;
+  stopped?: boolean;
 };
+
+export function newestLifetimeEvents<T extends Pick<LifetimeEvent, "id" | "at" | "seq" | "producer">>(events: T[]): T[] {
+  return [...events].sort((a, b) => {
+    const left = a.at ? Date.parse(a.at) : NaN;
+    const right = b.at ? Date.parse(b.at) : NaN;
+    if (Number.isFinite(left) && Number.isFinite(right) && left !== right) return right - left;
+    if (Number.isFinite(left) !== Number.isFinite(right)) return Number.isFinite(left) ? -1 : 1;
+    // Sequence numbers are comparable only within the same producer.
+    const producerOrder = (a.producer ?? "").localeCompare(b.producer ?? "");
+    return producerOrder || (b.seq ?? -1) - (a.seq ?? -1) || a.id.localeCompare(b.id);
+  });
+}
 
 function fmtAt(value: string): string {
   const date = new Date(value);
@@ -85,6 +100,8 @@ export function ExecutionLifetime({
         rows.push({
           id: `round-${event.round}-${index}`,
           at: event.ts,
+          seq: event.seq,
+          producer: event.agentInstance ?? event.agent ?? "principal",
           kind: "round",
           title: `Model round ${event.round + 1}`,
           summary: `${event.total_tokens.toLocaleString("en-US")} tokens · ${event.tool_calls} tool call${event.tool_calls === 1 ? "" : "s"} · ${event.ms} ms`,
@@ -95,6 +112,8 @@ export function ExecutionLifetime({
         rows.push({
           id: `tool-${event.round}-${index}`,
           at: event.ts,
+          seq: event.seq,
+          producer: event.agentInstance ?? event.agent ?? "principal",
           kind: "tool",
           title: event.name,
           summary: event.args_preview || "No arguments retained",
@@ -119,11 +138,10 @@ export function ExecutionLifetime({
         ok: approval.phase === "Approved" ? true : approval.phase === "Denied" || approval.phase === "Expired" ? false : null,
       });
     }
-    rows.sort((a, b) => (a.at ?? "").localeCompare(b.at ?? ""));
     for (const binding of [
       ...(routerActivity ? [routerActivity] : []),
       ...phases.flatMap(phase => {
-        const binding = reviewedPhaseRouterActivity(phase);
+        const binding = displayedPhaseRouterActivity(phase);
         return binding ? [binding] : [];
       }),
     ]) {
@@ -131,6 +149,9 @@ export function ExecutionLifetime({
       for (const action of actionsFromRouter(binding)) {
         rows.push({
           id: action.id,
+          producer: routerProducerKey(producer),
+          provisional: binding.provisional,
+          stopped: binding.stopped,
           at: action.ts,
           seq: action.seq,
           kind: action.source === "router-upstream" ? "round" : "tool",
@@ -150,12 +171,7 @@ export function ExecutionLifetime({
         });
       }
     }
-    return rows.sort((a, b) => {
-      if (a.at && b.at) return a.at.localeCompare(b.at);
-      if (a.at) return -1;
-      if (b.at) return 1;
-      return 0;
-    });
+    return newestLifetimeEvents(rows);
   }, [activity, approvals, assignmentEvents, routerActivity, phases]);
 
   const visible = useMemo(() => {
@@ -171,29 +187,29 @@ export function ExecutionLifetime({
   }, [events, query]);
 
   return (
-    <section className="rounded-2xl border border-border bg-surface p-5">
+    <section className="min-w-0 rounded-2xl border border-border bg-surface p-3 [overflow-wrap:anywhere] sm:p-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 className="text-sm font-semibold">Recorded execution timeline</h2>
           <p className="mt-0.5 max-w-2xl text-xs text-foreground-muted">
-            {routerActivity || phases.some(phase => reviewedPhaseRouterActivity(phase))
-              ? "Timestamped records appear in recorded time order. Router times identify observations, not exact tool start times. Older untimestamped records follow in each producer's sequence order; no ordering between producers is inferred for those records."
-              : "Available assignment, model round, tool call and approval records in timestamp order."}
+            {routerActivity || phases.some(phase => displayedPhaseRouterActivity(phase))
+              ? "Newest timestamped records first. Router times identify observations, not exact tool start times. Ties are grouped by producer, highest sequence first. Untimestamped records follow, grouped by producer with highest sequence first; no ordering between producers is inferred for those records."
+              : "Available assignment, model round, tool call and approval records, newest timestamp first. Ties use producer and sequence order; unavailable timestamps follow."}
             {" "}Missing records do not establish that no work occurred.
           </p>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <label className="relative">
+        <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
+          <label className="relative min-w-0 max-w-full">
             <span className="sr-only">Search recorded timeline</span>
             <Icon name="search" size={13} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-foreground-muted" />
             <input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               placeholder="Search recorded events"
-              className="w-64 rounded-lg border border-border bg-surface-muted/40 py-1.5 pl-8 pr-3 text-xs outline-none focus:border-signal"
+              className="w-64 max-w-full rounded-lg border border-border bg-surface-muted/40 py-1.5 pl-8 pr-3 text-xs outline-none focus:border-signal"
             />
           </label>
-          {running ? <LivePulse label="Recording live" /> : (
+          {running || events.some(event => event.provisional && !event.stopped) ? <LivePulse label="Recording live" /> : (
             <span className="rounded-full border border-border bg-surface-muted px-2.5 py-1 text-xs font-medium text-foreground-muted">
               {events.length > 0 ? `${visible.length}/${events.length} recorded events` : "No records available"}
             </span>
@@ -203,7 +219,7 @@ export function ExecutionLifetime({
       {routerActivity && (
         <div className="mt-3 space-y-1 text-xs text-foreground-muted">
           <p>
-            {routerActivity.provisional ? "Live provisional observations" : "Retained revision observations"}
+            {routerActivity.stopped ? "Last recorded partial observations before stop" : routerActivity.provisional ? "Live provisional observations" : "Retained revision observations"}
             {" · "}{routerActivity.producer.agent_name}. Returned responses only; not independent proof of tool execution or mission completion.
           </p>
           <p className="break-all font-mono text-[10px]">
@@ -224,26 +240,26 @@ export function ExecutionLifetime({
         {visible.map((event) => (
           <li key={event.id}>
             <details className="group rounded-xl border border-border bg-surface-muted/25">
-              <summary className="flex cursor-pointer list-none items-start gap-3 px-3 py-2.5">
+              <summary className="grid cursor-pointer list-none grid-cols-[0.5rem_minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1 px-3 py-2.5 sm:grid-cols-[0.5rem_8rem_minmax(0,1fr)_auto]">
                 <span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${
                   event.ok === false ? "bg-danger" : event.ok === true ? "bg-ok" : event.kind === "approval" ? "bg-warning" : "bg-signal"
                 }`} />
-                <span className="w-32 shrink-0 font-mono text-[10px] text-foreground-muted">
-                  {event.at === null ? <>
-                    Sequence {event.seq}
+                <span className="min-w-0 font-mono text-[10px] text-foreground-muted">
+                  {!event.at || !Number.isFinite(Date.parse(event.at)) ? <>
+                    {event.seq != null && <>Sequence {event.seq}</>}
                     <span className="block">Timestamp unavailable</span>
                   </> : fmtAt(event.at)}
                 </span>
-                <span className="min-w-0 flex-1">
-                  <span className="flex flex-wrap items-center gap-2">
-                    <span className="font-mono text-xs font-semibold">{event.title}</span>
+                <span className="col-start-2 row-start-2 min-w-0 sm:col-start-3 sm:row-start-1">
+                  <span className="flex min-w-0 flex-wrap items-center gap-2">
+                    <span className="min-w-0 font-mono text-xs font-semibold">{event.title}</span>
                     <span className="rounded-full border border-border px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-foreground-muted">
-                      {event.kind}
+                      {event.kind}{event.stopped ? " · stopped, partial" : event.provisional ? " · provisional" : ""}
                     </span>
                   </span>
                   <span className="mt-0.5 block truncate text-xs text-foreground-muted">{event.summary}</span>
                 </span>
-                <span className="text-xs text-foreground-muted transition group-open:rotate-180">⌄</span>
+                <span className="col-start-3 row-start-1 text-xs text-foreground-muted transition group-open:rotate-180 sm:col-start-4">⌄</span>
               </summary>
               <div className="border-t border-border px-3 py-3">
                 <p className="whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed">

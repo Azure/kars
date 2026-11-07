@@ -4,7 +4,7 @@
 # 04-mcpserver.yaml — register an external MCP server the analyst can
 # call alongside foundry_web_search. We use DeepWiki's hosted MCP
 # (https://mcp.deepwiki.com/mcp), which serves
-# `read_wiki_structure` / `read_wiki_contents` / `ask_question` over
+# `read_wiki_structure` / `read_wiki_contents` / `ask_wiki_question` over
 # Streamable HTTP. It is public, no-auth, and lets the analyst pull
 # structured docs for any indexed GitHub repo — perfect complement to
 # foundry_web_search for the platform deep-dives the prompt requires
@@ -32,7 +32,7 @@ spec:
   allowedTools:
     - read_wiki_structure
     - read_wiki_contents
-    - ask_question
+    - ask_wiki_question
   allowedSandboxes:
     matchLabels:
       kars.azure.com/sandbox: execbrief

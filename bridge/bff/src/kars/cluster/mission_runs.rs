@@ -7,6 +7,7 @@ use crate::providers::signing::sha256_hex;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use k8s_openapi::api::core::v1::ConfigMap;
+use kube::ResourceExt;
 use kube::api::{Api, Patch, PatchParams};
 
 const REQUESTED: &str = "kars.azure.com/run-requested";
@@ -321,7 +322,8 @@ impl Cluster {
 
     /// Create a distinct revision from the exact completed run reviewed by the
     /// caller. Never replace a pending objective or adopt another review's nonce.
-    /// Retired missions must be explicitly relaunched through the normal gates.
+    /// Ordinarily stopped missions must be relaunched through the normal gates.
+    /// Governed halts are permanent and cannot receive another revision.
     pub async fn redrive_with_revision(
         &self,
         task: &KarsTask,
@@ -329,6 +331,11 @@ impl Cluster {
         revised_objective: &str,
     ) -> Result<String, MissionRunError> {
         let (ns, name, uid, rv) = mission_identity(task)?;
+        if task.annotations().contains_key("kars.azure.com/halted") {
+            return Err(MissionRunError::Conflict(
+                "this Mission was permanently halted; create a new Mission to continue the work",
+            ));
+        }
         if reviewed_nonce.is_empty()
             || revised_objective.trim().is_empty()
             || annotation(task, REQUESTED) != Some(reviewed_nonce)
@@ -367,6 +374,7 @@ impl Cluster {
             )
         };
         if expected_nonce.is_empty()
+            || task.annotations().contains_key("kars.azure.com/halted")
             || !task
                 .spec
                 .execution

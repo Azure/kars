@@ -22,6 +22,13 @@ import * as crypto from "node:crypto";
 /** Per-message transport evidence, never a claim supplied by the payload. */
 export type MessageSecurity = "encrypted" | "plaintext" | "unknown";
 
+export class MessageWaitTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`Timed out waiting for message (${timeoutMs}ms)`);
+    this.name = "MessageWaitTimeoutError";
+  }
+}
+
 export interface InboxMessage {
   security: MessageSecurity;
   id: string;
@@ -207,7 +214,7 @@ export class LocalInbox {
       };
       const timer = setTimeout(() => {
         this.waiters.delete(waiter);
-        reject(new Error(`Timed out waiting for message (${timeoutMs}ms)`));
+        reject(new MessageWaitTimeoutError(timeoutMs));
       }, timeoutMs);
       this.waiters.add(waiter);
     });

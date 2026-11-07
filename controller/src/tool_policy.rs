@@ -193,7 +193,7 @@ pub struct ApprovalPolicy {
     pub channel: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolPolicyStatus {
     #[serde(default)]
@@ -206,7 +206,8 @@ pub struct ToolPolicyStatus {
     #[serde(default)]
     pub conditions: Option<Vec<Condition>>,
 
-    /// Last time the policy was compiled to an AGT profile and pushed.
+    /// Last time a changed compilation result was published to status.
+    /// Unchanged periodic verification preserves this timestamp.
     #[serde(default)]
     pub last_compiled_at: Option<String>,
 

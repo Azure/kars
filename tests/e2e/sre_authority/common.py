@@ -16,6 +16,7 @@ import ssl
 import subprocess
 import time
 from .schema_preparation_diagnostics import schema_preparation_failure
+from .stage_diagnostics import STAGES, collect_stage_workloads, last_stage
 
 CONTEXT = "kind-kars-e2e"
 SYSTEM = "kars-system"
@@ -36,7 +37,7 @@ PRIVACY_REVISION = "kars.azure.com/sre-privacy/v2"
 FIELD_MANAGER = "kars-controller/karssandbox"
 STANDIN = "kars-sandbox-e2e:dev"
 POLICIES = (
-    "source-authority", "registration-authority", "private-identity",
+    "source-authority", "registration-authority", "report-authority", "private-identity",
     "binding-authority", "private-material", "source-retirement",
     "pending-proposals", "consumer-authority", "private-mounts",
     "private-workloads", "private-cronjobs", "private-connect", "role-authority", "no-legacy-tokens",
@@ -70,14 +71,7 @@ def command_error_category(stderr):
         r"unsupported-platform|ci-environment)$", stderr, re.MULTILINE)
     if acquisition:
         return "ci-acquisition:" + (acquisition[0] if len(set(acquisition)) == 1 else "ambiguous")
-    stages = {
-        "registrar", "controller-review", "release-inventory", "prerequisite-chart-render",
-        "action-schema-review", "helm-compatibility", "action-schema-migration",
-        "core-schema-preparation", "helm-server-dry-run", "helm-upgrade",
-        "template-ownership-review", "schema-publication", "template-authority-write",
-        "controller-rollout",
-    }
-    observed = set(re.findall(r"^SRE-STAGE-FAILURE ([a-z-]+)$", stderr, re.MULTILINE)) & stages
+    observed = set(re.findall(r"^SRE-STAGE-FAILURE ([a-z-]+)$", stderr, re.MULTILINE)) & STAGES
     if observed:
         return "sre-stage:" + (next(iter(observed)) if len(observed) == 1 else "ambiguous")
     status = re.search(r"Error from server \((Forbidden|Unauthorized|Invalid|NotFound|"
@@ -86,6 +80,18 @@ def command_error_category(stderr):
         return status.group(1)
     if re.search(r'The CustomResourceDefinition "[^"\r\n]+" is invalid:', stderr):
         return "Invalid"
+    missing = re.findall(r'no matches for kind "([^"\r\n]+)" in version "([^"\r\n]+)"', stderr)
+    if missing:
+        from .schema_preparation_diagnostics import KINDS
+        allowed = {(kind, "kars.azure.com/v1alpha1") for kind in KINDS if kind != "Deployment"}
+        allowed.update((kind, "monitoring.coreos.com/" + version) for kind, version in (
+            ("AlertmanagerConfig", "v1alpha1"), ("AlertmanagerConfig", "v1beta1"),
+            ("Alertmanager", "v1"), ("PodMonitor", "v1"), ("Probe", "v1"),
+            ("PrometheusAgent", "v1alpha1"), ("Prometheus", "v1"), ("PrometheusRule", "v1"),
+            ("ScrapeConfig", "v1alpha1"), ("ServiceMonitor", "v1"), ("ThanosRuler", "v1")))
+        if any(item not in allowed for item in missing):
+            return "api-discovery:unclassified-type"
+        return "api-discovery:" + ",".join(kind + "@" + version for kind, version in sorted(set(missing)))
     text = stderr.lower()
     for needle, category in (("error validating", "schema-validation"),
                              ("unknown flag", "cli-argument"),
@@ -101,31 +107,60 @@ def command_error_category(stderr):
 
 def authority_failure_site(root, detail):
     """Report checked-in rejection coordinates, never the status detail itself."""
-    if not isinstance(detail, str) or not detail:
-        return {"category": "unclassified"}
-    result = {"category": "controller-rejection"}
-    message = detail
-    status = re.fullmatch(r"(.+): Kubernetes status ([1-5][0-9]{2})", detail)
-    if status:
-        message = status.group(1)
-        result = {"category": "kubernetes-status", "httpStatus": int(status.group(2))}
-    elif detail.endswith(": Kubernetes transport/serialization failure"):
-        message = detail.removesuffix(": Kubernetes transport/serialization failure")
-        result = {"category": "kubernetes-transport"}
-    # Only an exact literal in our own production source can identify a site.
-    # Untrusted API messages, names, credentials and interpolated suffixes are
-    # not echoed, even if they contain a familiar rejection substring.
-    literal = json.dumps(message, ensure_ascii=False)
+    unknown = {"category": "unclassified"}
+    if not isinstance(detail, str) or not detail or len(detail) > 8192:
+        return unknown
     paths = [root / "controller/src/sre_authority.rs", root / "controller/src/sre_registration.rs",
-             root / "shared/sre_privacy.rs"]
+             root / "shared/sre_privacy.rs", root / "controller/src/inference_budget/first_install.rs"]
     paths += sorted((root / "controller/src/sre_authority").glob("*.rs"))
-    for path in paths:
-        if path.name.endswith("tests.rs"):
-            continue
-        for number, line in enumerate(path.read_text().splitlines(), 1):
-            if literal in line:
-                return {**result, "source": str(path.relative_to(root)), "line": number}
-    return {"category": "unclassified"}
+    sources = [(path, path.read_text().splitlines()) for path in paths if not path.name.endswith("tests.rs")]
+
+    def site(message):
+        if not message:
+            return unknown
+        result = {"category": "controller-rejection"}
+        status = re.fullmatch(r"(.+): Kubernetes status ([1-5][0-9]{2})", message)
+        if status:
+            message = status.group(1)
+            result = {"category": "kubernetes-status", "httpStatus": int(status.group(2))}
+        elif message.endswith(": Kubernetes transport/serialization failure"):
+            message = message.removesuffix(": Kubernetes transport/serialization failure")
+            result = {"category": "kubernetes-transport"}
+        # Only exact production literals or the closed public policy-name set
+        # may identify a site. Never echo names or interpolated API details.
+        policy = re.fullmatch(
+            r"SRE admission policy (kars-sre-[a-z-]+) is not observed, type-checked, and enforced; no privilege may be issued",
+            message)
+        if policy:
+            if policy.group(1) not in {f"kars-sre-{name}" for name in POLICIES}:
+                return unknown
+            message = message.replace(policy.group(1), "{name}", 1)
+        literal = json.dumps(message, ensure_ascii=False)
+        for path, lines in sources:
+            for number, line in enumerate(lines, 1):
+                if literal in line:
+                    return {**result, "source": str(path.relative_to(root)), "line": number}
+        return unknown
+
+    operations = ["private authority revocation", "API policy retirement", "private credential retirement"]
+    parts = re.split(r"; owned (private authority revocation|API policy retirement|private credential retirement) failed: ", detail)
+    if len(parts) == 1:
+        return site(detail)
+    if len(parts) > 7:
+        return unknown
+    primary = site(parts[0])
+    if primary == unknown:
+        return unknown
+    failures = [{"operation": "authority", **primary}]
+    last = -1
+    for operation, message in zip(parts[1::2], parts[2::2]):
+        index = operations.index(operation)
+        rejection = site(message)
+        if index <= last or rejection == unknown:
+            return unknown
+        failures.append({"operation": operation, **rejection})
+        last = index
+    return {"category": "controller-rejection-chain", "failures": failures}
 
 
 def printed_object(output):
@@ -253,10 +288,12 @@ class Harness:
         except subprocess.TimeoutExpired:
             os.killpg(process.pid, signal.SIGTERM)
             try:
-                process.communicate(timeout=5)
+                _, stderr = process.communicate(timeout=5)
             except subprocess.TimeoutExpired:
                 os.killpg(process.pid, signal.SIGKILL)
-                process.communicate(timeout=5)
+                _, stderr = process.communicate(timeout=5)
+            print("SRE-TIMEOUT", json.dumps({"limit": "phase" if remaining < timeout else "command",
+                "stage": last_stage(stderr)}), flush=True)
             raise AssertionError(f"Command exceeded its bounded timeout at {command_site()}") from None
         result = subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
         if expected is not None:
@@ -397,6 +434,7 @@ class Harness:
     def diagnostics(self):
         from .bootstrap_diagnostics import failure_facts
         self.deadline = max(self.deadline, time.monotonic() + 90)
+        collect_stage_workloads(self)
         # Status and identities only; never dump Secret bodies or whole Pods.
         for kind, name, namespace in [("karssreregistrations.kars.azure.com", "canonical", None),
                                       ("karssandbox", "sre", SYSTEM), ("deployment", "sre", RUNTIME),

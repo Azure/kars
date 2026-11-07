@@ -58,6 +58,8 @@ export interface IsolationOption {
   note: string;
 }
 export interface Options {
+  /** Absent metadata is unavailable, including during a rolling BFF upgrade. */
+  per_run_qualification_available?: boolean;
   models: ModelOption[];
   default_model: string | null;
   provider: ProviderInfo | null;
@@ -118,6 +120,7 @@ export interface ComposeResponse {
 // ─── Team orchestrator: charter → org chart ──────────────────────────────────
 
 export interface ComposeTeamRole {
+  resources?: import("./teams").TeamRoleResources | null;
   name: string;
   system_prompt: string;
   runtime: string;
@@ -126,7 +129,10 @@ export interface ComposeTeamRole {
 }
 
 export interface ComposeTeamProposal {
+  /** Live catalogue snapshot proposed for review, not launch authority. */
+  profile?: import("./operations").ProfileSummary | null;
   tier: number;
+  budget_tokens: number | null;
   cadence_minutes: number;
   instructions: string;
   model: string;
@@ -137,7 +143,7 @@ export interface ComposeTeamProposal {
   mcp_servers: string[];
   memory: string | null;
   egress: BlueprintEgress[];
-  egress_mode: "learning" | "strict";
+  egress_mode: "strict";
   engineering_enabled: boolean;
   engineering_signals: EngineeringSignal[];
   engineering_poll_interval_seconds: number;

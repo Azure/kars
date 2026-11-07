@@ -1,0 +1,88 @@
+{{/* Copyright (c) Microsoft Corporation. Licensed under the MIT License. */}}
+{{- $profile := (.Values.global | default dict).installationProfile | default "" -}}
+{{- if and $profile (ne $profile "kind-beta") -}}{{- fail "Unknown Bridge installationProfile" -}}{{- end -}}
+{{- if eq $profile "kind-beta" -}}
+{{- include "kars-bridge.externalOIDCCA.validate" . -}}
+{{- $oidcCA := (.Values.web.oidc | default dict).caConfigMap | default "" -}}
+{{- if $oidcCA -}}
+{{- $config := lookup "v1" "ConfigMap" (include "kars-bridge.namespace" .) $oidcCA -}}
+{{- if or (not $config) $config.metadata.deletionTimestamp -}}
+{{- fail "kind-beta external OIDC CA ConfigMap must already exist in the Bridge namespace and not be terminating" -}}
+{{- end -}}
+{{- $pem := dig "data" "ca.crt" "" $config -}}
+{{- if not (kindIs "string" $pem) -}}{{- fail "kind-beta external OIDC CA ConfigMap data ca.crt must contain public PEM certificates only" -}}{{- end -}}
+{{- if not (regexMatch "^([[:space:]]*-----BEGIN CERTIFICATE-----[[:space:]]+[A-Za-z0-9+/=\\r\\n]+-----END CERTIFICATE-----[[:space:]]*)+$" $pem) -}}
+{{- fail "kind-beta external OIDC CA ConfigMap data ca.crt must contain public PEM certificates only" -}}
+{{- end -}}
+{{- end -}}
+{{- if or (ne .Release.Name "kars-bridge") (ne .Release.Namespace "kars-system") (ne .Values.namespace "kars-system") (ne .Values.core.namespace "kars-system") .Values.createNamespace .Values.idp.enabled -}}
+{{- fail "kind-beta Bridge requires kars-bridge/kars-system, existing Core namespace and genuine external OIDC" -}}
+{{- end -}}
+{{- if or (not .Values.networkPolicy.create) (not (has .Values.bff.routeQualification.mode (list "required" "validation"))) .Values.bff.extraEnv -}}
+{{- fail "kind-beta Bridge requires enforced NetworkPolicy, required or validation route qualification mode and no BFF env overrides" -}}
+{{- end -}}
+{{- $images := dict "web" .Values.web.image "bff" .Values.bff.image -}}
+{{- if .Values.teamsGateway.enabled -}}{{- $_ := set $images "teamsGateway" .Values.teamsGateway.image -}}{{- end -}}
+{{- range $name, $image := $images -}}
+{{- if or (not $image.repository) (not (regexMatch "^latest@sha256:[a-f0-9]{64}$" $image.tag)) -}}
+{{- fail (printf "kind-beta Bridge requires operator-qualified immutable %s.image" $name) -}}
+{{- end -}}
+{{- end -}}
+{{- $env := dict -}}
+{{- range .Values.web.extraEnv -}}
+{{- if or (hasKey $env .name) (not (has .name (list "BRIDGE_OIDC_ISSUER" "BRIDGE_OIDC_CLIENT_ID" "BRIDGE_OIDC_CLIENT_SECRET" "BRIDGE_OIDC_REDIRECT_URI" "BRIDGE_OIDC_SCOPES" "BRIDGE_OIDC_ROLE_CLAIM" "BRIDGE_OIDC_ROLE_MAP" "BRIDGE_HEADLAMP_SSO_ENABLED"))) -}}
+{{- fail "kind-beta Bridge web.extraEnv permits only unique genuine OIDC and Headlamp SSO settings; no overrides or fallback" -}}
+{{- end -}}
+{{- if and (eq .name "BRIDGE_HEADLAMP_SSO_ENABLED") (or (hasKey . "valueFrom") (not (kindIs "string" .value)) (not (has .value (list "true" "false")))) -}}
+{{- fail "kind-beta Bridge Headlamp SSO setting requires a literal string true or false" -}}
+{{- end -}}
+{{- $_ := set $env .name . -}}
+{{- end -}}
+{{- range $name := list "BRIDGE_OIDC_ISSUER" "BRIDGE_OIDC_CLIENT_ID" "BRIDGE_OIDC_REDIRECT_URI" "BRIDGE_OIDC_ROLE_CLAIM" "BRIDGE_OIDC_ROLE_MAP" -}}
+{{- if not (dig $name "value" "" $env | trim) -}}{{- fail (printf "kind-beta Bridge requires explicit %s" $name) -}}{{- end -}}
+{{- end -}}
+{{- $issuer := dig "BRIDGE_OIDC_ISSUER" "value" "" $env -}}
+{{- if not (regexMatch "^https://[A-Za-z0-9][A-Za-z0-9.-]*(:443)?(/[^[:space:]?#]*)?$" $issuer) -}}
+{{- fail "kind-beta Bridge requires genuine HTTPS OIDC on port 443" -}}
+{{- end -}}
+{{- $redirect := dig "BRIDGE_OIDC_REDIRECT_URI" "value" "" $env -}}
+{{- if not (regexMatch "^(https://[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]+)?|http://(localhost|127[.]0[.]0[.]1)(:[0-9]+)?)/auth/callback$" $redirect) -}}
+{{- fail "kind-beta Bridge requires an explicit HTTPS (or loopback HTTP) /auth/callback" -}}
+{{- end -}}
+{{- $roles := dig "BRIDGE_OIDC_ROLE_MAP" "value" "" $env | mustFromJson -}}
+{{- if or (not (kindIs "map" $roles)) (not $roles) -}}{{- fail "kind-beta Bridge requires a nonempty operator OIDC role map" -}}{{- end -}}
+{{- range $group, $role := $roles -}}
+{{- if or (not (trim $group)) (not (has $role (list "user" "operator" "auditor" "admin"))) -}}{{- fail "kind-beta Bridge OIDC role map contains an unsupported role" -}}{{- end -}}
+{{- end -}}
+{{- $client := dig "BRIDGE_OIDC_CLIENT_SECRET" "valueFrom" "secretKeyRef" dict $env -}}
+{{- if or (not $client.name) (not $client.key) $client.optional (dig "BRIDGE_OIDC_CLIENT_SECRET" "value" "" $env) (not .Values.auth.principalSecretName) (not .Values.auth.principalSecretKey) -}}
+{{- fail "kind-beta Bridge requires operator client and shared principal Secret references" -}}
+{{- end -}}
+{{- $controller := lookup "apps/v1" "Deployment" "kars-system" "kars-controller" -}}
+{{- if or (not $controller) $controller.metadata.deletionTimestamp (ne (dig "metadata" "annotations" "meta.helm.sh/release-name" "" $controller) "kars") (ne (dig "metadata" "annotations" "meta.helm.sh/release-namespace" "" $controller) "kars-system") (ne (dig "metadata" "annotations" "kars.azure.com/installation-profile" "" $controller) "kind-beta") -}}
+{{- fail "kind-beta Bridge requires the live Core-owned kind-beta controller; install Core first" -}}
+{{- end -}}
+{{- $registration := lookup "kars.azure.com/v1alpha1" "KarsSRERegistration" "" "canonical" -}}
+{{- $repair := include "kars-bridge.sreAdoptedRepair" (dict "root" . "registration" ($registration | default dict)
+  "bff" (lookup "apps/v1" "Deployment" .Release.Namespace "kars-bridge-bff" | default dict)
+  "intent" (lookup "v1" "ConfigMap" "kars-system" "kars-sre-first-install" | default dict)
+  "adoption" (lookup "v1" "ConfigMap" "kars-system" "kars-sre-helm-adoption" | default dict)) -}}
+{{- if or (not $registration) $registration.metadata.deletionTimestamp (not (dig "spec" "enabled" false $registration)) (and (ne (dig "status" "phase" "" $registration) "Ready") (ne $repair "verified")) (ne (dig "status" "observedGeneration" 0 $registration | toString) (dig "metadata" "generation" -1 $registration | toString)) (ne (dig "spec" "controller" "deployment" "uid" "" $registration) ($controller.metadata.uid | default "missing")) (not (dig "spec" "firstInstallFunding" "intent" "uid" "" $registration)) -}}
+{{- fail "kind-beta Bridge requires completed UID-bound Core SRE enrollment; no partial-install continuation" -}}
+{{- end -}}
+{{- $cni := dig "metadata" "annotations" "kars.azure.com/kind-beta-cni" "" $controller -}}
+{{- if or (not (has $cni (list "cilium" "calico"))) (and (eq $cni "cilium") (not .Values.networkPolicy.routerApiServerIngress)) (and (eq $cni "calico") .Values.networkPolicy.routerApiServerIngress) -}}
+{{- fail "kind-beta Bridge router API ingress must match Core CNI" -}}
+{{- end -}}
+{{- $headlamp := lookup "apps/v1" "Deployment" "headlamp" "headlamp" -}}
+{{- if or (not $headlamp) $headlamp.metadata.deletionTimestamp (ne (dig "metadata" "annotations" "kars.azure.com/headlamp-owner" "" $headlamp) "kars-system/kars") -}}
+{{- fail "kind-beta Bridge requires genuine live Core-owned Headlamp" -}}
+{{- end -}}
+{{- $headlampEnv := dict -}}
+{{- range $container := $headlamp.spec.template.spec.containers -}}
+{{- range $container.env -}}{{- $_ := set $headlampEnv .name . -}}{{- end -}}
+{{- end -}}
+{{- if or (ne (dig "HEADLAMP_CONFIG_OIDC_IDP_ISSUER_URL" "value" "" $headlampEnv) $issuer) (ne (dig "HEADLAMP_CONFIG_OIDC_CALLBACK_URL" "value" "" $headlampEnv) (printf "%s/oidc-callback" (trimSuffix "/" .Values.headlamp.url))) (not (dig "HEADLAMP_CONFIG_OIDC_CLIENT_SECRET" "valueFrom" "secretKeyRef" "name" "" $headlampEnv)) -}}
+{{- fail "kind-beta Bridge Headlamp URL/issuer must match the genuine Core OIDC deployment" -}}
+{{- end -}}
+{{- end -}}

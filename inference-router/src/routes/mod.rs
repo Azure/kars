@@ -41,6 +41,8 @@ pub(crate) mod spawn_policy;
 mod governance;
 pub use governance::sensitive_agt_routes;
 
+pub(crate) mod memory_access;
+mod memory_budget;
 mod mesh;
 pub use mesh::mesh_routes;
 
@@ -51,12 +53,16 @@ pub use observations::{
 };
 mod mesh_token;
 mod task_telemetry;
-pub use access_request::routes as governed_service_routes;
+pub use access_request::{
+    control_routes as access_request_control_routes, routes as governed_service_routes,
+};
 mod github_policy;
 mod github_proxy;
 mod model_routing;
 pub use github_proxy::routes as github_proxy_routes;
 pub use mesh_token::mesh_token_routes;
+#[cfg(test)]
+pub(crate) use model_routing::tests::test_state;
 
 mod egress;
 pub use egress::egress_routes;
@@ -158,6 +164,7 @@ pub struct AppState {
     /// no behaviour changes in the data plane (Slice 3b rewires the
     /// `foundry.memory.*` MCP tools through this handle).
     pub memory_binding: crate::memory_binding_loader::LoadedMemoryBindingHandle,
+    pub memory_updates: Arc<memory_access::MemoryUpdates>,
     /// Slice 5c.1 — currently loaded egress allowlist bundle, if any.
     /// Populated at startup by
     /// `egress_allowlist_loader::load_and_install` reading the
@@ -332,6 +339,7 @@ impl AppState {
         let services = Arc::new(crate::governed_services::GovernedServices::from_env(
             &sandbox_name,
         ));
+        blocklist.bind_governed_services(services.clone())?;
         let blocked_egress = Arc::new(BlockedBuffer::with_defaults());
         blocked_egress.bind_services(&services);
         let inference_budget = crate::inference_budget::Client::from_env()?;
@@ -376,6 +384,7 @@ impl AppState {
             policy_status,
             inference_policy,
             memory_binding,
+            memory_updates: Arc::new(memory_access::MemoryUpdates::default()),
             egress_allowlist,
             deployment_health: Arc::new(crate::deployment_health::DeploymentHealthRegistry::new()),
         })

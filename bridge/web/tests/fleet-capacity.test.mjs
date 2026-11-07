@@ -81,12 +81,14 @@ test("partial node coverage does not masquerade as a low cluster total", () => {
   assert.match(html, /unsampled/);
 });
 
-test("real zero samples render zero-width bars and healthy headroom", () => {
+test("real zero samples show measured utilization without promising headroom", () => {
   const html = render();
   assert.match(html, /0\.0%/);
   assert.match(html, /width:0%/);
   assert.doesNotMatch(html, /width:1%/);
-  assert.match(html, /Healthy headroom/);
+  assert.match(html, /Lower reported utilization/);
+  assert.match(html, /External VM or container limits are not measured here/);
+  assert.doesNotMatch(html, /Healthy headroom/);
 });
 
 test("activity read failures remain unknown instead of zero runs", () => {
@@ -155,7 +157,7 @@ test("Fleet age uses the server observation across a hydration minute boundary",
   assert.match(client, /59s.*?old/);
 });
 
-async function renderPage({ inventoryFails = false, capacityFails = false } = {}) {
+async function renderPage({ inventoryFails = false, capacityFails = false, sandboxes = [sandbox] } = {}) {
   const jsx = imports["react/jsx-runtime"].jsx;
   const pageImports = {
     ...imports,
@@ -169,7 +171,7 @@ async function renderPage({ inventoryFails = false, capacityFails = false } = {}
     "@/lib/bff": {
       listSandboxes: async () => {
         if (inventoryFails) throw new Error("private inventory failure detail");
-        return [sandbox];
+        return sandboxes;
       },
       getClusterCapacity: async () => {
         if (capacityFails) throw new Error("private capacity failure detail");
@@ -211,7 +213,7 @@ test("complete Fleet read failures remain explicit and recover to real capacity"
   assert.match(failed, /Cluster &amp; agent utilization unavailable/);
   assert.match(failed, /Cluster unreachable/);
   const recovered = await renderPage();
-  assert.match(recovered, /Healthy headroom/);
+  assert.match(recovered, /Lower reported utilization/);
   assert.match(recovered, /bridge-orchestrator-with-a-long-name/);
   assert.doesNotMatch(recovered, /utilization unavailable|Cluster unreachable/);
 });
@@ -238,4 +240,56 @@ test("Fleet initial search matches namespace and reports an honest empty result"
   const html = renderFleet("no-matching-sandbox");
   assert.match(html, /No sandbox matches these filters/);
   assert.doesNotMatch(html, /RuntimeReady/);
+});
+
+for (const phase of ["Running", "Ready"]) {
+  test(`${phase} inventory without activity never declares zero execution or idle`, async () => {
+    const html = await renderPage({ sandboxes: [{ ...sandbox, phase, executing: null }] });
+    assert.match(html, /Execution confirmed: Unavailable/);
+    assert.match(html, /Execution status is unavailable for 1 running sandbox/);
+    assert.match(html, /href="\/workspace\/agents"/);
+    assert.doesNotMatch(html, /is idle|are idle|exactly this same signal|Execution confirmed: 0/);
+  });
+}
+
+test("partial execution observations cannot masquerade as complete counts", async () => {
+  const html = await renderPage({ sandboxes: [
+    { ...sandbox, name: "active", executing: true },
+    { ...sandbox, name: "unobserved", executing: null },
+  ] });
+  assert.match(html, /Execution confirmed: 1\+/);
+  assert.match(html, /only confirmed execution/);
+});
+
+test("confirmed non-execution remains distinguishable from unavailable", async () => {
+  const html = await renderPage({ sandboxes: [{ ...sandbox, executing: false }] });
+  assert.match(html, /Execution confirmed: 0/);
+  assert.doesNotMatch(html, /Execution status is unavailable for/);
+});
+
+test("unknown team and activity are not standalone, idle, or lead assertions", () => {
+  const html = render({}, [{ ...sandbox, executing: null }]);
+  assert.match(html, /Team attribution unavailable/);
+  assert.match(html, /1 execution status unavailable/);
+  assert.doesNotMatch(html, /standalone|idle/);
+  const fleet = renderFleet();
+  assert.match(fleet, /No recorded parent/);
+  assert.match(fleet, /no parent recorded/);
+  assert.doesNotMatch(fleet, /Leads only|>lead</);
+});
+
+test("topology distinguishes unknown worker ancestry and execution from principals and idle", () => {
+  const topologyContext = { ...context, exports: {} };
+  runInNewContext(ts.transpileModule(
+    readFileSync(new URL("../src/app/console/fleet/mesh-topology.tsx", import.meta.url), "utf8"),
+    { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } },
+  ).outputText, topologyContext);
+  const html = renderToStaticMarkup(imports["react/jsx-runtime"].jsx(topologyContext.exports.MeshTopology, {
+    sandboxes: [{ ...sandbox, name: "qa-worker", executing: null }],
+  }));
+  assert.match(html, /1 root record/);
+  assert.match(html, /no parent recorded/);
+  assert.match(html, /0 execution confirmed · 1 unavailable/);
+  assert.match(html, /unavailable \/ not running/);
+  assert.doesNotMatch(html, /team principal|idle \/ retained/);
 });

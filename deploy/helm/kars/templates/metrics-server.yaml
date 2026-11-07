@@ -1,4 +1,5 @@
-{{- define "kars.metricsOwned" -}}
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}{{- define "kars.metricsOwned" -}}
 {{- $marker := get .annotations "kars.azure.com/metrics-owner" -}}
 {{- $ownerID := printf "%s/%s" .namespace .release -}}
 {{- $name := get .annotations "meta.helm.sh/release-name" -}}
@@ -246,7 +247,7 @@ spec:
         - name: serving-certificate
           secret:
             secretName: kars-metrics-server-tls
-            defaultMode: 0444
+            defaultMode: 292
         {{- if $kubelet.caBundle }}
         - name: kubelet-ca
           configMap:

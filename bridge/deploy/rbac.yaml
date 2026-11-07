@@ -13,6 +13,11 @@
 #   - Writes are scoped to the kinds the Bridge authors; everything else is read-only.
 #   - Core supplies source-only and enrolled-store Roles after explicit operator
 #     grants. This manifest grants no Secret or Deployment mutation authority.
+#   - Budget accounts are intentionally excluded. Funded compose additionally
+#     needs the exact-account Role/RoleBinding rendered by the maintained Bridge
+#     chart's orchestrator-funding-read.yaml with explicit Sandbox/account UIDs.
+#     See docs/governed-inference-budgets.md, "Bridge account-read delegation".
+#     Do not add karsbudgetaccounts to this ClusterRole or substitute list/watch.
 #   - For audit fidelity, run the BFF behind user impersonation (Impersonate-User)
 #     or per-user tokens so the K8s audit log records the human, not this SA.
 #   - Governance CRDs ARE the security posture; gate privilege-WIDENING applies
@@ -33,6 +38,11 @@ metadata:
   labels:
     app.kubernetes.io/name: kars-bridge
 rules:
+  # Report visibility needs only the canonical registration, never registrar use/renew.
+  - apiGroups: ["kars.azure.com"]
+    resources: ["karssreregistrations"]
+    resourceNames: ["canonical"]
+    verbs: ["get"]
   # ── Read the full kars CRD surface (status + envelope objects) ──────────────
   - apiGroups: ["kars.azure.com"]
     resources:

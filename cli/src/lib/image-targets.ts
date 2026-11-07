@@ -94,6 +94,7 @@ export function coreImageValues(images: PushedImage[]): Record<string, string> {
       values[`${prefix}.image.repository`] = repository;
       values[`${prefix}.image.tag`] = tag;
       values[`${prefix}.image.pullPolicy`] = "Always";
+      if (name === "controller") values[`${prefix}.image.digest`] = image.split("@")[1] ?? "";
     }
   }
   return values;

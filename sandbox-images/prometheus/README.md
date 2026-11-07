@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Prometheus on Azure Linux 3
 
 This recipe retains Prometheus **3.11.3**, Docker and Swarm discovery, and both

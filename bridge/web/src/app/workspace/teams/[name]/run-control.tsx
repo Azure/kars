@@ -17,11 +17,15 @@ export function RunNowControl({
   team,
   paused,
   inFlight,
+  held = false,
+  stopped = false,
   runKey,
 }: {
   team: string;
   paused: boolean;
   inFlight: boolean;
+  held?: boolean;
+  stopped?: boolean;
   runKey: string | null;
 }) {
   const router = useRouter();
@@ -46,13 +50,17 @@ export function RunNowControl({
     });
   }
 
+  if (held && !stopped) {
+    return <span className="text-xs text-warning">Run held — stop this run before starting fresh work.</span>;
+  }
+
   if (paused) {
     return (
       <span
         className="rounded-lg border border-border bg-surface-muted px-3 py-1.5 text-xs text-foreground-muted"
-        title="Resume the team to run it."
+        title="Resume scheduling to allow new runs. Current work can finish."
       >
-        Hibernating
+        Scheduling paused
       </span>
     );
   }
@@ -79,7 +87,10 @@ export function RunNowControl({
   if (confirming) {
     return (
       <div className="flex items-center gap-2">
-        <span className="text-xs text-foreground-muted">Mint a run now? It spends budget.</span>
+        <span className="text-xs text-foreground-muted">
+          Mint a new run now? It spends budget.
+          {held && stopped && " The stopped run will not be replayed; its evidence and charges remain."}
+        </span>
         <button
           type="button"
           disabled={pending}
@@ -110,7 +121,18 @@ export function RunNowControl({
       >
         Run now
       </button>
-      {error && <span className="text-xs text-rose-600">{error}</span>}
+      {error && (
+        <div role="alert" className="text-xs text-danger">
+          <p>{error.replace(/^ReviewedInputCapabilityRequired:\s*/, "This run cannot start because some phases cannot read previous work: ")
+            .replace(/\s*\[ReviewedInputCapabilityRequired\]$/, "")}</p>
+          {error.includes("ReviewedInputCapabilityRequired") && (
+            <details className="mt-1">
+              <summary>Technical details</summary>
+              <p>{error}</p>
+            </details>
+          )}
+        </div>
+      )}
     </div>
   );
 }

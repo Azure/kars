@@ -19,6 +19,7 @@ import {
   ellipsis,
   exactActionQuery,
   exactActionsQuery,
+  exactDestinationsQuery,
   normalize,
   phaseKind,
   phaseTone,
@@ -31,7 +32,7 @@ import {
   RECENT_ACTIVITY_MS,
 } from "./agent-graph/constants";
 import { buildAgentExecutions } from "./agent-graph/execution";
-import { ProofPoints, SelectionInspector } from "./agent-graph/inspectors";
+import { EvidenceReferences, ExecutionOverview, SelectionInspector } from "./agent-graph/inspectors";
 import { buildGraphLayout } from "./agent-graph/layout";
 import type { AgentExecution, GraphLeaf, GraphSelection } from "./agent-graph/types";
 
@@ -74,7 +75,7 @@ export function AgentGraph({
 }) {
   const sharedEvents = useLiveTrace(ns, name, running && externalEvents == null, activity, runNonce);
   const [query, setQuery] = useState("");
-  const [selectedKey, setSelectedKey] = useState("agent:principal");
+  const [selectedKey, setSelectedKey] = useState("overview");
   const [selectedAgentId, setSelectedAgentId] = useState("principal");
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => new Set());
   const [clientNow, setClientNow] = useState<number | null>(null);
@@ -160,7 +161,7 @@ export function AgentGraph({
   }, [graph]);
 
   const principal = agents.find((agent) => agent.isPrincipal) ?? agents[0];
-  const selected = selections.get(selectedKey)
+  const selected = selectedKey === "overview" && agents.length > 1 ? null : selections.get(selectedKey)
     ?? selections.get(`agent:${principal.id}`)
     ?? { kind: "agent" as const, key: `agent:${principal.id}`, agent: principal };
   const matchAgent = (agent: AgentExecution) =>
@@ -205,10 +206,10 @@ export function AgentGraph({
       onInspect?.(exactActionsQuery(selection.agent, selection.actions));
     } else if (selection.kind === "destination") {
       setSelectedAgentId(selection.agent.id);
-      onInspect?.(selection.destination);
+      onInspect?.(exactDestinationsQuery(selection.agent, [selection.destination]));
     } else {
       setSelectedAgentId(selection.agent.id);
-      onInspect?.(selection.agent.traceQuery);
+      onInspect?.(exactDestinationsQuery(selection.agent, selection.destinations));
     }
   };
 
@@ -226,7 +227,7 @@ export function AgentGraph({
           <h2 id="execution-graph-title" className="text-sm font-semibold">Agent execution graph</h2>
           <p id="execution-graph-description" className="mt-0.5 text-xs leading-relaxed text-foreground-muted">
             {routerActivity
-              ? "Revision-bound producer and router observations. Select nodes to distinguish model proposals from reported results. Available timestamps identify router observations; destinations are not recorded."
+              ? "Revision-bound producer and router observations. Select nodes to distinguish model proposals from reported results. Timestamps and source labels describe the available evidence; destination nodes are not proof of complete traffic coverage."
               : "Principal-to-specialist topology with live action and destination leaves. Select nodes for retained evidence or connectors for relationship context."}
           </p>
         </div>
@@ -383,7 +384,7 @@ export function AgentGraph({
           {graph.layouts.map((layout) => {
             const kind = phaseKind(layout.agent.phase);
             const recentlyActive = hasRecentActivity(layout.agent);
-            const selectedAgent = selected.key === `agent:${layout.agent.id}`;
+            const selectedAgent = selected?.key === `agent:${layout.agent.id}`;
             const latest = layout.agent.actions.at(-1);
             return (
               <button
@@ -395,7 +396,7 @@ export function AgentGraph({
                   agent: layout.agent,
                 })}
                 aria-pressed={selectedAgent}
-                aria-label={`Inspect ${layout.agent.displayName}, ${layout.agent.role}, ${layout.agent.phase}`}
+                aria-label={`Inspect ${layout.agent.displayName}, ${layout.agent.role}, ${layout.agent.phase}, runtime ${layout.agent.runtime ?? "not reported"}, model ${layout.agent.model ?? "not reported"}`}
                 className={`absolute overflow-hidden rounded-2xl border px-4 py-3 text-left shadow-sm transition-[opacity,border-color,box-shadow,transform] hover:-translate-y-0.5 hover:shadow-lg ${
                   selectedAgent
                     ? "border-signal bg-surface shadow-lg ring-2 ring-signal/20"
@@ -433,16 +434,22 @@ export function AgentGraph({
                   <span className={`rounded-full border px-1.5 py-0.5 font-medium ${phaseTone(layout.agent.phase)}`}>
                     {layout.agent.phase}
                   </span>
-                  {(layout.agent.model || layout.agent.runtime) && (
-                    <span className="truncate rounded-full border border-border bg-surface-muted/40 px-1.5 py-0.5 font-mono text-foreground-muted">
-                      {layout.agent.model ?? layout.agent.runtime}
+                  <span className="shrink-0 rounded-full border border-border bg-surface-muted/40 px-1.5 py-0.5 text-foreground-muted"
+                    title={`Runtime: ${layout.agent.runtime ?? "Not reported"}`}>
+                    {layout.agent.runtime ?? "Runtime unknown"}
+                  </span>
+                  {layout.agent.model && (
+                    <span className="min-w-0 truncate rounded-full border border-border bg-surface-muted/40 px-1.5 py-0.5 font-mono text-foreground-muted"
+                      title={`Model: ${layout.agent.model}`}>
+                      {layout.agent.model}
                     </span>
                   )}
                 </span>
                 <span className="mt-2 block border-t border-border/70 pt-2 text-[10px] text-foreground-muted">
-                  <span className="font-medium text-foreground">{layout.agent.actions.length} records</span>
-                  {" · "}
-                  {ellipsis(latest?.human ?? "No retained action", 34)}
+                  <span className="font-medium text-foreground">
+                    {layout.agent.actions.length ? `${layout.agent.actions.length} records` : "Detailed trace unavailable"}
+                  </span>
+                  {latest && <> · {ellipsis(latest.human, 34)}</>}
                 </span>
               </button>
             );
@@ -457,10 +464,10 @@ export function AgentGraph({
                 type="button"
                 onClick={() => activate(aggregate)}
                 aria-expanded={aggregate.expanded}
-                aria-pressed={selected.key === aggregate.key}
+                aria-pressed={selected?.key === aggregate.key}
                 aria-label={`${aggregate.expanded ? "Collapse" : "Expand"} specialists delegated by ${aggregate.parent.displayName}`}
                 className={`absolute flex flex-col justify-center rounded-2xl border border-dashed px-4 py-3 text-left shadow-sm transition-[opacity,border-color,box-shadow,transform] hover:-translate-y-0.5 hover:shadow-md ${
-                  selected.key === aggregate.key
+                  selected?.key === aggregate.key
                     ? "border-accent bg-accent/[0.08] ring-2 ring-accent/20"
                     : "border-accent/45 bg-surface"
                 } ${matched ? "opacity-100" : "opacity-20"}`}
@@ -483,7 +490,7 @@ export function AgentGraph({
 
           {graph.layouts.flatMap((layout) =>
             layout.leaves.map((leaf) => {
-              const leafSelected = selected.key === leaf.key;
+              const leafSelected = selected?.key === leaf.key;
               const isDestination = leaf.kind === "destination" || leaf.kind === "folded-destinations";
               const isFolded = leaf.kind === "folded-actions" || leaf.kind === "folded-destinations";
               const failed = leaf.kind === "action" && leaf.action.ok === false;
@@ -544,10 +551,10 @@ export function AgentGraph({
                 key={`edge-control-${key}`}
                 type="button"
                 onClick={() => activate(edge)}
-                aria-pressed={selected.key === key}
+                aria-pressed={selected?.key === key}
                 aria-label={`Inspect delegation from ${parent.agent.displayName} to ${layout.agent.displayName}`}
                 className={`absolute flex h-7 w-7 items-center justify-center rounded-full border bg-surface text-[11px] font-bold shadow-sm transition hover:scale-110 ${
-                  selected.key === key ? "border-signal text-signal ring-2 ring-signal/20" : "border-border text-foreground-muted"
+                  selected?.key === key ? "border-signal text-signal ring-2 ring-signal/20" : "border-border text-foreground-muted"
                 } ${matched ? "opacity-100" : "opacity-20"}`}
                 style={{ left: x - 14, top: y - 14 }}
               >
@@ -616,12 +623,18 @@ export function AgentGraph({
         </div>
       </div>
 
-      <SelectionInspector selection={selected} />
+      {agents.length > 1 && <button type="button" onClick={() => {
+        setSelectedKey("overview");
+        setSelectedAgentId("principal");
+      }} aria-pressed={selected === null} className="mt-4 rounded-lg border border-border px-3 py-1.5 text-xs font-medium hover:bg-surface-muted">
+        Execution overview · all producers
+      </button>}
+      {selected ? <SelectionInspector selection={selected} /> : <ExecutionOverview agents={agents} onInspect={onInspect} />}
 
-      {!routerActivity && <ProofPoints
+      {!routerActivity && <EvidenceReferences
         envelopeDigest={envelopeDigest}
         identity={identity}
-        subCount={agents.filter((agent) => !agent.isPrincipal).length}
+        nonPrincipalCount={agents.filter((agent) => !agent.isPrincipal).length}
         receipt={receipt}
       />}
     </section>

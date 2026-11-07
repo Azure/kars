@@ -3,7 +3,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { MissionReceiver, missionTargetFromEnvironment, type MissionReceiverOptions } from "./mission-receiver.js";
-import { MAX_MISSION_MESSAGE_BYTES, missionContract, parseMissionMessage, type MissionAssignment, type MissionReply } from "@kars/mesh/dist/mission-protocol.js";
+import { MAX_MISSION_BASE_BYTES, MAX_MISSION_MESSAGE_BYTES, missionContract, parseMissionMessage, type MissionAssignment, type MissionReply } from "@kars/mesh/dist/mission-protocol.js";
 import { missionObjectiveDigest, type MissionAdmission } from "@kars/mesh/dist/mission-admission.js";
 import { TaskExecutionError } from "./task-completion.js";
 import { missionIdentity } from "@kars/mesh/dist/mission-identity.js";
@@ -23,8 +23,68 @@ function setup(overrides: Partial<ConstructorParameters<typeof MissionReceiver>[
 }
 
 describe("encrypted mission receiver", () => {
+  it("partitions peer ingress by exact active execution and retires delayed callbacks", async () => {
+    let admitted!: MissionAssignment;
+    let finish!: () => void;
+    const execute: MissionReceiverOptions["execute"] = async (_content, _progress, _artifacts, _phase, _inputs, _live, _outputs, selected) => {
+      admitted = selected!;
+      await new Promise<void>(resolve => { finish = resolve; });
+      return { ...evidence, output: "Useful result" };
+    };
+    const h = setup({ execute });
+    expect(h.receiver.capturePeerIngress()).toBeUndefined();
+    await h.receiver.handle(target.dispatcherDid, assignment, "encrypted");
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+    expect(() => h.receiver.assertActiveAssignment({ ...admitted })).toThrow("stale");
+    const partition = h.receiver.peerInbox(admitted);
+    const capture = h.receiver.capturePeerIngress()!;
+    const old = {}; const entry = {}; capture(entry);
+    expect(partition.has(entry)).toBe(true); expect(partition.has(old)).toBe(false);
+    finish();
+    await vi.waitFor(() => expect(h.replies.at(-1)?.status).toBe("succeeded"));
+    expect(h.receiver.capturePeerIngress()).toBeUndefined();
+    expect(() => capture(old)).toThrow("stale");
+    expect(partition.has(old)).toBe(false);
+    await h.receiver.handle(target.dispatcherDid, assignment, "encrypted");
+    expect(() => h.receiver.peerInbox(admitted)).toThrow("stale");
+  });
+  it("preserves installed v5 locators through ready, execution and replay and rejects substitution", async () => {
+    const phase = { name: "draft", objective: "Write the reviewed briefing", capabilities: ["filesystem-write"], minToolCalls: 0, maxToolCalls: 2 };
+    const peerContext = { rootUid: "reviewed-root", stateName: `kars-reviewed-${"a".repeat(40)}`, slot: "r0-p0",
+      peers: [{ role: "writer", phase: "draft", slot: "r0-p0", agentName: `rp-${"a".repeat(20)}-r0-p0` }] };
+    const contract = missionContract(phase, undefined, [], peerContext);
+    const execute = vi.fn(async () => ({ ...evidence, phase: { name: "draft", minToolCalls: 0, maxToolCalls: 2,
+      attemptedToolCalls: 0, successfulToolCalls: 0 }, output: "Useful reviewed briefing" }));
+    const h = setup({ expectedContract: contract, execute });
+    const selected = { ...assignment, ...contract };
+    await h.receiver.handle(target.dispatcherDid, { ...selected, peerContext: { ...peerContext, rootUid: "other" } }, "encrypted");
+    expect(execute).not.toHaveBeenCalled();
+    await h.receiver.handle(target.dispatcherDid, { ...target, ...contract, type: "mission:probe", challenge: "probe-1", runNonce: "run-1" }, "encrypted");
+    expect(h.replies[0]).toMatchObject({ status: "ready", ...contract });
+    await h.receiver.handle(target.dispatcherDid, selected, "encrypted");
+    await vi.waitFor(() => expect(h.replies.at(-1)?.status).toBe("succeeded"));
+    expect(execute.mock.calls[0].at(-1)).toMatchObject({ ...contract, content: assignment.content });
+    expect(h.replies.every(reply => JSON.stringify(reply.peerContext) === JSON.stringify(contract.peerContext))).toBe(true);
+    await h.receiver.handle(target.dispatcherDid, selected, "encrypted");
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
   const activity = JSON.stringify({ version: 1, source: "runtime-forwarded-router-observations", coverage: "returned-responses-only",
     responses: 1, rounds: [1], state: "unavailable", reason: "Router observations unavailable after execution (reset, expiry or read failure)" });
+  it.each([false, true])("retains the reserved large Activity envelope through terminal failure=%s", async failed => {
+    const largeActivity = activity + " ".repeat(300 * 1024);
+    const s = setup({ execute: async (_content, progress) => {
+      progress(evidence, largeActivity);
+      if (failed) throw new TaskExecutionError("Measured failure", evidence);
+      return { ...evidence, output: "Report attached", artifacts: {
+        "report.md": "x".repeat(120 * 1024), "kars-router-observations.json": largeActivity,
+      } };
+    } });
+    await s.receiver.handle(target.dispatcherDid, { ...assignment, activityFormat: "router-observations-v1", artifactFormat: "text-v1" }, "encrypted");
+    await vi.waitFor(() => expect(s.replies.at(-1)?.status).toBe(failed ? "failed" : "succeeded"));
+    expect(s.replies.find(r => r.status === "running")?.routerObservations).toBe(largeActivity);
+    expect(failed ? s.replies.at(-1)?.routerObservations : s.replies.at(-1)?.artifacts?.["kars-router-observations.json"]).toBe(largeActivity);
+    expect(s.replies.every(r => parseMissionMessage(r) !== null)).toBe(true);
+  });
   it("echoes offered activity and forwards retained snapshots only while running", async () => {
     const execute = vi.fn<MissionReceiverOptions["execute"]>(async (_content, progress, _artifacts, _phase, _inputs, live) => {
       expect(live).toBe(true);
@@ -40,6 +100,44 @@ describe("encrypted mission receiver", () => {
     expect(s.replies.filter(r => r.status === "running").map(r => r.routerObservations)).toEqual([activity, activity]);
     expect(s.replies.at(-1)).not.toHaveProperty("routerObservations");
     expect(s.replies.every(r => !Object.hasOwn(r.evidence ?? {}, "routerObservations"))).toBe(true);
+  });
+  it.each(["Exact-host approval is needed.", "🔥".repeat(5000)])("retains a bounded measured failure explanation without artifacts", async output => {
+    const execute = vi.fn(async () => { throw new TaskExecutionError("Required exports missing", evidence, undefined, output); });
+    const s = setup({ execute });
+    await s.receiver.handle(target.dispatcherDid, assignment, "encrypted");
+    await vi.waitFor(() => expect(s.replies.at(-1)?.status).toBe("failed"));
+    const terminal = s.replies.at(-1)!;
+    expect(terminal).toMatchObject({ output: [...output].slice(0, 4096).join(""), error: "Required exports missing", evidence });
+    expect(Buffer.byteLength(terminal.output!)).toBeLessThanOrEqual(16384);
+    expect(terminal).not.toHaveProperty("artifacts");
+    expect(parseMissionMessage(terminal)).not.toBeNull();
+    await s.receiver.handle(target.dispatcherDid, assignment, "encrypted");
+    expect(s.replies.at(-1)).toEqual(terminal);
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+  it("retains the last validated observations on failure without publishing outputs", async () => {
+    const s = setup({ execute: async (_content, progress) => {
+      progress(evidence, activity);
+      progress(evidence);
+      throw new TaskExecutionError("Write failed", evidence);
+    } });
+    await s.receiver.handle(target.dispatcherDid, { ...assignment, activityFormat: "router-observations-v1" }, "encrypted");
+    await vi.waitFor(() => expect(s.replies.at(-1)?.status).toBe("failed"));
+    expect(s.replies.at(-1)).toMatchObject({ routerObservations: activity, error: "Write failed", evidence });
+    expect(s.replies.at(-1)).not.toHaveProperty("output");
+    expect(s.replies.at(-1)).not.toHaveProperty("artifacts");
+    expect(parseMissionMessage(s.replies.at(-1))).not.toBeNull();
+  });
+  it("preserves the first progress failure when the executor invokes the callback again", async () => {
+    const s = setup({ execute: async (_content, progress) => {
+      expect(() => progress(evidence, activity)).toThrow("Invalid or unnegotiated mission activity");
+      expect(() => progress(evidence)).toThrow("Invalid or unnegotiated mission activity");
+      return { ...evidence, output: "Not delivered" };
+    } });
+    await s.receiver.handle(target.dispatcherDid, assignment, "encrypted");
+    await vi.waitFor(() => expect(s.replies.at(-1)?.status).toBe("failed"));
+    expect(s.replies.at(-1)?.error).toBe("Invalid or unnegotiated mission activity");
+    expect(s.replies.some(r => r.routerObservations !== undefined)).toBe(false);
   });
   it("fails unnegotiated progress without persisting provisional bytes as terminal evidence", async () => {
     const s = setup({ execute: async (_content, progress) => {
@@ -94,7 +192,7 @@ describe("encrypted mission receiver", () => {
     const negotiated = { ...assignment, artifactFormat: "text-v1" as const };
     await s.receiver.handle(target.dispatcherDid, negotiated, "encrypted");
     await vi.waitFor(() => expect(s.replies.at(-1)?.status).toBe("succeeded"));
-    expect(execute).toHaveBeenCalledWith(assignment.content, expect.any(Function), true, undefined, undefined, false, undefined);
+    expect(execute).toHaveBeenCalledWith(assignment.content, expect.any(Function), true, undefined, undefined, false, undefined, negotiated);
     const terminal = structuredClone(s.replies.at(-1)!);
     expect(terminal.artifacts).toEqual(artifacts);
     artifacts["briefing.md"] = "changed executor state";
@@ -109,7 +207,7 @@ describe("encrypted mission receiver", () => {
     const s = setup();
     await s.receiver.handle(target.dispatcherDid, assignment, "encrypted");
     await vi.waitFor(() => expect(s.replies.at(-1)?.status).toBe("succeeded"));
-    expect(s.execute).toHaveBeenCalledWith(assignment.content, expect.any(Function), false, undefined, undefined, false, undefined);
+    expect(s.execute).toHaveBeenCalledWith(assignment.content, expect.any(Function), false, undefined, undefined, false, undefined, assignment);
     expect(s.replies.at(-1)).not.toHaveProperty("artifacts");
     expect(s.replies.at(-1)).not.toHaveProperty("artifactFormat");
   });
@@ -231,7 +329,7 @@ describe("installed run admission", () => {
     expect(s.replies).toEqual([]);
     allow(true);
     await vi.waitFor(() => expect(s.replies.at(-1)?.status).toBe("succeeded"));
-    expect(s.execute).toHaveBeenCalledWith(content, expect.any(Function), false, undefined, undefined, false, undefined);
+    expect(s.execute).toHaveBeenCalledWith(content, expect.any(Function), false, undefined, undefined, false, undefined, { ...assignment, content });
     await s.receiver.handle(target.dispatcherDid, { ...assignment, content }, "encrypted");
     expect(s.execute).toHaveBeenCalledTimes(1);
   });
@@ -262,7 +360,8 @@ describe("immutable input receiver", () => {
     caller.inputArtifacts.length = 0;
     allow(true);
     await vi.waitFor(() => expect(s.replies.at(-1)?.status).toBe("succeeded"));
-    expect(execute).toHaveBeenCalledWith(assignment.content, expect.any(Function), true, contract.reviewedPhase, inputs, false, undefined);
+    expect(execute).toHaveBeenCalledWith(assignment.content, expect.any(Function), true, contract.reviewedPhase, inputs, false, undefined, constrained);
+    expect(Object.isFrozen(execute.mock.calls[0][7])).toBe(true);
     for (const value of [execute.mock.calls[0][4], execute.mock.calls[0][4]![0], execute.mock.calls[0][4]![0].source]) expect(Object.isFrozen(value)).toBe(true);
     expect(s.replies.map(r => r.status)).toEqual(["ready", "accepted", "running", "succeeded"]);
     const terminal = s.replies.at(-1)!;
@@ -322,7 +421,7 @@ describe("reviewed filesystem phase receiver", () => {
     input.reviewedPhase!.maxToolCalls = 32; input.content = "Changed after authorization started";
     allow(true);
     await vi.waitFor(() => expect(s.replies.at(-1)?.status).toBe("succeeded"));
-    expect(execute).toHaveBeenCalledWith(assignment.content, expect.any(Function), true, contract.reviewedPhase, undefined, false, undefined);
+    expect(execute).toHaveBeenCalledWith(assignment.content, expect.any(Function), true, contract.reviewedPhase, undefined, false, undefined, constrained);
     expect(Object.isFrozen(execute.mock.calls[0][3])).toBe(true);
     expect(s.replies.map(reply => reply.status)).toEqual(["ready", "accepted", "running", "succeeded"]);
     expect(s.replies[2].evidence?.phase?.successfulToolCalls).toBe(1);
@@ -395,8 +494,8 @@ describe("reviewed filesystem phase receiver", () => {
   it.each([1, 2])("answers a maximum-size padded v%i probe with only the negotiated reply fields", async version => {
     const readyContract = missionContract(version === 2 ? contract.reviewedPhase : undefined);
     const input = { ...target, ...readyContract, type: "mission:probe", challenge: "phase-probe", runNonce: "run-1", padding: "" };
-    input.padding = "x".repeat(MAX_MISSION_MESSAGE_BYTES - Buffer.byteLength(JSON.stringify(input)));
-    expect(Buffer.byteLength(JSON.stringify(input))).toBe(MAX_MISSION_MESSAGE_BYTES);
+    input.padding = "x".repeat(MAX_MISSION_BASE_BYTES - Buffer.byteLength(JSON.stringify(input)));
+    expect(Buffer.byteLength(JSON.stringify(input))).toBe(MAX_MISSION_BASE_BYTES);
     expect(parseMissionMessage(input)).not.toBeNull();
     const s = setup({ expectedContract: readyContract });
     await s.receiver.handle(target.dispatcherDid, input, "encrypted");
@@ -413,8 +512,8 @@ describe("reviewed filesystem phase receiver", () => {
   it.each([true, false])("bounds and freezes a padded assignment failure with measured=%s and replays it unchanged", async measuredFailure => {
     const boundedContract = missionContract({ name: "a".repeat(48), objective: "é".repeat(600), capabilities: ["filesystem-read", "filesystem-write"], minToolCalls: 32, maxToolCalls: 32, requiredToolCalls: [], freshContext: true });
     const input = { ...assignment, ...boundedContract, artifactFormat: "text-v1", padding: "" };
-    input.padding = "x".repeat(MAX_MISSION_MESSAGE_BYTES - Buffer.byteLength(JSON.stringify(input)));
-    expect(Buffer.byteLength(JSON.stringify(input))).toBe(MAX_MISSION_MESSAGE_BYTES);
+    input.padding = "x".repeat(MAX_MISSION_BASE_BYTES - Buffer.byteLength(JSON.stringify(input)));
+    expect(Buffer.byteLength(JSON.stringify(input))).toBe(MAX_MISSION_BASE_BYTES);
     expect(parseMissionMessage(input)).not.toBeNull();
     const counters = { model: "m".repeat(253), rounds: 25, usage: { promptTokens: 175, completionTokens: 100, totalTokens: 275 },
       phase: { name: "a".repeat(48), attemptedToolCalls: 32, successfulToolCalls: 32, minToolCalls: 32, maxToolCalls: 32 } };
@@ -479,7 +578,7 @@ describe("reviewed required-output receiver", () => {
     await s.receiver.handle(target.dispatcherDid, constrained, "encrypted");
     await vi.waitFor(() => expect(s.replies.at(-1)?.status).toBe("succeeded"));
     expect(execute).toHaveBeenCalledWith(assignment.content,
-      expect.any(Function), true, contract.reviewedPhase, undefined, false, contract.requiredOutputs);
+      expect.any(Function), true, contract.reviewedPhase, undefined, false, contract.requiredOutputs, constrained);
     const terminal = structuredClone(s.replies.at(-1)!);
     expect(terminal).toMatchObject({ ...contract, artifacts, evidence: measured });
     expect(parseMissionMessage(terminal)).not.toBeNull();
@@ -490,14 +589,15 @@ describe("reviewed required-output receiver", () => {
   });
 
   it.each<MissionReply["artifacts"]>([undefined, { "other.md": "Wrong export" }, { "report.md": " \r\n\t" }])(
-    "rejects missing or blank required output without publishing private bytes %#", async artifacts => {
-      const execute = vi.fn(async () => ({ ...measured, output: "Private scratch result", ...(artifacts ? { artifacts } : {}) }));
+    "rejects missing or blank required exports while retaining only valid final diagnostics %#", async artifacts => {
+      const execute = vi.fn(async () => ({ ...measured, output: "Required export could not be completed", ...(artifacts ? { artifacts } : {}) }));
       const s = setup({ expectedContract: contract, execute });
       await s.receiver.handle(target.dispatcherDid, constrained, "encrypted");
       await vi.waitFor(() => expect(s.replies.at(-1)?.status).toBe("failed"));
       const failed = structuredClone(s.replies.at(-1)!);
       expect(failed.evidence).toEqual(measured);
-      expect(failed).not.toHaveProperty("output");
+      if (artifacts?.["report.md"] !== undefined) expect(failed).not.toHaveProperty("output");
+      else expect(failed.output).toBe("Required export could not be completed");
       expect(failed).not.toHaveProperty("artifacts");
       expect(parseMissionMessage(failed)).not.toBeNull();
       await s.receiver.handle(target.dispatcherDid, constrained, "encrypted");

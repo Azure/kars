@@ -23,6 +23,221 @@ use super::presentation::deliverable_pull_requests;
 use super::run_evidence::{mission_result, run_telemetry};
 
 #[test]
+fn mission_blueprints_reject_unsupported_egress_modes_and_preserve_hosts() {
+    for runtime in ["OpenClaw", "Hermes"] {
+        for mode in [
+            serde_json::Value::Null,
+            serde_json::json!("strict"),
+            serde_json::json!(" Strict "),
+        ] {
+            let expected_mode = if mode.is_null() { None } else { Some("strict") };
+            let blueprint: BlueprintDto = serde_json::from_value(serde_json::json!({
+                "runtime": runtime, "egress_mode": mode,
+                "egress": [{"host":"docs.example.com", "port":443}]
+            }))
+            .unwrap();
+            let crd = blueprint.into_crd();
+            assert_eq!(crd.runtime.as_deref(), Some(runtime));
+            assert_eq!(crd.egress_mode.as_deref(), expected_mode);
+            assert_eq!(crd.egress.len(), 1);
+            assert_eq!(crd.egress[0].host, "docs.example.com");
+            assert_eq!(crd.egress[0].port, Some(443));
+        }
+    }
+    assert!(serde_json::from_value::<BlueprintDto>(serde_json::json!({})).is_ok());
+    for mode in ["learning", "Learn", "enforced", "", "other"] {
+        let error = serde_json::from_value::<BlueprintDto>(serde_json::json!({"egress_mode":mode}))
+            .unwrap_err();
+        assert!(error.to_string().contains("Missions use Strict egress"));
+    }
+    for mode in [
+        serde_json::json!(false),
+        serde_json::json!(42),
+        serde_json::json!({}),
+    ] {
+        assert!(
+            serde_json::from_value::<BlueprintDto>(serde_json::json!({"egress_mode":mode}))
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn legacy_mission_mode_requests_reject_learning_before_mutation() {
+    use super::egress::EgressModeRequest;
+    for mode in ["strict", "enforced", " Strict "] {
+        let request: EgressModeRequest = serde_json::from_value(serde_json::json!({
+            "mode":mode,"allow":[],"merge":true
+        }))
+        .unwrap();
+        assert_eq!(request.mode, "strict");
+        assert!(request.allow.is_empty());
+        assert!(request.merge);
+    }
+    for mode in [
+        serde_json::Value::Null,
+        serde_json::json!("learning"),
+        serde_json::json!("learn"),
+        serde_json::json!(""),
+    ] {
+        assert!(
+            serde_json::from_value::<EgressModeRequest>(serde_json::json!({"mode":mode})).is_err()
+        );
+    }
+    assert!(serde_json::from_value::<EgressModeRequest>(serde_json::json!({})).is_err());
+}
+
+fn reviewed_creation_task(runtime: &str) -> crate::kars::task::KarsTask {
+    let roles = ["first", "second"].map(|name| serde_json::json!({
+        "name":name,"objective":"Review the available evidence","dependsOn":[],
+        "phases":[{"name":"review","objective":"Write findings from the available evidence","capabilities":["filesystem-read","filesystem-write"],
+            "minToolCalls":0,"maxToolCalls":4,"freshContext":true,"executionMode":"native"}]
+    }));
+    serde_json::from_value(serde_json::json!({
+        "metadata":{"name":"reviewed","namespace":"work"},
+        "spec":{"objective":"Compare evidence","envelope":{"tier":3,"authorityCeiling":2,"delegationDepth":2},
+            "blueprint":{"runtime":runtime,"executionPlan":{
+                "schema":"kars.execution-plan/v1","maxParallel":2,
+                "roles":roles,
+                "synthesis":{"objective":"Write the evidence summary to report.md","capabilities":["filesystem-read","filesystem-write"],"maxToolCalls":4,"executionMode":"native"},
+                "deliverables":[{"name":"report.md"}]
+            }}}
+    })).unwrap()
+}
+
+#[test]
+fn reviewed_creation_enrolls_uncapped_accounting_for_both_runtimes() {
+    for runtime in ["OpenClaw", "Hermes"] {
+        for explicit in [false, true] {
+            let mut task = reviewed_creation_task(runtime);
+            if explicit {
+                task.spec.envelope.budget = Some(
+                    serde_json::from_value(serde_json::json!({"scope":"GovernedInference"}))
+                        .unwrap(),
+                );
+            }
+            let blueprint = serde_json::to_value(&task.spec.blueprint).unwrap();
+            super::creation::prepare_reviewed_task(&mut task).unwrap();
+            assert_eq!(
+                serde_json::to_value(&task.spec.envelope.budget).unwrap(),
+                serde_json::json!({"scope":"GovernedInference"})
+            );
+            assert_eq!(
+                serde_json::to_value(&task.spec.blueprint).unwrap(),
+                blueprint
+            );
+            let annotations = task.metadata.annotations.as_ref().unwrap();
+            assert_eq!(
+                annotations["kars.azure.com/mission-decomposition"],
+                "execution-plan/v1"
+            );
+            assert_eq!(annotations["kars.azure.com/mission-specialist-count"], "2");
+            for key in [
+                "mission-budget-total",
+                "mission-principal-budget",
+                "mission-child-budget",
+            ] {
+                assert!(!annotations.contains_key(&format!("kars.azure.com/{key}")));
+            }
+            crate::kars::execution_plans::validate(&task, false).unwrap();
+        }
+    }
+}
+
+#[test]
+fn reviewed_creation_preserves_explicit_finite_limits_and_allocation() {
+    let mut task = reviewed_creation_task("OpenClaw");
+    let budget = serde_json::json!({"scope":"GovernedInference","tokens":600_000,"usdMicros":1234});
+    task.spec.envelope.budget = Some(serde_json::from_value(budget.clone()).unwrap());
+    super::creation::prepare_reviewed_task(&mut task).unwrap();
+    assert_eq!(
+        serde_json::to_value(task.spec.envelope.budget).unwrap(),
+        budget
+    );
+    let annotations = task.metadata.annotations.unwrap();
+    assert_eq!(annotations["kars.azure.com/mission-budget-total"], "600000");
+    assert_eq!(
+        annotations["kars.azure.com/mission-principal-budget"],
+        "600000"
+    );
+    assert_eq!(annotations["kars.azure.com/mission-child-budget"], "300000");
+}
+
+#[test]
+fn reviewed_creation_preserves_currency_only_limit_and_role_caps() {
+    let mut task = reviewed_creation_task("Hermes");
+    let budget = serde_json::json!({"scope":"GovernedInference","usdMicros":1234});
+    task.spec.envelope.budget = Some(serde_json::from_value(budget.clone()).unwrap());
+    task.spec
+        .blueprint
+        .as_mut()
+        .unwrap()
+        .execution_plan
+        .as_mut()
+        .unwrap()
+        .roles[0]
+        .budget_tokens = Some(5000);
+    let blueprint = serde_json::to_value(&task.spec.blueprint).unwrap();
+    super::creation::prepare_reviewed_task(&mut task).unwrap();
+    assert_eq!(
+        serde_json::to_value(task.spec.envelope.budget).unwrap(),
+        budget
+    );
+    assert_eq!(
+        serde_json::to_value(task.spec.blueprint).unwrap(),
+        blueprint
+    );
+}
+
+#[test]
+fn reviewed_creation_rejects_invalid_caps_and_unscoped_budgets() {
+    for budget in [
+        serde_json::json!({"scope":"GovernedInference","tokens":0}),
+        serde_json::json!({"scope":"GovernedInference","tokens":-1}),
+        serde_json::json!({"scope":"GovernedInference","tokens":1}),
+        serde_json::json!({"tokens":600_000}),
+    ] {
+        let mut task = reviewed_creation_task("OpenClaw");
+        task.spec.envelope.budget = Some(serde_json::from_value(budget.clone()).unwrap());
+        assert!(super::creation::prepare_reviewed_task(&mut task).is_err());
+        assert_eq!(
+            serde_json::to_value(task.spec.envelope.budget).unwrap(),
+            budget
+        );
+        assert!(task.metadata.annotations.is_none());
+    }
+}
+
+#[test]
+fn reviewed_creation_handles_uncapped_single_agent_and_preserves_planless_tasks() {
+    let mut task = reviewed_creation_task("OpenClaw");
+    let plan = task
+        .spec
+        .blueprint
+        .as_mut()
+        .unwrap()
+        .execution_plan
+        .as_mut()
+        .unwrap();
+    plan.roles.clear();
+    plan.max_parallel = 1;
+    task.spec.envelope.delegation_depth = 0;
+    super::creation::prepare_reviewed_task(&mut task).unwrap();
+    assert_eq!(
+        task.metadata.annotations.as_ref().unwrap()["kars.azure.com/mission-specialist-count"],
+        "0"
+    );
+    assert!(task.spec.envelope.budget.as_ref().unwrap().tokens.is_none());
+    crate::kars::execution_plans::validate(&task, false).unwrap();
+
+    let mut task = reviewed_creation_task("OpenClaw");
+    task.spec.blueprint.as_mut().unwrap().execution_plan = None;
+    let before = serde_json::to_value(&task).unwrap();
+    super::creation::prepare_reviewed_task(&mut task).unwrap();
+    assert_eq!(serde_json::to_value(task).unwrap(), before);
+}
+
+#[test]
 fn task_summary_keeps_annotation_only_team_machinery_out_of_missions() {
     let mut task: crate::kars::task::KarsTask = serde_json::from_value(serde_json::json!({
         "metadata":{"name":"eng-principal","namespace":"work"},
@@ -77,6 +292,7 @@ fn execution_plan_dto_into_crd_preserves_web_search_capability() {
                     min_tool_calls: 1,
                     max_tool_calls: 4,
                     fresh_context: true,
+                    execution_mode: Some("native".into()),
                 }],
                 budget_tokens: None,
             }],
@@ -85,6 +301,7 @@ fn execution_plan_dto_into_crd_preserves_web_search_capability() {
                 objective: "Return the verified answer.".into(),
                 capabilities: Vec::new(),
                 max_tool_calls: 0,
+                execution_mode: Some("native".into()),
             },
             deliverables: Vec::new(),
         }),
@@ -92,10 +309,24 @@ fn execution_plan_dto_into_crd_preserves_web_search_capability() {
     };
 
     let crd = blueprint.into_crd();
+    let plan = crd.execution_plan.expect("execution plan");
     assert_eq!(
-        crd.execution_plan.expect("execution plan").roles[0].phases[0].capabilities,
+        plan.roles[0].phases[0].capabilities,
         vec!["web-search".to_string(), "network".to_string()]
     );
+    assert_eq!(
+        plan.roles[0].phases[0].execution_mode.as_deref(),
+        Some("native")
+    );
+    assert_eq!(plan.synthesis.execution_mode.as_deref(), Some("native"));
+    let dto = ExecutionPlanDto::from_crd(&plan);
+    let serialized = serde_json::to_value(&dto).unwrap();
+    assert_eq!(
+        serialized["roles"][0]["phases"][0]["execution_mode"],
+        "native"
+    );
+    assert_eq!(serialized["synthesis"]["execution_mode"], "native");
+    assert_eq!(dto.into_crd(), plan);
 }
 
 #[test]

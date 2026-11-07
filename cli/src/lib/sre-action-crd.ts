@@ -10,6 +10,8 @@ const PARAMS = "/spec/versions/0/schema/openAPIV3Schema/properties/spec/properti
 // Complete immutable baseline spec, not a name/label-based adoption rule.
 // Azure/kars 8b206065608593667a40665b3f48225ef9ce278d (BASE365).
 const BASELINE = "2e119f9dee47426bdf1332e346a5f75f8b6a2d0d6c2a2781903406e7e25b577e";
+// Fresh creation or exact installed match only, not a historical migration permit.
+const DURABLE_EXECUTION = "ce528cf6c04c14fb80b917642e4412d374fc3aabb8523376d620520255c9572d";
 
 function canonical(value: any): string {
   const sort = (v: any): any => Array.isArray(v) ? v.map(sort)
@@ -47,7 +49,8 @@ export async function planActionCrd(
   }
   delete params["x-kubernetes-preserve-unknown-fields"];
   params.additionalProperties = true;
-  if (createHash("sha256").update(canonical(legacy)).digest("hex") !== BASELINE) {
+  const durable = createHash("sha256").update(canonical(spec)).digest("hex") === DURABLE_EXECUTION;
+  if (!durable && createHash("sha256").update(canonical(legacy)).digest("hex") !== BASELINE) {
     throw new Error("Unrecognized action CRD chart schema; explicitly review compatibility before staging policies");
   }
   const existing = await get(execute, "customresourcedefinition", ACTION_CRD);
@@ -85,7 +88,7 @@ export async function planActionCrd(
     throw new Error("Foreign or terminating action CRD; review its installation ownership before staging");
   }
   const current = normalizedSpec(existing);
-  const repair = canonical(current) === canonical(legacy);
+  const repair = !durable && canonical(current) === canonical(legacy);
   if (!repair && canonical(current) !== canonical(spec)) {
     throw new Error("Customized action CRD schema; explicitly review the params compatibility repair before staging policies");
   }

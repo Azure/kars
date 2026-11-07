@@ -62,7 +62,11 @@ pub async fn get_diagnostics(State(state): State<AppState>) -> AppResult<Json<Di
         let age_secs = status
             .and_then(|s| s.start_time.as_ref())
             .or(p.metadata.creation_timestamp.as_ref())
-            .map(|t| (chrono::Utc::now() - t.0).num_seconds().max(0))
+            .map(|t| {
+                (chrono::Utc::now() - crate::kars::time::to_chrono(t.0))
+                    .num_seconds()
+                    .max(0)
+            })
             .unwrap_or(0);
 
         // Container-level waiting reasons (image pull, crashloop, config error).
@@ -263,7 +267,7 @@ pub struct OrchestratorDto {
     pub sandbox_waiting_reason: Option<String>,
     pub sandbox_node: Option<String>,
     pub sandbox_uptime_seconds: Option<i64>,
-    /// How many Running sandbox routers the composer can fall back through.
+    /// How many ready routers belong to the standing composer.
     pub router_candidates: usize,
     /// True when the operator should configure the direct endpoint (sandbox path
     /// is the only option and it's unhealthy or capacity is thin).

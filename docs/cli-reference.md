@@ -538,7 +538,17 @@ Builds and pushes kars images (controller, inference router, sandbox,
 relay, registry) to ACR using the cached context from the last `kars up`
 run. Use `--apply` to restart deployments so pods immediately pick up new
 images. Use `--only sandbox` + `--apply` after modifying `entrypoint.sh`,
-plugins, or skills.
+plugins, or skills. Applying runtime or managed MCP images updates the owning
+controller defaults and restarts the controller to reconcile existing resources.
+It verifies image convergence and workload health without annotating protected
+source CRs; explicit sandbox image pins and funding bindings remain unchanged.
+Completed Mission runs retain their existing workload images without a restart:
+the CLI verifies the live Task owner UID and matching nonempty requested/completed
+run nonce, as the controller does. A new requested run is not treated as completed.
+Completion and source ownership are rechecked before verifying eligible workloads.
+Sandbox artifacts must resolve to immutable digests; changing the controller's
+selected digest triggers the workload rollout. The CLI waits for that rollout
+and verifies health without directly restarting protected sandbox deployments.
 
 **Usage:**
 ```
@@ -763,7 +773,7 @@ kars sre <subcommand> [options]
 | `install` | Enable the kars-sre agent on the current cluster (cluster-wide read; gated writes). |
 | `uninstall` | Disable the kars-sre agent (namespace + RBAC torn down by the controller). |
 | `status` | Show the sre `KarsSandbox` CR + pod state. |
-| `talk` | Open the kars-sre WebUI (alias for `kars connect sre`). |
+| `talk` | Open the kars-sre WebUI (alias for `kars connect sre --web`, local port `18790` by default). |
 | `actions` | List recent `KarsSREAction` proposals. |
 | `show <action-id>` | Show full details of a proposal — diagnosis, rationale, action target, approval state, conditions. Review this before approving. |
 | `approve <action-id>` | Approve a pending proposal — authorises the controller to execute it. `--note <text>` attaches an audit note. |
@@ -783,9 +793,10 @@ kars sre approve sreaction-xyz --note "confirmed: safe to restart"
 
 ### `kars connect`
 
-Connects to a running sandbox — either as a shell (bash), as the OpenClaw
-TUI, or via WebUI (port-forwarded to a local port). Defaults to the
-OpenClaw TUI on Docker and to WebUI on AKS.
+Connects to a running sandbox through an interactive shell or a local
+WebUI tunnel. On Kubernetes (including Kind and AKS), OpenClaw defaults to
+its WebUI; Hermes defaults to `hermes chat`. Use `--web` for the Hermes
+dashboard. Local Docker connections open a shell where you can run the TUI.
 
 **Usage:**
 ```
@@ -800,19 +811,40 @@ kars connect <name> [options]
 **Options:**
 | Flag | Default | Description |
 |---|---|---|
-| `--shell` | `false` | Drop to bash shell instead of OpenClaw TUI |
-| `--web` | `false` | Open WebUI via port-forward (default for AKS) |
+| `--shell` | `false` | Interactive shell (bash for OpenClaw; chat REPL for Hermes) |
+| `--web` | `false` | Open WebUI via port-forward (default for OpenClaw on Kubernetes) |
 | `--local` | `false` | Connect to local Docker sandbox (skip AKS) |
 | `--cloud` | `false` | Connect to AKS cloud sandbox (skip Docker) |
-| `--port <port>` | `18789` | Local port for WebUI |
+| `--port <port>` | `18789` | Local port for WebUI (Hermes respects this exact port; choose another if occupied) |
+| `--context <name>` | Auto-discovered | kubectl context for sandbox discovery and connection |
+| `--reset` | `false` | Restart the deployment before connecting (OpenClaw gateway token is preserved) |
+
+Hermes `--web` forwards `svc/<name>` dashboard port `9119` to
+`127.0.0.1:<port>`, checks the dashboard response, and opens the root URL
+without an OpenClaw gateway token or a Headlamp proxy prefix. Access requires
+your Kubernetes port-forward permissions. Keep this tokenless dashboard
+loopback-only; do not expose the tunnel on a public interface. The command
+stays in the foreground; Ctrl+C stops its own tunnel. Startup failures are
+reported without opening a shell or reusing another listener. After a transient
+connection loss, both runtimes wait up to three minutes for the replacement agent
+container to become Ready before reconnecting on the same port and context.
+Recovery also retries a replacement dashboard's connection refusal or a new
+Pending-pod race without resetting that deadline. Ctrl+C cancels that wait;
+authorization and fatal container errors stop recovery.
 
 **Examples:**
 ```bash
-# Connect to the OpenClaw TUI
+# Connect to the OpenClaw WebUI on Kubernetes
 kars connect my-agent
 
 # Open WebUI in browser (port-forwarded)
 kars connect my-agent --web
+
+# Open the Hermes SRE dashboard on an explicit context and local port
+kars connect sre --cloud --context kind-kars --web --port 19119
+
+# Keep the Hermes interactive chat path
+kars connect sre --cloud --context kind-kars --shell
 
 # Drop into a bash shell for debugging
 kars connect my-agent --shell
@@ -1956,7 +1988,7 @@ sandbox-delete sweep). Mirrors `kubectl get/apply/delete` patterns.
 **Common flags on `apply`:**
 | Flag | Description |
 |---|---|
-| `-n, --namespace <ns>` | Namespace (use `kars-<sandbox>`). |
+| `-n, --namespace <ns>` | Namespace containing the KarsSandbox resource (normally `kars-system`), not its generated pod namespace. |
 | `--from-file <path>` | Read full spec from a YAML/JSON file (mutually exclusive with the flags below). |
 | `--sandbox <name>` | Sandbox to bind (`spec.sandboxRef.name`). |
 | `--store <name>` | Foundry Memory Store name (DNS-label). |
@@ -1967,19 +1999,56 @@ sandbox-delete sweep). Mirrors `kubectl get/apply/delete` patterns.
 
 **Examples:**
 ```bash
-# Bind a sandbox to a Memory Store, scoped per-agent, 30-day floor
+# Create the binding beside the KarsSandbox, with a per-agent scope and 30-day floor
 kars memory apply my-agent-mem \
-  -n kars-my-agent \
+  -n kars-system \
   --sandbox my-agent \
   --store prod-shared-memory \
   --scope agent_my-agent \
   --retention-days 30
 
+# Attach it: --sandbox above does not set the sandbox's memoryRef
+kubectl patch karssandbox my-agent -n kars-system --type merge \
+  -p '{"spec":{"memoryRef":{"name":"my-agent-mem"}}}'
+
 # List bindings in a namespace
-kars memory list -n kars-my-agent
+kars memory list -n kars-system
 
 # Delete (defaults to cleaning up scope contents)
-kars memory delete my-agent-mem -n kars-my-agent
+kars memory delete my-agent-mem -n kars-system
 ```
+
+OpenClaw and Hermes use the router's shared `foundry.memory` MCP tool. The
+router loads the mounted binding; the agent does not need a binding mount.
+An explicit tool `scope` overrides the binding's default partition. Scope names
+are partitions within a store, not independent authorization boundaries.
+
+Memory processing deployments are independent of the agent's inference model.
+For newly auto-provisioned stores, the defaults are `gpt-4.1` (chat) and
+`text-embedding-3-small` (embedding). Operators can set deployed model names in
+Core Helm values:
+
+```yaml
+controller:
+  extraEnv:
+    - name: FOUNDRY_MEMORY_CHAT_MODEL
+      value: gpt-4.1
+    - name: FOUNDRY_MEMORY_EMBEDDING_MODEL
+      value: text-embedding-3-small
+```
+
+These settings are forwarded only to the router. The sealed `kind-beta`
+installation profile does not permit these extra environment overrides and uses
+the defaults above. The settings do not modify existing stores or their model definitions. Preserve existing stores containing history;
+qualify a separate binding before planning a migration.
+
+A memory update is asynchronous. Only `status: completed` confirms persistence;
+`queued` and `in_progress` remain pending, even when the request was accepted.
+The router observes status using read-only polls within a 25-second observation
+window starting at tool entry (existing POST/provision timeouts are separate).
+Failed or cancelled updates are tool errors. Retain the returned `update_id`
+when completion cannot be verified; do not blindly resubmit an accepted write.
+Search without text performs static recall; search with text performs contextual
+recall using model input.
 
 **See also:** [docs/api/crd-reference.md#karsmemory](api/crd-reference.md#karsmemory--memory-store-binding)

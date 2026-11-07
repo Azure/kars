@@ -105,6 +105,10 @@ pub(super) async fn reconcile(task: &KarsTask, ctx: &Ctx) -> Result<(), Reconcil
 }
 
 pub(super) async fn resume(client: &Client, task: &KarsTask) -> Result<(), String> {
+    Box::pin(resume_inner(client, task)).await
+}
+
+async fn resume_inner(client: &Client, task: &KarsTask) -> Result<(), String> {
     use crate::{crd::KarsSandbox, kars_receipt::KarsReceipt};
     if !crate::credential_grants::readiness::selected(task) {
         return Ok(());
@@ -248,7 +252,7 @@ pub(crate) async fn fence_deployment(
     sandbox: &crate::crd::KarsSandbox,
     deployment: &mut k8s_openapi::api::apps::v1::Deployment,
     identity: &serde_json::Value,
-) -> Result<(), String> {
+) -> Result<Option<k8s_openapi::api::apps::v1::Deployment>, String> {
     let Some(owner) = sandbox
         .metadata
         .owner_references
@@ -259,7 +263,7 @@ pub(crate) async fn fence_deployment(
                 .find(|owner| owner.kind == "KarsTask" && owner.controller == Some(true))
         })
     else {
-        return Ok(());
+        return Ok(None);
     };
     let workspace = sandbox
         .namespace()
@@ -313,8 +317,8 @@ pub(crate) async fn fence_deployment(
     crate::reconciler::namespace_ownership::recheck(client, &live, &namespace)
         .await
         .map_err(|e| e.to_string())?;
-    if let Some(prior) = prior {
-        crate::reconciler::credential_sources::validate_owned_deployment(&prior, &live, &namespace)
+    if let Some(prior) = prior.as_ref() {
+        crate::reconciler::credential_sources::validate_owned_deployment(prior, &live, &namespace)
             .map_err(|e| e.to_string())?;
         if deployment
             .metadata
@@ -329,12 +333,12 @@ pub(crate) async fn fence_deployment(
         {
             return Err("Task runtime deployment changed after preparation".into());
         }
-        deployment.metadata.uid = prior.metadata.uid;
-        deployment.metadata.resource_version = prior.metadata.resource_version;
+        deployment.metadata.uid = prior.metadata.uid.clone();
+        deployment.metadata.resource_version = prior.metadata.resource_version.clone();
     } else if deployment.metadata.uid.is_some() || deployment.metadata.resource_version.is_some() {
         return Err("Prepared task runtime disappeared; no replacement was adopted".into());
     }
-    Ok(())
+    Ok(prior)
 }
 #[cfg(test)]
 #[path = "kars_task_rebind/tests.rs"]
@@ -346,7 +350,7 @@ pub(crate) async fn apply_deployment(
     mut deployment: k8s_openapi::api::apps::v1::Deployment,
     identity: &serde_json::Value,
 ) -> Result<(), String> {
-    fence_deployment(client, sandbox, &mut deployment, identity).await?;
+    let prior = fence_deployment(client, sandbox, &mut deployment, identity).await?;
     if crate::private_activation::apply_deployment(client, sandbox, &mut deployment).await? {
         return Ok(());
     }
@@ -374,6 +378,33 @@ pub(crate) async fn apply_deployment(
             crate::credential_grants::api_error("Create current task credential runtime", e)
         })?;
         return Ok(());
+    }
+    if let Some(prior) = prior.as_ref()
+        && deployment
+            .spec
+            .as_ref()
+            .and_then(|spec| spec.strategy.as_ref())
+            .is_some_and(|strategy| {
+                strategy.type_.as_deref() == Some("Recreate") && strategy.rolling_update.is_none()
+            })
+        && prior
+            .spec
+            .as_ref()
+            .and_then(|spec| spec.strategy.as_ref())
+            .is_some_and(|strategy| strategy.rolling_update.is_some())
+    {
+        // CREATE/Update ownership can retain API-defaulted rollingUpdate fields
+        // even when SSA omits them or sends null. Remove them without rolling a pod.
+        let current = api.patch(
+            &sandbox.name_any(),
+            &PatchParams::default(),
+            &Patch::Merge(json!({
+                "metadata": {"uid": prior.metadata.uid, "resourceVersion": prior.metadata.resource_version},
+                "spec": {"strategy": {"type": "Recreate", "rollingUpdate": null}}
+            })),
+        ).await.map_err(|e| crate::credential_grants::api_error("Transition current task runtime strategy", e))?;
+        deployment.metadata.resource_version = current.metadata.resource_version;
+        fence_deployment(client, sandbox, &mut deployment, identity).await?;
     }
     api.patch(
         &sandbox.name_any(),

@@ -116,28 +116,82 @@ fn enroll_new_authority(ledger: &Ledger, authority: &TaskAuthority, now: i64) ->
 }
 
 #[test]
-fn paused_team_binding_stays_dormant_and_preserves_uncertain_usage_on_resume() {
+fn scheduling_pause_preserves_inflight_usage_but_authority_edits_still_revoke() {
     use crate::inference_budget::binding::bind_authority;
     let now = 100;
     let account = original_account(now);
     let ledger = Store::ledger(&account).unwrap();
     let (_, authority) = task_authority("A");
-    let paused = bind_authority(ledger, &authority, true).unwrap().next;
-    assert!(!paused.nodes["root"].active);
-    assert!(paused.sessions["old"].closed);
-    assert!(paused.meters.uncertain.tokens > 0);
-    assert!(!bind_authority(&paused, &authority, true).unwrap().changed);
+    let paused = bind_authority(ledger, &authority, true, true).unwrap().next;
+    assert_eq!(&paused, ledger);
+    assert!(paused.nodes["root"].active);
+    assert!(!paused.sessions["old"].closed);
+    assert!(
+        !bind_authority(&paused, &authority, true, true)
+            .unwrap()
+            .changed
+    );
     let (_, updated) = task_authority("B");
-    let edited = bind_authority(&paused, &updated, true).unwrap().next;
+    let edited = bind_authority(&paused, &updated, true, true).unwrap().next;
     assert!(!edited.nodes["root"].active);
     assert_eq!(edited.nodes["root"].authority, updated);
-    assert_eq!(edited.meters, paused.meters);
-    let resumed = bind_authority(&edited, &updated, false).unwrap().next;
+    assert!(edited.sessions["old"].closed);
+    assert!(edited.meters.uncertain.tokens > 0);
+    let resumed = bind_authority(&edited, &updated, false, true).unwrap().next;
     assert!(resumed.nodes["root"].active);
-    assert_eq!(resumed.meters, paused.meters);
+    assert_eq!(resumed.meters, edited.meters);
     assert!(resumed.sessions["old"].closed);
     assert!(resumed.register_session(identity("old")).is_err());
-    assert!(!bind_authority(&resumed, &updated, false).unwrap().changed);
+    assert!(
+        !bind_authority(&resumed, &updated, false, true)
+            .unwrap()
+            .changed
+    );
+}
+
+#[test]
+fn paused_scheduling_allows_new_phases_only_under_a_running_branch() {
+    use crate::inference_budget::binding::{bind_authority, team_branch_is_running};
+    let (mut task, parent) = task_authority("A");
+    task.annotations_mut()
+        .insert("kars.azure.com/team-role".into(), "taskforce".into());
+    let account = original_account(100);
+    let ledger = Store::ledger(&account).unwrap();
+    assert!(team_branch_is_running(&[task.clone()]));
+    let mut child = parent.clone();
+    child.task.name = "new-phase".into();
+    child.task.uid = "new-phase".into();
+    child.parent_uid = Some("root".into());
+    let next = bind_authority(
+        ledger,
+        &child,
+        !team_branch_is_running(&[task.clone()]),
+        true,
+    )
+    .unwrap()
+    .next;
+    assert!(next.nodes["new-phase"].active);
+    assert_eq!(next.meters, ledger.meters);
+    assert_eq!(next.sessions, ledger.sessions);
+    let mut role_parent = task.clone();
+    role_parent
+        .annotations_mut()
+        .remove("kars.azure.com/team-role");
+    role_parent.spec.execution.as_mut().unwrap().launch = false;
+    assert!(team_branch_is_running(&[task.clone(), role_parent.clone()]));
+    role_parent
+        .annotations_mut()
+        .insert("kars.azure.com/halted".into(), "true".into());
+    assert!(!team_branch_is_running(&[task.clone(), role_parent]));
+    task.spec.execution.as_mut().unwrap().launch = false;
+    assert!(!team_branch_is_running(&[task.clone()]));
+    task.spec.execution.as_mut().unwrap().launch = true;
+    task.annotations_mut()
+        .insert("kars.azure.com/halted".into(), "true".into());
+    assert!(!team_branch_is_running(&[task.clone()]));
+    task.annotations_mut().remove("kars.azure.com/halted");
+    task.annotations_mut().remove("kars.azure.com/team-role");
+    assert!(!team_branch_is_running(&[task]));
 }
 
 #[test]
@@ -145,19 +199,166 @@ fn paused_team_binding_can_prepare_new_members_without_reopening_parent() {
     use crate::inference_budget::binding::bind_authority;
     let (_, parent) = task_authority("A");
     let empty = Ledger::new("account-uid".into(), root(), parent.limits).unwrap();
-    let dormant = bind_authority(&empty, &parent, true).unwrap().next;
+    let dormant = bind_authority(&empty, &parent, true, true).unwrap().next;
     let mut child = parent.clone();
     child.task.name = "child".into();
     child.task.uid = "child".into();
     child.parent_uid = Some("root".into());
-    let dormant = bind_authority(&dormant, &child, true).unwrap().next;
+    let dormant = bind_authority(&dormant, &child, true, true).unwrap().next;
     assert!(dormant.nodes.values().all(|node| !node.active));
-    assert!(!bind_authority(&dormant, &child, true).unwrap().changed);
-    assert!(bind_authority(&dormant, &child, false).is_err());
-    let resumed = bind_authority(&dormant, &parent, false).unwrap().next;
-    let resumed = bind_authority(&resumed, &child, false).unwrap().next;
+    assert!(
+        !bind_authority(&dormant, &child, true, true)
+            .unwrap()
+            .changed
+    );
+    assert!(bind_authority(&dormant, &child, false, true).is_err());
+    let resumed = bind_authority(&dormant, &parent, false, true).unwrap().next;
+    let resumed = bind_authority(&resumed, &child, false, true).unwrap().next;
     assert!(resumed.nodes.values().all(|node| node.active));
     assert_eq!(resumed.meters, dormant.meters);
+}
+
+#[test]
+fn team_resume_keeps_stopped_branches_dormant_without_account_writes() {
+    use crate::inference_budget::binding::{bind_authority, team_branch_can_resume};
+    let account = original_account(100);
+    let ledger = Store::ledger(&account).unwrap();
+    let (mut task, authority) = task_authority("A");
+    let paused = ledger.close_subtree(&authority.task.uid).unwrap().next;
+    task.spec.execution.as_mut().unwrap().launch = false;
+    let can_resume = team_branch_can_resume(&[task.clone()]);
+    assert!(!can_resume);
+    for _ in 0..16 {
+        let unchanged = bind_authority(&paused, &authority, false, can_resume).unwrap();
+        assert!(!unchanged.changed);
+        assert_eq!(unchanged.next, paused);
+    }
+    let (mut child_task, mut child) = task_authority("A");
+    child_task.metadata.name = Some("child".into());
+    child.task.name = "child".into();
+    child.task.uid = "child".into();
+    child.parent_uid = Some("root".into());
+    let dormant = bind_authority(&paused, &child, true, true).unwrap().next;
+    assert!(!team_branch_can_resume(&[task.clone(), child_task]));
+    assert!(
+        !bind_authority(&dormant, &child, false, false)
+            .unwrap()
+            .changed
+    );
+    let (_, updated) = task_authority("B");
+    let edited = bind_authority(&paused, &updated, false, false)
+        .unwrap()
+        .next;
+    assert!(!edited.nodes["root"].active);
+    assert_eq!(edited.meters, paused.meters);
+    assert_eq!(edited.sessions, paused.sessions);
+    task.spec.execution.as_mut().unwrap().launch = true;
+    assert!(team_branch_can_resume(&[task]));
+    assert!(
+        bind_authority(&edited, &updated, false, true)
+            .unwrap()
+            .next
+            .nodes["root"]
+            .active
+    );
+}
+
+#[test]
+fn team_reactivation_preserves_prelaunch_enrollment_and_halt_fences() {
+    use crate::inference_budget::binding::{bind_authority, team_branch_can_resume};
+    let (mut task, authority) = task_authority("A");
+    let empty = Ledger::new("account-uid".into(), root(), authority.limits).unwrap();
+    task.spec.execution.as_mut().unwrap().launch = false;
+    let prepared = bind_authority(&empty, &authority, false, false)
+        .unwrap()
+        .next;
+    assert!(prepared.nodes["root"].active);
+    assert!(
+        !bind_authority(&prepared, &authority, false, false)
+            .unwrap()
+            .changed
+    );
+    task.spec.execution = None;
+    assert!(team_branch_can_resume(&[task.clone()]));
+    task.annotations_mut()
+        .insert("kars.azure.com/halted".into(), "operator stop".into());
+    assert!(!team_branch_can_resume(&[task.clone()]));
+    task.spec.execution = Some(TaskExecution {
+        launch: true,
+        runtime: None,
+    });
+    assert!(!team_branch_can_resume(&[task]));
+}
+
+#[tokio::test]
+async fn paused_team_recovery_keeps_live_dispatch_but_revokes_deleted_team() {
+    let now = chrono::Utc::now().timestamp();
+    let mut original = original_account(now);
+    original.spec.root.kind = RootKind::KarsTeam;
+    original
+        .status
+        .as_mut()
+        .unwrap()
+        .ledger
+        .as_mut()
+        .unwrap()
+        .root
+        .kind = RootKind::KarsTeam;
+    original.status = Some(project(&original, None));
+    let expected = Store::ledger(&original).unwrap().clone();
+    let (server, store, _) = setup(Some(original.clone()), Fault::None).await;
+    let (task, _) = task_authority("A");
+    live_sources(&server, Arc::new(Mutex::new(task.clone())), None).await;
+    let team: crate::kars_team::KarsTeam = serde_json::from_value(json!({
+        "apiVersion":"kars.azure.com/v1alpha1", "kind":"KarsTeam",
+        "metadata":{"name":"root","namespace":"workspace","uid":"root","resourceVersion":"1"},
+        "spec":{"charter":"Finish admitted work", "envelope":task.spec.envelope, "paused":true}
+    }))
+    .unwrap();
+    Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path(
+            "/apis/kars.azure.com/v1alpha1/namespaces/workspace/karsteams/root",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(team))
+        .with_priority(2)
+        .mount(&server)
+        .await;
+    Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path(
+            "/api/v1/namespaces/kars-root/pods/pod-old",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "apiVersion":"v1", "kind":"Pod",
+            "metadata":{"name":"pod-old","namespace":"kars-root","uid":"old"}
+        })))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    let client = test_client(&server);
+    reconcile_account(&client, &store, &original).await.unwrap();
+    let current = store
+        .read(&original.spec.root, "account-uid")
+        .await
+        .unwrap();
+    assert_eq!(Store::ledger(&current).unwrap(), &expected);
+    assert!(!expected.sessions["old"].closed);
+    Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path(
+            "/apis/kars.azure.com/v1alpha1/namespaces/workspace/karsteams/root",
+        ))
+        .respond_with(failure(404))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    reconcile_account(&client, &store, &current).await.unwrap();
+    let closed = store
+        .read(&original.spec.root, "account-uid")
+        .await
+        .unwrap();
+    assert_eq!(
+        Store::ledger(&closed).unwrap(),
+        &expected.close_account().unwrap().next
+    );
 }
 
 #[derive(Clone)]
@@ -194,7 +395,7 @@ struct LiveTask {
 }
 
 impl Respond for LiveTask {
-    fn respond(&self, _: &Request) -> ResponseTemplate {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
         // Root-lifetime GET precedes recovery's ledger snapshot; the per-node
         // authority GET follows it. Interleave deterministically at the latter.
         if self.reads.fetch_add(1, Ordering::SeqCst) == 1
@@ -202,7 +403,15 @@ impl Respond for LiveTask {
         {
             enrollment.install();
         }
-        ResponseTemplate::new(200).set_body_json(&*self.task.lock().unwrap())
+        let task = self.task.lock().unwrap();
+        if request.url.path().ends_with("/karstasks") {
+            ResponseTemplate::new(200).set_body_json(json!({
+                "apiVersion":"kars.azure.com/v1alpha1", "kind":"KarsTaskList",
+                "metadata":{"resourceVersion":"123"}, "items":[&*task]
+            }))
+        } else {
+            ResponseTemplate::new(200).set_body_json(&*task)
+        }
     }
 }
 
@@ -255,24 +464,40 @@ async fn live_sources(
             .mount(server)
             .await;
     }
-    Mock::given(wiremock::matchers::method("GET"))
-        .and(wiremock::matchers::path(
-            "/apis/kars.azure.com/v1alpha1/namespaces/workspace/karstasks/root",
-        ))
-        .respond_with(LiveTask {
-            task,
-            reads: reads.clone(),
-            enrollment,
-        })
-        .with_priority(1)
-        .mount(server)
-        .await;
+    for suffix in ["/root", ""] {
+        Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(format!(
+                "/apis/kars.azure.com/v1alpha1/namespaces/workspace/karstasks{suffix}",
+            )))
+            .respond_with(LiveTask {
+                task: task.clone(),
+                reads: reads.clone(),
+                enrollment: enrollment.clone(),
+            })
+            .with_priority(1)
+            .mount(server)
+            .await;
+    }
     reads
 }
 
-async fn changed_authority_survives(conflict: bool) {
+async fn changed_authority_survives(conflict: bool, batched: bool) {
     let now = chrono::Utc::now().timestamp();
-    let original = original_account(now);
+    let mut original = original_account(now);
+    if batched {
+        let (_, mut child) = task_authority("A");
+        child.task.name = "child".into();
+        child.task.uid = "child".into();
+        child.parent_uid = Some("root".into());
+        original.status.as_mut().unwrap().ledger = Some(
+            Store::ledger(&original)
+                .unwrap()
+                .register_task(child)
+                .unwrap()
+                .next,
+        );
+        original.status = Some(project(&original, None));
+    }
     let (task, authority) = task_authority("B");
     let expected = enroll_new_authority(Store::ledger(&original).unwrap(), &authority, now);
     let (server, store, state) = setup(Some(original.clone()), Fault::None).await;
@@ -297,7 +522,7 @@ async fn changed_authority_survives(conflict: bool) {
             .mount(&server)
             .await;
     }
-    let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
+    let client = test_client(&server);
     reconcile_account(&client, &store, &original).await.unwrap();
     assert!(enrollment.occurred.load(Ordering::SeqCst));
     assert_eq!(reads.load(Ordering::SeqCst), 2);
@@ -367,12 +592,222 @@ async fn changed_authority_survives(conflict: bool) {
 
 #[tokio::test]
 async fn recovery_authority_change_before_transaction_preserves_new_session_and_inflight_work() {
-    changed_authority_survives(false).await;
+    changed_authority_survives(false, false).await;
 }
 
 #[tokio::test]
 async fn recovery_authority_change_on_cas_retry_preserves_new_session_and_inflight_work() {
-    changed_authority_survives(true).await;
+    changed_authority_survives(true, false).await;
+}
+
+#[tokio::test]
+async fn recovery_batched_snapshot_preserves_concurrent_enrollment_and_revokes_changed_authority() {
+    changed_authority_survives(false, true).await;
+}
+
+#[tokio::test]
+async fn recovery_batched_snapshot_cas_retry_preserves_new_inflight_work() {
+    changed_authority_survives(true, true).await;
+}
+
+const TASKS: &str = "/apis/kars.azure.com/v1alpha1/namespaces/workspace/karstasks";
+
+fn named_task(name: &str) -> KarsTask {
+    let mut task = task_authority("A").0;
+    task.metadata.name = Some(name.into());
+    task.metadata.uid = Some(name.into());
+    task
+}
+
+#[tokio::test]
+async fn recovery_snapshot_batches_128_tasks_and_rechecks_next_scan() {
+    use crate::inference_budget::recovery::task_snapshot;
+    use wiremock::matchers::{method, path, query_param};
+    let server = MockServer::start().await;
+    let client = test_client(&server);
+    let api = Api::namespaced(client, "workspace");
+    let tasks: Vec<_> = (0..128).map(|i| named_task(&format!("task-{i}"))).collect();
+    let names: std::collections::BTreeSet<String> =
+        tasks.iter().map(ResourceExt::name_any).collect();
+    Mock::given(method("GET"))
+        .and(path(TASKS))
+        .and(query_param("limit", "128"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "apiVersion":"kars.azure.com/v1alpha1", "kind":"KarsTaskList",
+            "metadata":{"resourceVersion":"123"}, "items":tasks
+        })))
+        .expect(2)
+        .mount(&server)
+        .await;
+    for _ in 0..2 {
+        let snapshot = task_snapshot(&api, names.clone()).await.unwrap();
+        assert_eq!(snapshot.len(), 128);
+        assert!(snapshot.values().all(Option::is_some));
+    }
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn recovery_snapshot_follows_continuation_before_proving_absence() {
+    use crate::inference_budget::recovery::task_snapshot;
+    use wiremock::matchers::{method, path, query_param};
+    let server = MockServer::start().await;
+    let client = test_client(&server);
+    let api = Api::namespaced(client, "workspace");
+    Mock::given(method("GET"))
+        .and(path(TASKS))
+        .and(query_param("continue", "second"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "apiVersion":"kars.azure.com/v1alpha1", "kind":"KarsTaskList",
+            "metadata":{"resourceVersion":"123"}, "items":[named_task("child")]
+        })))
+        .with_priority(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(TASKS))
+        .and(query_param("limit", "128"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "apiVersion":"kars.azure.com/v1alpha1", "kind":"KarsTaskList",
+            "metadata":{"resourceVersion":"123", "continue":"second"},
+            "items":[named_task("root"), named_task("unrelated")]
+        })))
+        .with_priority(2)
+        .expect(1)
+        .mount(&server)
+        .await;
+    let snapshot = task_snapshot(
+        &api,
+        ["root".into(), "child".into(), "absent".into()].into(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(snapshot.len(), 3);
+    assert_eq!(
+        snapshot["root"].as_ref().unwrap().uid().as_deref(),
+        Some("root")
+    );
+    assert_eq!(
+        snapshot["child"].as_ref().unwrap().uid().as_deref(),
+        Some("child")
+    );
+    assert!(snapshot["absent"].is_none());
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn recovery_snapshot_never_interprets_truncated_inventory_as_absence() {
+    use crate::inference_budget::recovery::task_snapshot;
+    use wiremock::matchers::{method, path};
+    let server = MockServer::start().await;
+    let client = test_client(&server);
+    let api = Api::namespaced(client, "workspace");
+    let page = Arc::new(AtomicUsize::new(0));
+    let seen = page.clone();
+    Mock::given(method("GET"))
+        .and(path(TASKS))
+        .respond_with(move |_: &Request| {
+            let n = seen.fetch_add(1, Ordering::SeqCst);
+            ResponseTemplate::new(200).set_body_json(json!({
+                "apiVersion":"kars.azure.com/v1alpha1", "kind":"KarsTaskList",
+                "metadata":{"resourceVersion":"123", "continue":format!("page-{}",n+1)},
+                "items": if n == 0 { vec![named_task("root")] } else { vec![] }
+            }))
+        })
+        .expect(4)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{TASKS}/child")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(named_task("child")))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let snapshot = task_snapshot(&api, ["root".into(), "child".into()].into())
+        .await
+        .unwrap();
+    assert!(snapshot.values().all(Option::is_some));
+    assert_eq!(server.received_requests().await.unwrap().len(), 5);
+}
+
+#[tokio::test]
+async fn recovery_snapshot_absence_requires_a_complete_inventory() {
+    use crate::inference_budget::recovery::task_snapshot;
+    let server = MockServer::start().await;
+    let client = test_client(&server);
+    let api = Api::namespaced(client, "workspace");
+    Mock::given(wiremock::matchers::path(TASKS))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "apiVersion":"kars.azure.com/v1alpha1", "kind":"KarsTaskList",
+            "metadata":{"resourceVersion":"123"}, "items":[named_task("root")]
+        })))
+        .mount(&server)
+        .await;
+    let snapshot = task_snapshot(&api, ["root".into(), "absent".into()].into())
+        .await
+        .unwrap();
+    assert!(snapshot["root"].is_some());
+    assert!(snapshot["absent"].is_none());
+}
+
+#[tokio::test]
+async fn recovery_snapshot_fails_closed_on_list_error_or_inconsistent_pagination() {
+    use crate::inference_budget::recovery::task_snapshot;
+    for fault in [
+        "forbidden",
+        "changed-version",
+        "repeated-token",
+        "duplicate-task",
+        "missing-version",
+        "oversized-page",
+    ] {
+        let server = MockServer::start().await;
+        let client = test_client(&server);
+        let api = Api::namespaced(client, "workspace");
+        let calls = Arc::new(AtomicUsize::new(0));
+        Mock::given(wiremock::matchers::path(TASKS))
+            .respond_with(move |_: &Request| {
+                let n = calls.fetch_add(1, Ordering::SeqCst);
+                if fault == "forbidden" {
+                    return failure(403);
+                }
+                let version = if fault == "missing-version" {
+                    None
+                } else if fault == "changed-version" && n > 0 {
+                    Some("124")
+                } else {
+                    Some("123")
+                };
+                let items = match fault {
+                    "duplicate-task" => vec![named_task("root")],
+                    "oversized-page" => (0..129)
+                        .map(|index| named_task(&format!("task-{index}")))
+                        .collect(),
+                    _ => vec![],
+                };
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "apiVersion":"kars.azure.com/v1alpha1", "kind":"KarsTaskList",
+                    "metadata":{"resourceVersion":version,
+                        "continue":if fault == "repeated-token" {"same".into()} else {format!("page-{n}")}},
+                    "items": items
+                }))
+            }).mount(&server).await;
+        assert!(
+            task_snapshot(&api, ["root".into(), "child".into()].into())
+                .await
+                .is_err(),
+            "{fault}"
+        );
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|request| request.url.path() == TASKS)
+        );
+    }
 }
 
 #[tokio::test]
@@ -381,7 +816,7 @@ async fn recovery_unchanged_authority_with_invalid_live_source_still_revokes_and
     let original = original_account(now);
     let (server, store, state) = setup(Some(original.clone()), Fault::None).await;
     live_sources(&server, Arc::new(Mutex::new(task_authority("B").0)), None).await;
-    let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
+    let client = test_client(&server);
     reconcile_account(&client, &store, &original).await.unwrap();
     let current = state.lock().unwrap().account.clone().unwrap();
     let ledger = Store::ledger(&current).unwrap();

@@ -430,8 +430,15 @@ Sandbox ID: ${HOSTNAME:-dev-agent}
 
 ## On First Message (Welcome)
 
-When a user starts a new conversation, include the following in your greeting
-for security transparency:
+A new conversation is not necessarily a request for onboarding. When the current
+message supplies a task, a reviewed Mission phase, or revision feedback, execute
+that assigned work directly. Do not substitute a welcome, capability tour, or
+"How can I help?" for the task. The reviewed phase and its granted tools take
+precedence over the general examples below; this guidance grants no capabilities.
+
+Only when the user starts a conversation without an actionable request, offer a
+brief welcome with the following information, describing only configured and
+verified protections and currently granted tools:
 
 1. Header: "🔒 kars Sandbox — Local Dev (GitHub Copilot)"
 2. Provider: \`GitHub Copilot\`
@@ -517,8 +524,15 @@ Sandbox ID: ${HOSTNAME:-dev-agent}
 
 ## On First Message (Welcome)
 
-When a user starts a new conversation, include the following in your greeting
-for security transparency:
+A new conversation is not necessarily a request for onboarding. When the current
+message supplies a task, a reviewed Mission phase, or revision feedback, execute
+that assigned work directly. Do not substitute a welcome, capability tour, or
+"How can I help?" for the task. The reviewed phase and its granted tools take
+precedence over the general examples below; this guidance grants no capabilities.
+
+Only when the user starts a conversation without an actionable request, offer a
+brief welcome with the following information, describing only configured and
+verified protections and currently granted tools:
 
 1. Header: "🔒 kars Sandbox — Local Dev (GitHub Models)"
 2. Provider: \`GitHub Models\`
@@ -624,8 +638,15 @@ Sandbox ID: ${HOSTNAME:-dev-agent}
 
 ## On First Message (Welcome)
 
-When a user starts a new conversation, include the following in your greeting
-for security transparency:
+A new conversation is not necessarily a request for onboarding. When the current
+message supplies a task, a reviewed Mission phase, or revision feedback, execute
+that assigned work directly. Do not substitute a welcome, capability tour, or
+"How can I help?" for the task. The reviewed phase and its granted tools take
+precedence over the general examples below; this guidance grants no capabilities.
+
+Only when the user starts a conversation without an actionable request, offer a
+brief welcome with the following information, describing only configured and
+verified protections and currently granted tools:
 
 1. Header: "🔒 kars Sandbox — Secure AI Runtime on Azure"
 2. Foundry Project: \`${FOUNDRY_PROJECT_ENDPOINT:-${ENDPOINT}}\`
@@ -812,6 +833,8 @@ MCPEOF
     }
   },
   "tools": {
+    "toolSearch": false,
+    "web": { "fetch": { "useTrustedEnvProxy": true, "provider": "kars-router" } },
     "deny": ["sessions_spawn", "sessions_send"],
     "exec": {
       "mode": "full"
@@ -873,34 +896,8 @@ MCPEOF
 EOF
   chmod 600 "$OPENCLAW_CONFIG" 2>/dev/null || true
 
-  # Seed auth-profiles.json for the "main" agent. Required by the embedded-mode
-  # lane of `openclaw agent --message ...` subprocesses (spawned from the
-  # kars plugin's delegateToNativeAgent / processTaskWithTools paths).
-  # Without this file, the subprocess's embedded fallback errors out with
-  # "No API key found for provider 'openai'" even though the gateway itself
-  # routes through the inference router just fine.
-  #
-  # The key value is a routing stub — the inference router at 127.0.0.1:8443
-  # doesn't validate it; real auth happens upstream via IMDS/WI. No real
-  # credential material is written here.
-  AGENT_DIR="$OPENCLAW_DIR/agents/main/agent"
-  mkdir -p "$AGENT_DIR"
-  cat > "$AGENT_DIR/auth-profiles.json" << 'AUTHPROFEOF'
-{
-  "version": 1,
-  "profiles": {
-    "openai:default": { "type": "api_key", "provider": "openai", "key": "routed-via-inference-router", "displayName": "router-stub" },
-    "azure-openai:default": { "type": "api_key", "provider": "azure-openai", "key": "routed-via-inference-router", "displayName": "router-stub" }
-  },
-  "defaults": { "openai": "openai:default", "azure-openai": "azure-openai:default" }
-}
-AUTHPROFEOF
-  chmod 600 "$AGENT_DIR/auth-profiles.json" 2>/dev/null || true
-  # In dev mode we run as root; the sandbox user needs to own + read this file.
-  # (AKS pods already run as UID 1000, so chown is a no-op / skipped.)
-  if [ "$IS_ROOT" = "true" ]; then
-    chown -R sandbox:sandbox "$OPENCLAW_DIR/agents" 2>/dev/null || true
-  fi
+  # Native inference uses the explicit loopback provider configuration above.
+  # Legacy auth-profiles.json seeds trigger credential migration in OpenClaw 2026.9.8.
 
   # Build channels config dynamically from env vars.
   # Built-in channel extensions need BOTH:
@@ -1054,8 +1051,15 @@ open-source runtime for AI agents on Azure Kubernetes Service (AKS).
 
 ## On First Message (Welcome)
 
-When a user starts a new conversation, include the following in your greeting
-for security transparency:
+A new conversation is not necessarily a request for onboarding. When the current
+message supplies a task, a reviewed Mission phase, or revision feedback, execute
+that assigned work directly. Do not substitute a welcome, capability tour, or
+"How can I help?" for the task. The reviewed phase and its granted tools take
+precedence over the general examples below; this guidance grants no capabilities.
+
+Only when the user starts a conversation without an actionable request, offer a
+brief welcome with the following information, describing only configured and
+verified protections and currently granted tools:
 
 1. **Header**: "🔒 kars Sandbox — Secure AI Runtime on Azure"
 2. **Foundry Project**: Show the connected project: \`${FOUNDRY_PROJECT_ENDPOINT:-${ENDPOINT}}\`
@@ -1497,6 +1501,26 @@ if [ "${KARS_AUTH_MODE:-}" != "workload-identity" ]; then
   echo "[kars] Inference router running (PID: $ROUTER_PID, port: 8443)"
 else
   echo "[kars] Inference router provided by AKS container (workload-identity mode)"
+fi
+
+# Prepare governed capacity before the gateway captures its immutable model generation.
+if [ -n "${KARS_MISSION_CONTRACT:-}" ]; then
+  $AS_SANDBOX node --input-type=module - "$OPENCLAW_CONFIG" "$MODEL" <<'MODEL_LIMITS'
+import { randomUUID } from 'node:crypto';
+import { lstat, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { prepareNativeModelConfig } from '/opt/kars-plugin/core/model-limits.js';
+const [path, model] = process.argv.slice(2);
+if (!(await lstat(path)).isFile()) throw new Error('Native gateway config must be a regular file');
+const config = JSON.parse(await readFile(path, 'utf8'));
+const prepared = await prepareNativeModelConfig(config, model, AbortSignal.timeout(15_000));
+const temporary = `${path}.${randomUUID()}.tmp`;
+try {
+  await writeFile(temporary, JSON.stringify(prepared), { flag: 'wx', mode: 0o600 });
+  await rename(temporary, path);
+} finally {
+  await rm(temporary, { force: true });
+}
+MODEL_LIMITS
 fi
 
 # ── Offload idle timeout enforcement ────────────────────────────────────────

@@ -61,12 +61,33 @@ async fn agt_evaluate(
         .unwrap_or("unknown");
     let extra_context = body.get("context").cloned();
     let telemetry_scope = state.services.telemetry.cursor().0;
+    let correlation = extra_context.as_ref().and_then(|context| {
+        if agent_id != state.sandbox_name.as_str()
+            || context.get("scope_id")?.as_str()? != telemetry_scope
+        {
+            return None;
+        }
+        state.services.telemetry.correlate_operation(
+            &telemetry_scope,
+            context.get("tool_call_id")?.as_str()?,
+            Some(action.strip_prefix("tool:")?),
+        )
+    });
 
     // Per-tool sliding window rate limit (AGT McpSlidingRateLimiter)
     // Extract tool name from action format "tool:exec_command" or "tool:http_fetch"
     if let Some(tool_name) = action.strip_prefix("tool:") {
         let (allowed, retry_after) = state.governance.check_tool_rate(tool_name);
         if !allowed {
+            state.services.telemetry.record_operation(
+                correlation.as_ref(),
+                crate::task_telemetry::operation::RouterOperation::ToolPolicy {
+                    allowed: false,
+                    rate_limited: true,
+                },
+                None,
+                0,
+            );
             state
                 .services
                 .telemetry
@@ -88,6 +109,15 @@ async fn agt_evaluate(
         && let Some(tool) = action.strip_prefix("tool:")
     {
         let allowed = result.get("allowed").and_then(serde_json::Value::as_bool) == Some(true);
+        state.services.telemetry.record_operation(
+            correlation.as_ref(),
+            crate::task_telemetry::operation::RouterOperation::ToolPolicy {
+                allowed,
+                rate_limited: false,
+            },
+            None,
+            0,
+        );
         state
             .services
             .telemetry

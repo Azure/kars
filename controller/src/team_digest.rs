@@ -25,7 +25,9 @@ pub struct DigestEntry {
     pub summary: String,
     pub runs_generated: i64,
     pub runs_delivered: i64,
-    pub tokens_spent: i64,
+    pub tokens_spent: Option<i64>,
+    #[serde(default)]
+    pub tokens_spent_scope: Option<String>,
     pub knowledge_entries: i64,
     /// Idempotent publication slot: status retries do not append duplicates.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -83,7 +85,8 @@ pub async fn publish(
     summary: &str,
     runs_generated: i64,
     runs_delivered: i64,
-    tokens_spent: i64,
+    tokens_spent: Option<i64>,
+    tokens_spent_scope: &str,
     knowledge_entries: i64,
 ) -> Result<()> {
     let namespace = team
@@ -125,6 +128,7 @@ pub async fn publish(
         runs_generated,
         runs_delivered,
         tokens_spent,
+        tokens_spent_scope: Some(tokens_spent_scope.into()),
         knowledge_entries,
         slot: Some(slot),
     });

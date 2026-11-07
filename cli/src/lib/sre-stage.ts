@@ -3,7 +3,7 @@
 
 import { parseAllDocuments } from "yaml";
 import { get, requireRegistrar, type ApiObject, type Execute } from "./sre-authority.js";
-import { listSreHelmReleases, sreHelmStageWait } from "./sre-helm.js";
+import { listSreHelmReleases, sreHelmStageWait, sreInferenceFlags } from "./sre-helm.js";
 import { ACTION_CRD, planActionCrd } from "./sre-action-crd.js";
 import { planCoreHelmSchemas } from "./core-helm-schemas.js";
 import { waitForInstalledCoreSchemas } from "./schema-stage.js";
@@ -32,9 +32,14 @@ export async function stageAuthority(
   controllerImage:string,routerImage:string,dryRun:boolean,
 ):Promise<void> {
   let phase: StagePhase = "registrar";
+  const mark = (next: StagePhase) => {
+    phase = next;
+    // A killed Helm child cannot reach catch; retain only fixed progress labels.
+    console.error(`SRE-STAGE-PROGRESS ${phase}`);
+  };
   try {
-    await stageAuthorityChecked(execute,chart,namespace,release,controllerImage,routerImage,dryRun,
-      next => { phase = next; });
+    mark("registrar");
+    await stageAuthorityChecked(execute,chart,namespace,release,controllerImage,routerImage,dryRun,mark);
   } catch (error) {
     // Fixed source stage only: never include argv, API bodies or raw causes.
     console.error(`SRE-STAGE-FAILURE ${phase}`);
@@ -71,13 +76,29 @@ async function stageAuthorityChecked(
   }).filter((obj):obj is ApiObject=>!!obj);
   const actions=documents.filter(obj=>obj.kind==="CustomResourceDefinition"&&obj.metadata.name===ACTION_CRD);
   if(actions.length!==1)throw new Error("Exactly one compatible action CRD is required before staging authority policies");
-  mark("action-schema-review");
-  const stageAction=await planActionCrd(execute,actions[0],namespace,release,helm);
   if(helm) {
     mark("helm-compatibility");
     const wait=await sreHelmStageWait(execute);
+    const saved=await execute("helm",["get","values",release,"--namespace",namespace,"--all","-o","json"],{stdio:"pipe"});
+    let values;
+    try { values=JSON.parse(saved.stdout); }
+    catch { throw new Error("Cannot read the installed SRE model selection from Helm values"); }
+    if(!values||typeof values!=="object"||Array.isArray(values)) {
+      throw new Error("Installed Helm values must be an object");
+    }
+    const sre="sre" in values?values.sre:{};
+    if(!sre||typeof sre!=="object"||Array.isArray(sre))throw new Error("Installed SRE values must be an object");
+    let inferenceFlags:string[]=[];
+    if(sre.enabled===true) {
+      if(typeof sre.provider!=="string"||typeof sre.model!=="string") {
+        throw new Error("Enabled SRE requires its installed provider/model string selection");
+      }
+      // Reset/reuse keeps user values, not defaults from the installed chart.
+      // Preserve its selected route without inventing a new model or provider.
+      inferenceFlags=sreInferenceFlags({provider:sre.provider||undefined,model:sre.model||undefined});
+    }
     const baseArgs=["upgrade",release,chart,"--namespace",namespace,"--reset-then-reuse-values",
-      "--set","sre.authorityStage=true",
+      "--set","sre.authorityStage=true",...inferenceFlags,
       "--set-string",`controller.image.repository=${controllerRepository}`,
       "--set-string",`controller.image.tag=${controllerTag}`,
       "--set-string",`inferenceRouter.image.repository=${routerRepository}`,
@@ -98,6 +119,10 @@ async function stageAuthorityChecked(
     }
     return;
   }
+  // Helm reviewed the entire schema/data migration above. Template staging has
+  // only the narrower params-repair permit, not a durable-schema migration.
+  mark("action-schema-review");
+  const stageAction=await planActionCrd(execute,actions[0],namespace,release,false);
   mark("template-ownership-review");
   if(controller.metadata.annotations?.["meta.helm.sh/release-name"]) {
     throw new Error("Controller reports Helm ownership that was not found; no template-mode adoption is allowed");

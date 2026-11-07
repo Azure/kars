@@ -36,15 +36,19 @@ returned dict so the LLM can reason over them.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from collections import Counter
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote
 
 import httpx
 
 from . import sre_kube
+from .sre import KARS_GROUP, KARS_VERSION, _summarise_cr
+from .sre_tools import register_sre_tool
 
 logger = logging.getLogger("kars.hermes.sre.k8s")
 
@@ -71,6 +75,8 @@ RESOURCE_PATHS: dict[str, tuple[str, str]] = {
     "DaemonSet": ("daemonsets", "apis/apps/v1"),
     "ReplicaSet": ("replicasets", "apis/apps/v1"),
     "EndpointSlice": ("endpointslices", "apis/discovery.k8s.io/v1"),
+    "KarsEval": ("karsevals", f"apis/{KARS_GROUP}/{KARS_VERSION}"),
+    "EgressApproval": ("egressapprovals", f"apis/{KARS_GROUP}/{KARS_VERSION}"),
 }
 
 # Reasons we treat as "incident-flavoured" — these are the ones
@@ -218,6 +224,7 @@ def _summarise_workload(item: dict[str, Any]) -> dict[str, Any]:
         "name": meta.get("name"),
         "generation": meta.get("generation"),
         "observedGeneration": status.get("observedGeneration"),
+        "desiredReplicas": spec.get("replicas"),
         "replicas": status.get("replicas"),
         "readyReplicas": status.get("readyReplicas"),
         "availableReplicas": status.get("availableReplicas"),
@@ -350,6 +357,50 @@ def _walk_owner_graph(
     return out
 
 
+def _summarise_karseval(item: dict[str, Any]) -> dict[str, Any]:
+    summary = _summarise_cr(item, "KarsEval")
+    spec = item.get("spec") or {}
+    status = item.get("status") or {}
+    for key in ("schedule", "failSandboxOnDrift"):
+        summary[key] = spec.get(key)
+    for key in (
+        "lastRunAt", "corpusDigest", "cronJobName",
+        "reportConfigMapUid", "reportEvidenceDigest",
+    ):
+        summary[key] = status.get(key)
+    for source, key in (
+        (spec, "targetSandboxRef"), (status, "corpusConfigMapRef"),
+        (status, "reportConfigMapRef"),
+    ):
+        ref = source.get(key)
+        summary[key] = {"name": ref.get("name")} if isinstance(ref, dict) else None
+    result = status.get("lastResult")
+    # Only the controller's compact result, never raw corpus/report contents.
+    summary["lastResult"] = {
+        key: result[key] for key in (
+            "schemaVersion", "corpusDigest", "total", "passed", "failed", "errored",
+            "corpusLabel", "jobName", "firstFailingCases",
+        ) if key in result
+    } if isinstance(result, dict) else None
+    return summary
+
+
+def _summarise_egress_approval(item: dict[str, Any]) -> dict[str, Any]:
+    summary = _summarise_cr(item, "EgressApproval")
+    spec = item.get("spec") or {}
+    status = item.get("status") or {}
+    for key in ("sandbox", "ttl"):
+        summary[key] = spec.get(key)
+    hosts = spec.get("hosts")
+    summary["hosts"] = [
+        {"host": host.get("host"), "port": host.get("port")}
+        for host in hosts
+    ] if isinstance(hosts, list) else None
+    for key in ("effectiveAt", "expiresAt", "mergedDigest", "hostCount", "usageCount"):
+        summary[key] = status.get(key)
+    return summary
+
+
 def _impl_sre_describe_resource(
     *,
     kind: str,
@@ -378,6 +429,9 @@ def _impl_sre_describe_resource(
             "error": f"unknown kind: {kind}",
             "supported_kinds": sorted(RESOURCE_PATHS.keys()),
         }
+
+    if kind in {"KarsEval", "EgressApproval"} and not namespace:
+        return {"error": f"{kind} is namespaced — provide namespace"}
 
     # Owner-graph walk for workload kinds
     if kind in {"Deployment", "StatefulSet", "DaemonSet"}:
@@ -413,6 +467,8 @@ def _impl_sre_describe_resource(
         "ReplicaSet": _summarise_workload,
         "Service": _summarise_service,
         "ResourceQuota": _summarise_resource_quota,
+        "KarsEval": _summarise_karseval,
+        "EgressApproval": _summarise_egress_approval,
     }.get(kind)
 
     summary: dict[str, Any]
@@ -457,6 +513,53 @@ def _impl_sre_describe_resource(
 # --------------------------------------------------------------------------
 
 
+def _events_in_window(
+    kube: sre_kube.KubeClient, path: str, since: datetime, as_of: datetime
+) -> tuple[list[dict[str, Any]], int]:
+    events = []
+    undated = 0
+    params: dict[str, Any] = {"limit": 200}
+    seen_tokens: set[str] = set()
+    while True:
+        doc = kube.get(path, params=dict(params))
+        items = doc.get("items")
+        if not isinstance(items, list):
+            raise ValueError("Event inventory omitted a valid items list")
+        for ev in items:
+            if ev.get("reason") not in WHAT_CHANGED_REASONS:
+                continue
+            timestamps = []
+            for value in (
+                (ev.get("series") or {}).get("lastObservedTime"),
+                ev.get("lastTimestamp"),
+                ev.get("deprecatedLastTimestamp"),
+                ev.get("eventTime"),
+                ev.get("firstTimestamp"),
+                ev.get("deprecatedFirstTimestamp"),
+            ):
+                if not isinstance(value, str):
+                    continue
+                try:
+                    timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+                if timestamp.tzinfo is not None:
+                    timestamps.append(timestamp.astimezone(timezone.utc))
+            if not timestamps:
+                undated += 1
+                continue
+            observed = max(timestamps)
+            if since <= observed <= as_of:
+                events.append({**ev, "lastObservedTime": observed.isoformat()})
+        token = (doc.get("metadata") or {}).get("continue")
+        if not token:
+            return events, undated
+        if not isinstance(token, str) or token in seen_tokens:
+            raise ValueError("Event inventory returned an invalid or repeated continuation token")
+        seen_tokens.add(token)
+        params["continue"] = token
+
+
 def _impl_sre_what_changed(
     *,
     namespace: str | None = None,
@@ -468,7 +571,9 @@ def _impl_sre_what_changed(
     Surfaces events from BOTH ``core/v1/events`` (older API) and
     ``events.k8s.io/v1/events`` (newer API) — they have different
     retention windows and shapes; the agent should not have to know
-    which is in play.
+    which is in play. All pages are filtered using the latest valid occurrence
+    timestamp, including event-series updates and legacy timestamps. Undated
+    events are counted separately, never presented as recent observations.
 
     Args:
         namespace: limit to one namespace (omit for cluster-wide).
@@ -484,12 +589,17 @@ def _impl_sre_what_changed(
     """
     minutes = max(1, min(minutes, 60))
     kube = sre_kube.client()
+    as_of = datetime.now(timezone.utc)
+    since = as_of - timedelta(minutes=minutes)
 
     out: dict[str, Any] = {
         "since_minutes": minutes,
+        "since": since.isoformat(),
+        "as_of": as_of.isoformat(),
         "namespace": namespace or "*",
         "events_core": [],
         "events_new": [],
+        "excluded_undated": {},
     }
 
     # core/v1/events
@@ -498,8 +608,9 @@ def _impl_sre_what_changed(
     else:
         core_path = "/api/v1/events"
     try:
-        doc = kube.get(core_path, params={"limit": 200})
-        for ev in doc.get("items", []):
+        events, undated = _events_in_window(kube, core_path, since, as_of)
+        out["excluded_undated"]["events_core"] = undated
+        for ev in events:
             reason = ev.get("reason")
             if reason in WHAT_CHANGED_REASONS:
                 out["events_core"].append(
@@ -512,6 +623,7 @@ def _impl_sre_what_changed(
                         "message": ev.get("message"),
                         "count": ev.get("count"),
                         "lastTimestamp": ev.get("lastTimestamp"),
+                        "lastObservedTime": ev["lastObservedTime"],
                     }
                 )
     except Exception as exc:  # noqa: BLE001
@@ -523,8 +635,9 @@ def _impl_sre_what_changed(
     else:
         new_path = "/apis/events.k8s.io/v1/events"
     try:
-        doc = kube.get(new_path, params={"limit": 200})
-        for ev in doc.get("items", []):
+        events, undated = _events_in_window(kube, new_path, since, as_of)
+        out["excluded_undated"]["events_new"] = undated
+        for ev in events:
             reason = ev.get("reason")
             if reason in WHAT_CHANGED_REASONS:
                 regarding = ev.get("regarding") or {}
@@ -538,6 +651,7 @@ def _impl_sre_what_changed(
                         "note": ev.get("note"),
                         "deprecatedCount": ev.get("deprecatedCount"),
                         "eventTime": ev.get("eventTime"),
+                        "lastObservedTime": ev["lastObservedTime"],
                     }
                 )
     except Exception as exc:  # noqa: BLE001
@@ -626,8 +740,13 @@ def _impl_sre_endpoints_inspect(
             raise ValueError("EndpointSlice inventory omitted a valid items list")
         slices = []
         for es in es_doc.get("items", []):
+            reported_endpoints = es.get("endpoints")
+            if reported_endpoints is None:
+                reported_endpoints = []
+            if not isinstance(reported_endpoints, list):
+                raise ValueError("EndpointSlice endpoints must be a list or null")
             endpoints = []
-            for ep in es.get("endpoints", []):
+            for ep in reported_endpoints:
                 endpoints.append(
                     {
                         "addresses": ep.get("addresses"),
@@ -931,13 +1050,19 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
         logger.warning("Hermes ctx has no register_tool — Slice 2 SRE tools not registered")
         return
 
-    register_tool(
+    register_sre_tool(
+        ctx,
         name="sre_describe_resource",
         toolset="sre",
         description=(
-            "Structured-describe for any K8s resource (Pod, Deployment, "
+            "Structured-describe for supported K8s resources (Pod, Deployment, "
             "Service, ResourceQuota, ConfigMap, Secret metadata only, "
-            "EndpointSlice, Node, Event, etc.). For workload kinds "
+            "EndpointSlice, Node, Event, etc.), KarsEval and EgressApproval. KarsEval includes "
+            "conditions, target, compact last-result counts and evidence references; "
+            "an absent result is not a passing evaluation. EgressApproval includes "
+            "target, hosts, TTL, reported phase/conditions, effective/expiry timestamps, "
+            "merged digest and usage count; reported Active is not proof of current "
+            "router enforcement or unexpired access. For workload kinds "
             "(Deployment, StatefulSet, DaemonSet) walks the owner graph: "
             "workload → ReplicaSet → Pods → events on every level. This "
             "is THE single-call diagnostic for most workload incidents."
@@ -960,7 +1085,8 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
         handler=sre_describe_resource,
     )
 
-    register_tool(
+    register_sre_tool(
+        ctx,
         name="sre_what_changed",
         toolset="sre",
         description=(
@@ -986,7 +1112,8 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
         handler=sre_what_changed,
     )
 
-    register_tool(
+    register_sre_tool(
+        ctx,
         name="sre_endpoints_inspect",
         toolset="sre",
         description=(
@@ -1006,7 +1133,8 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
         handler=sre_endpoints_inspect,
     )
 
-    register_tool(
+    register_sre_tool(
+        ctx,
         name="sre_image_probe",
         toolset="sre",
         description=(
@@ -1028,7 +1156,8 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
         handler=sre_image_probe,
     )
 
-    register_tool(
+    register_sre_tool(
+        ctx,
         name="sre_top",
         toolset="sre",
         description=(
@@ -1066,24 +1195,24 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
 def sre_image_probe(args=None, **_ctx):  # noqa: ANN001 — Hermes call shape
     if args is None:
         args = {}
-    return _impl_sre_image_probe(**args)
+    return json.dumps(_impl_sre_image_probe(**args))
 
 def sre_what_changed(args=None, **_ctx):  # noqa: ANN001 — Hermes call shape
     if args is None:
         args = {}
-    return _impl_sre_what_changed(**args)
+    return json.dumps(_impl_sre_what_changed(**args))
 
 def sre_describe_resource(args=None, **_ctx):  # noqa: ANN001 — Hermes call shape
     if args is None:
         args = {}
-    return _impl_sre_describe_resource(**args)
+    return json.dumps(_impl_sre_describe_resource(**args))
 
 def sre_top(args=None, **_ctx):  # noqa: ANN001 — Hermes call shape
     if args is None:
         args = {}
-    return _impl_sre_top(**args)
+    return json.dumps(_impl_sre_top(**args))
 
 def sre_endpoints_inspect(args=None, **_ctx):  # noqa: ANN001 — Hermes call shape
     if args is None:
         args = {}
-    return _impl_sre_endpoints_inspect(**args)
+    return json.dumps(_impl_sre_endpoints_inspect(**args))

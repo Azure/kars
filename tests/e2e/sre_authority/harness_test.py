@@ -90,6 +90,20 @@ class HarnessTests(unittest.TestCase):
             "SRE-STAGE-FAILURE action-schema-review\nSRE-STAGE-FAILURE helm-server-dry-run"),
             "sre-stage:ambiguous")
 
+    def test_discovery_failure_retains_only_known_api_types_not_resource_names(self):
+        from sre_authority.common import command_error_category
+        private = "DO-NOT-EMIT-PRIVATE-DATA"
+        error = f'resource mapping not found for name: "{private}": no matches for kind "ServiceMonitor" in version "monitoring.coreos.com/v1"'
+        self.assertEqual(command_error_category(error), "api-discovery:ServiceMonitor@monitoring.coreos.com/v1")
+        self.assertEqual(command_error_category(error + "\n" + error), command_error_category(error))
+        self.assertNotIn(private, command_error_category(error))
+        for kind, version in ((private, "monitoring.coreos.com/v1"), ("ServiceMonitor", private),
+                              ("Deployment", "kars.azure.com/v1alpha1")):
+            self.assertEqual(command_error_category(f'no matches for kind "{kind}" in version "{version}"'),
+                             "api-discovery:unclassified-type")
+        self.assertEqual(command_error_category('no matches for kind "KarsBudgetAccount" in version "kars.azure.com/v1alpha1"'),
+                         "api-discovery:KarsBudgetAccount@kars.azure.com/v1alpha1")
+
     def test_hermes_runtime_assertion_verifies_exact_pin_and_runtime_without_blanket_standin_acceptance(self):
         helper = Path(__file__).resolve().parents[1] / "sre-authority.sh"
         cases = [
@@ -306,6 +320,68 @@ class HarnessTests(unittest.TestCase):
                        "Retire reviewed SRE ClusterRoleBinding: Kubernetes status 403 " + MARKER):
             self.assertEqual(authority_failure_site(root, unsafe), {"category": "unclassified"})
 
+    def test_blocked_authority_diagnostics_classify_first_install_and_public_policy_failures(self):
+        root = Path(__file__).resolve().parents[3]
+        for detail in (
+            "First-install funding configuration is invalid",
+            "First-install funding requires the governed broker",
+            "First-install funding catalog is unavailable",
+            "First-install SRE intent, identity, catalog or funding authorization failed verification",
+        ):
+            with self.subTest(detail=detail):
+                result = authority_failure_site(root, detail)
+                self.assertEqual(result["source"], "controller/src/inference_budget/first_install.rs")
+                self.assertNotIn(detail, json.dumps(result))
+        from sre_authority.common import POLICIES
+        for name in POLICIES:
+            detail = f"SRE admission policy kars-sre-{name} is not observed, type-checked, and enforced; no privilege may be issued"
+            result = authority_failure_site(root, detail)
+            self.assertEqual(result["source"], "controller/src/sre_authority/admission.rs")
+            self.assertNotIn(detail, json.dumps(result))
+        for name in (MARKER, "kars-sre-unknown", "kars-sre-source-authority " + MARKER):
+            detail = f"SRE admission policy {name} is not observed, type-checked, and enforced; no privilege may be issued"
+            self.assertEqual(authority_failure_site(root, detail), {"category": "unclassified"})
+
+    def test_blocked_authority_diagnostics_preserve_all_checked_cleanup_failure_sites(self):
+        root = Path(__file__).resolve().parents[3]
+        primary = "Reviewed SRE consumer was changed or replaced"
+        cleanups = [
+            ("private authority revocation", "Retire private SRE binding: Kubernetes status 403"),
+            ("API policy retirement", "Read retiring SRE API policy: Kubernetes transport/serialization failure"),
+            ("private credential retirement", "Retire private SRE identity: Kubernetes status 409"),
+        ]
+        for mask in range(1, 8):
+            selected = [entry for index, entry in enumerate(cleanups) if mask & (1 << index)]
+            detail = primary + "".join(f"; owned {operation} failed: {message}" for operation, message in selected)
+            with self.subTest(mask=mask):
+                result = authority_failure_site(root, detail)
+                self.assertEqual(result["category"], "controller-rejection-chain")
+                self.assertEqual(result["failures"], [
+                    {"operation": "authority", **authority_failure_site(root, primary)},
+                    *[{"operation": operation, **authority_failure_site(root, message)} for operation, message in selected],
+                ])
+                for _, message in selected:
+                    self.assertNotIn(message, json.dumps(result))
+                for unsafe in (MARKER + detail, detail + MARKER, detail + "\n" + MARKER):
+                    self.assertEqual(authority_failure_site(root, unsafe), {"category": "unclassified"})
+
+    def test_blocked_authority_diagnostics_reject_unknown_or_malformed_cleanup_chains(self):
+        root = Path(__file__).resolve().parents[3]
+        primary = "Reviewed SRE consumer was changed or replaced"
+        rejection = "Retire private SRE binding: Kubernetes status 403"
+        first = f"; owned private authority revocation failed: {rejection}"
+        second = f"; owned API policy retirement failed: {rejection}"
+        for detail in (
+            primary + first + first, primary + second + first,
+            primary + first * 4, primary + "; owned unknown failed: " + rejection,
+            primary + "; owned private authority revocation failed: " + MARKER,
+            primary + "; owned private authority revocation failed: ",
+            primary + first + "; owned API policy retirement failed: " + MARKER,
+            MARKER + first, "x" * 8193,
+        ):
+            with self.subTest(detail=detail[:100]):
+                self.assertEqual(authority_failure_site(root, detail), {"category": "unclassified"})
+
     def test_control_consumer_fixture_satisfies_required_sandbox_fields(self):
         captured = []
         class Captured(Exception):
@@ -509,6 +585,40 @@ class HarnessTests(unittest.TestCase):
                         fixture.index('h.cli("authority", "stage"'))
         from sre_authority.common import POLICIES
         self.assertIn("no-legacy-tokens", POLICIES)
+
+    def test_final_upgrade_preserves_saved_values_only_for_prepared_legacy_release(self):
+        root = Path(__file__).resolve().parents[3]
+        source = (root / "tests/e2e/run.sh").read_text()
+        install = "install_crds() {" + source.split("install_crds() {", 1)[1].split("\nteardown()", 1)[0]
+        script = '''
+set -eu
+ROOT_DIR="$1"
+SRE_LEGACY_PREPARED="$2"
+source "$ROOT_DIR/tests/e2e/sre-authority.sh"
+info() { :; }
+helm() {
+    if [ "$1" = version ]; then printf '%s\\n' "$HELM_VERSION";
+    else printf '%s\\0' "$@"; fi
+}
+''' + install + '\nHELM_VERSION="$3"; install_crds\n'
+        for prepared in ("0", "1"):
+            for version, wait in (("v3.16.4", "--wait"), ("v4.2.4", "--wait=legacy")):
+                with self.subTest(prepared=prepared, version=version):
+                    result = subprocess.run(
+                        ["bash", "-c", script, "saved-helm-values-test", str(root), prepared, version],
+                        capture_output=True, check=True, timeout=5)
+                    args = result.stdout.decode().rstrip("\0").split("\0")
+                    self.assertEqual(args[:3], ["upgrade", "--install", "kars"])
+                    self.assertEqual(args.count("--reset-then-reuse-values"), int(prepared))
+                    self.assertNotIn("--reset-values", args)
+                    self.assertNotIn("--reuse-values", args)
+                    self.assertNotIn("sre.enabled=false", args)
+                    self.assertEqual("sre.authorityStage=true" in args, prepared == "1")
+                    self.assertIn(wait if prepared == "1" else "--wait", args)
+                    self.assertEqual(args[args.index("--timeout") + 1], "5m")
+                    self.assertEqual(args[args.index("--values") + 1], str(root / ".e2e-addon-values.json"))
+                    self.assertIn("controller.replicas=1", args)
+                    self.assertIn("inferenceRouter.image.pullPolicy=Never", args)
 
     def test_staged_setup_waits_for_builtins_without_skipping_migration_readiness(self):
         root = Path(__file__).resolve().parents[3]

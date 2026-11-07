@@ -74,6 +74,124 @@ async fn privileged_http_endpoints_reject_agent_admin_even_on_loopback() {
 }
 
 #[tokio::test]
+async fn clarification_wait_returns_only_the_bound_human_answer() {
+    let state = state("workspace-a", "uid-a");
+    let scope = state.services.requests.scope().unwrap().id;
+    let app = app(state.clone());
+    let entry = queue(&app, &scope, "clarification", "source-choice", None).await;
+    let id = entry["request_id"].as_str().unwrap();
+    for answer in [
+        json!(null),
+        json!(""),
+        json!(" \n\t"),
+        json!("😀".repeat(2049)),
+    ] {
+        let (status, _) = send(
+            &app,
+            request(
+                "POST",
+                "/internal/access-requests/decision",
+                json!({"scope_id":scope,"request_id":id,"verdict":"approved","answer":answer}),
+                Some(CONTROL),
+                None,
+                false,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            state.services.requests.entry(&scope, id).unwrap().status,
+            Status::Pending
+        );
+    }
+    // Escaping makes the JSON body exceed the ordinary 8 KiB request limit.
+    let answer = "\"".repeat(8192);
+    let body = json!({"scope_id":scope,"request_id":id,"verdict":"approved","answer":answer});
+    for token in [None, Some(AGENT_ADMIN)] {
+        assert_eq!(
+            send(
+                &app,
+                request(
+                    "POST",
+                    "/internal/access-requests/decision",
+                    body.clone(),
+                    token,
+                    None,
+                    true
+                )
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    let (status, decided) = send(
+        &app,
+        request(
+            "POST",
+            "/internal/access-requests/decision",
+            body,
+            Some(CONTROL),
+            None,
+            false,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(decided["enforcement_changed"], false);
+    assert_eq!(decided["request"]["answer"], answer);
+    let path = format!("/v1/access-requests/{id}/wait?scope_id={scope}&timeout_ms=100");
+    let (status, waited) = send(&app, request("GET", &path, json!({}), None, None, true)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(waited["answer"], answer);
+    assert_eq!(
+        decision(&app, &scope, id, "denied").await.0,
+        StatusCode::CONFLICT
+    );
+    let repeated = queue(&app, &scope, "clarification", "source-choice", None).await;
+    assert_eq!(repeated["answer"], answer);
+    assert_eq!(repeated["request_id"], id);
+    state
+        .services
+        .reset(&scope, Some("next-assignment".into()))
+        .unwrap();
+    assert_eq!(
+        send(&app, request("GET", &path, json!({}), None, None, true))
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+}
+
+#[tokio::test]
+async fn answers_cannot_be_attached_to_egress_or_denied_requests() {
+    for (kind, verdict) in [("egress", "approved"), ("clarification", "denied")] {
+        let state = state("workspace-a", "uid-a");
+        let scope = state.services.requests.scope().unwrap().id;
+        let app = app(state.clone());
+        let entry = queue(&app, &scope, kind, "source.example", None).await;
+        let id = entry["request_id"].as_str().unwrap();
+        assert_eq!(send(&app, request("POST", "/internal/access-requests/decision",
+            json!({"scope_id":scope,"request_id":id,"verdict":verdict,"answer":"human answer"}),
+            Some(CONTROL), None, false)).await.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            state.services.requests.entry(&scope, id).unwrap().status,
+            Status::Pending
+        );
+        assert_eq!(decision(&app, &scope, id, verdict).await.0, StatusCode::OK);
+        assert!(
+            state
+                .services
+                .requests
+                .entry(&scope, id)
+                .unwrap()
+                .answer
+                .is_none()
+        );
+    }
+}
+
+#[tokio::test]
 async fn reset_fences_old_requests_and_preserves_uid_qualified_identity() {
     let state = state("workspace-a", "uid-a");
     let scope = state.services.requests.scope().unwrap().id;

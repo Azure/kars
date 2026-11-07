@@ -2,11 +2,12 @@
 // Licensed under the MIT License.
 
 import {
-  annotations, at, canonical, PRIVATE_PREFIX, read, record, reviewed, reviewBudgetTls,
+  annotations, at, canonical, digest, PRIVATE_PREFIX, read, record, reviewed, reviewBudgetTls,
   templateDigest, validateActivationShape, validatePrivateActivation, verifyPrivateBundle,
-  requiresPrivatePodReview, validateObservedControllerProfile,
-  type Execute, type PrivateActivation,
+  requiresPrivatePodReview, validateObservedControllerProfile, validateQualifiedActivation, reviewQualifiedBudgetRevision,
+  type Execute, type PrivateActivation, type ReviewedObject,
 } from "./private-activation.js";
+import { reviewPrivateBudgetRevision } from "./private-activation-continuity.js";
 import {
   assertRetiredRoot, retirementBinding, retirementReview, retirementState, type RootRetirement,
 } from "./private-activation-retirement.js";
@@ -132,4 +133,134 @@ export async function applyBudgetTlsRecovery(execute: Execute, review: BudgetTls
       resourceVersion: original.root.namespace.resourceVersion, annotations: fields } }), "-o", "json"]));
   if (reviewed(updated).uid !== original.root.namespace.uid) throw new Error("Budget TLS recovery returned another namespace");
   assertPending(updated, next, nextState);
+}
+
+export interface BudgetRevisionRecovery {
+  version: 1;
+  qualification: Awaited<ReturnType<typeof reviewPrivateBudgetRevision>>;
+  grant: { identity: ReviewedObject; spec: ReturnType<typeof record> };
+}
+
+function qualifiedActivation(value: unknown): PrivateActivation {
+  const activation = value as PrivateActivation;
+  validateActivationShape(activation, "qualified");
+  return activation;
+}
+
+async function singleRootGrant(execute: Execute, namespace: string, rootUid: string) {
+  const list = async (kind: string, scope: string[]) => {
+    const result = JSON.parse(await execute(["get", kind, ...scope, "--chunk-size=0", "-o", "json"]));
+    const items = at(result, "items");
+    if (at(result, "metadata", "continue") || !Array.isArray(items) || items.length > 1024) {
+      throw new Error("TLS revision recovery inventory is incomplete or exceeds its bound");
+    }
+    return items;
+  };
+  for (const item of await list("namespaces", [])) {
+    const fields = record(at(item, "metadata", "annotations") ?? {});
+    if ((fields[`${PRIVATE_PREFIX}root-namespace`] === namespace
+      || fields[`${PRIVATE_PREFIX}root-namespace-uid`] === rootUid) && reviewed(item).uid !== rootUid) {
+      throw new Error("TLS revision recovery refuses additional affiliated namespaces");
+    }
+  }
+  const grants = (await list("karscredentialgrants.kars.azure.com", ["--all-namespaces"])).filter(item => {
+    const writers = at(item, "spec", "writers");
+    if (!Array.isArray(writers)) throw new Error("TLS revision recovery grant inventory is malformed");
+    return at(item, "metadata", "namespace") === namespace
+      || at(item, "spec", "privateActivation", "root", "namespace", "uid") === rootUid
+      || writers.some(writer => at(writer, "namespace") === namespace);
+  });
+  if (grants.length !== 1 || reviewed(grants[0]).name !== "workspace"
+    || at(grants[0], "metadata", "namespace") !== namespace) {
+    throw new Error("TLS revision recovery requires exactly one existing single-root workspace grant");
+  }
+  return { identity: reviewed(grants[0]), spec: record(at(grants[0], "spec")) };
+}
+
+/** Changes only the revision binding of the same public key, not material,
+ * retirement, enrollment, consumer epochs or the root Deployment. */
+export async function previewBudgetRevisionRecovery(
+  execute: Execute, namespace: string,
+): Promise<BudgetRevisionRecovery> {
+  await assertOperator(execute);
+  const qualification = await reviewPrivateBudgetRevision(execute, namespace);
+  await validateObservedControllerProfile(execute, qualification.proof.activation.profile);
+  const grant = await singleRootGrant(execute, namespace, qualification.namespace.uid);
+  const activation = qualifiedActivation(grant.spec.privateActivation);
+  if (retirementBinding(activation) !== retirementBinding(qualification.proof.activation)) {
+    throw new Error("TLS revision recovery grant differs from the sealed root intent");
+  }
+  await reviewQualifiedBudgetRevision(execute, activation);
+  return { version: 1, qualification, grant };
+}
+
+export async function applyBudgetRevisionRecovery(execute: Execute, review: BudgetRevisionRecovery): Promise<void> {
+  if (!review || review.version !== 1
+    || Object.keys(review).sort().join(",") !== "grant,qualification,version") {
+    throw new Error("An exact reviewed same-key TLS revision recovery is required");
+  }
+  await assertOperator(execute);
+  const { qualification } = review;
+  const original = qualification.proof.activation;
+  validateActivationShape(original, "qualified");
+  const namespace = original.root.namespace.name;
+  const nextProof = structuredClone(qualification.proof);
+  const nextGrantActivation = structuredClone(qualifiedActivation(review.grant.spec.privateActivation));
+  if (!original.root.budgetTls || !nextGrantActivation.root.budgetTls
+    || retirementBinding(original) !== retirementBinding(nextGrantActivation)
+    || qualification.namespace.uid !== original.root.namespace.uid
+    || qualification.budget.secret.uid !== original.root.budgetTls.secret.uid
+    || qualification.budget.keyDigest !== original.root.budgetTls.keyDigest) {
+    throw new Error("TLS revision recovery must preserve the sealed key, identities and grant intent");
+  }
+  nextProof.activation.root.budgetTls!.secret.resourceVersion = qualification.budget.secret.resourceVersion;
+  nextGrantActivation.root.budgetTls.secret.resourceVersion = qualification.budget.secret.resourceVersion;
+  const nextSpec = { ...review.grant.spec, privateActivation: nextGrantActivation };
+  const current = await read(execute, "namespace", namespace);
+  const raw = at(current, "metadata", "annotations", FIELD);
+  if (raw === canonical(qualification.proof)) {
+    const fresh = await previewBudgetRevisionRecovery(execute, namespace);
+    if (canonical(fresh.qualification.proof) !== canonical(qualification.proof)
+      || canonical(fresh.grant.spec) !== canonical(review.grant.spec)
+      || fresh.grant.identity.uid !== review.grant.identity.uid
+      || fresh.qualification.state !== qualification.state
+      || fresh.qualification.namespaceDigest !== qualification.namespaceDigest
+      || fresh.qualification.budget.secret.resourceVersion !== qualification.budget.secret.resourceVersion) {
+      throw new Error("TLS revision recovery changed since review");
+    }
+    const latestNamespace = await read(execute, "namespace", namespace);
+    const metadata = reviewed(latestNamespace);
+    if (digest({ ...latestNamespace, metadata: { ...record(latestNamespace.metadata), resourceVersion: null } })
+      !== fresh.qualification.namespaceDigest) {
+      throw new Error("TLS revision recovery namespace changed during review");
+    }
+    await execute(["patch", "namespace", namespace, "--type=merge", "-p", JSON.stringify({
+      metadata: { uid: metadata.uid, resourceVersion: metadata.resourceVersion, annotations: {
+        [FIELD]: canonical(nextProof),
+        [`${PRIVATE_PREFIX}budget-tls-version`]: qualification.budget.secret.resourceVersion,
+        [`${PRIVATE_PREFIX}state`]: "Qualified",
+      } },
+    })]);
+  } else if (raw !== canonical(nextProof)) {
+    throw new Error("TLS revision recovery refuses an unrelated or partially modified root proof");
+  }
+  // Resume only this exact new seal after interruption, never reconstructed API evidence.
+  await validateObservedControllerProfile(execute, nextProof.activation.profile);
+  await validateQualifiedActivation(execute, nextProof.activation);
+  const grant = await singleRootGrant(execute, namespace, qualification.namespace.uid);
+  if (grant.identity.uid !== review.grant.identity.uid
+    || ![canonical(review.grant.spec), canonical(nextSpec)].includes(canonical(grant.spec))) {
+    throw new Error("TLS revision recovery grant changed; protection remains enabled");
+  }
+  if (canonical(grant.spec) !== canonical(nextSpec)) {
+    await execute(["patch", "karscredentialgrants.kars.azure.com", "workspace", "-n", namespace,
+      "--type=merge", "-p", JSON.stringify({
+        metadata: { uid: grant.identity.uid, resourceVersion: grant.identity.resourceVersion }, spec: nextSpec,
+      })]);
+  }
+  const published = await read(execute, "karscredentialgrants.kars.azure.com", "workspace", namespace);
+  if (reviewed(published).uid !== review.grant.identity.uid || canonical(at(published, "spec")) !== canonical(nextSpec)) {
+    throw new Error("TLS revision recovery grant publication does not match the reviewed intent");
+  }
+  await validateQualifiedActivation(execute, qualifiedActivation(at(published, "spec", "privateActivation")));
 }

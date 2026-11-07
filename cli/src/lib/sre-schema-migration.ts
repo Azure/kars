@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import { CANONICAL_SCHEMAS, EVALUATOR_V2, MIGRATION } from "./sre-migration-catalog.js";
+import { BETA_V1_SCHEMA_SET, CANONICAL_SCHEMAS, EVALUATOR_V2, MIGRATION } from "./sre-migration-catalog.js";
 import {
   canonicalSchema, normalizedCrd, readSchemaObject, schemaDigest, schemaIdentity, verifySchemaOwner,
   type ObjectMap, type SchemaExecute, type SchemaOwner,
@@ -17,7 +17,7 @@ interface Review {
   owner: SchemaOwner;
   schemas: Map<string, { current?: ObjectMap; desired: ObjectMap; written: boolean }>;
   data: MigrationDataSnapshot[];
-  profile: "core-470" | "evaluator-v2";
+  profile: "core-470" | "evaluator-v2" | "beta-v1";
   controller: ObjectMap;
 }
 const reviews = new WeakMap<QualifiedSreMigration, Review>();
@@ -70,6 +70,8 @@ export async function qualifySreSchemaMigration(
   if (canonicalSchema([...schemas.keys()].sort()) !== canonicalSchema(Object.keys(CANONICAL_SCHEMAS).sort())) {
     throw new Error("BASE365 migration requires the complete canonical core CRD inventory");
   }
+  const beta = schemaDigest(Object.fromEntries([...schemas].map(([name, entry]) =>
+    [name, schemaDigest(normalizedCrd(entry.desired))]))) === BETA_V1_SCHEMA_SET;
   const controller = await quiescentController(execute, owner);
   schemaStep("schema-retention");
   requireCrdRetention(crds);
@@ -78,7 +80,7 @@ export async function qualifySreSchemaMigration(
     schemaStep("canonical-target", entry.desired.spec.names.kind);
     const allowed = CANONICAL_SCHEMAS[name];
     const after = schemaDigest(normalizedCrd(entry.desired));
-    if (!allowed.after.includes(after)) throw new Error(`Unreviewed target schema in BASE365 migration: ${name}`);
+    if (!beta && !allowed.after.includes(after)) throw new Error(`Unreviewed target schema in BASE365 migration: ${name}`);
     if (!entry.current) {
       if (allowed.before) throw new Error(`Historical BASE365 CRD is missing: ${name}`);
       continue;
@@ -101,7 +103,7 @@ export async function qualifySreSchemaMigration(
   const evalSchema = schemas.get("karsevals.kars.azure.com")!.desired;
   const plan: QualifiedSreMigration = Object.freeze({ id: MIGRATION });
   reviews.set(plan, { execute, owner, schemas, data, controller,
-    profile: schemaDigest(normalizedCrd(evalSchema)) === EVALUATOR_V2 ? "evaluator-v2" : "core-470" });
+    profile: beta ? "beta-v1" : schemaDigest(normalizedCrd(evalSchema)) === EVALUATOR_V2 ? "evaluator-v2" : "core-470" });
   await recheckSreSchemaMigration(plan);
   return plan;
 }

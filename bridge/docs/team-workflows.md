@@ -29,6 +29,26 @@ Intent
   -> approved team memory + next milestone
 ```
 
+The Team value summary's **Assigned work** count reports active queue assignments,
+not live execution. An assignment can remain active while its reviewed run is
+held or uncertain; the run page reports that execution state separately.
+
+**Run finished** describes execution, not acceptance. Recent outcomes and Outcome
+history show **Changes requested** or **Approved** only from that exact run's
+retained review decision, and **Awaiting review** from its current queue state.
+A later attempt's review does not change an earlier attempt's label. Missing
+review evidence never implies approval; conflicting decisions show **Review
+status unavailable**. Requesting changes preserves the finished attempt and its
+usage while queuing a correction; a paused Team still requires resuming before
+new work can start.
+
+A held run is not retried by **Run now**. First use that run's **Emergency stop**
+to stop its launch and pause the Team while preserving evidence and charges.
+After explicitly resuming the Team, **Run now** offers a separately confirmed
+new run only when the old run records an operator stop and is no longer launched.
+The old run remains held/uncertain in history; stopping is not a successful result
+or a refund. Fresh work still requires current authority and budget admission.
+
 ## Authoring reusable building blocks
 
 The console's Team profile, inference-policy and custom MCP editors carry the
@@ -37,6 +57,22 @@ discarding it. Settings that the visual fields cannot preserve, including nested
 authority extensions and signed bundles, stay in JSON mode with an explanation.
 Managed MCP presets remain JSON-only. Saving a profile or registering an MCP
 server does not itself authorize a Team launch or tool call.
+
+A **Use profile** draft copies the template's roles and bounds, not an executable
+plan. Select **Prepare work plan** to use the existing governed composer without
+writing JSON or navigating back to the charter. Preparation uses AI and records
+usage; it updates the proposal for review but does not create or launch a Team.
+The profile's authority limits remain unchanged. If preparation is unavailable,
+the draft remains editable and the same action lets you retry. Review the proposal
+and run readiness checks before creating the Team. Technical plan editing remains
+under **Advanced: inspect or edit plan JSON**.
+
+Creation first saves a paused Team before attaching reviewed credentials and
+activating it. Activation retries status-only conflicts and the controller's
+exact cleanup-finalizer registration, including its merge-patch field ownership;
+it does not adopt concurrent authority edits. If activation fails after creation,
+inspect the existing Team in **Teams** and resume it after reviewing its state,
+rather than submitting another creation request.
 
 ## Current execution boundary
 
@@ -62,28 +98,60 @@ execution plan into a member.
 Route qualification uses each exact-name role's reviewed `budget_tokens`, not
 another role's allowance. Team create/update checks use the smaller of the role
 cap and Team lifetime cap when both are present; without a role cap, they
-retain the lifetime-cap check. Compose has no total-budget field, so it uses the
-explicit role cap or preserves unspecified-budget qualification when absent.
-Candidate normalization, fallback routes and qualification diagnostics use the
-same bound without changing reviewed caps. This is route qualification, not
+retain the lifetime-cap check. The composer proposes an explicit finite Team-lifetime
+`budget_tokens` allowance as well as role caps. The lifetime proposal reaches the
+review form and preflight unchanged; an explicit profile budget takes precedence.
+Live model-contract bounds and complete route-record minima are returned to the
+composer's existing bounded repair step. Candidate normalization, fallback routes
+and qualification diagnostics use the same effective bound without changing caps.
+The principal, members, retries and later tasks share this allowance; new runs do
+not replenish it. This is route qualification, not
 runtime reservation or enforcement; execution must also pass the gates below.
 
-**The current source implements restricted reviewed filesystem execution**, not
-general-purpose execution of every proposed plan. The existing controller and
+Role dependencies wait for **all** predecessor phases, not just its first phase.
+A reviewer dependent on an analyst cannot send feedback to an earlier analyst
+phase. The principal synthesis runs after all members and incorporates review.
+Each milestone executes the complete Team plan, so a single requested delivery
+uses one milestone rather than separate draft/review/finalize milestones.
+
+**Native phases use the runtime's agent loop within reviewed capabilities and
+router-enforced authority.** The existing controller and
 encrypted dispatcher schedule role dependencies, reserve governed role budgets,
 run fresh-context phase children, retain immutable `handoff.md` inputs, and
 synthesize the result in the root Task. Both OpenClaw and Hermes use this path.
 If a revision-bound phase fails before synthesis, the run is shown as failed,
 with its retained error and phase timestamp, even when no principal result or
 assignment exists. Completed role evidence remains available; it is not a
-successful final delivery.
+successful final delivery. A custody- and revision-bound durable attempt marked
+`uncertain` is shown as **Outcome uncertain**, never Working or completed based
+on its last running reply or launch flag. A root's reviewed-execution hold is
+shown as **Held** and overrides stale active phase and assignment projections;
+completed builder work remains visible, missing deliverables remain missing,
+and unavailable usage remains unknown. A recorded failure remains Failed rather
+than being relabeled as uncertainty. These are read-only status projections;
+they do not retry, restart, or authorize synthesis.
+The Team overview uses the same revision-bound
+terminal evidence: missing or stale assignment projections cannot turn a current
+terminal result or failed reviewed phase back into “Run in progress.” Results
+from a previous run do not stop polling a newly launched run.
+Emergency stop remains available while the run's launch flag is set, including
+a failed run or a paused Team, so operators can clean up remaining execution.
+It still requires confirmation and the backend's Team ownership checks; it is
+not offered once the launch flag is cleared.
 An explicit operator stop before root output returns that exact active work item
 to the queue while keeping the Team paused. Its history records a cancellation
 with the real stop time and reason, not a fabricated result or output digest.
 Resume and a new run request are required to execute it again.
-Active plans require exactly filesystem-read/write capabilities, no required
-external-tool calls, a positive tool-call ceiling, and UTF-8 text, Markdown or
-JSON deliverables. Unsupported plans remain inactive and reject activation with
+Native phases require filesystem-read/write, fresh context and a positive tool-call
+ceiling. With declared `network`, agents select sources and recovery in their
+native loop; reviewed hosts and router policy still constrain access. Normally
+`required_tool_calls` is empty: composition does not prescribe a fetch script.
+Explicit required-call contracts, when present, remain enforceable rather than
+being satisfied by failed calls or fabricated source content. Synthesis performs
+final integration and file validation using its declared capabilities. Hosted
+search remains unsupported under finite funding; necessary search must not be
+silently replaced with direct retrieval.
+Unsupported plans remain inactive and reject activation with
 `TypedPlanExecutionUnavailable`; saving a plan does not authorize its execution.
 
 A reviewed one-shot Task needs **delegation depth 2** (Task → role → phase).
@@ -101,14 +169,17 @@ marker declares one. Unmarked legacy planless execution remains supported.
 These are current-source/local integration claims. Fresh Helm installation and
 complete customer-journey acceptance on Kind and AKS remain release gates.
 
-The OpenClaw measured loop and encrypted mission protocol support a tested
-**single-phase filesystem contract**. Version 2 requires a canonical phase and
+Both runtime measured loops and the encrypted mission protocol support a tested
+**single-phase reviewed contract**. Version 2 requires a canonical phase and
 its SHA256 digest in readiness, assignment and replies; version 1 cannot silently
-drop constraints. Only explicitly granted `filesystem-read`/`filesystem-write`
-tools are exposed, actual calls are checked again, and router policy authorization
-is still required. `maxToolCalls` limits attempted calls (including denied,
-malformed and failed calls); an overflowing batch fails before any tool runs.
-`minToolCalls` counts only successful authorized filesystem operations.
+drop constraints. Only granted filesystem tools and, when declared, exact reviewed
+`http_fetch` calls are exposed. Actual calls are checked again, and router policy
+authorization is still required. `maxToolCalls` limits attempted calls (including
+denied, malformed and failed calls); an overflowing batch fails before any tool
+runs. `minToolCalls` counts successful authorized operations. The separate
+`completedRequiredToolCalls` counter counts distinct verified reviewed fetches:
+terminal success requires every declaration even when the general minimum is zero.
+Legacy filesystem-only wire contracts remain readable.
 
 The local version-3 contract additionally supports bounded **immutable input
 artifacts**. Its canonical SHA256 digest binds the exact UTF-8 bytes, input aliases
@@ -138,8 +209,9 @@ be selected as useful input documents. A source Task may have moved to a later
 run: this reads retained evidence, not the current deliverable or its approval.
 
 Bridge's terminal-evidence reader accepts validated version-1 through version-4
-replies. It checks the canonical filesystem phase digest, supported capabilities,
-attempted/successful call bounds and digest-only input contract, then applies the
+replies. It checks the canonical phase digest (including ordered required calls),
+supported capabilities, attempted/successful/required-call completion bounds and
+digest-only input contract, then applies the
 existing Task UID, run, assignment, producer and exact-usage checks. Version 4
 also requires bounded, unique output names and matching text-v1 artifacts on
 success; its input digest is optional. Artifact envelopes retain the shared
@@ -241,8 +313,8 @@ and 32 tool attempts, including failure and exact replay.
 
 These are library/runtime and in-process durability proofs, **not live Team
 acceptance**. The dispatcher admits only the reviewed subset with matching
-installed authority; unsupported capabilities, required external-tool contracts
-and unsolicited phases fail before inference. Previously claimed terminal
+installed authority; unsupported capabilities, external-tool contracts outside
+the reviewed HTTPS GET subset, and unsolicited phases fail before inference. Previously claimed terminal
 attempts remain recoverable without resend. The root's remaining governed budget
 bounds synthesis; role allocations cannot manufacture additional authority or
 replenish the Team's lifetime allowance.
@@ -282,6 +354,69 @@ Written change requests retain the previous attempt and its output hash, return
 the item to the pending queue, and bind feedback into a fresh Task/run. Approval
 completes the item and makes its dependents eligible. This reuses the same Team
 lifetime account; neither revisions nor later intake replenish its budget.
+
+Revision deliverables and approved Team knowledge are retained inputs to **every**
+phase, including independent first researchers, and the principal synthesis.
+A first run with only network and filesystem-write can succeed without these
+inputs; that does not authorize reading them on a later run. Manual Run now and
+explicit qualification admission check queued revisions before requesting a run.
+The controller checks manual and automatic dispatch again before creating a Task
+or claiming work, including the actual revision and knowledge input counts.
+Unreadable inputs fail with a plain-language explanation naming affected
+roles/phases. Run now keeps `ReviewedInputCapabilityRequired` under **Technical
+details**, not in the main error. Automatic queued revisions use the existing
+Degraded/`invalid_authority` status with the same explanation; they remain queued
+without creating or claiming a Task. The existing per-phase runtime guard remains
+in place for both OpenClaw and Hermes.
+
+To repair, **Pause → Edit → Reading previous work**. Review the named phases,
+explicitly enable **Read previous work** and set sufficient
+**Maximum tool calls**, then **Save input permissions**. This saves only the
+reviewed execution plan through the normal launch-package route; no JSON editing
+is required. Resume and confirm Run now (or let the reviewed cadence proceed).
+Change requests and failed/cancelled attempts remain in history; no existing run
+identity is replayed and no charges are erased. This does not alter ToolPolicy,
+egress, credentials, role budgets or host access. A tool-policy denial still
+refuses the read; granting filesystem-read is necessary, not a policy bypass.
+Each checkbox changes only its named role phase, or synthesis when selected.
+Administrator policy denial requires administrator review, not a permission-control
+workaround. Admission checks the reviewed plan, not a prediction of live router
+policy decisions; the runtime still enforces the administrator's current policy.
+
+There is no editable execution-plan `tool_allowlist`/`toolAllowlist`: both runtimes
+derive available file tools from capabilities. Bridge and the shared plan schema
+reject unknown plan, role, phase and synthesis fields rather than discarding a
+purported restriction. Empty, read-only, write-only and wildcard allowlists are all
+unsupported and rejected before a Team edit can mutate the plan or request a run.
+Cluster ToolPolicy and MCP server `allowedTools` are separate controls; their
+existing matching semantics are unchanged.
+
+While a Team is paused, a pending item offers **Edit queued feedback**. **Save
+feedback** changes only next-run instructions on that same item; **Cancel** makes
+no write. The item ID, Team UID, every attempt, output hash and original approval
+or rejection reason remain intact. Saving does not resume the Team, request a run,
+change accounting or retry an earlier attempt.
+
+The API is `PATCH /api/namespaces/{ns}/teams/{name}/tasks/{task_id}/feedback` with
+`{"team_uid":"<Team detail uid>","expected":<complete displayed TeamTask>,"feedback":"<replacement>"}`.
+An empty string (or API `null`) explicitly clears only next-run feedback. The full
+expected item includes history, not just its request digest. The BFF requires the
+current owner and paused Team, rechecks the Team before each CAS attempt, and
+compares the complete item in the UID-fenced backlog. A changed, assigned or
+recreated item/Team fails rather than overwriting another writer. Refresh and
+review the new snapshot before retrying a conflict; do not silently rebase edits.
+
+Create, Team change-request review, generic Inbox and Teams gateway checkpoint
+denial, feedback amendment and changed engineering intake all preflight the shared controller
+objective contract. The allowance remains **4096 Unicode characters**, including
+the exact Team display name/charter prefix and serialized work JSON with its
+framing. JSON escaping counts; a raw feedback character count alone is not the
+allowance. Oversize errors report actual and allowed counts and ask for shorter
+work details, criteria or feedback (or a shorter charter/display name). Nothing
+is truncated to fit. Optional commons history uses only the remaining allowance.
+Existing oversized records remain readable and amendable; old decision evidence
+is not retroactively rejected or rewritten. These checks do not waive fresh run
+admission or protect against later charter changes made outside these routes.
 
 Engineering intake uses this same owned queue and canonical UID/resource-version
 fenced run admission; it does not write a separate run trigger or rewrite a claimed
@@ -326,7 +461,7 @@ This budget contract alone is not proof of useful Team delivery or beta readines
 
 | Workspace concept | What it is | What it is not |
 |---|---|---|
-| Team | A persistent charter, org chart, authority envelope, backlog, memory identity, and explicit runtime lifecycle policy. | A single run or an implicitly permanent pod. |
+| Team | A persistent charter, org chart, authority envelope, backlog and memory identity, with on-demand execution. | A single run or an implicitly permanent pod. |
 | Work queue | Durable milestones/tasks the team will execute. | A live event stream. |
 | Run | One attempt to execute one milestone or charter tick. | The whole lifetime of the team. |
 | Execution flow / activity | The chronological signal inside one run. | A separate work item. |
@@ -444,7 +579,7 @@ Bridge composer reads the live cluster palette and proposes:
 - per-role harness and model overrides;
 - MCP services, egress mode, and public hosts;
 - autonomy tier and cadence;
-- runtime lifecycle and warm-idle policy;
+- durable Team state with isolated, on-demand execution;
 - engineering intake settings for repository maintenance;
 - a 2-8 milestone DAG for finite work.
 
@@ -465,18 +600,18 @@ not present generic fallback roles as a successful AI recommendation.
 
 ### Runtime lifecycle modes
 
-Lifecycle mode controls runtime retention, not workflow durability. The charter,
-queue, approvals, receipts, and approved memory remain durable in every mode.
+The supported execution path is a durable Team with on-demand agent pods.
+Charter, shared memory, history and the Team-UID lifetime budget survive across
+isolated runs. This does not mean a principal pod stays warm or always on.
 
-| Mode | Runtime behavior | Use when |
-|---|---|---|
-| **Resource optimized** | Reuses the same principal while warm, then suspends it after the configured idle window. New work resumes the same team identity. | Default for most standing teams. |
-| **Persistent** | Keeps the principal runtime ready until an operator explicitly pauses the team. | Low-latency work justifies continuous resource use. |
-| **Ephemeral** | Creates a clean isolated runtime for each assignment and tears it down after evidence is retained. | Maximum isolation or compatibility with earlier teams. |
-
-The controller never auto-suspends a runtime while an assignment is active or a
-milestone is awaiting review. Pausing a team explicitly suspends retained
-runtimes in all modes.
+Older Bridge forms exposed `resourceOptimized`, `persistent` and
+`warm_idle_seconds`, but the current controller does not implement these
+retention settings. Bridge no longer offers those controls and rejects their
+use explicitly instead of reporting success while Kubernetes prunes the fields.
+Legacy API clients may omit both inputs, or send `lifecycle_mode: "ephemeral"`
+with zero warm idle; those defaults do not add unsupported fields to the CR.
+Warm/always-on compute remains an open implementation and qualification gap,
+not a completed lifecycle feature or a waiver of an acceptance requirement.
 
 ## 2. Understand the milestone graph
 
@@ -515,6 +650,12 @@ identifiers. The latest-run link and live refresh follow that order. A local
 the request indicator so a later completed run does not require a page reload
 before another request. Resuming also refreshes the controller's stale
 hibernating state; an enabled but not-yet-active Team is not presented as paused.
+
+**Pause** disables future scheduling; an existing assignment can continue and
+consume tokens. The journey rail says **Scheduling paused**, not that execution
+is suspended. **Resume** enables future scheduling without replaying the current
+run. To terminate current work, use its **Emergency stop** control. Scheduling
+pause does not checkpoint a process or establish resource-optimized hibernation.
 
 The controller carries the Team's user-owner annotation into generated Tasks
 and through reviewed role/phase parents. It repairs missing attribution only

@@ -7,11 +7,64 @@ import { assertSchemaCompatibility } from "./schema-compatibility.js";
 import { planCoreSchemaDocuments, stageCoreSchemaDocuments } from "./schema-stage.js";
 import { qualifySreSchemaMigration, sreMigrationSummary } from "./sre-schema-migration.js";
 import { canonicalMigrationSchemas, currentCoreSchemas, migrationFixture } from "./sre-migration.test-support.js";
-import { CANONICAL_SCHEMAS, EVALUATOR_V2, MIGRATION } from "./sre-migration-catalog.js";
+import { BETA_V1_SCHEMA_SET, CANONICAL_SCHEMAS, EVALUATOR_V2, MIGRATION } from "./sre-migration-catalog.js";
 import { planCoreHelmSchemas } from "./core-helm-schemas.js";
 
 describe("closed BASE365 SRE schema migration", () => {
-  it.each(["KarsAuthConfig", "KarsSkill", "KarsTask", "KarsTeam"])(
+  it("pins and applies the complete beta inventory without changing existing data or CRD UIDs", async () => {
+    const f = migrationFixture();
+    const targets = currentCoreSchemas();
+    expect(schemaDigest(Object.fromEntries(targets.map(object =>
+      [object.metadata.name, schemaDigest(normalizedCrd(object))])))).toBe(BETA_V1_SCHEMA_SET);
+    f.addData("KarsTask", { envelope: {}, blueprint: {}, execution: { launch: false } });
+    f.addData("KarsTeam", { envelope: {}, blueprint: {}, roster: [] });
+    f.addData("KarsMemory", { sandboxRef: { name: "sre" }, storeName: "memory", scope: "agent_sre" });
+    f.addData("KarsSREAction", { action: { params: { nested: { values: [1, true] } } } });
+    const before = f.snapshot();
+    const identities = new Map([...f.objects].map(([name, object]) => [name, object.metadata.uid]));
+    const permit = await qualifySreSchemaMigration(f.execute, targets, f.owner);
+    expect(sreMigrationSummary(permit!)).toMatchObject({ profile: "beta-v1", schemas: 21 });
+    const apply = await planCoreSchemaDocuments(f.execute, targets, { ...f.owner, ...f.wait, reviewedSreMigration: permit });
+    expect(f.writes).toEqual([]);
+    await apply();
+    expect(f.snapshot()).toBe(before);
+    for (const [name, uid] of identities) expect(f.objects.get(name)!.metadata.uid).toBe(uid);
+    for (const target of targets) expect(normalizedCrd(f.objects.get(target.metadata.name)!)).toEqual(normalizedCrd(target));
+  });
+
+  it.each(["mixed", "changed", "missing", "foreign", "active-controller"])(
+    "rejects a beta %s inventory before all writes", async fault => {
+      const f = migrationFixture();
+      const targets = currentCoreSchemas();
+      const index = targets.findIndex(object => object.spec.names.kind === "KarsTask");
+      if (fault === "mixed") targets[index] = f.after.find(object => object.spec.names.kind === "KarsTask")!;
+      if (fault === "changed") targets[index].spec.versions[0].schema.openAPIV3Schema.description = "unreviewed";
+      if (fault === "missing") targets.splice(index, 1);
+      if (fault === "foreign") f.objects.get("karstasks.kars.azure.com")!.metadata.annotations["meta.helm.sh/release-name"] = "other";
+      if (fault === "active-controller") f.objects.get("kars-controller")!.spec.replicas = 1;
+      await expect(qualifySreSchemaMigration(f.execute, targets, f.owner)).rejects.toThrow();
+      expect(f.writes).toEqual([]);
+    },
+  );
+
+  it.each([
+    ["KarsAuthConfig", { controller: { managedIdentityClientId: "existing", managedIdentityResourceId: "existing" } }, undefined],
+    ["KarsMemory", { scope: "agent/../shared" }, undefined],
+    ["KarsMemory", { scope: "agent/./shared" }, undefined],
+    ["KarsMemory", { sharedScopes: ["other"] }, undefined],
+    ["KarsTask", { blueprint: { executionPlan: {} } }, undefined],
+    ["KarsSREAction", {}, { execution: {} }],
+    ["KarsApproval", { requestedBy: { subject: "claimed", name: "claimed" } }, undefined],
+  ])("rejects beta defaults, narrowed values or new authority/evidence in %s", async (kind, spec, status) => {
+    const f = migrationFixture();
+    f.addData(kind as string, spec, status);
+    await expect(qualifySreSchemaMigration(f.execute, currentCoreSchemas(), f.owner)).rejects.toThrow();
+    expect(f.writes).toEqual([]);
+  });
+
+  it.each(["KarsApproval", "KarsMemory", "KarsSREAction", "KarsSRERegistration",
+    "KarsAuthConfig", "KarsSkill", "KarsTask", "KarsTeam", "A2AAgent",
+    "InferencePolicy", "ToolPolicy", "KarsReceipt", "KarsBudgetAccount", "KarsSandbox"])(
     "does not extend the historical migration permit to the current %s schema",
     async kind => {
       const f = migrationFixture();

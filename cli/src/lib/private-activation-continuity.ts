@@ -5,13 +5,14 @@ import { randomBytes } from "node:crypto";
 import {
   annotations, at, canonical, consumesPrivateAuthority, digest, kinds, patchNamespace,
   PRIVATE_PREFIX, read, record, requiresPrivatePodReview, reviewed, reviewedOwner, template, templateDigest,
-  validateActivationShape, validateQualifiedMetadata,
-  type Execute, type Json, type NamespaceReview, type PrivateActivation,
+  validateActivationShape, validateQualifiedMetadata, reviewQualifiedBudgetRevision, reviewSealedAuthorityMetadata,
+  type BudgetTlsReview, type Execute, type Json, type NamespaceReview, type PrivateActivation,
 } from "./private-activation.js";
 import {
   replicaIntent, retirementBinding, retirementReview, retirementState, type RootRetirement,
 } from "./private-activation-retirement.js";
-import { reviewLateScope, stageLateScope } from "./private-activation-late-scope.js";
+import { reviewLateScope, verifyRetiredLateScope, stageLateScope } from "./private-activation-late-scope.js";
+import { reviewedControllerRollout } from "./private-activation-reconciliation.js";
 
 const RETIREMENT = "kars.azure.com/private-root-retirement";
 // Unlike other private annotations, this existing field is operator-only,
@@ -19,6 +20,12 @@ const RETIREMENT = "kars.azure.com/private-root-retirement";
 const ROOT = RETIREMENT;
 const SCOPE = RETIREMENT;
 const failure = "Shared private qualification changed or is incomplete; existing authority was preserved";
+export class PrivateQualificationConsumerChanged extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PrivateQualificationConsumerChanged";
+  }
+}
 interface RootQualification {
   version: 2;
   retirement: string;
@@ -92,13 +99,18 @@ async function pods(execute: Execute, scope: NamespaceReview): Promise<Json[]> {
 
 async function consumers(
   execute: Execute, activation: PrivateActivation, scope: NamespaceReview, captured: string[] = [], qualified = true, stamping = false,
+  rolloutHistory = false,
 ): Promise<void> {
-  for (const consumer of scope.consumers) {
+  const liveScope = structuredClone(scope);
+  for (const consumer of liveScope.consumers) {
     if (!kinds[consumer.kind]) throw new Error(failure);
     const current = await read(execute, kinds[consumer.kind]!, consumer.object.name, scope.namespace.name);
-    if (reviewed(current).uid !== consumer.object.uid || templateDigest(current) !== consumer.templateDigest) {
-      throw new Error(`${failure}: ${scope.namespace.name}/${consumer.kind}/${consumer.object.name} identity or template differs`);
+    if (reviewed(current).uid !== consumer.object.uid || (templateDigest(current) !== consumer.templateDigest
+      && !(qualified && consumer.object.uid !== activation.root.deployment.uid
+        && await reviewedControllerRollout(execute, scope, consumer, current, rolloutHistory)))) {
+      throw new PrivateQualificationConsumerChanged(`${failure}: ${scope.namespace.name}/${consumer.kind}/${consumer.object.name} identity or template differs`);
     }
+    consumer.templateDigest = templateDigest(current);
     if (consumesPrivateAuthority(current, scope.namespace.name, activation)) {
       const epoch = at(template(current), "metadata", "annotations", `${PRIVATE_PREFIX}epoch`);
       if (!qualified && (["Pod", "Job"].includes(consumer.kind) || epoch !== undefined)) {
@@ -114,7 +126,7 @@ async function consumers(
       throw new Error("Additional scope still consumes private authority; owner-specific retirement/rotation is required without restarting the shared root");
     }
     if (at(pod, "metadata", "annotations", `${PRIVATE_PREFIX}epoch`) !== scope.epoch
-      || !await reviewedOwner(execute, pod, scope, undefined, activation.root)) {
+      || !await reviewedOwner(execute, pod, liveScope, undefined, activation.root)) {
       throw new Error("Unreviewed or stale-epoch private consumer in shared qualification; existing authority was preserved");
     }
   }
@@ -122,12 +134,14 @@ async function consumers(
 
 async function qualifiedScope(
   execute: Execute, activation: PrivateActivation, scope: NamespaceReview, captured: string[] = [], stamping = false,
+  reviewBudgetRevision = false, authorityOnly = false, rolloutHistory = false, retiring = false,
 ): Promise<void> {
   const current = await read(execute, "namespace", scope.namespace.name);
   const fields = record(at(current, "metadata", "annotations"));
+  const state = (reviewBudgetRevision || authorityOnly || retiring) && fields[`${PRIVATE_PREFIX}state`] === "Pending" ? "Pending" : "Qualified";
   if (!scope.epoch || !/^[a-f0-9]{64}$/.test(scope.epoch)
     || reviewed(current).uid !== scope.namespace.uid || fields[`${PRIVATE_PREFIX}epoch`] !== scope.epoch
-    || Object.entries(annotations(activation, scope, "Qualified")).some(([key, value]) => fields[key] !== value)) throw new Error(failure);
+    || Object.entries(annotations(activation, scope, state)).some(([key, value]) => fields[key] !== value)) throw new Error(failure);
   const parents = Object.entries(fields).filter(([key, value]) => key.startsWith(`${PRIVATE_PREFIX}parent-`) && value === scope.epoch)
     .map(([key]) => key.slice(`${PRIVATE_PREFIX}parent-`.length)).sort();
   if (canonical(parents) !== canonical(scope.consumers.map(consumer => consumer.object.uid).sort())) throw new Error(failure);
@@ -137,10 +151,13 @@ async function qualifiedScope(
     ["budget-qualified-secret", activation.root.budgetTls.secret.uid],
     ["budget-rotation-bundle", ""], ["budget-before-key", ""],
   ].some(([key, value]) => fields[`${PRIVATE_PREFIX}${key}`] !== value)) throw new Error(failure);
-  await consumers(execute, activation, scope, captured, true, stamping);
+  if (!authorityOnly) await consumers(execute, activation, scope, captured, true, stamping, rolloutHistory);
 }
 
-async function verifyProof(execute: Execute, proof: RootQualification, state: RootRetirement, ready: boolean): Promise<void> {
+async function verifyProof(
+  execute: Execute, proof: RootQualification, state: RootRetirement, ready: boolean, reviewBudgetRevision = false,
+  authorityOnly = false, rolloutHistory = false, retiring = false,
+): Promise<BudgetTlsReview | undefined> {
   const activation = proof.activation;
   const namespace = await read(execute, "namespace", activation.root.namespace.name);
   const deployment = await read(execute, "deployment", activation.root.deployment.name, activation.root.namespace.name);
@@ -151,8 +168,65 @@ async function verifyProof(execute: Execute, proof: RootQualification, state: Ro
   const budget = activation.root.budgetTls;
   if (budget && (!state.baseline || state.exposedKeys.includes(budget.keyDigest)
     || state.baseline.resourceVersion === budget.secret.resourceVersion)) throw new Error(failure);
-  await validateQualifiedMetadata(execute, activation);
-  for (const scope of activation.namespaces) await qualifiedScope(execute, activation, scope, state.captured[scope.namespace.uid]);
+  let revisedBudget: BudgetTlsReview | undefined;
+  if (reviewBudgetRevision) revisedBudget = await reviewQualifiedBudgetRevision(execute, activation);
+  else if (authorityOnly || retiring) await reviewSealedAuthorityMetadata(execute, activation);
+  else await validateQualifiedMetadata(execute, activation);
+  for (const scope of activation.namespaces) {
+    await qualifiedScope(execute, activation, scope, state.captured[scope.namespace.uid], false, reviewBudgetRevision, authorityOnly, rolloutHistory, retiring);
+  }
+  return revisedBudget;
+}
+
+/** Verify only the sealed predecessor's authority against its digest-bound template witness.
+ * Current execution is deliberately not called qualified; recovery must review and retire it separately. */
+export async function reviewSealedRootPredecessor(execute: Execute, historicalRoot: Json): Promise<PrivateContinuity> {
+  const name = at(historicalRoot, "metadata", "namespace");
+  if (typeof name !== "string") throw new Error(failure);
+  const namespace = await read(execute, "namespace", name);
+  const proof = rootProof(namespace), state = retirementState(namespace);
+  const a = proof?.activation, scope = a?.namespaces[0];
+  if (!proof || !state || !a || !scope || !state.pauseRoot || a.root.namespace.name !== name
+    || a.namespaces.length !== 1 || scope.namespace.uid !== a.root.namespace.uid
+    || scope.consumers.length !== 1 || scope.consumers[0]?.kind !== "Deployment"
+    || scope.consumers[0].object.uid !== a.root.deployment.uid
+    || reviewed(historicalRoot).uid !== a.root.deployment.uid
+    || reviewed(historicalRoot).name !== a.root.deployment.name
+    || templateDigest(historicalRoot) !== a.root.templateDigest) throw new Error(failure);
+  const historical: Execute = async (args, input) => {
+    if (!["get", "auth"].includes(args[0]!)) throw new Error("Predecessor authority review is read-only");
+    const response = await execute(args, input);
+    if (args[0] !== "get" || args[1] !== "deployment" || args[2] !== a.root.deployment.name
+      || args[args.indexOf("-n") + 1] !== name) return response;
+    const current = record(JSON.parse(response));
+    if (reviewed(current).uid !== a.root.deployment.uid) throw new Error(failure);
+    // Only the historical template is substituted, never namespace proof, identity, keys or Pod evidence.
+    record(current.spec).template = structuredClone(template(historicalRoot));
+    return JSON.stringify(current);
+  };
+  await verifyProof(historical, proof, state, false, false, true);
+  return { proof, state, sealed: true };
+}
+
+export async function reviewPrivateBudgetRevision(execute: Execute, namespace: string) {
+  const current = await read(execute, "namespace", namespace);
+  const proof = rootProof(current);
+  const state = retirementState(current);
+  const activation = proof?.activation;
+  if (!proof || !state || !activation || activation.root.namespace.name !== namespace
+    || activation.namespaces.length !== 1 || activation.namespaces[0]?.namespace.name !== namespace
+    || activation.namespaces[0].consumers.length !== 1
+    || activation.namespaces[0].consumers[0]?.kind !== "Deployment"
+    || activation.namespaces[0].consumers[0]?.object.uid !== activation.root.deployment.uid) {
+    throw new Error("TLS revision recovery requires a sealed single-root qualification");
+  }
+  const budget = await verifyProof(execute, proof, state, true, true);
+  if (!budget) throw new Error("TLS revision recovery requires an enabled budget identity");
+  return {
+    namespace: reviewed(current),
+    namespaceDigest: digest({ ...current, metadata: { ...record(current.metadata), resourceVersion: null } }),
+    state: at(current, "metadata", "annotations", `${PRIVATE_PREFIX}state`), proof, budget,
+  };
 }
 
 async function legacyProof(execute: Execute, activation: PrivateActivation, state: RootRetirement): Promise<RootQualification> {
@@ -186,7 +260,7 @@ async function legacyProof(execute: Execute, activation: PrivateActivation, stat
 }
 
 export async function reviewPrivateContinuity(
-  execute: Execute, activation: PrivateActivation, recoverIntent = false,
+  execute: Execute, activation: PrivateActivation, recoverIntent = false, rolloutHistory = false,
 ): Promise<PrivateContinuity | undefined> {
   const namespace = await read(execute, "namespace", activation.root.namespace.name);
   const deployment = await read(execute, "deployment", activation.root.deployment.name, activation.root.namespace.name);
@@ -207,13 +281,13 @@ export async function reviewPrivateContinuity(
   // The original full namespace/consumer binding remains intact and verified.
   // Substitution here compares only the incoming root to that verified history.
   if (retirementBinding({ ...activation, namespaces: proof.activation.namespaces }) !== state.binding) throw new Error(failure);
-  await verifyProof(execute, proof, state, sealed);
+  await verifyProof(execute, proof, state, sealed, false, false, rolloutHistory);
   if (!sealed && !rootReady(deployment, state) && retirementBinding(activation) !== state.binding) {
     throw new Error("Original private root restore is incomplete; resume its exact review before adding another workspace");
   }
   const continuity = { proof, state, sealed, lateScopes: [] as string[] };
   for (const scope of activation.namespaces) {
-    const plan = await scopePlan(execute, activation, scope, continuity);
+    const plan = await scopePlan(execute, activation, scope, continuity, rolloutHistory);
     if (plan === "Late") continuity.lateScopes.push(scope.namespace.uid);
     if (recoverIntent && plan === "Late") {
       console.error(`Private enrollment of ${scope.namespace.name} requires reviewed runtime suspension, retirement of all old Pod UIDs, `
@@ -225,13 +299,23 @@ export async function reviewPrivateContinuity(
 }
 
 async function scopePlan(
-  execute: Execute, activation: PrivateActivation, scope: NamespaceReview, continuity: PrivateContinuity,
+  execute: Execute, activation: PrivateActivation, scope: NamespaceReview, continuity: PrivateContinuity, rolloutHistory = false, retiring = false,
 ): Promise<"Qualified" | "Stamping" | "Pending" | "New" | "Late"> {
   const original = continuity.proof.activation.namespaces.find(value => value.namespace.name === scope.namespace.name);
   if (original) {
-    if (scopeBinding(scope) !== scopeBinding(original) || (scope.epoch !== undefined && scope.epoch !== original.epoch)) throw new Error(failure);
+    const bound = structuredClone(scope);
+    for (const consumer of bound.consumers) {
+      const prior = original.consumers.find(c => c.kind === consumer.kind && c.object.uid === consumer.object.uid
+        && c.object.name === consumer.object.name);
+      if (prior && prior.templateDigest !== consumer.templateDigest && consumer.object.uid !== activation.root.deployment.uid) {
+        const current = await read(execute, kinds[consumer.kind]!, consumer.object.name, scope.namespace.name);
+        if (templateDigest(current) === consumer.templateDigest
+          && await reviewedControllerRollout(execute, original, prior, current, rolloutHistory)) consumer.templateDigest = prior.templateDigest;
+      }
+    }
+    if (scopeBinding(bound) !== scopeBinding(original) || (scope.epoch !== undefined && scope.epoch !== original.epoch)) throw new Error(failure);
     scope.epoch = original.epoch;
-    await qualifiedScope(execute, activation, scope, continuity.state.captured[scope.namespace.uid]);
+    await qualifiedScope(execute, activation, scope, continuity.state.captured[scope.namespace.uid], false, false, false, rolloutHistory, retiring);
     return "Qualified";
   }
   const namespace = await read(execute, "namespace", scope.namespace.name);
@@ -258,7 +342,7 @@ async function scopePlan(
   if (receipt.phase === "Qualified" || receipt.phase === "Stamping") {
     if (typeof receipt.epoch !== "string" || (scope.epoch !== undefined && scope.epoch !== receipt.epoch)) throw new Error(failure);
     scope.epoch = receipt.epoch;
-    await qualifiedScope(execute, activation, scope, [], receipt.phase === "Stamping");
+    await qualifiedScope(execute, activation, scope, [], receipt.phase === "Stamping", false, false, rolloutHistory, retiring);
     return receipt.phase;
   }
   if (receipt.phase !== "Pending" || receipt.epoch !== undefined || scope.epoch !== undefined
@@ -288,10 +372,50 @@ export async function completePrivateQualification(
     activation: structuredClone(activation) }, state, sealed: false });
 }
 
-async function assertSealed(execute: Execute, continuity: PrivateContinuity): Promise<void> {
+export async function verifyRetiredSealedRoot(
+  execute: Execute, activation: PrivateActivation, companionUids: readonly string[] = [], rolloutHistory = false, retiring = false,
+): Promise<void> {
+  const namespace = await read(execute, "namespace", activation.root.namespace.name);
+  const proof = rootProof(namespace);
+  const state = retirementState(namespace);
+  const deployment = await read(execute, "deployment", activation.root.deployment.name, activation.root.namespace.name);
+  if (!proof || !state || !state.pauseRoot
+    || retirementBinding({ ...activation, namespaces: proof.activation.namespaces }) !== retirementBinding(proof.activation)
+    || proof.activation.namespaces.some(scope => !activation.namespaces.some(value => value.namespace.uid === scope.namespace.uid))
+    || replicaIntent(deployment) !== 0
+    || !activation.namespaces.some(scope => scope.namespace.uid === activation.root.namespace.uid)
+    || activation.namespaces.flatMap(scope => scope.consumers).length !== companionUids.length + 1
+    || new Set([activation.root.deployment.uid, ...companionUids]).size !== companionUids.length + 1
+    || activation.namespaces.flatMap(scope => scope.consumers).some(consumer => consumer.kind !== "Deployment"
+      || ![activation.root.deployment.uid, ...companionUids].includes(consumer.object.uid))) throw new Error(failure);
+  for (const scope of activation.namespaces) for (const consumer of scope.consumers) {
+    if (consumer.object.uid === activation.root.deployment.uid) continue;
+    const current = await read(execute, "deployment", consumer.object.name, scope.namespace.name);
+    if (reviewed(current).uid !== consumer.object.uid || replicaIntent(current) !== 0) throw new Error(failure);
+  }
+  await verifyProof(execute, proof, state, false, false, false, rolloutHistory, retiring);
+  await (retiring ? reviewSealedAuthorityMetadata(execute, activation) : validateQualifiedMetadata(execute, activation));
+  for (const scope of activation.namespaces) {
+    const namespace = await read(execute, "namespace", scope.namespace.name);
+    const qualification = at(namespace, "metadata", "annotations", SCOPE);
+    if (!proof.activation.namespaces.some(value => value.namespace.uid === scope.namespace.uid)
+      && qualification !== undefined && record(JSON.parse(String(qualification))).version === 4) {
+      await verifyRetiredLateScope(execute, activation, scope, digest(proof), retiring);
+      await qualifiedScope(execute, activation, scope, [], false, false, false, rolloutHistory, retiring);
+    } else if (await scopePlan(execute, activation, scope, { proof, state, sealed: true }, rolloutHistory, retiring) !== "Qualified") throw new Error(failure);
+    for (const pod of await pods(execute, scope)) {
+      if (await requiresPrivatePodReview(execute, pod, scope, activation)
+        || (companionUids.length > 0 && await reviewedOwner(execute, pod, scope, undefined, activation.root))) {
+        throw new Error("Private root execution remains; sealed restoration cannot release quarantine");
+      }
+    }
+  }
+}
+
+async function assertSealed(execute: Execute, continuity: PrivateContinuity, rolloutHistory = false): Promise<void> {
   const namespace = await read(execute, "namespace", continuity.proof.activation.root.namespace.name);
   if (at(namespace, "metadata", "annotations", ROOT) !== encoded(continuity.proof)) throw new Error(failure);
-  await verifyProof(execute, continuity.proof, continuity.state, true);
+  await verifyProof(execute, continuity.proof, continuity.state, true, false, false, rolloutHistory);
 }
 
 export async function stageSharedActivation(
@@ -369,14 +493,16 @@ export async function stageSharedActivation(
   return activation;
 }
 
-export async function verifySharedPublication(execute: Execute, activation: PrivateActivation): Promise<void> {
+export async function verifySharedPublication(
+  execute: Execute, activation: PrivateActivation, rolloutHistory = false,
+): Promise<void> {
   const namespace = await read(execute, "namespace", activation.root.namespace.name);
   const proof = rootProof(namespace);
   const state = retirementState(namespace);
   if (!proof || !state || retirementBinding({ ...activation, namespaces: proof.activation.namespaces }) !== state.binding) throw new Error(failure);
   const continuity = { proof, state, sealed: true };
-  await assertSealed(execute, continuity);
+  await assertSealed(execute, continuity, rolloutHistory);
   for (const scope of activation.namespaces) {
-    if (await scopePlan(execute, activation, scope, continuity) !== "Qualified") throw new Error(failure);
+    if (await scopePlan(execute, activation, scope, continuity, rolloutHistory) !== "Qualified") throw new Error(failure);
   }
 }

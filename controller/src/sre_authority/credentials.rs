@@ -320,8 +320,15 @@ async fn ensure_with_connection(
         let token = token
             .status
             .ok_or("Kubernetes TokenRequest omitted its token/expiry")?;
-        let expiry = token.expiration_timestamp.0.to_string();
-        if token.token.is_empty()
+        let expiry = token
+            .expiration_timestamp
+            .ok_or("Kubernetes TokenRequest omitted its expiry")?
+            .0
+            .to_string();
+        let token = token
+            .token
+            .ok_or("Kubernetes TokenRequest omitted its token")?;
+        if token.is_empty()
             || chrono::DateTime::parse_from_rfc3339(&expiry)
                 .map_err(|_| "TokenRequest expiry was invalid")?
                 .timestamp()
@@ -330,7 +337,7 @@ async fn ensure_with_connection(
             return Err("TokenRequest returned unusable private credentials".into());
         }
         let (url, ca) = connection()?;
-        private_values.insert("kube-token".into(), token.token);
+        private_values.insert("kube-token".into(), token);
         private_values.insert("kube-expires-at".into(), expiry);
         private_values.insert("kube-ca.crt".into(), ca);
         private_values.insert(

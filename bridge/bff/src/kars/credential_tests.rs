@@ -20,6 +20,8 @@ mod discovery;
 mod binding_repairs;
 #[path = "credential_handler_tests.rs"]
 mod handler_conflicts;
+#[path = "model_default_tests.rs"]
+mod model_defaults;
 #[path = "observation_credential_tests.rs"]
 mod observations;
 
@@ -331,9 +333,9 @@ async fn fixture() -> (Cluster, Arc<Mutex<TestApi>>, tokio::task::JoinHandle<()>
     let app = Router::new().fallback(handle).with_state(state.clone());
     let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    let client =
-        kube::Client::try_from(kube::Config::new(format!("http://{addr}").parse().unwrap()))
-            .unwrap();
+    let config =
+        Cluster::transport_config(kube::Config::new(format!("http://{addr}").parse().unwrap()));
+    let client = kube::Client::try_from(config).unwrap();
     (Cluster::for_test_client(client), state, task)
 }
 
@@ -666,6 +668,565 @@ async fn credential_finish_status_conflict_retains_fences_and_bounded_retries() 
                 }
                 server.abort();
             }
+        }
+    }
+}
+
+#[tokio::test]
+async fn credential_keyless_source_creation_recovers_status_conflict_without_rewriting_source() {
+    let (cluster, state, server) = fixture().await;
+    let (target, path, object) = created_target("KarsTask", false);
+    {
+        let mut s = state.lock().unwrap();
+        s.objects.insert(path.clone(), object);
+        s.objects.insert("/apis/kars.azure.com/v1alpha1/namespaces/work/karscredentialgrants/workspace".into(), json!({
+            "apiVersion":"kars.azure.com/v1alpha1","kind":"KarsCredentialGrant",
+            "metadata":{"name":"workspace","namespace":"work","uid":"grant","resourceVersion":"1","generation":1},
+            "spec":{"enabled":true,"workspaceUid":"namespace","agentKeys":[],"integrationStores":[],"legacyImports":[]},
+            "status":{"phase":"Ready","observedGeneration":1,"sources":[],"legacySources":[]}
+        }));
+        s.gate_patch_conflicts = 1;
+    }
+    cluster
+        .write_agent_credentials(
+            "work",
+            "KarsTask",
+            "draft",
+            Some(&target.uid),
+            std::collections::BTreeMap::new(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    {
+        let s = state.lock().unwrap();
+        assert_eq!(s.calls.iter().filter(|(m, _, _)| m == "POST").count(), 1);
+        let writes: Vec<_> = s.calls.iter().filter(|(m, _, _)| m == "PATCH").collect();
+        assert_eq!(writes.len(), 2);
+        assert!(writes.iter().all(|(_, p, _)| p == &path));
+        assert_eq!(
+            s.objects[&path]["spec"]["blueprint"]["credentialBindings"]["sources"][0]["keys"],
+            json!([])
+        );
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn credential_draft_setup_resumes_only_the_acknowledged_empty_source() {
+    for (change, source_change, allowed) in [
+        (
+            json!({"metadata":{"annotations":{"kars.azure.com/run-requested":"used"}}}),
+            json!({}),
+            false,
+        ),
+        (
+            json!({"metadata":{"deletionTimestamp":"2026-10-27T00:00:00Z"}}),
+            json!({}),
+            false,
+        ),
+        (
+            json!({"status":{"assignment":{"taskId":"used"}}}),
+            json!({}),
+            false,
+        ),
+        (json!({}), json!({}), true),
+        (json!({"metadata":{"generation":2}}), json!({}), false),
+        (json!({"metadata":{"uid":"replacement"}}), json!({}), false),
+        (
+            json!({"metadata":{"annotations":{"kars.azure.com/halted":"true"}}}),
+            json!({}),
+            false,
+        ),
+        (
+            json!({"spec":{"execution":{"launch":true}}}),
+            json!({}),
+            false,
+        ),
+        (
+            json!({"status":{"executionPhase":"Failed"}}),
+            json!({}),
+            false,
+        ),
+        (
+            json!({"status":{"sandboxRef":{"name":"used"}}}),
+            json!({}),
+            false,
+        ),
+        (
+            json!({"spec":{"blueprint":{"credentialBindings":{}}}}),
+            json!({}),
+            false,
+        ),
+        (json!({}), json!({"target":{"uid":"foreign"}}), false),
+        (json!({}), json!({"keys":["GITHUB_TOKEN"]}), false),
+        (json!({}), json!({"phase":"Blocked"}), false),
+    ] {
+        let (cluster, state, server) = fixture().await;
+        let (target, path, mut object) = created_target("KarsTask", false);
+        object["metadata"]["generation"] = json!(1);
+        object["spec"]["blueprint"]["githubBinding"] = json!({"write":false});
+        object["status"]["executionPhase"] = json!("Idle");
+        json_patch::merge(&mut object, &change);
+        let pending = change == json!({}) || change == json!({"metadata":{"uid":"replacement"}});
+        assert_eq!(Cluster::keyless_draft_setup_pending(&object), pending);
+        let dynamic: kube::api::DynamicObject = serde_json::from_value(object.clone()).unwrap();
+        assert_eq!(Cluster::keyless_draft_setup_pending(&dynamic), pending);
+        let mut source = json!({"name":"kars-credential-input-task-draft","uid":"source-uid", "resourceVersion":"7", "phase":"Ready", "reason":"SourceValidated", "keys":[], "target":target});
+        json_patch::merge(&mut source, &source_change);
+        {
+            let mut s = state.lock().unwrap();
+            s.objects.insert(path.clone(), object);
+            s.objects.insert("/apis/kars.azure.com/v1alpha1/namespaces/work/karscredentialgrants/workspace".into(), json!({
+                "apiVersion":"kars.azure.com/v1alpha1","kind":"KarsCredentialGrant",
+                "metadata":{"name":"workspace","namespace":"work","uid":"grant","resourceVersion":"1","generation":1},
+                "spec":{"enabled":true,"workspaceUid":"namespace","agentKeys":[],"integrationStores":[],"legacyImports":[]},
+                "status":{"phase":"Ready","observedGeneration":1,"sources":[source],"legacySources":[]}
+            }));
+            s.gate_patch_conflicts = 1;
+        }
+        let result = cluster
+            .resume_keyless_draft_credentials("work", "draft", &target.uid, "2")
+            .await;
+        assert_eq!(
+            result.is_ok(),
+            allowed,
+            "{change}: {source_change}: {result:?}"
+        );
+        {
+            let s = state.lock().unwrap();
+            let writes: Vec<_> = s.calls.iter().filter(|(m, _, _)| m != "GET").collect();
+            assert_eq!(writes.len(), if allowed { 2 } else { 0 });
+            assert!(writes.iter().all(|(m, p, _)| m == "PATCH" && p == &path));
+            if allowed {
+                assert_eq!(
+                    s.objects[&path]["spec"]["blueprint"]["githubBinding"]["write"],
+                    false
+                );
+                assert_eq!(
+                    s.objects[&path]["spec"]["blueprint"]["credentialBindings"]["sources"][0]["source"]
+                        ["uid"],
+                    "source-uid"
+                );
+                assert_eq!(s.objects[&path]["spec"]["execution"]["launch"], false);
+            }
+        }
+        server.abort();
+    }
+}
+
+fn workspace_binding_selection() -> Selection {
+    Selection {
+        scope: "workspace".into(),
+        source: Identity {
+            name: "kars-credential-input-workspace".into(),
+            uid: "source-uid".into(),
+        },
+        keys: vec!["GITHUB_TOKEN".into()],
+        owner: None,
+    }
+}
+
+#[tokio::test]
+async fn credential_binding_status_conflicts_keep_exact_fences_and_bounded_retries() {
+    for kind in ["KarsTask", "KarsTeam"] {
+        for conflicts in 0..=3 {
+            let (cluster, state, server) = fixture().await;
+            let (target, path, object) = created_target(kind, false);
+            {
+                let mut s = state.lock().unwrap();
+                s.objects.insert(path.clone(), object);
+                s.gate_patch_conflicts = conflicts;
+            }
+            let result = cluster
+                .bind_credential_selection(
+                    &target,
+                    &Identity {
+                        name: "workspace".into(),
+                        uid: "grant".into(),
+                    },
+                    workspace_binding_selection(),
+                )
+                .await;
+            if conflicts < 3 {
+                result.unwrap();
+            } else {
+                assert!(matches!(result, Err(kube::Error::Api(response)) if response.code == 409));
+            }
+            {
+                let s = state.lock().unwrap();
+                let writes: Vec<_> = s.calls.iter().filter(|(m, _, _)| m == "PATCH").collect();
+                assert_eq!(writes.len(), (conflicts + 1).min(3));
+                for (index, (_, written_path, body)) in writes.iter().enumerate() {
+                    assert_eq!(written_path, &path);
+                    assert_eq!(body["metadata"]["uid"], target.uid);
+                    assert_eq!(body["metadata"]["resourceVersion"], (index + 2).to_string());
+                    assert_eq!(
+                        body["spec"]["blueprint"]["credentialBindings"]["sources"][0]["source"]["uid"],
+                        "source-uid"
+                    );
+                }
+                assert_eq!(
+                    s.objects[&path]["spec"]["blueprint"]["credentialBindings"].is_object(),
+                    conflicts < 3
+                );
+            }
+            server.abort();
+        }
+    }
+}
+
+#[tokio::test]
+async fn credential_binding_missing_resource_version_never_writes() {
+    let (cluster, state, server) = fixture().await;
+    let (target, path, mut object) = created_target("KarsTask", false);
+    object["metadata"]
+        .as_object_mut()
+        .unwrap()
+        .remove("resourceVersion");
+    state.lock().unwrap().objects.insert(path, object);
+    assert!(
+        cluster
+            .bind_credential_selection(
+                &target,
+                &Identity {
+                    name: "workspace".into(),
+                    uid: "grant".into()
+                },
+                workspace_binding_selection()
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        !state
+            .lock()
+            .unwrap()
+            .calls
+            .iter()
+            .any(|(m, _, _)| m == "PATCH")
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn credential_binding_conflicts_adopt_only_controller_cleanup_registration() {
+    for kind in ["KarsTask", "KarsTeam"] {
+        let mut registration = cleanup_registration(kind);
+        registration["metadata"]["finalizers"]
+            .as_array_mut()
+            .unwrap()
+            .remove(0);
+        for (change, allowed) in [
+            (registration, true),
+            (json!({"metadata":{"uid":"replacement"}}), false),
+            (
+                json!({"metadata":{"deletionTimestamp":"2026-10-27T18:26:50Z"}}),
+                false,
+            ),
+            (
+                json!({"metadata":{"annotations":{"kars.azure.com/owner-sub":"someone-else"}}}),
+                false,
+            ),
+            (
+                json!({"spec":{"blueprint":{"githubBinding":{"write":true}}}}),
+                false,
+            ),
+            (
+                json!({"spec":{"blueprint":{"credentialBindings":{"grant":{"name":"workspace","uid":"other-grant"}}}}}),
+                false,
+            ),
+        ] {
+            let (cluster, state, server) = fixture().await;
+            let (target, path, mut object) = created_target(kind, false);
+            object["metadata"]["managedFields"] = json!([{"manager":"creator","operation":"Update","apiVersion":"kars.azure.com/v1alpha1"}]);
+            {
+                let mut s = state.lock().unwrap();
+                s.objects.insert(path.clone(), object);
+                s.gate_patch_conflicts = 1;
+                s.target_read_mutation = Some((path.clone(), 2, change));
+            }
+            let result = cluster
+                .bind_credential_selection(
+                    &target,
+                    &Identity {
+                        name: "workspace".into(),
+                        uid: "grant".into(),
+                    },
+                    workspace_binding_selection(),
+                )
+                .await;
+            if allowed {
+                result.unwrap();
+            } else {
+                assert!(matches!(result, Err(kube::Error::Api(response)) if response.code == 409));
+            }
+            assert_eq!(
+                state
+                    .lock()
+                    .unwrap()
+                    .calls
+                    .iter()
+                    .filter(|(m, _, _)| m == "PATCH")
+                    .count(),
+                if allowed { 2 } else { 1 }
+            );
+            server.abort();
+        }
+    }
+}
+
+fn cleanup_registration(kind: &str) -> Value {
+    let suffix = if kind == "KarsTask" {
+        "karstask"
+    } else {
+        "karsteam"
+    };
+    let finalizer = format!("kars.azure.com/{suffix}-cleanup");
+    json!({"metadata":{
+        "finalizers":["existing-cleanup",finalizer],
+        "managedFields":[
+            {"manager":format!("kars-controller/{suffix}"), "operation":"Apply",
+             "apiVersion":"kars.azure.com/v1alpha1", "fieldsType":"FieldsV1",
+             "time":"2026-10-17T12:47:13Z",
+             "fieldsV1":{"f:metadata":{"f:finalizers":{format!("v:\"{finalizer}\""): {}}}}},
+            {"manager":"creator","operation":"Update","apiVersion":"kars.azure.com/v1alpha1"}
+        ]
+    }})
+}
+
+#[tokio::test]
+async fn credential_finish_cleanup_registration_and_status_conflicts_preserve_authority() {
+    for kind in ["KarsTask", "KarsTeam"] {
+        for active in [false, true] {
+            let (cluster, state, server) = fixture().await;
+            let (target, path, mut object) = created_target(kind, !active);
+            let mut change = cleanup_registration(kind);
+            if active {
+                change["metadata"]["finalizers"]
+                    .as_array_mut()
+                    .unwrap()
+                    .remove(0);
+            } else {
+                object["metadata"]["finalizers"] = json!(["existing-cleanup"]);
+            }
+            object["metadata"]["managedFields"] = json!([change["metadata"]["managedFields"][1]]);
+            {
+                let mut s = state.lock().unwrap();
+                s.objects.insert(path.clone(), object.clone());
+                s.gate_patch_conflicts = 2;
+                s.target_read_mutation =
+                    Some((path.clone(), if active { 3 } else { 2 }, change.clone()));
+            }
+            cluster
+                .finish_created_credentials(&target, active)
+                .await
+                .unwrap();
+            {
+                let s = state.lock().unwrap();
+                let writes: Vec<_> = s.calls.iter().filter(|(m, _, _)| m == "PATCH").collect();
+                assert_eq!(writes.len(), 3);
+                for (write, version) in writes.iter().zip(["2", "4", "5"]) {
+                    assert_eq!(write.2["metadata"]["uid"], "draft-uid");
+                    assert_eq!(write.2["metadata"]["resourceVersion"], version);
+                }
+                let mut expected = object;
+                json_patch::merge(&mut expected, &change);
+                if kind == "KarsTask" {
+                    expected["spec"]["execution"]["launch"] = active.into();
+                } else {
+                    expected["spec"]["paused"] = (!active).into();
+                }
+                expected["metadata"]["resourceVersion"] = "6".into();
+                assert_eq!(s.objects[&path], expected);
+            }
+            server.abort();
+        }
+    }
+}
+
+fn merge_cleanup_registration(kind: &str, existing: bool) -> (Value, Value) {
+    let finalizer = if kind == "KarsTask" {
+        "kars.azure.com/karstask-cleanup"
+    } else {
+        "kars.azure.com/karsteam-cleanup"
+    };
+    let mut prior = json!({
+        "manager":"unknown", "operation":"Update",
+        "apiVersion":"kars.azure.com/v1alpha1", "fieldsType":"FieldsV1",
+        "time":"2026-10-25T23:58:37Z",
+        "fieldsV1":{
+            "f:metadata":{"f:annotations":{".":{},"f:kars.azure.com/owner-sub":{}}},
+            "f:spec":{".":{},"f:blueprint":{}}
+        }
+    });
+    if existing {
+        prior["fieldsV1"]["f:metadata"]["f:finalizers"] =
+            json!({".":{},"v:\"existing-cleanup\"":{}});
+    }
+    let mut updated = prior.clone();
+    updated["time"] = json!("2026-10-25T23:58:38Z");
+    if !existing {
+        updated["fieldsV1"]["f:metadata"]["f:finalizers"] = json!({".":{}});
+    }
+    updated["fieldsV1"]["f:metadata"]["f:finalizers"][format!("v:\"{finalizer}\"")] = json!({});
+    let finalizers = if existing {
+        json!(["existing-cleanup", finalizer])
+    } else {
+        json!([finalizer])
+    };
+    (
+        prior,
+        json!({"metadata":{"finalizers":finalizers,"managedFields":[updated]}}),
+    )
+}
+
+#[tokio::test]
+async fn credential_finish_merge_cleanup_registration_preserves_authority() {
+    for kind in ["KarsTask", "KarsTeam"] {
+        for active in [false, true] {
+            for existing in [false, true] {
+                let (cluster, state, server) = fixture().await;
+                let (target, path, mut object) = created_target(kind, !active);
+                let (prior, change) = merge_cleanup_registration(kind, existing);
+                object["metadata"]["managedFields"] = json!([prior]);
+                if existing {
+                    object["metadata"]["finalizers"] = json!(["existing-cleanup"]);
+                }
+                {
+                    let mut s = state.lock().unwrap();
+                    s.objects.insert(path.clone(), object.clone());
+                    s.gate_patch_conflicts = 2;
+                    s.target_read_mutation =
+                        Some((path.clone(), if active { 3 } else { 2 }, change.clone()));
+                }
+                cluster
+                    .finish_created_credentials(&target, active)
+                    .await
+                    .unwrap();
+                {
+                    let s = state.lock().unwrap();
+                    let writes: Vec<_> = s.calls.iter().filter(|(m, _, _)| m == "PATCH").collect();
+                    assert_eq!(writes.len(), 3);
+                    for (write, version) in writes.iter().zip(["2", "4", "5"]) {
+                        assert_eq!(write.2["metadata"]["uid"], "draft-uid");
+                        assert_eq!(write.2["metadata"]["resourceVersion"], version);
+                    }
+                    let mut expected = object;
+                    json_patch::merge(&mut expected, &change);
+                    if kind == "KarsTask" {
+                        expected["spec"]["execution"]["launch"] = active.into();
+                    } else {
+                        expected["spec"]["paused"] = (!active).into();
+                    }
+                    expected["metadata"]["resourceVersion"] = "6".into();
+                    assert_eq!(s.objects[&path], expected);
+                }
+                server.abort();
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn credential_finish_merge_cleanup_registration_rejects_other_ownership_changes() {
+    for kind in ["KarsTask", "KarsTeam"] {
+        for mutation in [
+            json!({"manager":"another-manager"}),
+            json!({"operation":"Apply"}),
+            json!({"subresource":"other"}),
+            json!({"fieldsV1":{"f:spec":{"f:paused":{}}}}),
+            json!({"fieldsV1":{"f:metadata":{"f:annotations":{"f:new-authority":{}}}}}),
+            json!({"fieldsV1":{"f:metadata":{"f:finalizers":{"v:\"other-cleanup\"":{}}}}}),
+        ] {
+            let (cluster, state, server) = fixture().await;
+            let (target, path, mut object) = created_target(kind, false);
+            let (prior, mut change) = merge_cleanup_registration(kind, false);
+            object["metadata"]["managedFields"] = json!([prior]);
+            json_patch::merge(&mut change["metadata"]["managedFields"][0], &mutation);
+            {
+                let mut s = state.lock().unwrap();
+                s.objects.insert(path.clone(), object);
+                s.gate_patch_conflicts = 1;
+                s.target_read_mutation = Some((path.clone(), 3, change));
+            }
+            let error = cluster
+                .finish_created_credentials(&target, true)
+                .await
+                .unwrap_err();
+            assert!(matches!(error, kube::Error::Api(ref response) if response.code == 409));
+            assert_eq!(
+                state
+                    .lock()
+                    .unwrap()
+                    .calls
+                    .iter()
+                    .filter(|(m, _, _)| m == "PATCH")
+                    .count(),
+                1
+            );
+            server.abort();
+        }
+    }
+}
+
+#[tokio::test]
+async fn credential_finish_cleanup_registration_does_not_mask_concurrent_edits() {
+    for (kind, merge) in [
+        ("KarsTask", false),
+        ("KarsTeam", false),
+        ("KarsTask", true),
+        ("KarsTeam", true),
+    ] {
+        for mutation in [
+            json!({"metadata":{"uid":"replacement"}}),
+            json!({"metadata":{"deletionTimestamp":"2026-10-17T12:47:13Z"}}),
+            json!({"metadata":{"annotations":{"kars.azure.com/run-requested":"other-run"}}}),
+            json!({"metadata":{"ownerReferences":[{"apiVersion":"v1","kind":"Secret","name":"other","uid":"other"}]}}),
+            json!({"metadata":{"labels":{"owner":"other"}}}),
+            json!({"metadata":{"finalizers":["other-cleanup"]}}),
+            json!({"metadata":{"generation":2}}),
+            json!({"spec":{"blueprint":{"model":{"deployment":"other"}}}}),
+            json!({"spec":{"blueprint":{"credentialBindings":{"grant":{"uid":"other"}}}}}),
+            json!({"spec":{"execution":{"launch":true},"paused":false}}),
+            json!({"metadata":{"managedFields":[{"manager":"other","operation":"Apply","apiVersion":"kars.azure.com/v1alpha1"}]}}),
+        ] {
+            let (cluster, state, server) = fixture().await;
+            let (target, path, mut object) = created_target(kind, false);
+            let mut change = if merge {
+                let (prior, change) = merge_cleanup_registration(kind, true);
+                object["metadata"]["managedFields"] = json!([prior]);
+                change
+            } else {
+                let change = cleanup_registration(kind);
+                object["metadata"]["managedFields"] =
+                    json!([change["metadata"]["managedFields"][1]]);
+                change
+            };
+            object["metadata"]["finalizers"] = json!(["existing-cleanup"]);
+            json_patch::merge(&mut change, &mutation);
+            {
+                let mut s = state.lock().unwrap();
+                s.objects.insert(path.clone(), object);
+                s.gate_patch_conflicts = 1;
+                s.target_read_mutation = Some((path.clone(), 3, change));
+            }
+            let error = cluster
+                .finish_created_credentials(&target, true)
+                .await
+                .unwrap_err();
+            assert!(matches!(error, kube::Error::Api(ref response) if response.code == 409));
+            assert_eq!(
+                state
+                    .lock()
+                    .unwrap()
+                    .calls
+                    .iter()
+                    .filter(|(m, _, _)| m == "PATCH")
+                    .count(),
+                1
+            );
+            server.abort();
         }
     }
 }

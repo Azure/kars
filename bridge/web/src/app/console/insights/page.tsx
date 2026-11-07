@@ -8,47 +8,42 @@
 import { BarChart } from "@/components/bar-chart";
 import { HonestState } from "@/components/honest-state";
 import { LiveRefresh } from "@/components/live-refresh";
+import { ConsoleLoadError } from "@/components/console-load-error";
 import { getArtifacts, getEfficiency, getInsights, getInferenceBudgets } from "@/lib/bff";
-import type { Efficiency, Insights, MissionArtifacts, InferenceBudgets } from "@/lib/types";
+import type { Efficiency, Insights, InferenceBudgets } from "@/lib/types";
 import { lowerWins, measuredDeliveredTokens, measuredRoutes, metric } from "@/lib/efficiency";
 
 export const dynamic = "force-dynamic";
 
 export default async function InsightsPage() {
-  let insights: Insights | null = null;
-  let error = false;
-  try {
-    insights = await getInsights();
-  } catch {
-    error = true;
-  }
+  const [insightsRead, efficiencyRead, artifactsRead, budgetsRead] = await Promise.allSettled([
+    getInsights(), getEfficiency(), getArtifacts(), getInferenceBudgets(),
+  ]);
+  const insights = insightsRead.status === "fulfilled" ? insightsRead.value : null;
+  const efficiency = efficiencyRead.status === "fulfilled" ? efficiencyRead.value : null;
+  const deliverables = artifactsRead.status === "fulfilled" ? artifactsRead.value.missions : null;
+  const budgets = budgetsRead.status === "fulfilled" ? budgetsRead.value : null;
 
-  let efficiency: Efficiency | null = null;
-  try {
-    efficiency = await getEfficiency();
-  } catch {
-    efficiency = null;
-  }
-
-  let deliverables: MissionArtifacts[] = [];
-  try {
-    deliverables = (await getArtifacts()).missions;
-  } catch {
-    deliverables = [];
-  }
-
-  let budgets: InferenceBudgets | null = null;
-  try {
-    budgets = await getInferenceBudgets();
-  } catch {
-    budgets = null;
-  }
-
-  if (error || !insights) {
+  if (!insights) {
     return (
       <div className="space-y-6">
+        <LiveRefresh active intervalMs={8000} />
         <Header />
         <HonestState variant="not_wired" title="Insights unavailable" detail="The run environment isn't reachable right now." />
+      </div>
+    );
+  }
+
+  if (!efficiency) {
+    return (
+      <div className="space-y-6">
+        <LiveRefresh active intervalMs={8000} />
+        <Header />
+        <HonestState
+          variant="not_wired"
+          title="Efficiency evidence unavailable"
+          detail="Run measurements and acceptance history could not be verified. This is not empty history. Retrying automatically."
+        />
       </div>
     );
   }
@@ -56,8 +51,6 @@ export default async function InsightsPage() {
   const totalMissions = insights.missions_by_phase.reduce((s, p) => s + p.count, 0);
   const totalTokens = measuredDeliveredTokens(efficiency);
   const accepted = efficiency ? efficiency.routes.reduce((s, r) => s + r.accepted, 0) : 0;
-  const delivered = deliverables.filter((m) => m.summary && m.status !== "error").length;
-  const reviewed = deliverables.filter((m) => m.review_status === "approved").length;
 
   // One consistent, monotonic population for the outcome funnel. The efficiency
   // engine counts run-level outcomes where attempted ≥ delivered ≥ accepted by
@@ -74,8 +67,10 @@ export default async function InsightsPage() {
         accepted: Math.min(a, d),
       };
     }
-    // No efficiency data: use mission counts, clamped so stages never exceed
-    // the prior stage.
+    if (!deliverables) return null;
+    const delivered = deliverables.filter((m) => m.summary && m.status !== "error").length;
+    const reviewed = deliverables.filter((m) => m.review_status === "approved").length;
+    // No efficiency data: use successfully read mission counts, clamped.
     const d = Math.min(delivered, totalMissions);
     const a = Math.min(accepted || reviewed, d);
     return { attempted: totalMissions, delivered: d, accepted: a };
@@ -91,8 +86,8 @@ export default async function InsightsPage() {
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
         <Kpi label="Missions" value={totalMissions} accent />
         <Kpi label="Running" value={insights.launched} />
-        <Kpi label="Deliverables" value={funnelPop.delivered} />
-        <Kpi label="Accepted" value={funnelPop.accepted} />
+        <Kpi label="Deliverables" value={funnelPop?.delivered ?? null} />
+        <Kpi label="Accepted" value={funnelPop?.accepted ?? null} />
         <Kpi label="Signed receipts" value={insights.receipts_issued} />
         <Kpi label="Measured delivered tokens" value={totalTokens} />
       </div>
@@ -106,12 +101,16 @@ export default async function InsightsPage() {
       {/* Deliverable funnel — outcome, not activity. Uses the run-level
           population from the efficiency engine so it is strictly monotonic
           (attempted ≥ delivered ≥ accepted) — never a >100% stage. */}
-      <Funnel
+      {artifactsRead.status === "rejected" && (
+        <ConsoleLoadError inline title="Deliverable evidence" error={artifactsRead.reason}
+          detail="Artifact and review history could not be verified. Missing evidence is not zero outcomes; any available run-level measurements remain visible. Retrying automatically." />
+      )}
+      {funnelPop && <Funnel
         attempted={funnelPop.attempted}
         delivered={funnelPop.delivered}
         accepted={funnelPop.accepted}
         blocked={insights.amplification_rejections}
-      />
+      />}
 
       <div className="grid gap-6 lg:grid-cols-2">
         <Panel title="Missions by status" subtitle="Where your work stands.">
@@ -154,6 +153,10 @@ export default async function InsightsPage() {
       {/* Budget utilization — the token economy against the hierarchical caps.
           Live measured daily spend vs the cluster + workspace budgets. */}
       {budgets && <BudgetUtilization budgets={budgets} />}
+      {budgetsRead.status === "rejected" && (
+        <ConsoleLoadError inline title="Budget utilization" error={budgetsRead.reason}
+          detail="Budget limits and usage could not be verified. This does not mean no budgets exist or no tokens were spent. Retrying automatically." />
+      )}
 
       {/* Cross-harness efficiency frontier (§3B, Pillar B) — the real per-route
           telemetry. Promoted above the honest-gap note. */}

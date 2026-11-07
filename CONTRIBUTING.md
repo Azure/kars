@@ -184,6 +184,45 @@ make images               # builds controller + inference-router images
 make push                 # pushes to configured ACR
 ```
 
+### Kind CI image prerequisites
+
+`make test-e2e` keeps the chart's Headlamp, metrics-server and monitoring add-ons
+enabled. CI prepares their nine AL3 images from the same candidate: it reuses the
+Headlamp image only after qualification succeeds, then builds the remaining
+images using `cli/src/lib/image-targets.ts`. Same-run artifacts include image IDs
+and the source revision; mismatched or missing images fail before Kind loading.
+Nothing is published to a registry by these preparation steps.
+
+Only the disposable `kars-e2e` fixture uses `Never` pull policies, carried from
+historical Helm installation through authority staging and the final upgrade.
+The final staged upgrade resets chart defaults then reuses the saved release
+values before applying explicit fixture overrides, preserving its installed SRE
+provider/model and reviewed authority configuration.
+Blocked SRE migration diagnostics report checked-in source coordinates for exact
+rejections, including first-install funding and ordered authority-cleanup failures.
+Only known public admission-policy names are recognized; unknown status content
+remains unclassified, and raw status details or credentials are never printed.
+Production image references, `Always` policies and migration deadlines are
+unchanged. The full historical journey explicitly requires the generated
+`.e2e-addon-values.json`; missing values fail before installation. Preparation
+also verifies each fresh control-plane and worker Node against its owned Kind
+container and public kubelet certificate chain using the customer installer's
+shared verifier. The generated values carry both CAs and hostname mappings into
+metrics-server; no private keys are read and kubelet TLS verification stays on.
+Changed, foreign or missing nodes fail before those values are written. The standalone
+SRE schema job does not execute add-ons or consume that file: its historical
+install retains the archived defaults and its current upgrade is a server dry-run.
+Without `KARS_E2E_PREBUILT_ADDONS=1`, the harness builds these add-ons
+locally; prefer hosted CI for these heavy builds. A built CLI and Helm are needed
+for the lightweight preparation/rendering regressions:
+
+```bash
+node --test tests/e2e/addon-images.test.mjs tests/e2e/addon-chart.test.mjs tests/e2e/addon-kubelet-trust.test.mjs
+```
+
+This infrastructure fixture still uses its existing sandbox stand-in; passing it
+does not qualify shipping runtimes or complete the released beta user journeys.
+
 ### Local end-to-end loop
 
 ```bash
@@ -235,7 +274,7 @@ comments **must** carry the two-line notice in its format's comment syntax:
 // Licensed under the MIT License.
 ```
 
-Use `//` for Rust, TypeScript/JavaScript (including TSX and MJS), and Bicep;
+Use `//` for Rust, Go, TypeScript/JavaScript (including TSX, MTS, MJS and CJS), and Bicep;
 `#` for shell/Python, YAML/TOML, Dockerfiles, Makefiles, ignore files, CODEOWNERS
 and environment examples; HTML comments for Markdown; CSS block comments for CSS;
 and Handlebars comments for `.hbs`. Plain YAML under a chart's `templates/`
@@ -247,7 +286,7 @@ whitespace**. A hash header before leading `{{- ... -}}` can be joined to
 
 Use `scripts/apply-copyright-headers.sh` rather than rewriting files manually.
 It preserves original body bytes, line endings, file modes, author notices,
-shebangs, Python encoding cookies, Docker parser directives, Markdown frontmatter,
+shebangs, Go build constraints, Python encoding cookies, Docker parser directives, Markdown frontmatter,
 CSS charset directives and frontend directive prologues. It is idempotent.
 For YAML with an incorrect comment style, it replaces only the exact existing
 Microsoft/MIT license prefix; original body bytes and author notices remain intact.
@@ -274,10 +313,18 @@ directory exemption for first-party sources.
 Generated status is never inferred from names such as `build`, `target`, `dist`,
 `coverage`, `.turbo`, `node_modules`, or the `.d.ts` suffix. Generated coverage
 requires an exact reviewed file entry with producer/provenance and a notice
-reference in `ci/copyright-coverage.json`. The current entries are only
-`tools/headlamp-plugin/dist/main.js` and `tools/headlamp-plugin/dist/package.json`.
+reference in `ci/copyright-coverage.json`. Entries include the packaged Headlamp
+bundle, resolved Dex and image dependency locks, and the packaged local Helm chart.
+Upstream archives and patches keep exact-path third-party coverage, never a
+format-wide exemption for new archives or source directories.
 Handwritten sources in output-named directories and authored declarations need
 normal headers; unknown first-party formats still fail.
+
+The two shared native-helper symlinks have exact-path rules with a reviewed
+repository-relative `target`. The checker validates the relative link destination
+and requires a regular, independently header-covered target with no symlink
+ancestors. It never follows or rewrites a link. Unreviewed, retargeted, broken,
+absolute or chained symlinks fail, as do regular files replacing a reviewed link.
 
 The embedded Helm AGT policy has a raw-byte digest contract: the controller
 publishes its exact bytes as `agt-profile.yaml`, and the router confirms a

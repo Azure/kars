@@ -2,11 +2,36 @@
 // Licensed under the MIT License.
 
 import type { ActivityEvent, SubAgent } from "@/lib/types";
-import { actionFromEvent, actionsFromRouter, destinationsFrom, normalize } from "./activity";
+import { actionFromEvent, actionsFromRouter, normalize } from "./activity";
 import { routerProducerKey, type BoundRouterActivity } from "@/lib/router-activity";
-import type { AgentExecution, ToolEvent } from "./types";
+import type { AgentAction, AgentExecution, ToolEvent } from "./types";
 import type { ReviewedExecution } from "@/lib/types/missions";
-import { reviewedPhaseRouterActivity } from "@/lib/team-run-evidence";
+import { displayedPhaseRouterActivity } from "@/lib/team-run-evidence";
+
+export function buildExecutionOverview(agents: AgentExecution[]) {
+  const recorded = agents.filter(agent => agent.actions.length > 0);
+  let latest: { agent: AgentExecution; action: AgentAction } | null = null;
+  for (const agent of recorded) {
+    for (const action of agent.actions) {
+      if (!action.ts || !Number.isFinite(Date.parse(action.ts))) continue;
+      const time = Date.parse(action.ts);
+      const latestTime = latest ? Date.parse(latest.action.ts!) : -Infinity;
+      if (time > latestTime || (time === latestTime && latest && (
+        agent.traceQuery.localeCompare(latest.agent.traceQuery) < 0
+        || (agent.traceQuery === latest.agent.traceQuery && (action.seq ?? 0) >= (latest.action.seq ?? 0))
+      ))) latest = { agent, action };
+    }
+  }
+  return {
+    recorded,
+    unavailable: agents.length - recorded.length,
+    rounds: recorded.length ? recorded.reduce((sum, agent) => sum + agent.rounds, 0) : null,
+    toolCalls: recorded.length ? recorded.reduce((sum, agent) => sum + agent.toolCalls, 0) : null,
+    failures: recorded.length ? recorded.reduce((sum, agent) => sum + agent.failures, 0) : null,
+    latest,
+    untimestamped: recorded.some(agent => agent.actions.some(action => !action.ts || !Number.isFinite(Date.parse(action.ts)))),
+  };
+}
 
 export function buildAgentExecutions({
   agentLabel,
@@ -37,12 +62,12 @@ export function buildAgentExecutions({
         subAgents: [], routerActivity,
       });
       return [...principal, ...phases.map((phase, index) => {
-        const binding = reviewedPhaseRouterActivity(phase);
+        const binding = displayedPhaseRouterActivity(phase);
         const [agent] = buildAgentExecutions({
           agentLabel: `${phase.role} / ${phase.phase}`,
           agentModel: phase.result?.model ?? null,
           agentPhase: phase.state,
-          agentRuntime: null,
+          agentRuntime: phase.result?.run_evidence?.runtime ?? null,
           events: [], name: phase.task_name ?? undefined,
           running: phase.state === "active", subAgents: [], routerActivity: binding,
         });
@@ -69,9 +94,9 @@ export function buildAgentExecutions({
       const models = [...new Set(records.flatMap(event => event.kind === "round" && event.model ? [event.model] : []))];
       const [agent] = buildAgentExecutions({
         agentLabel: producer.agent_name, name: producer.agent_name,
-        agentModel: models.length === 1 ? models[0] : null, agentRuntime: null,
-        agentPhase: provisional ? "Running" : agentPhase ?? "Finished",
-        events: [], running: provisional, subAgents: [],
+        agentModel: models.length === 1 ? models[0] : null, agentRuntime: producer.runtime ?? null,
+        agentPhase: routerActivity.stopped ? "Stopped" : provisional ? "Running" : agentPhase ?? "Finished",
+        events: [], running: provisional && !routerActivity.stopped, subAgents: [],
       });
       return [{
         ...agent,
@@ -80,11 +105,12 @@ export function buildAgentExecutions({
         traceQuery: `observations:${new URLSearchParams({ producer: routerProducerKey(producer) })}`,
         observedAgentName: producer.agent_name,
         observedAgentInstance: producer.pod_uid,
-        identitySearchText: normalize(`${producer.agent_name} ${producer.agent_did} ${producer.assignment_id}`),
-        searchText: normalize(`${producer.agent_name} ${producer.agent_did} ${producer.assignment_id} ${models.join(" ")} ${actions.map(action => `${action.human} ${action.raw} ${action.args} ${action.result}`).join(" ")}`),
+        identitySearchText: normalize(`${producer.agent_name} ${producer.agent_did} ${producer.assignment_id} ${producer.runtime ?? ""}`),
+        searchText: normalize(`${producer.agent_name} ${producer.agent_did} ${producer.assignment_id} ${producer.runtime ?? ""} ${models.join(" ")} ${actions.map(action => `${action.human} ${action.raw} ${action.args} ${action.result}`).join(" ")}`),
         rounds: records.filter(event => event.kind === "round").length,
         toolCalls: records.filter(event => event.kind === "tool_result").length,
         failures: records.filter(event => event.kind === "tool_result" && event.ok === false).length,
+        destinations: [...new Set(actions.flatMap(action => action.destinations))],
         lastActivity: actions.reduce<string | null>((latest, action) =>
           action.ts && (!latest || action.ts > latest) ? action.ts : latest, null),
         actions,
@@ -93,7 +119,7 @@ export function buildAgentExecutions({
     const rootInactive = Boolean(
       !running
       && agentPhase
-      && /(completed|failed|hibernating|paused|idle|finished)/i.test(agentPhase),
+      && /(completed|failed|hibernating|paused|idle|finished|stopped)/i.test(agentPhase),
     );
     const definitions = [
       {
@@ -175,7 +201,7 @@ export function buildAgentExecutions({
       const tools = agentEvents.filter(
         (event): event is ToolEvent => event.kind === "tool",
       );
-      const destinations = [...new Set(tools.flatMap(destinationsFrom))].sort();
+      const destinations = [...new Set(actions.flatMap(action => action.destinations))].sort();
       const lastActivity = agentEvents.reduce<string | null>(
         (latest, event) => (!latest || event.ts > latest ? event.ts : latest),
         null,

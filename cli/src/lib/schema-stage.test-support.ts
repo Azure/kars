@@ -93,22 +93,25 @@ export function schemaFixture(documents = [crd(), admission()]) {
       ];
       return { stdout: current ? JSON.stringify(current) : "" };
     }
-    if (["create", "apply"].includes(args[0])) {
+    if (["create", "apply", "replace"].includes(args[0])) {
       if (args.some(arg => arg.startsWith("--force"))) throw new Error("No forced schema writes");
       const desired = JSON.parse(settings.input!);
       beforeWrite(desired);
       const objectKey = desired.kind === "CustomResourceDefinition" ? desired.metadata.name : `${desired.kind.toLowerCase()}/${desired.metadata.name}`;
       const current = objects.get(objectKey);
       if (args[0] === "create" && current) throw new Error("409 create conflict");
-      if (args[0] === "apply" && (!current || desired.metadata.uid !== current.metadata.uid
+      if (["apply", "replace"].includes(args[0]) && (!current || desired.metadata.uid !== current.metadata.uid
         || desired.metadata.resourceVersion !== current.metadata.resourceVersion)) throw new Error("409 UID/resourceVersion conflict");
       const applied = structuredClone(desired);
+      const dryRun = args.includes("--dry-run=server");
       applied.metadata = { ...current?.metadata, ...desired.metadata,
         labels: { ...current?.metadata.labels, ...desired.metadata.labels },
         annotations: { ...current?.metadata.annotations, ...desired.metadata.annotations },
-        uid: current?.metadata.uid ?? `${desired.metadata.name}-uid`, resourceVersion: String(revision++),
+        uid: current?.metadata.uid ?? `${desired.metadata.name}-uid`,
+        resourceVersion: dryRun ? current?.metadata.resourceVersion ?? String(revision) : String(revision++),
         generation: (current?.metadata.generation ?? 0) + 1 };
       applied.status = { storedVersions: ["v1alpha1"], conditions: [] };
+      if (dryRun) return { stdout: JSON.stringify(applied) };
       objects.set(objectKey, applied);
       writes.push(structuredClone(applied));
       return { stdout: JSON.stringify(applied) };

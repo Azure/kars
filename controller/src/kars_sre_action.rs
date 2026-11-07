@@ -44,8 +44,8 @@
 //!
 //! Slice 4+ may add `PatchConfigMapKey` etc.
 //!
-//! Each type maps to ONE (verb, resource, namespace) tuple at
-//! reconciler-mint time. The controller refuses any action whose
+//! Each type maps to an exact namespace/name/resource (or subresource) with
+//! `get` plus its mutation verb at reconciler-mint time. The controller refuses any action whose
 //! target namespace is in the protected-resource denylist (§7.7.1):
 //! `kube-system`, `kars-system`, `kars-sre`, `kube-public`,
 //! `kube-node-lease`, `agentmesh`, or any namespace whose name
@@ -186,12 +186,14 @@ pub struct KarsSREActionStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub applied_at: Option<String>,
 
-    /// Name of the one-shot ClusterRoleBinding the controller minted
-    /// for the writer SA on approval. Cleaned up post-execution.
-    /// Persisted in status so the cleanup reconciler can find it
-    /// after a controller restart.
+    /// Legacy ClusterRoleBinding reference, retained only to detect unresolved
+    /// authority from older controllers. New executions never create a CRB.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub writer_crb_name: Option<String>,
+
+    /// Durable, single-attempt execution claim. Never cleared or replayed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<SREActionExecution>,
 
     /// Standard k8s conditions. The reconciler stamps:
     ///   - `Available` (True iff phase=Applied/Recovered)
@@ -201,6 +203,20 @@ pub struct KarsSREActionStatus {
     ///   - `Degraded` (True with reason if anything went wrong)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,
+}
+
+/// Persisted before issuing any writer authority; contains no credentials.
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SREActionExecution {
+    pub started_at: String,
+    /// Other controller replicas wait until this deadline before crash cleanup.
+    pub deadline: String,
+    pub namespace: String,
+    pub namespace_uid: String,
+    pub authority_name: String,
+    pub target_uid: String,
+    pub cleanup_pending: bool,
 }
 
 #[cfg(test)]
@@ -220,6 +236,36 @@ mod tests {
             spec["properties"]["approval"]["properties"]["state"]["type"],
             "string"
         );
+    }
+
+    #[test]
+    fn sre_action_schema_persists_complete_credential_free_execution_claim() {
+        let crd = serde_json::to_value(crate::crd_validations::kars_sre_action_crd()).unwrap();
+        let execution = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["status"]
+            ["properties"]["execution"];
+        let expected = [
+            "startedAt",
+            "deadline",
+            "namespace",
+            "namespaceUid",
+            "authorityName",
+            "targetUid",
+            "cleanupPending",
+        ];
+        assert_eq!(
+            execution["properties"].as_object().unwrap().len(),
+            expected.len()
+        );
+        for field in expected {
+            assert!(execution["properties"].get(field).is_some());
+            assert!(
+                execution["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!(field))
+            );
+        }
+        assert_eq!(execution["properties"]["cleanupPending"]["type"], "boolean");
     }
 
     #[test]

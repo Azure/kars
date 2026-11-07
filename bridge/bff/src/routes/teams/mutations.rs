@@ -15,10 +15,10 @@ use crate::routes::options::build_options;
 use crate::routes::tasks::require_cluster;
 
 use super::validation::{
-    apply_team_git_write, build_roster, normalize_autonomous_runtime, normalize_lifecycle_mode,
-    normalize_mcp_servers, normalize_model_fallback_routes, normalize_role_runtime,
-    reject_reserved_role_names, validate_mcp_servers, validate_team_budget,
-    validate_team_model_routes, validate_warm_idle_seconds,
+    apply_team_git_write, build_roster, normalize_autonomous_runtime, normalize_mcp_servers,
+    normalize_model_fallback_routes, normalize_role_runtime, reject_reserved_role_names,
+    validate_mcp_servers, validate_runtime_retention, validate_team_budget,
+    validate_team_model_routes,
 };
 use super::{
     CreateRole, CreateTeamRequest, TeamModelRoutes, UpdateTeamRequest, require_owned_team,
@@ -26,14 +26,18 @@ use super::{
 
 /// `POST /api/namespaces/:ns/teams` — create a standing team. The controller
 /// validates the envelope; cadence drives the autonomous tick. Defaults are
-/// conservative (tier 3, ceiling=tier, depth 1) so a team can't self-amplify.
+/// tier 3, ceiling=tier, and the shared reviewed Team delegation depth.
+/// Explicit grants are not raised to satisfy activation.
 pub async fn create_team(
     State(state): State<crate::state::AppState>,
     Extension(principal): Extension<Principal>,
     Path(ns): Path<String>,
     Json(mut b): Json<CreateTeamRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
+    crate::routes::qualification_runs::authorize(&principal, b.qualification_run)?;
+    super::qualification::validate_designation(&b)?;
     let cluster = require_cluster(&state)?;
+    validate_runtime_retention(b.lifecycle_mode.as_deref(), b.warm_idle_seconds)?;
     cluster
         .credential_grant(&ns)
         .await
@@ -67,21 +71,7 @@ pub async fn create_team(
         )
         .map_err(AppError::BadRequest)?;
     }
-    let roster_names = b
-        .roles
-        .iter()
-        .map(|role| role.name.trim())
-        .collect::<std::collections::BTreeSet<_>>();
-    let plan_names = execution_plan
-        .roles
-        .iter()
-        .map(|role| role.name.as_str())
-        .collect::<std::collections::BTreeSet<_>>();
-    if roster_names != plan_names {
-        return Err(AppError::BadRequest(
-            "execution_plan role names must exactly match the team roster".into(),
-        ));
-    }
+    super::preflight::validate_roster_plan(&b.roles, execution_plan)?;
     b.mcp_servers = normalize_mcp_servers(&b.mcp_servers)?;
     validate_mcp_servers(cluster, &ns, &b.mcp_servers).await?;
     normalize_autonomous_runtime(&mut b.runtime);
@@ -101,7 +91,7 @@ pub async fn create_team(
             .map(|model| format!("{}::{}", model.provider, model.deployment));
     }
     b.model_fallbacks = normalize_model_fallback_routes(&b.model_fallbacks, b.model.as_deref())?;
-    validate_team_model_routes(
+    super::validation::validate_team_model_routes_for_attempt(
         &options,
         TeamModelRoutes {
             namespace: &ns,
@@ -114,16 +104,29 @@ pub async fn create_team(
             mcp_servers: &b.mcp_servers,
             memory: b.memory.as_deref(),
         },
+        b.qualification_run,
     )?;
     b.created_by = Some(principal.name.clone());
     let created_by = principal.name.clone();
-    let git_write = crate::routes::github::authorize_git_write(
+    let git_write = crate::routes::github::authorize_github_access(
         cluster,
         &ns,
         &principal,
         b.git_write_repos.as_deref(),
+        super::validation::team_github_write_enabled(Some(execution_plan), None),
     )
     .await?;
+    if git_write.is_some() {
+        crate::routes::github::validate_bound_github_egress(
+            b.egress.iter().map(|entry| entry.host.trim()).chain(
+                b.roles
+                    .iter()
+                    .filter_map(|role| role.resources.as_ref())
+                    .flat_map(|resources| &resources.egress)
+                    .map(|entry| entry.host.trim()),
+            ),
+        )?;
+    }
     // Aggregate inference-budget gate (cluster + workspace + user): a launched
     // team immediately kicks off a run (token spend), so block starting new work
     // when a budget at any tier is strict/over-buffer. A paused team passes.
@@ -142,12 +145,6 @@ pub async fn create_team(
     });
     if let Some(budget) = budget {
         spec["envelope"]["budget"] = serde_json::json!(budget);
-    }
-    if let Some(mode) = normalize_lifecycle_mode(b.lifecycle_mode.as_deref())? {
-        spec["lifecycleMode"] = serde_json::json!(mode);
-    }
-    if let Some(seconds) = validate_warm_idle_seconds(b.warm_idle_seconds)? {
-        spec["warmIdleSeconds"] = serde_json::json!(seconds);
     }
     if let Some(r) = &b.reporting_to {
         spec["reportingTo"] = serde_json::json!(r);
@@ -270,22 +267,13 @@ pub async fn create_team(
                 .collect::<Vec<_>>()
         );
     }
-    if let Some(mode) = b.egress_mode.as_deref().map(str::trim) {
-        let mode = match mode.to_ascii_lowercase().as_str() {
-            "strict" => "Strict",
-            "learning" | "learn" => "Learn",
-            _ => {
-                return Err(AppError::BadRequest(
-                    "egress_mode must be 'learning' or 'strict'".into(),
-                ));
-            }
-        };
-        if !spec["blueprint"].is_object() {
-            spec["blueprint"] = serde_json::json!({});
-        }
-        spec["blueprint"]["egressMode"] = serde_json::json!(mode);
-    }
-    apply_team_git_write(&mut spec, git_write.as_ref().map(|(config, _)| config))?;
+    apply_team_git_write(
+        &mut spec,
+        git_write
+            .as_ref()
+            .filter(|(_, binding)| binding.write)
+            .map(|(config, _)| config),
+    )?;
     if let Some((_, binding)) = &git_write {
         spec["blueprint"]["githubBinding"] =
             serde_json::to_value(binding).map_err(|error| AppError::Upstream(error.to_string()))?;
@@ -309,7 +297,7 @@ pub async fn create_team(
             &b.roles,
             tool_policy.as_deref(),
             Some(&parent)
-        ));
+        )?);
     }
     if let Some(ttl) = b.run_retention_ttl_seconds {
         spec["runRetentionTtlSeconds"] = serde_json::json!(ttl);
@@ -334,10 +322,28 @@ pub async fn create_team(
         crate::routes::validate::require_team_budget_contracts(cluster, &reviewed).await?;
     }
     body["spec"]["paused"] = serde_json::json!(true);
-    let captured = cluster
-        .create_kind(&ns, "KarsTeam", body.clone())
-        .await
-        .map_err(|e| AppError::Upstream(e.to_string()))?;
+    if b.qualification_run {
+        body["metadata"]["annotations"][super::qualification::contract::PENDING] =
+            serde_json::json!("binding");
+    }
+    let captured = match cluster.create_kind(&ns, "KarsTeam", body.clone()).await {
+        Ok(created) => created,
+        Err(kube::Error::Api(error))
+            if b.qualification_run && error.code == 409 && error.reason == "AlreadyExists" =>
+        {
+            let existing = super::qualification::contract::api(
+                cluster.qualification_client(),
+                &ns,
+                "KarsTeam",
+            )
+            .get(b.name.trim())
+            .await
+            .map_err(|e| AppError::Upstream(e.to_string()))?;
+            super::qualification::validate_creation_recovery(&body, &serde_json::json!(existing))?;
+            existing
+        }
+        Err(error) => return Err(AppError::Upstream(error.to_string())),
+    };
     crate::kars::execution_plans::ensure_preserved(&body, &captured).map_err(AppError::Upstream)?;
     cluster
         .finish_created_credentials(
@@ -353,8 +359,11 @@ pub async fn create_team(
         )
         .await
         .map_err(|e| AppError::Upstream(e.to_string()))?;
+    if b.qualification_run {
+        super::qualification::bind_created(cluster, &ns, &captured, &principal).await?;
+    }
     Ok(Json(
-        serde_json::json!({"created": true, "name": b.name.trim()}),
+        serde_json::json!({"created": true, "name": b.name.trim(), "qualification_run": b.qualification_run}),
     ))
 }
 
@@ -408,8 +417,51 @@ pub async fn update_team(
     Path((ns, name)): Path<(String, String)>,
     Json(mut b): Json<UpdateTeamRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
+    crate::routes::qualification_runs::authorize(&principal, b.qualification_reviewed)?;
     let cluster = require_cluster(&state)?;
     let team = require_owned_team(cluster, &ns, &name, &principal).await?;
+    if b.qualification_reviewed {
+        let approval =
+            super::qualification::release_record(&team, b.qualification_team_uid.as_deref())?;
+        if b.paused == Some(false) {
+            return Err(AppError::Conflict(
+                "Evidence review cannot resume work".into(),
+            ));
+        }
+        let tasks = cluster
+            .tasks(&ns)
+            .list(&kube::api::ListParams::default())
+            .await
+            .map_err(|e| AppError::Upstream(e.to_string()))?;
+        if super::qualification::has_active_attempt(&team, &tasks.items) {
+            return Err(AppError::Conflict("Qualification evidence cannot be released while an owned Task remains launched; wait for Core to stop it".into()));
+        }
+        // Re-read the exact resources, including content-bound skill approval.
+        let raw =
+            super::qualification::contract::api(cluster.qualification_client(), &ns, "KarsTeam")
+                .get(&name)
+                .await
+                .map_err(|e| AppError::Upstream(e.to_string()))?;
+        if raw.resource_version() != team.resource_version() {
+            return Err(AppError::Conflict(
+                "Qualification Team changed during evidence review".into(),
+            ));
+        }
+        let value = serde_json::to_value(raw).map_err(|e| AppError::Upstream(e.to_string()))?;
+        // Admission expiry cannot prevent later evidence review; the original
+        // reviewed package and resource versions still must match exactly.
+        super::qualification::contract::validate(&approval, &value, approval.approved_at)
+            .map_err(AppError::Conflict)?;
+        if super::qualification::contract::resources(cluster.qualification_client(), &ns, &value)
+            .await
+            .map_err(AppError::BadRequest)?
+            != approval.resources
+        {
+            return Err(AppError::Conflict("Reviewed qualification resources changed; this attempt cannot qualify a replacement package".into()));
+        }
+        crate::routes::validate::require_team_budget_contracts(cluster, &team).await?;
+    }
+    validate_runtime_retention(b.lifecycle_mode.as_deref(), b.warm_idle_seconds)?;
     normalize_autonomous_runtime(&mut b.runtime);
     if let Some(roles) = &mut b.roles {
         for role in roles {
@@ -417,7 +469,8 @@ pub async fn update_team(
         }
     }
     let execution_plan_changed = b.execution_plan.is_some();
-    if b.runtime.is_some()
+    if b.qualification_reviewed
+        || b.runtime.is_some()
         || b.model.is_some()
         || b.model_fallbacks.is_some()
         || b.memory.is_some()
@@ -485,6 +538,10 @@ pub async fn update_team(
                     .and_then(|blueprint| blueprint.model.as_ref())
                     .map(|model| format!("{}::{}", model.provider, model.deployment)),
                 skills: role.skills.clone(),
+                resources: role
+                    .blueprint
+                    .as_ref()
+                    .map(super::RoleResources::from_blueprint),
             })
             .collect::<Vec<_>>();
         let existing_execution_plan = team
@@ -517,20 +574,7 @@ pub async fn update_team(
         crate::routes::compose::validate_execution_plan(execution_plan)
             .map_err(AppError::BadRequest)?;
         let effective_roles = b.roles.as_deref().unwrap_or(existing_roles.as_slice());
-        let roster_names = effective_roles
-            .iter()
-            .map(|role| role.name.trim())
-            .collect::<std::collections::BTreeSet<_>>();
-        let plan_names = execution_plan
-            .roles
-            .iter()
-            .map(|role| role.name.as_str())
-            .collect::<std::collections::BTreeSet<_>>();
-        if roster_names != plan_names {
-            return Err(AppError::BadRequest(
-                "execution_plan role names must exactly match the team roster".into(),
-            ));
-        }
+        super::preflight::validate_roster_plan(effective_roles, execution_plan)?;
         validate_team_model_routes(
             &options,
             TeamModelRoutes {
@@ -569,12 +613,6 @@ pub async fn update_team(
     }
     if let Some(r) = &b.reporting_to {
         spec.insert("reportingTo".into(), serde_json::json!(r));
-    }
-    if let Some(mode) = normalize_lifecycle_mode(b.lifecycle_mode.as_deref())? {
-        spec.insert("lifecycleMode".into(), serde_json::json!(mode));
-    }
-    if let Some(seconds) = validate_warm_idle_seconds(b.warm_idle_seconds)? {
-        spec.insert("warmIdleSeconds".into(), serde_json::json!(seconds));
     }
     if let Some(m) = b.cadence_minutes {
         if m >= 1 {
@@ -655,10 +693,23 @@ pub async fn update_team(
         validate_mcp_servers(cluster, &ns, &servers).await?;
         blueprint.insert("mcpServers".into(), serde_json::json!(servers));
     }
-    if let Some(repos) = &b.git_write_repos {
-        let git_write =
-            crate::routes::github::authorize_git_write(cluster, &ns, &principal, Some(repos))
-                .await?;
+    let stored_repos = super::queries::team_git_write_repos(team.spec.blueprint.as_ref());
+    let repositories = b.git_write_repos.as_deref().or_else(|| {
+        (execution_plan_changed && !stored_repos.is_empty()).then_some(stored_repos.as_slice())
+    });
+    if let Some(repos) = repositories {
+        let write = super::validation::team_github_write_enabled(
+            b.execution_plan.as_ref(),
+            team.spec.blueprint.as_ref(),
+        );
+        let git_write = crate::routes::github::authorize_github_access(
+            cluster,
+            &ns,
+            &principal,
+            Some(repos),
+            write,
+        )
+        .await?;
         blueprint.insert(
             "githubBinding".into(),
             git_write
@@ -671,6 +722,7 @@ pub async fn update_team(
         blueprint.insert(
             "gitWrite".into(),
             git_write
+                .filter(|(_, binding)| binding.write)
                 .map(|(grant, _)| {
                     serde_json::to_value(grant).map_err(|e| AppError::Upstream(e.to_string()))
                 })
@@ -688,18 +740,6 @@ pub async fn update_team(
             .collect::<Vec<_>>();
         blueprint.insert("egress".into(), serde_json::json!(entries));
     }
-    if let Some(mode) = b.egress_mode.as_deref().map(str::trim) {
-        let mode = match mode.to_ascii_lowercase().as_str() {
-            "strict" => "Strict",
-            "learning" | "learn" => "Learn",
-            _ => {
-                return Err(AppError::BadRequest(
-                    "egress_mode must be 'learning' or 'strict'".into(),
-                ));
-            }
-        };
-        blueprint.insert("egressMode".into(), serde_json::json!(mode));
-    }
     if let Some(execution_plan) = &b.execution_plan {
         blueprint.insert(
             "executionPlan".into(),
@@ -713,8 +753,7 @@ pub async fn update_team(
         // team's existing toolPolicy/model and can be changed together.
         spec.insert("blueprint".into(), serde_json::Value::Object(blueprint));
     }
-    if let Some(roles) = &b.roles {
-        reject_reserved_role_names(&name, roles)?;
+    if b.roles.is_some() || b.mcp_servers.is_some() || b.egress.is_some() {
         let mut parent = serde_json::to_value(team.spec.blueprint.clone().unwrap_or_default())
             .map_err(|error| AppError::Upstream(error.to_string()))?;
         if let Some(changes) = spec.get("blueprint") {
@@ -729,17 +768,56 @@ pub async fn update_team(
                 .as_ref()
                 .map(|policy| policy.name.as_str())
         });
-        spec.insert(
-            "roster".into(),
-            serde_json::json!(build_roster(roles, tool_policy, Some(&parent))),
-        );
+        if let Some(roles) = &b.roles {
+            reject_reserved_role_names(&name, roles)?;
+            spec.insert(
+                "roster".into(),
+                serde_json::json!(build_roster(roles, tool_policy, Some(&parent))?),
+            );
+        } else {
+            for role in &team.spec.roster {
+                if let Some(blueprint) = &role.blueprint {
+                    super::RoleResources::from_blueprint(blueprint).bind(
+                        &role.name,
+                        Some(&parent),
+                        &mut serde_json::Map::new(),
+                    )?;
+                }
+            }
+        }
     }
     if let Some(ttl) = b.run_retention_ttl_seconds {
         spec.insert("runRetentionTtlSeconds".into(), serde_json::json!(ttl));
     }
     let pause_only = spec.len() == 1 && spec.get("paused") == Some(&serde_json::json!(true));
-    let patch = crate::kars::execution_plans::prepare_team_patch(&team, spec.into())
+    if super::qualification::marked(&team)
+        && !pause_only
+        && !(b.qualification_reviewed && spec.is_empty())
+    {
+        return Err(AppError::Conflict("Qualification authority cannot be edited or resumed; pause it, then separately review qualified evidence without changing the package".into()));
+    }
+    let mut patch = crate::kars::execution_plans::prepare_team_patch(&team, spec.into())
         .map_err(AppError::BadRequest)?;
+    if b.qualification_reviewed {
+        let annotations = &mut patch["metadata"]["annotations"];
+        if !annotations.is_object() {
+            *annotations = serde_json::json!({});
+        }
+        annotations["kars.azure.com/last-team-qualification"] = serde_json::json!({
+            "authorization":team.annotations().get(super::qualification::contract::RECORD),
+            "task_uid":team.annotations().get(super::qualification::contract::CONSUMED),
+            "reviewed_by":principal.sub,"reviewed_at":chrono::Utc::now()
+        })
+        .to_string()
+        .into();
+        for key in [
+            super::qualification::contract::RECORD,
+            super::qualification::contract::PENDING,
+            super::qualification::contract::CONSUMED,
+        ] {
+            annotations[key] = serde_json::Value::Null;
+        }
+    }
     let mut expected =
         serde_json::to_value(&team).map_err(|error| AppError::Upstream(error.to_string()))?;
     json_patch::merge(&mut expected, &patch);

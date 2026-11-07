@@ -5,6 +5,9 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { join } from "path";
 import { homedir } from "os";
 
+import inquirer from "inquirer";
+vi.mock("inquirer", () => ({ default: { prompt: vi.fn() } }));
+
 // Mock fs before importing module under test
 vi.mock("fs", () => ({
   existsSync: vi.fn(),
@@ -15,7 +18,7 @@ vi.mock("fs", () => ({
 }));
 
 import {
-  loadConfig, loadContext, saveContext,
+  loadConfig, loadContext, saveContext, promptAndSaveCredentials,
   CONFIG_DIR, CONFIG_FILE, CREDENTIALS_FILE, SECRETS_FILE,
   loadSecrets, saveSecrets, setSecret, deleteSecret, resolveSecret,
   listSecretVariants, KNOWN_SECRETS,
@@ -31,6 +34,26 @@ const mockChmodSync = vi.mocked(chmodSync);
 
 beforeEach(() => {
   vi.clearAllMocks();
+});
+
+describe("installation credential prompts", () => {
+  it("preserves supplied Foundry endpoint/model while prompting for real auth and saving privately", async () => {
+    mockExistsSync.mockReturnValue(false);
+    const prompt = vi.mocked(inquirer.prompt);
+    prompt.mockResolvedValueOnce({ apiKey: "test-install-key" });
+    const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("No provider calls in this test"));
+    try {
+      const config = await promptAndSaveCredentials({ provider: "foundry", skipVerify: true,
+        foundry: { endpoint: "https://models.example.test", model: "reviewed-deployment" } });
+      expect(config).toMatchObject({ endpoint: "https://models.example.test", model: "reviewed-deployment", apiKey: "test-install-key" });
+      const questions = prompt.mock.calls[0][0] as any[];
+      expect(questions.find(question => question.name === "endpoint").when()).toBe(false);
+      expect(questions.find(question => question.name === "model").when()).toBe(false);
+      expect(questions.find(question => question.name === "apiKey").type).toBe("password");
+      expect(mockChmodSync).toHaveBeenCalledWith(CONFIG_FILE, 0o600);
+      expect(fetch).not.toHaveBeenCalled();
+    } finally { fetch.mockRestore(); }
+  });
 });
 
 describe("config path resolution", () => {

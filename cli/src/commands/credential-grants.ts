@@ -2,21 +2,28 @@
 // Licensed under the MIT License.
 
 import { Command } from "commander";
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync } from "node:fs";
+import { readBoundedFileSync } from "../lib/bounded-file.js";
 import { createHash } from "node:crypto";
 import { execa } from "execa";
 import { parseAllDocuments } from "yaml";
 import {
   previewPrivateActivation, stagePrivateActivation, validatePrivateActivation,
-  validateQualifiedActivation, canonical, type PrivateActivation,
+  validateQualifiedActivation, canonical, record, type PrivateActivation,
   verifyOwnedRuntimeNamespace,
 } from "../lib/private-activation.js";
-import { captureGuardRetirement, refreshGuardRetirement } from "../lib/private-activation-guard-retirement.js";
-import { captureWriterSettlement, observeWriterSettlement, settleWriterRetirement } from "../lib/private-activation-writer-settle.js";
+import { captureGuardRetirement } from "../lib/private-activation-guard-retirement.js";
+import { captureWriterSettlement } from "../lib/private-activation-writer-settle.js";
+import { retireGrantWriters } from "../lib/private-grant-writer-retirement.js";
 import { privateCommandFailure } from "../lib/private-activation-command-diagnostics.js";
 import { applyControllerProfileRecovery, previewControllerProfileRecovery } from "../lib/private-controller-profile-recovery.js";
-import { applyBudgetTlsRecovery, previewBudgetTlsRecovery } from "../lib/private-budget-tls-recovery.js";
+import {
+  applyBudgetTlsRecovery, previewBudgetTlsRecovery, applyBudgetRevisionRecovery, previewBudgetRevisionRecovery,
+} from "../lib/private-budget-tls-recovery.js";
 import { previewPrivateRootMigration } from "../lib/private-root-migration-review.js";
+import { applyRootImageRecovery, previewRootImageRecovery } from "../lib/private-root-image-recovery.js";
+import { prepareRootMigration, prepareRouterBaselineRestart, retireRootMigration, finalizeRootMigration } from "../lib/private-root-migration.js";
+import { withRootMigrationJournal } from "../lib/private-root-migration-journal.js";
 
 type Execute=(args:string[],input?:string)=>Promise<string>;
 const resource="karscredentialgrants.kars.azure.com";
@@ -146,34 +153,9 @@ export async function applyReviewedGrant(run:Execute,document:any):Promise<void>
       const guardReview=await captureGuardRetirement(run,stagedSpec.privateActivation,existing);
       const settlement=await captureWriterSettlement(run,stagedSpec.privateActivation,existing);
       quiescentSpec={...existing.spec,writers:[]};
-      await run(["patch",resource,"workspace","-n",document.metadata.namespace,"--type=merge","-p",JSON.stringify({
-        metadata:{uid:existing.metadata.uid,resourceVersion:existing.metadata.resourceVersion},spec:quiescentSpec,
-      })]);
-      const deadline=Date.now()+120_000;
-      for(;;){
-        const current=await get(run,resource,"workspace",document.metadata.namespace);
-        if(!current||current.metadata.uid!==existing.metadata.uid||canonical(current.spec)!==canonical(quiescentSpec))
-          throw new Error("Grant changed while retiring prior private writer authority");
-        if(settlement)await observeWriterSettlement(run,stagedSpec.privateActivation,settlement);
-        if(current.status?.observedGeneration===current.metadata.generation
-          &&current.status?.conditions?.some((c:any)=>c.type==="WriterReady"&&c.status==="False")){
-          const inventory=JSON.parse(await run(["get","roles,rolebindings,clusterroles,clusterrolebindings",
-            "--all-namespaces","--chunk-size=0","-o","json"]));
-          if(!Array.isArray(inventory.items)||inventory.metadata?.continue)
-            throw new Error("Private authority retirement inventory is incomplete");
-          if(!inventory.items.some((object:any)=>
-            object.metadata?.annotations?.["kars.azure.com/credential-grant-owner"]===existing.metadata.uid)){
-            const refreshed=await refreshGuardRetirement(run,guardReview,settlement
-              ?activation=>settleWriterRetirement(run,activation,settlement):undefined);
-            if(refreshed){
-              stagedSpec.privateActivation=refreshed;
-              existing=current;break;
-            }
-          }
-        }
-        if(Date.now()>=deadline)throw new Error("Prior writer authority retirement is still pending; no new activation was published");
-        await new Promise(resolve=>setTimeout(resolve,500));
-      }
+      const retired=await retireGrantWriters(run,existing,guardReview,settlement);
+      stagedSpec.privateActivation=retired.activation;
+      existing=retired.grant;
     }
     if(quiescentSpec){
       await validateGrantDocument(run,{...document,spec:stagedSpec});
@@ -208,15 +190,93 @@ export function credentialGrantsCommand():Command {
     }
   };
   const repeat=(value:string,prior:string[])=>[...prior,value];
+  const migration=command.command("migrate-root-image")
+    .description("Retire reviewed root images with same-namespace Deployment companions, require fresh budget rotation, then restore execution and retained grant intent");
+  migration.command("retire").argument("<reviewed-migration>").argument("<rendered-release>")
+    .requiredOption("--receipt <file>","New private durable receipt; retain it for resume/finalize").option("--context <context>")
+    .action(async(file,rendered,options)=>{
+      const review=JSON.parse(readBoundedFileSync(file,2_097_152,"Migration inputs exceed their bounds or are not regular files"));
+      const parsed=parseAllDocuments(readBoundedFileSync(rendered,16*1024*1024,"Migration inputs exceed their bounds or are not regular files"));
+      if(parsed.some(document=>document.errors.length))throw new Error("Rendered migration release contains invalid YAML");
+      const documents:unknown[]=parsed.map(document=>document.toJS({maxAliasCount:100})).filter(value=>value!=null);
+      const run=execute(options.context);
+      await withRootMigrationJournal(options.receipt,true,async journal=>{
+        const receipt=await prepareRootMigration(run,review,documents,journal);
+        await retireRootMigration(run,receipt,journal);
+      });
+      console.log("Root retired at zero; reviewed image installed Pending. Rotate budget TLS key and public CA in place, then finalize with this receipt.");
+    });
+  migration.command("restart-router-baseline").argument("<failed-receipt>")
+    .description("Re-retire a sealed failed qualification with its omitted original router verifier; retain the original receipt and grant intent")
+    .requiredOption("--receipt <file>","New successor journal; the failed journal is preserved and marked superseded")
+    .option("--context <context>")
+    .action(async(file,options)=>{
+      const run=execute(options.context);
+      await withRootMigrationJournal(file,false,async(sourceJournal,source)=>{
+        await withRootMigrationJournal(options.receipt,true,async journal=>{
+          const successor=await prepareRouterBaselineRestart(run,source!,journal);
+          await sourceJournal.save({...source!,supersededBy:successor.planDigest});
+          await retireRootMigration(run,successor,journal);
+        });
+      });
+      console.log("Corrected successor retired with original grant intent and all exposed-key history retained. Rotate budget TLS and finalize using the new receipt; acceptance is not implied.");
+    });
+  migration.command("resume-retirement").argument("<receipt>").option("--context <context>")
+    .action(async(file,options)=>{
+      await withRootMigrationJournal(file,false,async(journal,receipt)=>retireRootMigration(execute(options.context),receipt!,journal));
+      console.log("Root retirement recorded; target remains zero and Pending. Complete real budget rotation before finalize.");
+    });
+  migration.command("publish-core").argument("<receipt>").argument("<chart>")
+    .description("Publish a fenced full Core snapshot after retirement and TLS rotation; never execute hooks or retry unknown outcomes")
+    .requiredOption("--cluster-name <name>","Explicit existing Kind cluster; no cluster creation or image builds")
+    .requiredOption("--release <name>","The reviewed Core release")
+    .option("--replace-preparing-request","Explicitly replace a failed preparing request before any snapshot or launch; retain its attempt and evidence")
+    .option("--recover-failed-publication","Fence an exact failed or fully projected deployed SSA publication before preparing a fresh owned attempt")
+    .option("--retire-historical-monitoring-hooks","Retain and freeze an old failed admission-hook revision only after matching successful successor hooks and absent hook authority")
+    .option("-f, --values <file>","Complete Core values overlay (repeatable)",repeat,[])
+    .option("--set <value>","Core values setting (repeatable)",repeat,[])
+    .action(async(file,chart,options)=>{
+      const { installLocalCoreChart }=await import("./dev/local-k8s.js");
+      await installLocalCoreChart("helm","kubectl",options.clusterName,options.release,chart,options.values,options.set,
+        {receipt:file,replacePreparingRequest:options.replacePreparingRequest,recoverFailedPublication:options.recoverFailedPublication,
+          retireHistoricalMonitoringHooks:options.retireHistoricalMonitoringHooks});
+      console.log("Core publication is durably verified. Finalize with the same receipt to establish a fresh epoch and restore retained grants; Kind acceptance is not implied.");
+    });
+  migration.command("finalize").argument("<receipt>").option("--context <context>")
+    .action(async(file,options)=>{
+      await withRootMigrationJournal(file,false,async(journal,receipt)=>{
+        const context=receipt!.publication?.context;
+        if(context&&options.context&&context!==options.context)throw new Error("Finalize must use the owned publication context");
+        await finalizeRootMigration(execute(context??options.context),receipt!,journal,applyReviewedGrant);
+      });
+      console.log("Actual target execution requalified and original grant intent restored with controller acknowledgement. This is not full Kind customer acceptance.");
+    });
+  const imageRecovery=command.command("recover-root-image")
+    .description("Restore only an immutable controller image matching existing sealed single-root qualification; never authorizes an upgrade");
+  imageRecovery.command("preview")
+    .requiredOption("--private-root <namespace>").requiredOption("--image <reference>").option("--context <context>")
+    .action(async(options)=>{
+      console.log(JSON.stringify(await previewRootImageRecovery(execute(options.context),options.privateRoot,options.image),null,2));
+    });
+  imageRecovery.command("apply").argument("<reviewed-recovery>").option("--context <context>")
+    .action(async(file,options)=>{
+      await applyRootImageRecovery(execute(options.context),JSON.parse(readBoundedFileSync(file,131_072,"Root image recovery review exceeds its bound or is not a regular file")));
+      console.log("Previously qualified controller image restored; existing proofs and grants preserved. Ordinary root upgrades remain blocked.");
+    });
   command.command("review-root-migration").argument("<rendered-release>")
     .description("Read-only complete private-root inventory and exact Helm-render projection; does not authorize cutover")
     .requiredOption("--private-root <namespace>").requiredOption("--release <name>").option("--context <context>")
+    .option("--companion-image <deployment>","Explicitly review image-only refresh of an already-enrolled Deployment in the private root namespace (repeatable)",repeat,[])
+    .option("--sealed-root <file>","Historical root Deployment JSON matching the existing seal; review retirement of an already-rolled image-only delta without rollback")
     .action(async(file,options)=>{
-      if(statSync(file).size>16*1024*1024)throw new Error("Rendered migration release exceeds 16 MiB");
-      const parsed=parseAllDocuments(readFileSync(file,"utf8"));
+      const parsed=parseAllDocuments(readBoundedFileSync(file,16*1024*1024,"Rendered migration release exceeds 16 MiB or is not a regular file"));
       if(parsed.some(document=>document.errors.length))throw new Error("Rendered migration release contains invalid YAML");
       const documents:unknown[]=parsed.map(document=>document.toJS({maxAliasCount:100})).filter(value=>value!=null);
-      const review=await previewPrivateRootMigration(execute(options.context),options.privateRoot,options.release,documents);
+      let historicalRoot;
+      if(options.sealedRoot){
+        historicalRoot=record(JSON.parse(readBoundedFileSync(options.sealedRoot,1_048_576,"Historical root witness exceeds 1 MiB or is not a regular file")));
+      }
+      const review=await previewPrivateRootMigration(execute(options.context),options.privateRoot,options.release,documents,historicalRoot,options.companionImage);
       console.log(JSON.stringify(review,null,2));
     });
   const recovery=command.command("recover-controller-profile")
@@ -243,6 +303,17 @@ export function credentialGrantsCommand():Command {
     .action(async(file,options)=>{
       await applyBudgetTlsRecovery(execute(options.context),JSON.parse(readFileSync(file,"utf8")));
       console.log("Managed budget TLS checksum reconciled; root remains paused and Pending. Re-preview and apply the grant to qualify and restore it.");
+    });
+  const revisionRecovery=command.command("recover-budget-revision")
+    .description("Explicitly rebind a sealed single-root qualification after a same-key TLS Secret revision change");
+  revisionRecovery.command("preview").requiredOption("--private-root <namespace>").option("--context <context>")
+    .action(async(options)=>{
+      console.log(JSON.stringify(await previewBudgetRevisionRecovery(execute(options.context),options.privateRoot),null,2));
+    });
+  revisionRecovery.command("apply").argument("<reviewed-recovery>").option("--context <context>")
+    .action(async(file,options)=>{
+      await applyBudgetRevisionRecovery(execute(options.context),JSON.parse(readBoundedFileSync(file,262_144,"Budget revision recovery review exceeds its bound or is not a regular file")));
+      console.log("Same-key TLS revision rebound and strict qualification verified. Confirm current-generation WriterReady and PrivateConsumptionReady before use.");
     });
   command.command("preview").requiredOption("--namespace <namespace>")
     .requiredOption("--writer <namespace/name>","Writer ServiceAccount",repeat,[])

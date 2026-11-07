@@ -23,7 +23,7 @@ import logging
 import os
 import uuid
 from pathlib import Path
-from typing import AsyncIterator
+from typing import AsyncIterator, Callable
 
 # Upstream AGT Python crypto — built locally via runtimes/build-agt-wheels.sh.
 # The encryption primitives ARE the source of truth for byte-on-the-wire
@@ -100,6 +100,9 @@ class MeshClient:
         self._channels: dict[str, SecureChannel] = {}
         # Inbox queue — drained by `inbox()` async iterator.
         self._inbox: asyncio.Queue[InboundMessage | tuple[tuple[object, int], InboundMessage]] = asyncio.Queue()
+        self._reserved_inbox: asyncio.Queue = asyncio.Queue(maxsize=128)
+        self._inbox_partition: Callable[[InboundMessage], bool] | None = None
+        self._inbox_changed = asyncio.Event()
         self._is_connected = False
         # Filesystem handle for the prekey-writer lock (acquired by
         # ``_acquire_prekey_writer_lock``, released on ``disconnect``
@@ -315,6 +318,7 @@ class MeshClient:
                 on_frame=self._handle_frame,
                 entra_token=_entra_token,
                 connection_auth=self.connection_auth,
+                on_heartbeat=self._heartbeat_registry,
             )
             await self._relay.connect()
             self._is_connected = True
@@ -323,6 +327,18 @@ class MeshClient:
                 self._config.name,
                 self._identity.did,
             )
+
+    async def _heartbeat_registry(self) -> None:
+        # Relay presence alone does not refresh registry discovery's last_seen.
+        registry = self._registry
+        if registry is None:
+            return
+        stamp = self._auth_stamp()
+        try:
+            await registry.heartbeat()
+        except Exception as exc:
+            logger.warning("Registry heartbeat failed (%s)", type(exc).__name__)
+        self._check_auth(stamp)
 
     async def disconnect(self) -> None:
         """Close the relay WS and HTTP client. Per-peer ratchet state
@@ -434,15 +450,88 @@ class MeshClient:
             message_frame["id"],
         )
 
-    def inbox(self) -> AsyncIterator[InboundMessage]:
-        """Async iterator over decrypted inbound messages.
+    def partition_inbox(self, reserved: Callable[[InboundMessage], bool]) -> None:
+        """Separate protocol custody from peer reads before connecting.
 
-        Order-preserving: messages are yielded in the order they
-        arrived at the local relay receive loop. Backpressure: the
-        underlying ``asyncio.Queue`` is unbounded by default; callers
-        with strict memory budgets should consume in a tight loop."""
+        Each partition holds at most 128 messages. A full peer inbox drops its
+        oldest message (with a warning), never blocking protocol delivery. The
+        reserved queue applies backpressure rather than dropping protocol work.
+        This changes no transport, identity, or authorization ownership.
+        """
+        if self._inbox_partition is reserved:
+            return
+        if self._is_connected or not self._inbox.empty() or self._inbox_partition is not None:
+            raise MeshTransportError("Inbox partition must be configured before connecting")
+        self._inbox_partition = reserved
+        self._inbox = asyncio.Queue(maxsize=128)
+
+    def clear_inboxes(self) -> None:
+        """Discard both partitions when their connection authorization ends."""
+        for queue in (self._inbox, self._reserved_inbox):
+            while not queue.empty():
+                queue.get_nowait()
+        self._inbox_changed.set()
+
+    async def _enqueue_inbound(self, message: InboundMessage) -> None:
+        stamp = self._auth_stamp()
+        item = (stamp, message) if stamp is not None else message
+        if self._inbox_partition is not None and self._inbox_partition(message):
+            await self._reserved_inbox.put(item)
+        else:
+            if self._inbox.full():
+                self._inbox.get_nowait()
+                logger.warning("Peer inbox full; discarded oldest peer message")
+            self._inbox.put_nowait(item)
+            self._inbox_changed.set()
+
+    def _inbox_message(self, item) -> InboundMessage | None:
+        if isinstance(item, tuple):
+            stamp, message = item
+            try:
+                self._check_auth(stamp)
+            except MeshTransportError:
+                return None
+            return message
         self._auth_stamp()
-        return _InboxIterator(self)
+        return item
+
+    def drain_inbox(self, match: Callable[[InboundMessage], bool] | None = None,
+                    *, limit: int | None = None) -> list[InboundMessage]:
+        """Read live peer messages without consuming other senders' messages."""
+        self._auth_stamp()
+        messages = []
+        # No await: selection and restoration are atomic on the owning loop.
+        for _ in range(self._inbox.qsize()):
+            item = self._inbox.get_nowait()
+            message = self._inbox_message(item)
+            if message is None:
+                continue
+            if (limit is None or len(messages) < limit) and (match is None or match(message)):
+                messages.append(message)
+            else:
+                self._inbox.put_nowait(item)
+        return messages
+
+    async def receive_inbox(self, match: Callable[[InboundMessage], bool] | None = None) -> InboundMessage:
+        """Wait for one matching peer message; caller owns its timeout."""
+        stamp = self._auth_stamp()
+        while True:
+            self._check_auth(stamp)
+            messages = self.drain_inbox(match, limit=1)
+            if messages:
+                return messages[0]
+            self._inbox_changed.clear()
+            await self._inbox_changed.wait()
+
+    def inbox(self, *, reserved: bool = False) -> AsyncIterator[InboundMessage]:
+        """Order-preserving iterator over one authenticated inbox partition.
+
+        Without partitioning, the existing unbounded inbox behavior is retained.
+        Protocol consumers explicitly select the reserved partition; normal peer
+        consumers cannot dequeue its envelopes.
+        """
+        self._auth_stamp()
+        return _InboxIterator(self, self._reserved_inbox if reserved else self._inbox)
 
     # ── Internals ───────────────────────────────────────────────────────
 
@@ -516,8 +605,7 @@ class MeshClient:
             payload=app_payload,
             message_id=str(frame.get("id", "")),
         )
-        stamp = self._auth_stamp()
-        await self._inbox.put((stamp, message) if stamp is not None else message)
+        await self._enqueue_inbound(message)
 
     async def _handle_knock_frame(self, frame: dict) -> None:
         """Auto-accept a KNOCK frame.
@@ -610,9 +698,9 @@ class MeshClient:
 
 
 class _InboxIterator:
-    def __init__(self, client: MeshClient) -> None:
+    def __init__(self, client: MeshClient, queue: asyncio.Queue) -> None:
         self._client = client
-        self._queue = client._inbox
+        self._queue = queue
 
     def __aiter__(self) -> _InboxIterator:
         return self

@@ -3,7 +3,7 @@
 
 // Mission detail server presentation; page fetching and routing stay in ./page.
 
-import Link from "next/link";
+import Link from "@/components/navigation-link";
 import { missionFailureAdvice, missionFailureMessage, revisionArtifactUrl } from "@/lib/mission-run-evidence";
 import { isSystemEvidenceArtifact } from "@/lib/router-activity";
 import { DeliverableView, DeliverableBody } from "@/components/deliverable-view";
@@ -139,8 +139,10 @@ export function ObjectiveBlock({ objective }: { objective: string }) {
  *  tabs below; this is the signpost, not a duplicate action surface. */
 export function NextStep({
   status,
+  qualificationRun = false,
 }: {
   status: import("@/components/mission-status").MissionStatus;
+  qualificationRun?: boolean;
 }) {
   const map: Record<string, { tone: string; title: string; body: string; cta?: { href: string; label: string } }> = {
     drafting: {
@@ -158,6 +160,26 @@ export function NextStep({
       title: "Running",
       body: "Check revision status in Activity. Detailed activity appears only when a revision-bound trace is available; a running sandbox alone does not prove progress.",
     },
+    waiting: {
+      tone: "border-signal/30 bg-signal/[0.05]",
+      title: "Awaiting next phase",
+      body: "Reviewed work is recorded for this revision. No reviewed phase is currently reported active; the next phase or principal handoff is pending. This is not a completed Mission.",
+    },
+    unavailable: {
+      tone: "border-warning/40 bg-warning/10",
+      title: "Execution evidence unavailable",
+      body: "The current reviewed phase snapshot could not be read consistently. Refreshing status; this does not establish whether work is active or completed.",
+    },
+    stopping: {
+      tone: "border-warning/40 bg-warning/10",
+      title: "Stopping",
+      body: "The controller is stopping execution. Retained phase evidence does not mean work is still active.",
+    },
+    stopped: {
+      tone: "border-border bg-surface-muted/50",
+      title: "Stopped",
+      body: "This revision is no longer launched. Retained phase results are not proof of a completed Mission.",
+    },
     needs_you: {
       tone: "border-warning/40 bg-warning/10",
       title: "This mission needs your decision",
@@ -167,7 +189,9 @@ export function NextStep({
     done: {
       tone: "border-ok/40 bg-ok/10",
       title: "Delivered",
-      body: "Review the output, its recorded producer, and attached files. Accept or request a distinct revision in Deliverable. Receipt availability and revision binding are shown separately.",
+      body: qualificationRun
+        ? "Review the output, its recorded producer, and attached files. Eligible output can still be approved in Deliverable; approval does not qualify the harness or provider. Another attempt requires a new explicitly reviewed qualification Mission."
+        : "Review the output, its recorded producer, and attached files. Accept or request a distinct revision in Deliverable. Receipt availability and revision binding are shown separately.",
     },
     failed: {
       tone: "border-danger/40 bg-danger/10",
@@ -398,7 +422,7 @@ export function ArtifactsPanel({ ns, task, runNonce, artifacts, pullRequests, ac
               ) : a.content != null ? (
                 isProseArtifact(a.name) ? (
                   <div className="max-h-96 overflow-auto border-t border-border bg-surface-muted/20 px-4 py-3">
-                    <DeliverableBody output={a.content} />
+                    <DeliverableBody output={a.content} artifactContext={{ namespace: ns, task, runNonce, artifacts }} />
                   </div>
                 ) : (
                   <pre className="max-h-96 overflow-auto whitespace-pre-wrap border-t border-border bg-surface-muted/30 px-4 py-3 font-mono text-xs leading-relaxed">
@@ -427,7 +451,7 @@ export function ArtifactsPanel({ ns, task, runNonce, artifacts, pullRequests, ac
   );
 }
 
-export function ResultPanel({ result }: { result: MissionResult }) {
+export function ResultPanel({ result, task }: { result: MissionResult; task: TaskDetail }) {
   return (
     <div className="space-y-3">
       {result.source === "single_turn" && (
@@ -441,6 +465,9 @@ export function ResultPanel({ result }: { result: MissionResult }) {
       )}
       <DeliverableView
         output={result.output}
+        artifactContext={result.assignment_nonce === task.current_run_nonce ? {
+          namespace: task.namespace, task: task.name, runNonce: task.current_run_nonce, artifacts: task.artifacts,
+        } : undefined}
         model={result.model}
         totalTokens={result.total_tokens}
         finishedAt={result.finished_at}
@@ -569,7 +596,7 @@ export function CompositionPanel({ composition, launched, envelopeToolPolicy }: 
       <h2 className="text-sm font-semibold">How this mission runs</h2>
       <p className="mt-0.5 text-xs text-foreground-muted">
         {launched
-          ? "The effective configuration the running sandbox is using — read from the materialized policy and sandbox (including any defaults the controller applied)."
+          ? "The materialized sandbox configuration, including controller defaults. Network destinations below are the baseline, not the current temporary-grant state."
           : "The planned configuration you composed — what this mission will run with once launched."}
       </p>
       <dl className="mt-4 grid gap-x-8 gap-y-4 sm:grid-cols-2">
@@ -591,9 +618,10 @@ export function CompositionPanel({ composition, launched, envelopeToolPolicy }: 
           : "Missing policy information is not evidence that tools are disabled."}
       </p>
       <div className="mt-4 border-t border-border pt-4">
-        <p className="text-xs font-medium text-foreground-muted">Network egress</p>
+        <p className="text-xs font-medium text-foreground-muted">Baseline network egress</p>
+        <p className="mt-1 text-xs text-foreground-muted">Temporary grants are reviewed separately; approval alone does not establish installation or continued access after expiry.</p>
         {c.egress.length === 0 ? (
-          <p className="mt-1 text-sm">Model path only — all other egress denied at the boundary.</p>
+          <p className="mt-1 text-sm">No extra destinations in the baseline allowlist.</p>
         ) : (
           <>
           <ul className="mt-1.5 flex flex-wrap gap-1.5">

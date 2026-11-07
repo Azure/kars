@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # OpenClaw runtime: required Entra mesh admission
 
 Set `MESH_AUTH_BACKEND=EntraAgentIdentity` to require Entra admission through the existing Kars inference router and official AGT transport. This setting is incompatible with `AGT_SKIP_INIT=1`, `AGT_SKIP_ENTRA=1`, and `AGT_SKIP_VERIFY=1`; conflicts stop startup rather than downgrade authentication.
@@ -10,26 +13,297 @@ plugin and CLI. Generated tests under `dist/` are not a second test suite:
 TypeScript can leave old outputs there after a source test is removed or renamed.
 Source-test success does not establish image or installed-runtime acceptance.
 
+## Scoped human approval
+
+`kars_access_request` uses the active assignment scope when a new request or list
+omits `scope_id` or supplies an empty string. A nonempty stale scope is rejected;
+wait and cancel always require the original nonempty scope and request IDs.
+Only tier requests transmit `tier`, and only egress requests transmit `port`.
+A queued request is not permission: the owner decision and router policy remain
+authoritative.
+
+## Inference request lifetime
+
+The task-loop client waits up to 630 seconds of socket inactivity for a model
+response: the router's existing 600-second upstream deadline plus 30 seconds
+for admission, response handling and settlement. It must not abandon a valid
+reasoning request at the old 60-second client deadline. This does not extend
+the router deadline, add retries, increase task limits or forgive unresolved
+usage. A local timeout, aborted response or router error still fails the attempt;
+unknown provider consumption remains unknown.
+
+## Native Mission execution
+
+MissionReceiver uses the registered plugin's `runtime.agent.session.createSessionEntry`
+and `runtime.agent.runEmbeddedAgent` APIs from OpenClaw **2026.9.8**, pinned to
+`fc23bc864e4553c2d215e479eeec47b67a0bf943`. There is one native run, not a CLI
+subprocess, a Kars chat-completion loop, or a fallback executor. Assignment identity
+selects an isolated native session; receiver admission, boot/run binding and terminal
+replay protection remain controller-owned. The legacy task loop still serves
+`task_request`, handoff resume and offload, not Missions.
+
+An explicit reviewed phase is required. With `executionMode:"native"`, the model
+chooses which granted tools to use and in what order; network capability need not
+specify URLs or a mandatory fetch. Explicit `requiredToolCalls`, when supplied,
+remain completion obligations. No input/fetch/write sequence, forced export slots
+or follow-up model loop is imposed. Missing mode never widens an old grant.
+Historical tool-bearing phases currently fail **before model execution**: their
+whole-batch admission guarantee cannot be implemented from the pinned API's
+individual tool-start events. They require explicit review as native phases, not
+an automatic mode upgrade or a scripted-loop fallback. Historical compute-only
+phases remain supported. The historical guard retains its exact GET, complete-input
+and fetch-before-write restrictions. Assignments without a capability phase fail
+rather than receiving ambient agent authority.
+
+Run-bound v2 adapters expose `kars_mission_file_read`, `kars_mission_file_write`
+and, when network is granted, `kars_mission_http_fetch`, `kars_mission_mcp_list`
+and `kars_mission_mcp_call`. MCP uses the existing router bridge at `/mcp`, with
+configured server bindings and router-enforced tool policy and credential scope;
+network capability alone does not enroll a server. In both OpenClaw and Hermes,
+listing with an omitted or empty-string `server` uses the existing qualified
+catalogue (`tools/list`), not a tool invocation. Nonempty scopes still narrow the
+catalogue; malformed scopes are refused. Invocation still requires an exact tool
+name and rejects an explicitly empty server scope. Listing does not grant execution
+authority. The model chooses discovery and invocation, rather than following a
+prescribed MCP sequence. Cancellation
+propagates through the bridge queue and HTTP request, with no automatic call replay.
+Native read-only GitHub App access uses `kars_mission_http_fetch`, not a separate
+GitHub read tool or MCP server. With reviewed `network` capability and an authorized
+repository binding, call canonical `https://api.github.com/repos/{owner}/{repo}`
+GET URLs without credentials, custom headers or a body. The router supplies scoped
+authentication. Metadata-only work uses repository metadata and the paginated
+`/branches` list (matching `default_branch` to `commit.sha`), not unsupported
+`/branches/{branch}` or `/git/ref/heads/{branch}` routes. No additional direct egress,
+GitHub MCP or `github-pr` capability is needed. Runtime guidance does not grant access:
+keep assignment scope and actual denials; never claim unobserved private reads.
+An explicitly requested GitHub MCP integration retains its own credential scope.
+
+Explicit native `memory` capability independently exposes
+`kars_mission_foundry_memory` for search/update through the existing `/platform/mcp`
+`foundry.memory` service; network alone does not grant memory. The router retains
+binding, exact scope and shared-scope authorization, Foundry credentials and update
+status handling. Omitting scope or supplying `null` selects the bound private scope,
+including with providers that require every schema property. Never invent a mission
+scope or use the literal `private`; explicit strings require exact grants. Deletion and store
+selection are not exposed. Calls use the same observed admission, policy and outcome
+reporting as other native tools, and cancellation aborts the HTTP request without
+replay. `queued`/`in_progress` does not establish persistence; even `completed` does
+not approve knowledge. Read back when the assignment requires persistence evidence.
+The configured memory binding and Foundry project must be available independently
+of the selected inference provider.
+
+Native network phases also expose `kars_mission_mesh_send`, `kars_mission_discover`,
+`kars_mission_mesh_inbox` and `kars_mission_mesh_await` through the same observed
+admission, policy and outcome path. They reuse the singleton AGT transport and
+registry, not generic interactive messaging tools or another client/listener.
+Send accepts `to_agent` (exact name or canonical DID) and ordinary `content` up to
+65,536 UTF-8 bytes. Discovery accepts exactly one `name` or `did`, returns at most
+16 fresh registrations, and requires a unique fresh registration to resolve a name.
+Send/discovery have a 30-second invocation deadline; registry requests and results
+are bounded. There is no automatic send/prekey retry. Await accepts up to 16 unique
+`senders` and a positive `timeout_seconds` up to 300; results are capped at 160 KiB.
+Timeout leaves partial selections queued and returns `completed:false`.
+
+Native inbox eligibility is captured at live socket arrival for the exact active
+assignment, then checked again before insertion and consumption. Pre-assignment,
+replayed/backlogged, plaintext, chunk-reassembled and reserved protocol messages
+(including JSON-encoded Mission envelopes) are not native ordinary inbox messages.
+A name filter resolves to an authenticated DID; a payload's claimed sender name
+is not authority. Ordinary messages themselves have no Team/run identifier, so
+this is receiver-lifetime partitioning, not proof of a sender's Team membership.
+Abort, stale authority and deadline expiry veto subsequent request/encryption/relay
+effects without canceling unrelated invocations. An already-issued frame cannot be
+recalled: send results report unconfirmed delivery, and an ambiguous failure must
+not be replayed automatically. The scoped transport capability must be present;
+an older built `@kars/mesh` fails closed rather than ignoring per-call custody.
+Rebuild/package the shared mesh and runtime together before installed acceptance.
+
+Native model and execution allowlists
+exclude ambient shell, browser, generic messaging and delegation tools. Each effect checks
+host invocation authority, the assignment lease, session/model correlation, the
+reviewed ceiling and fail-closed AGT policy. The selected model must belong to the
+finite `azure-openai` catalog using the local router `/v1` endpoint; provider/model
+selection is locked and model/auth fallbacks are disabled.
+
+Native discovery requires exactly one non-null name or canonical DID. The unused
+field may be omitted or explicitly null, including when a provider's strict tool
+schema requires both fields. Two populated targets and two absent targets are rejected.
+
+HTTP retrieval tools use `/egress/fetch`, never direct public sockets. Native peer
+tools use the existing router-mediated AGT relay and registry paths. Native phases may
+select HTTPS URLs, methods, string headers and a text body, subject to the router's
+actual policy. Successful fetches require outer HTTP 200, inner 2xx, `truncated:false`
+and complete nonempty UTF-8 text up to 65,536 bytes (1 MiB envelope bound).
+Failures, redirects and truncation do not discharge explicit required calls. This
+is bounded text retrieval, **not** support for arbitrary binary downloads or opaque
+CONNECT/browser/shell egress. Hosted search and additional capabilities are not
+implicitly granted. Retrieved content is untrusted data, never new authority.
+
+Completed rounds come from native `assistantTurns`. Usage requires matching
+per-round assistant messages and model-call observations, with complete valid token
+counts. Model-call starts are counted across attempts even when the pinned host
+restarts its call IDs. An observation-only `before_agent_finalize` hook preserves
+measured drafts before the host prunes a rejected draft and suppresses its `agent_end`.
+It never requests revision or bypasses the host's side-effect rewind protection.
+Assistant evidence is retained across finalization and attempt-end snapshots,
+without charging repeated history twice; ambiguous or missing evidence still fails
+reconciliation. Sparse cumulative totals, missing observations and unmeasured attempts
+remain unknown and cannot succeed. Usage failures report mismatched observation counts
+or the first invalid round and field category, without transcript content or provider
+payloads; explicit native terminal errors retain precedence. Native tool-start observations reserve attempts,
+including failed calls; an adapter with missing or repeated correlation cannot act.
+Before a tool-enabled native run, `GET /telemetry/cursor` supplies the router-issued
+scope and an ephemeral search cursor. Before authorization, the adapter reads
+`GET /telemetry/trace?since=<cursor>` with `x-kars-telemetry-scope` and requires one
+matching proposed tool call ID/name and its accepted round's model. Missing,
+ambiguous, stale, truncated or dropped correlation fails before effects; the cursor
+window is never treated as this run's complete inference history. OpenClaw's local
+`azure-openai` provider names the configured router transport, not the upstream
+selected by router policy. The correlated round's actual provider ID is retained
+as `router_provider` in authorization context, separately from `native_provider`;
+no provider alias is inferred and native context still requires the configured
+local transport. Router inference policy and funding authorize the upstream.
+
+`/agt/evaluate` receives the exact model-visible `tool:kars_mission_*` action and
+`context.tool`, plus `scope_id`, `tool_call_id` and frozen assignment/native identity.
+Only matched, positively authorized calls send `/telemetry/tool` outcomes, once per
+call. Read/write summaries contain measured byte counts (and optional output name),
+never paths or contents; fetch success has no invented typed summary. Failures use
+a bounded `failure` summary. A rejected outcome receipt aborts the run rather than
+repeating an effect or claiming its telemetry was recorded. Denied, invalid or
+unobserved calls do not send completion reports.
+
+Tool proposals alone cannot identify every inference round, especially the final
+text-only response. When `activityFormat: "router-observations-v1"` is negotiated,
+Activity exports only individually correlated proposals, their actual proposing
+rounds and immediate harness-reported results. Correlated router operations also
+retain tool-policy decisions, egress-policy decisions and upstream HTTP status/body
+completeness, separately from harness success. Native fetches forward the authorized
+scope and call ID; unmatched operations are not inferred from timing or tool names.
+Only the destination host/port is retained, never URL paths, queries, headers or bodies.
+Absent router flags mean unavailable, not allowed or denied. The shared AgentMesh
+message validator preserves this distinction in live progress. Its distinct
+`native-tool-correlated-only` coverage records `correlated_tools`, never invented
+returned-response identifiers/counts. Unrelated cursor events and later transcript
+echoes are excluded. Safe summaries omit arguments, URLs, paths and content.
+The router's `github_service` flag is retained only as a denied egress decision;
+generic GitHub HTTP remains blocked and publication uses the reviewed native adapter.
+Completed tool reports publish serialized live progress. Rejected progress aborts the
+native run before further effects, preserving the original reporting error rather than
+masking it as journal exhaustion. A reporting failure does not undo a completed effect
+or authorize replay. Successful completion also attempts the existing reserved
+system-artifact attachment within the artifact limits.
+Reset, expiry, truncation, lost events or refused reads yield explicitly unavailable
+Activity without failing otherwise successful work. Export remains bounded to 130
+rounds, 1,024 events and a separate 384 KiB Activity envelope; ordinary file limits
+are unchanged. These forwarded observations do not prove
+complete inference usage, final text-only rounds or independent tool attestation.
+Native measured usage still comes from the separately reconciled host evidence.
+Explicit native phases use `max(8, maxToolCalls + 2)` model rounds and the shared
+[reviewed time/event headroom](../../mesh-plugin/README.md#native-mission-headroom),
+not the historical 25-round/eight-minute limits. Tool correlation pages the existing
+router cursor endpoint through a captured high-water mark and advances its cursor
+after matching, retaining the proposing round for sibling calls. Each page remains
+bounded; missing current events or changed scope still fail. Historical dropped
+events outside that advancing window do not revoke current valid work. Activity
+export stays explicitly unavailable beyond its retention limits, including empty
+round lists when needed, without becoming an execution limit. Incomplete, yielded,
+asynchronous, refused or uncorrelated completion still fails.
+
 ## Reviewed Mission outputs
 
-Required output names are passed from the installed Mission contract into the
-executor, not inferred from the task's prose. Each phase exports its own named
-handoff or final deliverables with `file_write` and an explicit `artifact_name`.
-Scratch files and inline answers never satisfy a required export. A premature
-final answer receives corrective feedback only within the original tool-call
-and model-round limits; exhausted limits fail the phase and block synthesis.
-Required-output executions request one tool call at a time. When only enough
-calls remain to export the missing outputs, the model is offered `file_write`
-with those exact non-null filenames; after the ceiling is used it is asked for
-a final answer without tools. Tool authorization and completion validation
-remain independent, including when a provider ignores these request constraints.
-Legacy assignments without required outputs retain their inline-delivery path.
+Required filenames come from the controller contract, never inferred from prose.
+The native user prompt quotes the overall Mission and role as reference context,
+then states the current reviewed phase and its exact `/sandbox/<filename>` path
+and `artifact_name` for each required export. These phase instructions also remain
+in the extra system prompt, rather than relying on system context alone to resolve
+conflicting final-deliverable requests in the overall Mission. The agent writes its own substantive findings, including
+unknowns; the runtime does not create missing handoffs or retry the agent loop.
+Root deliverables and final chat text do not substitute for phase handoffs.
+Required names are minimum obligations, not an exclusive export list. Internal
+phase guidance tells application builders to export changed source, tests, and
+configuration with `artifact_name` after testing, alongside required handoffs.
+Paths, hashes, and execution receipts do not retain those files for downstream
+review. Unchanged inputs need not be republished; artifact limits and role authority
+remain unchanged, and failed tests must remain reported as failed.
+For byte-preserving native handoffs, the existing `kars_mission_file_write` accepts
+`{path, source_path, sha256, artifact_name?}` **instead of** `{path, content, artifact_name?}`.
+Both filesystem-read and filesystem-write must be reviewed. `source_path` must be
+an exact `/sandbox/.kars-inputs/<name>` manifest path or a successful write from
+this invocation; `sha256` is the complete `sha256:<64 lowercase hex>` digest from
+the manifest or write result. Retained bytes are copied, not reread from ambient
+host files or transcribed by the model. Skills, input bundles and arbitrary files
+are not copy sources. Builders can export their tested scratch writes; principals
+can copy retained builder/QA inputs to the original customer filenames. A matching
+digest preserves byte identity, not independent proof that tests passed.
 
-The shared controller retires a completed reviewed phase's sandbox and inference
-policy only after verifying its current grant and immutable successful handoff.
-The Task, lifetime budget lineage and publication records remain available to
-later phases and synthesis. Failed or ambiguous evidence never authorizes this
-completion cleanup; stopping the root retains the existing owned-compute cleanup.
+The destination uses the same guarded filesystem writer, explicit artifact
+selection, required-output tracking, reserved receipt names and serialized limits.
+Copy arguments receive the same tool correlation and governance authorization;
+there is no implicit export or new capability. A digest mismatch fails before the
+write, a failed named copy must be corrected before completion, and collected copy
+bytes must still match the expected digest. Content writes remain supported.
+Unused alternative fields may be omitted or null for strict-provider schemas;
+non-null content cannot be combined with source/digest arguments.
+
+Successful file-write results report the selected `artifact_name` and
+`required_outputs_remaining`, so the native loop can see outstanding phase exports
+without a scripted tool sequence or another run. This is write feedback, not final
+file verification; read-only inputs and differently named deliverables do not clear
+an outstanding export.
+Explicit `artifact_name` exports remain supported. Native mode also collects a
+successful write whose basename exactly matches a required filename. Other scratch
+files, pre-existing files and inline answers cannot satisfy required outputs.
+The runtime rereads the actual written files as strict UTF-8 before returning them;
+model-supplied write arguments are not file-retrieval evidence. Missing, unreadable,
+truncated, invalid or unresolved exports fail, with the existing 16-file/128 KiB
+serialized artifact bound. Before each export write, the runtime checks the complete
+pending export set, including aliases of the same normalized path and real Python
+execution receipts. Writes and Python receipt reservations are serialized per
+assignment so concurrent calls cannot overbook that envelope. An oversized write
+is rejected before changing the file; the native loop can shorten its output and
+retry while retaining the failed attempt. Python checks space for its execution receipt
+before starting. Its request-sized worst-case reservation includes the exact source
+manifest, arguments and identity, both full 2048-byte streams and JSON escaping at
+both serialization layers. The 64-KiB receipt and 128-KiB export bounds are unchanged;
+reservation whitespace contains only previously retained runs, never synthetic results.
+A capacity refusal reports that no execution occurred and tells the
+agent to shorten existing exports or execute before exporting large documents; retained
+inputs can be read directly without republishing them. This is not an authorization or
+spending failure. Final disk rereads remain mandatory.
+File delivery is not evidence of business acceptance.
+
+Downstream reviewed phases and the principal receive all exported peer documents,
+not only handoff summaries, with deterministic aliases and original content/hash
+and producer custody. Team retention reconstructs that same complete input set
+from verified completed records, including sealed approved memory, after compute
+retirement. It does not require a retired sandbox to become Ready again or accept
+unbound replacement files. Historical summary-only assignments remain readable
+for their retention lifetime only when their sealed inputs exactly match approved
+memory plus all verified handoffs; this is not evidence of full-file peer review.
+Partial full-export sets, substituted content, and changed custody are rejected.
+Response text and router telemetry are not peer inputs.
+
+Native accounting reconciles assistant measurements across attempt snapshots using
+provider, model, timestamp and exact token fields, preserving repeated occurrences.
+Transcript redaction or replay-only body changes are not new model calls. Changed
+measurements and ambiguous collisions across pruned attempts fail the strict
+assistant/call/turn count check; missing usage is never replaced with zero or
+cumulative totals. Messages without usable timestamps retain exact-message matching.
+
+Focused tests use native API doubles only at test boundaries. Installed validation
+must still verify the pinned host's plugin lifecycle permissions, v2 tool bindings,
+model-call/tool-start events, per-round usage, real router mediation and final file
+retrieval. Passing local tests is not installed-runtime or live Mission acceptance.
+
+The shared controller retires a terminal reviewed phase's sandbox and inference
+policy only after verifying its current grant and immutable terminal records.
+Verified failed or rejected phases can retire compute without authorizing later
+phases or synthesis. An empty failed artifact ConfigMap may omit `data`, as the
+Kubernetes API does; unexpected artifacts or missing nonempty outputs still fail
+custody verification. The Task, lifetime budget lineage and publication records
+remain available. Ambiguous evidence does not authorize terminal cleanup;
+stopping the root retains the existing owned-compute cleanup.
 
 ## Startup and credentials
 
@@ -41,7 +315,7 @@ The single existing transport registers its identity and connects using the fres
 
 The request is `POST /agt/registry/v1/registry/verify` with JSON `{ "amid": "<connected canonical DID>", "verification_token": "<fresh router token>" }`. The transport must remain connected with that same current DID and lifecycle through the POST response; a matching response for an identity that is no longer current is rejected. The token is the same one sent in the relay's `connect.token` frame. Required renewal and reconnect repeat the complete mint/connect/verify sequence.
 
-The selected registry implementation is [`verify_identity`, `agentmesh/registry/app.py`](https://github.com/microsoft/agent-governance-toolkit/blob/f68f2cf312c7e1366d6fd5654c51d8380c815222/agent-governance-python/agent-mesh/src/agentmesh/registry/app.py). Local enforcement is in `src/core/mesh-auth.ts`, `validateMeshVerification` and `RequiredMeshAuth.authenticate`: it requires a matching DID, verified tier, application ID and tenant ID, not merely HTTP success or a timestamp. The AGT 5 SDK is checksum-bound under `vendor/agt`; mesh servers, Python owners and Rust dependencies use the same source revision. Local compatibility does not establish deployed Entra acceptance.
+The selected registry implementation is [`verify_identity`, `agentmesh/registry/app.py`](https://github.com/microsoft/agent-governance-toolkit/blob/17595e649abdfa703962c2f8c241826f68318109/agent-governance-python/agent-mesh/src/agentmesh/registry/app.py). Local enforcement is in `src/core/mesh-auth.ts`, `validateMeshVerification` and `RequiredMeshAuth.authenticate`: it requires a matching DID, verified tier, application ID and tenant ID, not merely HTTP success or a timestamp. The AGT 5 SDK is checksum-bound under `vendor/agt`; mesh servers, Python owners and Rust dependencies use the same source revision. Local compatibility does not establish deployed Entra acceptance.
 
 ## Renewal, readiness, and teardown
 

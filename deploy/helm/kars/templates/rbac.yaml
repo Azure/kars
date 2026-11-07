@@ -69,6 +69,7 @@ rules:
       - "karsauthconfigs/status"
       - "karssreactions"
       - "karssreactions/status"
+      - "karssreactions/finalizers"
       - "karstasks"
       - "karstasks/status"
       - "karstasks/finalizers"
@@ -106,6 +107,11 @@ rules:
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Delegate only the exact named Scale subresource to per-action writers.
+  # Ordinary RBAC escalation checks require the delegator to hold these verbs.
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    verbs: ["get", "patch"]
   # Slice 3 of kars-sre — typed actions RolloutRestart targets
   # StatefulSet / DaemonSet as well. Read+patch is sufficient (we
   # only ever rollout-restart, never create/delete those kinds).
@@ -146,18 +152,14 @@ rules:
   - apiGroups: ["events.k8s.io"]
     resources: ["events"]
     verbs: ["get", "list", "watch", "create", "patch"]
-  # Manage spawner role bindings for sandbox sub-agent creation
-  # AND the one-shot writer CRBs the kars-sre-action reconciler mints
-  # on Approved typed-action proposals (Slice 3 of kars-sre).
+  # Manage spawner role bindings for sandbox sub-agent creation.
+  # SRE actions use namespaced Roles/RoleBindings, never writer CRBs.
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["clusterrolebindings"]
     verbs: ["get", "list", "create", "update", "patch", "delete"]
-  # Slice 3 of kars-sre — TokenRequest for the sre-writer SA
-  # (controller mints short-lived tokens when executing an approved
-  # KarsSREAction). Currently the structure ships but the execution
-  # path uses the controller's own SA — the §7.8.4 hardening uses the
-  # token. This rule lands the RBAC upfront so the hardening pass is
-  # a code-only change.
+  # TokenRequest for isolated per-action SRE writer ServiceAccounts and
+  # other maintained controller credential issuers. Tokens stay in memory
+  # for SRE actions; the stable sre-writer account remains permissionless.
   - apiGroups: [""]
     resources: ["serviceaccounts/token"]
     verbs: ["create"]

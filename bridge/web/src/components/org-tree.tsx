@@ -10,7 +10,7 @@
 // scrolls horizontally instead of collapsing into a stack. Used for both team
 // and mission orgs.
 
-import Link from "next/link";
+import Link from "@/components/navigation-link";
 import { useState } from "react";
 import { ViewportPortal } from "@/components/viewport-portal";
 
