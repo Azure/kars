@@ -320,6 +320,68 @@ class HarnessTests(unittest.TestCase):
                        "Retire reviewed SRE ClusterRoleBinding: Kubernetes status 403 " + MARKER):
             self.assertEqual(authority_failure_site(root, unsafe), {"category": "unclassified"})
 
+    def test_blocked_authority_diagnostics_classify_first_install_and_public_policy_failures(self):
+        root = Path(__file__).resolve().parents[3]
+        for detail in (
+            "First-install funding configuration is invalid",
+            "First-install funding requires the governed broker",
+            "First-install funding catalog is unavailable",
+            "First-install SRE intent, identity, catalog or funding authorization failed verification",
+        ):
+            with self.subTest(detail=detail):
+                result = authority_failure_site(root, detail)
+                self.assertEqual(result["source"], "controller/src/inference_budget/first_install.rs")
+                self.assertNotIn(detail, json.dumps(result))
+        from sre_authority.common import POLICIES
+        for name in POLICIES:
+            detail = f"SRE admission policy kars-sre-{name} is not observed, type-checked, and enforced; no privilege may be issued"
+            result = authority_failure_site(root, detail)
+            self.assertEqual(result["source"], "controller/src/sre_authority/admission.rs")
+            self.assertNotIn(detail, json.dumps(result))
+        for name in (MARKER, "kars-sre-unknown", "kars-sre-source-authority " + MARKER):
+            detail = f"SRE admission policy {name} is not observed, type-checked, and enforced; no privilege may be issued"
+            self.assertEqual(authority_failure_site(root, detail), {"category": "unclassified"})
+
+    def test_blocked_authority_diagnostics_preserve_all_checked_cleanup_failure_sites(self):
+        root = Path(__file__).resolve().parents[3]
+        primary = "Reviewed SRE consumer was changed or replaced"
+        cleanups = [
+            ("private authority revocation", "Retire private SRE binding: Kubernetes status 403"),
+            ("API policy retirement", "Read retiring SRE API policy: Kubernetes transport/serialization failure"),
+            ("private credential retirement", "Retire private SRE identity: Kubernetes status 409"),
+        ]
+        for mask in range(1, 8):
+            selected = [entry for index, entry in enumerate(cleanups) if mask & (1 << index)]
+            detail = primary + "".join(f"; owned {operation} failed: {message}" for operation, message in selected)
+            with self.subTest(mask=mask):
+                result = authority_failure_site(root, detail)
+                self.assertEqual(result["category"], "controller-rejection-chain")
+                self.assertEqual(result["failures"], [
+                    {"operation": "authority", **authority_failure_site(root, primary)},
+                    *[{"operation": operation, **authority_failure_site(root, message)} for operation, message in selected],
+                ])
+                for _, message in selected:
+                    self.assertNotIn(message, json.dumps(result))
+                for unsafe in (MARKER + detail, detail + MARKER, detail + "\n" + MARKER):
+                    self.assertEqual(authority_failure_site(root, unsafe), {"category": "unclassified"})
+
+    def test_blocked_authority_diagnostics_reject_unknown_or_malformed_cleanup_chains(self):
+        root = Path(__file__).resolve().parents[3]
+        primary = "Reviewed SRE consumer was changed or replaced"
+        rejection = "Retire private SRE binding: Kubernetes status 403"
+        first = f"; owned private authority revocation failed: {rejection}"
+        second = f"; owned API policy retirement failed: {rejection}"
+        for detail in (
+            primary + first + first, primary + second + first,
+            primary + first * 4, primary + "; owned unknown failed: " + rejection,
+            primary + "; owned private authority revocation failed: " + MARKER,
+            primary + "; owned private authority revocation failed: ",
+            primary + first + "; owned API policy retirement failed: " + MARKER,
+            MARKER + first, "x" * 8193,
+        ):
+            with self.subTest(detail=detail[:100]):
+                self.assertEqual(authority_failure_site(root, detail), {"category": "unclassified"})
+
     def test_control_consumer_fixture_satisfies_required_sandbox_fields(self):
         captured = []
         class Captured(Exception):

@@ -156,6 +156,14 @@ remains the controller/Kubernetes path. Preview reads no Secret values, receipts
 retain hashes/anchor identity only, and exact receipt resource-version checks remain
 fail-closed on later renewal. Shared reviewed-root/Team memory and customized
 mounts still require their owner-specific retirement rather than automatic adoption.
+The controller's v4 resume fence accepts the same closed TLS/memory receipt fields
+as the CLI. Before restoring replicas it requires the exact qualified configuration
+hashes, rotated proofs, unchanged Secret UID, new resourceVersion and the shared
+control version in the Deployment template. Unknown data or missing proofs remain
+fail-closed; this byte binding does not replace the CLI's certificate and live-anchor
+validation. Native runs the existing runtime-apply fixture with these receipt shapes
+and negative cases on its normal debug profile/default worker stack after the Team
+regression. Neither regression alone establishes live observer or writer acceptance.
 Other credential purposes retain their existing version semantics.
 The controller does not report its credential transition complete while old
 version or mismatched verified-epoch Pods remain, including terminating Pods. Loss of the checked privacy

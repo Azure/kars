@@ -198,6 +198,10 @@ historical Helm installation through authority staging and the final upgrade.
 The final staged upgrade resets chart defaults then reuses the saved release
 values before applying explicit fixture overrides, preserving its installed SRE
 provider/model and reviewed authority configuration.
+Blocked SRE migration diagnostics report checked-in source coordinates for exact
+rejections, including first-install funding and ordered authority-cleanup failures.
+Only known public admission-policy names are recognized; unknown status content
+remains unclassified, and raw status details or credentials are never printed.
 Production image references, `Always` policies and migration deadlines are
 unchanged. The full historical journey explicitly requires the generated
 `.e2e-addon-values.json`; missing values fail before installation. Preparation

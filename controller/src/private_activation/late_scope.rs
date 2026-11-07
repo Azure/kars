@@ -55,10 +55,45 @@ fn identity(value: &Value) -> bool {
             .all(|key| text(&value[key]))
 }
 fn material(value: &Value) -> bool {
-    fields(value, "object key", "")
+    fields(value, "object key", "tls memory")
         && identity(&value["object"])
         && value["object"]["name"] == ADMIN
         && hex(&value["key"])
+        && value.get("tls").is_none_or(|tls| {
+            fields(tls, "configuration key", "") && hex(&tls["configuration"]) && hex(&tls["key"])
+        })
+        && value.get("memory").is_none_or(|memory| {
+            fields(memory, "configuration key anchor epoch binding version", "")
+                && ["configuration", "key", "epoch", "binding"]
+                    .iter()
+                    .all(|key| hex(&memory[key]))
+                && text(&memory["anchor"])
+                && value["object"]["uid"].as_str().is_some_and(|uid| {
+                    memory["version"].as_str().is_some_and(|version| {
+                        version
+                            .strip_prefix(&format!("{uid}:control-v1:"))
+                            .is_some_and(|digest| hex(&json!(digest)))
+                    })
+                })
+        })
+}
+
+fn rotated_authority(baseline: &Value, fresh: &Value) -> bool {
+    match (baseline.get("tls"), fresh.get("tls")) {
+        (Some(before), Some(after)) if before["key"] != after["key"] => {}
+        (None, None) => {}
+        _ => return false,
+    }
+    match (baseline.get("memory"), fresh.get("memory")) {
+        (Some(before), Some(after)) => {
+            before["binding"] == after["binding"]
+                && before["anchor"] != after["anchor"]
+                && before["epoch"] != after["epoch"]
+                && before["key"] != after["key"]
+        }
+        (None, None) => true,
+        _ => false,
+    }
 }
 
 fn decode(raw: &str) -> Result<Value, String> {
@@ -111,6 +146,8 @@ fn decode(raw: &str) -> Result<Value, String> {
                         && value["material"]["object"]["resourceVersion"]
                             != state["baseline"]["object"]["resourceVersion"]
                         && value["material"]["key"] != state["baseline"]["key"]
+                        && rotated_authority(&state["baseline"], &value["material"])
+                        && (runtime.get("task").is_some() || value["material"].get("tls").is_none())
                 })
         }
         _ => false,
@@ -137,6 +174,7 @@ fn decode(raw: &str) -> Result<Value, String> {
         || !(runtime["suspended"].is_null() || runtime["suspended"].is_boolean())
         || !identity(&state["deployment"])
         || !material(&state["baseline"])
+        || (runtime.get("task").is_none() && state["baseline"].get("tls").is_some())
         || state["replicas"].as_u64() != Some(u64::from(runtime["suspended"] != true))
         || !state["captured"]
             .as_array()
@@ -274,11 +312,29 @@ fn rotated(
         .and_then(|data| data.get("control-token"))
         .ok_or(ERROR)?;
     let digest = hash(&json!(STANDARD.encode(&token.0)));
-    let version = format!(
-        "{}:{}",
-        secret.uid().ok_or(ERROR)?,
-        secret.resource_version().ok_or(ERROR)?
-    );
+    let version = crate::sre_registration::control_credential_version(secret).map_err(|_| ERROR)?;
+    let data = secret.data.as_ref().ok_or(ERROR)?;
+    let expected_keys = 1
+        + usize::from(material.get("tls").is_some())
+        + usize::from(material.get("memory").is_some());
+    if data.len() != expected_keys {
+        return Err(ERROR.into());
+    }
+    // The operator validates TLS and live bound-token retirement before recording
+    // these hashes. Bind resume to those exact bytes, not merely epoch stamps.
+    for (proof, key) in [("tls", "config.json"), ("memory", "builtin-memory.json")] {
+        match (material.get(proof), data.get(key)) {
+            (Some(proof), Some(bytes))
+                if proof["configuration"] == hash(&json!(STANDARD.encode(&bytes.0))) => {}
+            (None, None) => {}
+            _ => return Err(ERROR.into()),
+        }
+    }
+    if let Some(memory) = material.get("memory")
+        && memory["version"] != version
+    {
+        return Err(ERROR.into());
+    }
     let annotations = deployment
         .spec
         .as_ref()
@@ -292,7 +348,6 @@ fn rotated(
             != material["object"]["resourceVersion"].as_str()
         || material["object"]["resourceVersion"] == baseline["object"]["resourceVersion"]
         || secret.type_.as_deref() != Some("Opaque")
-        || secret.data.as_ref().is_none_or(|data| data.len() != 1)
         || token.0.len() != 64
         || !token.0.iter().all(u8::is_ascii_alphanumeric)
         || Some(digest.as_str()) != material["key"].as_str()
@@ -576,6 +631,128 @@ mod tests {
             sandbox: serde_json::from_value(sandbox).unwrap(),
             desired: serde_json::from_value(desired).unwrap(),
         }
+    }
+
+    fn add_control_material(api: &mut RuntimeApi, tls: bool, memory: bool) {
+        let mut state = api.state.lock().unwrap();
+        let mut receipt = state.receipt();
+        let mut fresh = state.objects[PRIVATE_SECRET].clone();
+        let mut before = fresh.clone();
+        before["metadata"]["resourceVersion"] = json!("1");
+        before["data"]["control-token"] = json!(STANDARD.encode(vec![b'A'; 64]));
+        for (proof, key, enabled) in [
+            ("tls", "config.json", tls),
+            ("memory", "builtin-memory.json", memory),
+        ] {
+            if !enabled {
+                continue;
+            }
+            // These are byte-binding fixtures; CLI tests validate real certificates
+            // and live memory anchors before producing this controller receipt.
+            let encoded = STANDARD.encode(format!("{proof}-before"));
+            before["data"][key] = json!(encoded);
+            receipt["baseline"][proof] =
+                json!({"configuration":hash(&json!(encoded)), "key":hash(&json!("before"))});
+            let encoded = STANDARD.encode(format!("{proof}-after"));
+            fresh["data"][key] = json!(encoded);
+            if receipt.get("qualified").is_some() {
+                receipt["qualified"]["material"][proof] =
+                    json!({"configuration":hash(&json!(encoded)), "key":hash(&json!("after"))});
+            }
+        }
+        if memory {
+            for (value, label, path) in [
+                (&before, "before", "/baseline"),
+                (&fresh, "after", "/qualified/material"),
+            ] {
+                if let Some(material) = receipt.pointer_mut(path) {
+                    let secret: Secret = serde_json::from_value(value.clone()).unwrap();
+                    material["memory"]["anchor"] = json!(label);
+                    material["memory"]["epoch"] = json!(hash(&json!(label)));
+                    material["memory"]["binding"] = json!(hash(&json!("same-owner-and-store")));
+                    material["memory"]["version"] = json!(
+                        crate::sre_registration::control_credential_version(&secret).unwrap()
+                    );
+                }
+            }
+        }
+        let secret: Secret = serde_json::from_value(fresh.clone()).unwrap();
+        api.desired
+            .spec
+            .as_mut()
+            .unwrap()
+            .template
+            .metadata
+            .as_mut()
+            .unwrap()
+            .annotations
+            .as_mut()
+            .unwrap()
+            .insert(
+                VERSION.into(),
+                crate::sre_registration::control_credential_version(&secret).unwrap(),
+            );
+        state.objects.insert(PRIVATE_SECRET.into(), fresh);
+        state.set_receipt(receipt);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn runtime_control_material_receipts_preserve_rotation_and_resume_fences() {
+        tokio::spawn(async {
+            for (tls, memory) in [(false, false), (true, false), (false, true), (true, true)] {
+                for phase in ["Rotating", "Restoring"] {
+                    eprintln!("native-late-material-regression: fixture phase={phase} tls={tls} memory={memory}");
+                    let mut api = runtime_api(Some(phase), Some("deployment"), phase == "Rotating").await;
+                    add_control_material(&mut api, tls, memory);
+                    eprintln!("native-late-material-regression: apply-poll");
+                    assert_eq!(api.apply().await, Ok(true));
+                    eprintln!("native-late-material-regression: apply-returned");
+                    let state = api.state.lock().unwrap();
+                    assert_eq!(state.objects[DEPLOYMENT]["metadata"]["uid"], "deployment");
+                    assert_eq!(state.objects[DEPLOYMENT]["spec"]["replicas"], u64::from(phase == "Restoring"));
+                    assert_eq!(state.writes.len(), 1);
+                }
+            }
+            for fault in ["tls-bytes", "memory-bytes", "extra-data", "tls-key", "memory-key",
+                "anchor", "epoch", "binding", "version", "missing-tls", "missing-memory",
+                "missing-data", "taskless-tls", "partial-proof", "unknown-proof"] {
+                let mut api = runtime_api(Some("Restoring"), Some("deployment"), false).await;
+                add_control_material(&mut api, true, true);
+                {
+                    let mut state = api.state.lock().unwrap();
+                    let mut receipt = state.receipt();
+                    match fault {
+                        "tls-bytes" | "memory-bytes" | "extra-data" => {
+                            let key = match fault { "tls-bytes" => "config.json", "memory-bytes" => "builtin-memory.json", _ => "unreviewed" };
+                            state.objects.get_mut(PRIVATE_SECRET).unwrap()["data"][key] = json!(STANDARD.encode("changed"));
+                        }
+                        "tls-key" | "memory-key" => {
+                            let proof = if fault == "tls-key" { "tls" } else { "memory" };
+                            receipt["qualified"]["material"][proof]["key"] = receipt["baseline"][proof]["key"].clone();
+                        }
+                        "anchor" | "epoch" => {
+                            receipt["qualified"]["material"]["memory"][fault] = receipt["baseline"]["memory"][fault].clone();
+                        }
+                        "binding" => receipt["qualified"]["material"]["memory"]["binding"] = json!("e".repeat(64)),
+                        "version" => receipt["qualified"]["material"]["memory"]["version"] = json!(format!("secret:control-v1:{}", "f".repeat(64))),
+                        "missing-tls" | "missing-memory" => {
+                            let proof = if fault == "missing-tls" { "tls" } else { "memory" };
+                            receipt["qualified"]["material"].as_object_mut().unwrap().remove(proof);
+                        }
+                        "missing-data" => { state.objects.get_mut(PRIVATE_SECRET).unwrap()["data"].as_object_mut().unwrap().remove("config.json"); }
+                        "taskless-tls" => { receipt["runtime"].as_object_mut().unwrap().remove("task"); }
+                        "partial-proof" => { receipt["qualified"]["material"]["memory"].as_object_mut().unwrap().remove("binding"); }
+                        _ => receipt["baseline"]["tls"]["unreviewed"] = json!("value"),
+                    }
+                    state.set_receipt(receipt);
+                }
+                assert!(api.apply().await.is_err(), "{fault}");
+                let state = api.state.lock().unwrap();
+                assert!(state.writes.is_empty(), "{fault}");
+                assert_eq!(state.objects[DEPLOYMENT]["spec"]["replicas"], 0);
+            }
+            eprintln!("native-late-material-regression: complete");
+        }).await.unwrap();
     }
 
     #[tokio::test]

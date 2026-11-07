@@ -203,6 +203,10 @@ jobs:
             -p kars-controller --bin kars-controller \
             kars_task_reconciler::rebind::tests::credential_rebind_full_reconcile_preserves_authority_before_resume \
             -- --exact --nocapture
+          cargo test --manifest-path .native/core/Cargo.toml --locked \
+            -p kars-controller --bin kars-controller \
+            private_activation::late_scope::tests::runtime_control_material_receipts_preserve_rotation_and_resume_fences \
+            -- --exact --nocapture
       - name: Retain only bounded secret-free native outcomes
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4

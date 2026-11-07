@@ -27,6 +27,38 @@ class NativeProfileRegressionTests(unittest.TestCase):
         self.assertLess(runtime.index("run: python3 tests/native-credentials/run.py"), runtime.index("Exercise Team projection"))
         self.assertLess(runtime.index("Exercise Team projection"), runtime.index("Retain only bounded secret-free native outcomes"))
 
+    def test_late_material_regression_uses_existing_native_worker_and_runtime_fence(self):
+        workflow = (ROOT / ".github/workflows/bridge-native.yml").read_text()
+        step = workflow.split("      - name: Exercise Team projection", 1)[1].split("      - name:", 1)[0]
+        test = "runtime_control_material_receipts_preserve_rotation_and_resume_fences"
+        self.assertIn("private_activation::late_scope::tests::" + test, step)
+        self.assertEqual(step.count("-- --exact --nocapture"), 2)
+        source = (ROOT / "controller/src/private_activation/late_scope.rs").read_text()
+        self.assertIn('#[tokio::test(flavor = "multi_thread", worker_threads = 1)]\n    async fn ' + test, source)
+        regression = source.split("async fn " + test, 1)[1].split("    #[tokio::test]", 1)[0]
+        self.assertIn("tokio::spawn(async", regression)
+        self.assertIn("api.apply().await", regression)
+        for phase in ("apply-poll", "apply-returned", "complete"):
+            self.assertIn("native-late-material-regression: " + phase, regression)
+        for fault in ("tls-bytes", "memory-bytes", "extra-data", "tls-key", "memory-key", "anchor", "epoch", "binding", "version", "missing-tls", "unknown-proof"):
+            self.assertIn('"' + fault + '"', regression)
+        for forbidden in ("Box::pin", "stack_size", "timeout(", "catch_unwind"):
+            self.assertNotIn(forbidden, regression)
+
+    def test_controller_receipt_keeps_exact_proofs_and_shared_control_version(self):
+        source = (ROOT / "controller/src/private_activation/late_scope.rs").read_text()
+        self.assertIn('fields(value, "object key", "tls memory")', source)
+        self.assertIn('fields(tls, "configuration key", "")', source)
+        self.assertIn('"configuration key anchor epoch binding version"', source)
+        self.assertIn('rotated_authority(&state["baseline"], &value["material"])', source)
+        rotated = source.split("fn rotated(", 1)[1].split("pub(super) async fn fence", 1)[0]
+        self.assertIn("crate::sre_registration::control_credential_version(secret)", rotated)
+        self.assertIn('proof["configuration"] == hash(&json!(STANDARD.encode(&bytes.0)))', rotated)
+        self.assertIn("data.len() != expected_keys", rotated)
+        self.assertIn('memory["version"] != version', rotated)
+        self.assertIn('material["object"]["resourceVersion"] == baseline["object"]["resourceVersion"]', rotated)
+        self.assertNotIn("data.len() != 1", rotated)
+
     def test_exact_test_registration_and_default_worker_projection_phases_are_maintained(self):
         controller = ROOT / "controller/src"
         self.assertIn("mod kars_task_reconciler;", (controller / "main.rs").read_text())

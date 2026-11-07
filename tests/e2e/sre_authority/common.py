@@ -107,31 +107,60 @@ def command_error_category(stderr):
 
 def authority_failure_site(root, detail):
     """Report checked-in rejection coordinates, never the status detail itself."""
-    if not isinstance(detail, str) or not detail:
-        return {"category": "unclassified"}
-    result = {"category": "controller-rejection"}
-    message = detail
-    status = re.fullmatch(r"(.+): Kubernetes status ([1-5][0-9]{2})", detail)
-    if status:
-        message = status.group(1)
-        result = {"category": "kubernetes-status", "httpStatus": int(status.group(2))}
-    elif detail.endswith(": Kubernetes transport/serialization failure"):
-        message = detail.removesuffix(": Kubernetes transport/serialization failure")
-        result = {"category": "kubernetes-transport"}
-    # Only an exact literal in our own production source can identify a site.
-    # Untrusted API messages, names, credentials and interpolated suffixes are
-    # not echoed, even if they contain a familiar rejection substring.
-    literal = json.dumps(message, ensure_ascii=False)
+    unknown = {"category": "unclassified"}
+    if not isinstance(detail, str) or not detail or len(detail) > 8192:
+        return unknown
     paths = [root / "controller/src/sre_authority.rs", root / "controller/src/sre_registration.rs",
-             root / "shared/sre_privacy.rs"]
+             root / "shared/sre_privacy.rs", root / "controller/src/inference_budget/first_install.rs"]
     paths += sorted((root / "controller/src/sre_authority").glob("*.rs"))
-    for path in paths:
-        if path.name.endswith("tests.rs"):
-            continue
-        for number, line in enumerate(path.read_text().splitlines(), 1):
-            if literal in line:
-                return {**result, "source": str(path.relative_to(root)), "line": number}
-    return {"category": "unclassified"}
+    sources = [(path, path.read_text().splitlines()) for path in paths if not path.name.endswith("tests.rs")]
+
+    def site(message):
+        if not message:
+            return unknown
+        result = {"category": "controller-rejection"}
+        status = re.fullmatch(r"(.+): Kubernetes status ([1-5][0-9]{2})", message)
+        if status:
+            message = status.group(1)
+            result = {"category": "kubernetes-status", "httpStatus": int(status.group(2))}
+        elif message.endswith(": Kubernetes transport/serialization failure"):
+            message = message.removesuffix(": Kubernetes transport/serialization failure")
+            result = {"category": "kubernetes-transport"}
+        # Only exact production literals or the closed public policy-name set
+        # may identify a site. Never echo names or interpolated API details.
+        policy = re.fullmatch(
+            r"SRE admission policy (kars-sre-[a-z-]+) is not observed, type-checked, and enforced; no privilege may be issued",
+            message)
+        if policy:
+            if policy.group(1) not in {f"kars-sre-{name}" for name in POLICIES}:
+                return unknown
+            message = message.replace(policy.group(1), "{name}", 1)
+        literal = json.dumps(message, ensure_ascii=False)
+        for path, lines in sources:
+            for number, line in enumerate(lines, 1):
+                if literal in line:
+                    return {**result, "source": str(path.relative_to(root)), "line": number}
+        return unknown
+
+    operations = ["private authority revocation", "API policy retirement", "private credential retirement"]
+    parts = re.split(r"; owned (private authority revocation|API policy retirement|private credential retirement) failed: ", detail)
+    if len(parts) == 1:
+        return site(detail)
+    if len(parts) > 7:
+        return unknown
+    primary = site(parts[0])
+    if primary == unknown:
+        return unknown
+    failures = [{"operation": "authority", **primary}]
+    last = -1
+    for operation, message in zip(parts[1::2], parts[2::2]):
+        index = operations.index(operation)
+        rejection = site(message)
+        if index <= last or rejection == unknown:
+            return unknown
+        failures.append({"operation": operation, **rejection})
+        last = index
+    return {"category": "controller-rejection-chain", "failures": failures}
 
 
 def printed_object(output):
