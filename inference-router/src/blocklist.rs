@@ -15,6 +15,12 @@
 //!
 //! The blocklist is stored in an `Arc<RwLock<HashSet<String>>>` so reads (every proxy
 //! request) are lock-free when uncontested, and writes (every 6h refresh) are rare.
+//!
+//! Every source (seed file, OISD, each extra feed) keeps the entries of its last
+//! successful load. A source that fails in one cycle keeps contributing those
+//! entries, so a partial outage never drops what that source supplied before.
+//! Limits: 50 MB per feed body (enforced while streaming), 500,000 domains per
+//! source and [`MAX_TOTAL_DOMAINS`] across all sources.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -34,8 +40,22 @@ const HIGH_RISK_TLDS: &[&str] = &[
 /// How often to refresh from upstream feeds (default: 6 hours).
 const DEFAULT_REFRESH_SECS: u64 = 6 * 3600;
 
-/// Max domains to load per feed (prevents memory exhaustion from malformed feeds).
+/// Max domains kept from one source: the seed file, OISD or one extra feed
+/// (prevents memory exhaustion from malformed feeds).
 const MAX_DOMAINS_PER_FEED: usize = 500_000;
+
+/// Max domains kept from all sources together. A source only gets the space
+/// the other sources leave, and the refresh logs the truncation. Each source
+/// keeps its last-known-good set, so the router holds at most this many
+/// entries in the per-source sets plus as many again in the merged set.
+pub const MAX_TOTAL_DOMAINS: usize = 1_000_000;
+
+/// Max body size of one feed after decompression. Enforced while the body
+/// is streamed, so an oversized feed is never buffered whole.
+const MAX_FEED_BYTES: usize = 50 * 1024 * 1024;
+
+/// Timeout of one feed download, from connect to the last body byte.
+const FEED_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Well-known threat intelligence feed URL.
 const OISD_SMALL_URL: &str = "https://small.oisd.nl/domainswild";
@@ -168,7 +188,7 @@ impl Blocklist {
             if Path::new(path).exists() {
                 match tokio::fs::read_to_string(path).await {
                     Ok(content) => {
-                        let count = parse_domain_list(&content, &mut domains);
+                        let count = parse_domain_list(&content, &mut domains, MAX_DOMAINS_PER_FEED);
                         tracing::info!(count, path, "Loaded seed blocklist from file");
                     }
                     Err(e) => {
@@ -259,6 +279,7 @@ impl Blocklist {
     ) {
         let domains = Arc::clone(&self.domains);
         let interval = Duration::from_secs(refresh_secs.unwrap_or(DEFAULT_REFRESH_SECS));
+        let mut sources = RefreshSources::new(seed_path, &extra_feeds, FeedLimits::default());
 
         tokio::spawn(async move {
             // Short initial delay, then retry quickly if feeds fail on first attempt.
@@ -271,64 +292,25 @@ impl Blocklist {
             loop {
                 tracing::info!("Blocklist refresh: fetching upstream feeds");
 
-                let mut new_domains = HashSet::new();
+                let outcome = sources.refresh(&client, first_run).await;
 
-                // Re-load seed file (controller may have updated it via CronJob)
-                if let Some(ref path) = seed_path
-                    && let Ok(content) = tokio::fs::read_to_string(path).await
-                {
-                    let count = parse_domain_list(&content, &mut new_domains);
-                    tracing::info!(count, "Blocklist: reloaded seed file");
-                }
-
-                // Fetch OISD with retry on first run
-                let max_attempts = if first_run { 3 } else { 1 };
-                let mut oisd_ok = false;
-                for attempt in 1..=max_attempts {
-                    match fetch_feed(&client, OISD_SMALL_URL).await {
-                        Ok(content) => {
-                            let count = parse_domain_list(&content, &mut new_domains);
-                            tracing::info!(count, "Blocklist: loaded OISD feed");
-                            oisd_ok = true;
-                            break;
-                        }
-                        Err(e) => {
-                            if attempt < max_attempts {
-                                tracing::warn!(attempt, error = %e, "Blocklist: OISD fetch failed — retrying in 10s");
-                                tokio::time::sleep(Duration::from_secs(10)).await;
-                            } else {
-                                tracing::warn!(error = %e, "Blocklist: OISD fetch failed — keeping existing");
-                            }
-                        }
-                    }
-                }
-
-                // Opt-in feeds (BLOCKLIST_EXTRA_FEEDS), same timeout and size caps as OISD.
-                // A feed that fails is left out of this cycle's set.
-                for feed in &extra_feeds {
-                    match fetch_feed(&client, &feed.url).await {
-                        Ok(content) => {
-                            let count = parse_feed(feed.format, &content, &mut new_domains);
-                            tracing::info!(count, host = %feed.host, "Blocklist: loaded extra feed");
-                        }
-                        Err(e) => {
-                            tracing::warn!(host = %feed.host, error = %e, "Blocklist: extra feed fetch failed — skipped this cycle");
-                        }
-                    }
-                }
-
-                // Only replace if we actually got domains (don't wipe on network failure)
-                if !new_domains.is_empty() {
-                    let count = new_domains.len();
+                // Only replace if we have domains (don't wipe on network failure).
+                // Failed sources still contribute their last-known-good entries.
+                if !outcome.merged.is_empty() {
+                    let count = outcome.merged.len();
                     let mut lock = domains.write().await;
-                    *lock = new_domains;
-                    tracing::info!(count, "Blocklist refreshed — {count} domains blocked");
+                    *lock = outcome.merged;
+                    tracing::info!(
+                        count,
+                        failed_sources = outcome.failed,
+                        "Blocklist refreshed — {count} domains blocked"
+                    );
                 } else {
-                    tracing::warn!("Blocklist: all feeds failed, keeping previous entries");
+                    tracing::warn!("Blocklist: no source has loaded yet, keeping previous entries");
                 }
 
                 // On first run, if OISD failed, retry sooner (60s instead of 6h)
-                if first_run && !oisd_ok {
+                if first_run && !outcome.primary_ok {
                     tracing::info!("Blocklist: OISD failed on startup — retrying in 60s");
                     tokio::time::sleep(Duration::from_secs(60)).await;
                 } else {
@@ -495,10 +477,11 @@ impl BlockResult {
 }
 
 /// Parse a domain list (one domain per line, # comments, wildcards stripped).
-fn parse_domain_list(content: &str, dest: &mut HashSet<String>) -> usize {
+/// Stops once `dest` holds `limit` entries.
+fn parse_domain_list(content: &str, dest: &mut HashSet<String>, limit: usize) -> usize {
     let mut count = 0;
     for line in content.lines() {
-        if count >= MAX_DOMAINS_PER_FEED {
+        if dest.len() >= limit {
             break;
         }
         let line = line.trim();
@@ -516,19 +499,26 @@ fn parse_domain_list(content: &str, dest: &mut HashSet<String>) -> usize {
     count
 }
 
-/// Parse feed content in the given line format.
-fn parse_feed(format: FeedFormat, content: &str, dest: &mut HashSet<String>) -> usize {
+/// Parse feed content in the given line format. Stops once `dest` holds
+/// `limit` entries.
+fn parse_feed(
+    format: FeedFormat,
+    content: &str,
+    dest: &mut HashSet<String>,
+    limit: usize,
+) -> usize {
     match format {
-        FeedFormat::Hosts => parse_hostfile(content, dest),
-        FeedFormat::Domains => parse_domain_list(content, dest),
+        FeedFormat::Hosts => parse_hostfile(content, dest, limit),
+        FeedFormat::Domains => parse_domain_list(content, dest, limit),
     }
 }
 
 /// Parse hostfile format ("127.0.0.1 domain" or "0.0.0.0 domain").
-fn parse_hostfile(content: &str, dest: &mut HashSet<String>) -> usize {
+/// Stops once `dest` holds `limit` entries.
+fn parse_hostfile(content: &str, dest: &mut HashSet<String>, limit: usize) -> usize {
     let mut count = 0;
     for line in content.lines() {
-        if count >= MAX_DOMAINS_PER_FEED {
+        if dest.len() >= limit {
             break;
         }
         let line = line.trim();
@@ -548,30 +538,324 @@ fn parse_hostfile(content: &str, dest: &mut HashSet<String>) -> usize {
     count
 }
 
-/// Fetch a feed URL with timeout and size limits.
-async fn fetch_feed(client: &reqwest::Client, url: &str) -> anyhow::Result<String> {
-    let resp = client
+/// Why a feed could not be loaded. `Display` never includes the feed URL,
+/// which may carry a token in its query string: logs name a feed by host.
+#[derive(Debug)]
+enum FeedError {
+    /// Transport, timeout or body error, with the URL stripped.
+    Request(reqwest::Error),
+    /// The feed answered with a redirect. Redirects are never followed:
+    /// a feed must return its content directly from the configured URL.
+    Redirect(reqwest::StatusCode),
+    /// Any other non-success status.
+    Status(reqwest::StatusCode),
+    /// The body passed the byte cap (after decompression).
+    TooLarge(usize),
+    /// The seed file could not be read.
+    Seed(std::io::Error),
+}
+
+impl FeedError {
+    fn request(e: reqwest::Error) -> Self {
+        Self::Request(e.without_url())
+    }
+}
+
+impl std::fmt::Display for FeedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Request(e) => write!(f, "{e}"),
+            Self::Redirect(status) => write!(
+                f,
+                "HTTP {status}: redirects are not followed, configure the URL that serves the list"
+            ),
+            Self::Status(status) => write!(f, "HTTP {status}"),
+            Self::TooLarge(max) => write!(f, "feed exceeds the {max}-byte limit"),
+            Self::Seed(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// Fetch a feed with a timeout and a byte cap. The body is streamed and the
+/// cap is checked chunk by chunk, so an oversized feed is dropped without
+/// being buffered whole. A redirect is an error (the shared client does not
+/// follow redirects, and a feed that moves must be reconfigured).
+async fn fetch_feed(
+    client: &reqwest::Client,
+    url: &str,
+    max_bytes: usize,
+) -> Result<String, FeedError> {
+    let mut resp = client
         .get(url)
-        .timeout(Duration::from_secs(60))
+        .timeout(FEED_TIMEOUT)
         .header("user-agent", "kars-Blocklist/1.0")
         .send()
-        .await?;
+        .await
+        .map_err(FeedError::request)?;
 
-    // Feed URLs are https; refuse a redirect to plain http.
-    if resp.url().scheme() != "https" {
-        anyhow::bail!("redirected to a non-https URL");
+    let status = resp.status();
+    // A client that followed redirects would end on another URL: refuse that
+    // too, so the rule does not depend on how the shared client is built.
+    let moved = reqwest::Url::parse(url).map_or(true, |u| u != *resp.url());
+    if status.is_redirection() || moved {
+        return Err(FeedError::Redirect(status));
+    }
+    if !status.is_success() {
+        return Err(FeedError::Status(status));
+    }
+    if let Some(len) = resp.content_length()
+        && len > max_bytes as u64
+    {
+        return Err(FeedError::TooLarge(max_bytes));
     }
 
-    if !resp.status().is_success() {
-        anyhow::bail!("HTTP {}", resp.status());
+    let mut body: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(FeedError::request)? {
+        if body.len() + chunk.len() > max_bytes {
+            return Err(FeedError::TooLarge(max_bytes));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8_lossy(&body).into_owned())
+}
+
+/// Size limits of the refresh loop. Tests use small values.
+#[derive(Debug, Clone, Copy)]
+struct FeedLimits {
+    /// Max domains kept from one source.
+    per_source: usize,
+    /// Max domains kept from all sources together.
+    total: usize,
+    /// Max body size of one feed.
+    max_bytes: usize,
+}
+
+impl Default for FeedLimits {
+    fn default() -> Self {
+        Self {
+            per_source: MAX_DOMAINS_PER_FEED,
+            total: MAX_TOTAL_DOMAINS,
+            max_bytes: MAX_FEED_BYTES,
+        }
+    }
+}
+
+/// Where a source comes from.
+enum SourceKind {
+    /// The seed file (domain list), re-read every cycle.
+    Seed(String),
+    /// A feed URL. `primary` marks OISD: retried on the first run, and its
+    /// failure triggers the quick startup retry.
+    Feed {
+        url: String,
+        format: FeedFormat,
+        primary: bool,
+    },
+}
+
+/// One source of the refresh loop with its last-known-good entries.
+struct Source {
+    /// Name for logs ("seed", "OISD" or the feed host), never the URL.
+    name: String,
+    kind: SourceKind,
+    /// Entries of the last successful load, kept while later loads fail.
+    last_good: Option<HashSet<String>>,
+}
+
+impl Source {
+    fn len(&self) -> usize {
+        self.last_good.as_ref().map_or(0, HashSet::len)
+    }
+}
+
+/// Result of one refresh cycle.
+struct RefreshOutcome {
+    /// Union of every source's current or last-known-good entries.
+    merged: HashSet<String>,
+    /// Number of sources that failed this cycle.
+    failed: usize,
+    /// Whether every primary source (OISD) loaded this cycle.
+    primary_ok: bool,
+}
+
+/// All sources of the refresh loop: the seed file, OISD, then the extra
+/// feeds in their configured order.
+struct RefreshSources {
+    sources: Vec<Source>,
+    limits: FeedLimits,
+}
+
+impl RefreshSources {
+    fn new(seed_path: Option<String>, extra_feeds: &[ExtraFeed], limits: FeedLimits) -> Self {
+        let mut sources = Vec::new();
+        if let Some(path) = seed_path {
+            sources.push(Source {
+                name: "seed".into(),
+                kind: SourceKind::Seed(path),
+                last_good: None,
+            });
+        }
+        sources.push(Source {
+            name: "OISD".into(),
+            kind: SourceKind::Feed {
+                url: OISD_SMALL_URL.into(),
+                format: FeedFormat::Domains,
+                primary: true,
+            },
+            last_good: None,
+        });
+        Self::with_sources(sources, extra_feeds, limits)
     }
 
-    // Limit to 50MB to prevent memory exhaustion
-    let bytes = resp.bytes().await?;
-    if bytes.len() > 50 * 1024 * 1024 {
-        anyhow::bail!("Feed exceeds 50MB limit");
+    fn with_sources(
+        mut sources: Vec<Source>,
+        extra_feeds: &[ExtraFeed],
+        limits: FeedLimits,
+    ) -> Self {
+        for feed in extra_feeds {
+            sources.push(Source {
+                name: feed.host.clone(),
+                kind: SourceKind::Feed {
+                    url: feed.url.clone(),
+                    format: feed.format,
+                    primary: false,
+                },
+                last_good: None,
+            });
+        }
+        Self { sources, limits }
     }
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
+
+    /// Load every source once. A source that loads replaces its entries;
+    /// one that fails keeps the entries of its last successful load.
+    async fn refresh(&mut self, client: &reqwest::Client, first_run: bool) -> RefreshOutcome {
+        let mut failed = 0;
+        let mut primary_ok = true;
+
+        for i in 0..self.sources.len() {
+            // A source gets the per-source cap, or what the others leave of
+            // the total budget, whichever is smaller.
+            let others: usize = self
+                .sources
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .map(|(_, s)| s.len())
+                .sum();
+            let limit = self
+                .limits
+                .per_source
+                .min(self.limits.total.saturating_sub(others));
+            let limits = self.limits;
+            let source = &mut self.sources[i];
+            let is_primary = matches!(source.kind, SourceKind::Feed { primary: true, .. });
+
+            match load_source(
+                client,
+                &source.kind,
+                &source.name,
+                first_run,
+                limits.max_bytes,
+            )
+            .await
+            {
+                Ok((format, content)) => {
+                    let mut set = HashSet::new();
+                    parse_feed(format, &content, &mut set, limit);
+                    let count = set.len();
+                    if count >= limit {
+                        if limit < limits.per_source {
+                            tracing::warn!(
+                                source = %source.name,
+                                limit,
+                                total = limits.total,
+                                "Blocklist: aggregate domain budget reached, source truncated"
+                            );
+                        } else {
+                            tracing::warn!(
+                                source = %source.name,
+                                limit,
+                                "Blocklist: per-source domain cap reached, source truncated"
+                            );
+                        }
+                    }
+                    tracing::info!(count, source = %source.name, "Blocklist: source loaded");
+                    source.last_good = Some(set);
+                }
+                // No seed file (e.g. overlay mode): nothing to load, not a failure.
+                Err(FeedError::Seed(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                    tracing::debug!(source = %source.name, "Blocklist: no seed file, skipped");
+                }
+                Err(e) => {
+                    failed += 1;
+                    if is_primary {
+                        primary_ok = false;
+                    }
+                    match &source.last_good {
+                        Some(set) => tracing::warn!(
+                            source = %source.name,
+                            error = %e,
+                            kept = set.len(),
+                            "Blocklist: source failed, keeping the entries of its last successful load"
+                        ),
+                        None => tracing::warn!(
+                            source = %source.name,
+                            error = %e,
+                            "Blocklist: source failed and has never loaded, it adds no entries until it does"
+                        ),
+                    }
+                }
+            }
+        }
+
+        let total: usize = self.sources.iter().map(Source::len).sum();
+        let mut merged = HashSet::with_capacity(total);
+        for source in &self.sources {
+            if let Some(set) = &source.last_good {
+                merged.extend(set.iter().cloned());
+            }
+        }
+        RefreshOutcome {
+            merged,
+            failed,
+            primary_ok,
+        }
+    }
+}
+
+/// Read one source. OISD gets 3 attempts on the first run (startup DNS).
+async fn load_source(
+    client: &reqwest::Client,
+    kind: &SourceKind,
+    name: &str,
+    first_run: bool,
+    max_bytes: usize,
+) -> Result<(FeedFormat, String), FeedError> {
+    match kind {
+        SourceKind::Seed(path) => tokio::fs::read_to_string(path)
+            .await
+            .map(|content| (FeedFormat::Domains, content))
+            .map_err(FeedError::Seed),
+        SourceKind::Feed {
+            url,
+            format,
+            primary,
+        } => {
+            let max_attempts = if first_run && *primary { 3 } else { 1 };
+            let mut attempt = 1;
+            loop {
+                match fetch_feed(client, url, max_bytes).await {
+                    Ok(content) => return Ok((*format, content)),
+                    Err(e) if attempt < max_attempts => {
+                        tracing::warn!(source = %name, attempt, error = %e, "Blocklist: fetch failed — retrying in 10s");
+                        tokio::time::sleep(Duration::from_secs(10)).await;
+                        attempt += 1;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+    }
 }
 
 /// Extract domain from a URL, host:port, or bare domain.
@@ -642,7 +926,7 @@ mod tests {
     fn test_parse_domain_list() {
         let input = "# comment\n*.evil.com\ngood.com\n!adblock-rule\nbad.tk\n";
         let mut set = HashSet::new();
-        let count = parse_domain_list(input, &mut set);
+        let count = parse_domain_list(input, &mut set, MAX_DOMAINS_PER_FEED);
         assert_eq!(count, 3);
         assert!(set.contains("evil.com"));
         assert!(set.contains("good.com"));
@@ -653,7 +937,7 @@ mod tests {
     fn test_parse_hostfile() {
         let input = "# URLhaus\n127.0.0.1\tmalware.com\n0.0.0.0 phish.net\n";
         let mut set = HashSet::new();
-        let count = parse_hostfile(input, &mut set);
+        let count = parse_hostfile(input, &mut set, MAX_DOMAINS_PER_FEED);
         assert_eq!(count, 2);
         assert!(set.contains("malware.com"));
         assert!(set.contains("phish.net"));
@@ -720,17 +1004,17 @@ mod tests {
     fn test_parse_feed_by_format() {
         let mut set = HashSet::new();
         assert_eq!(
-            parse_feed(FeedFormat::Hosts, "0.0.0.0 evil.example\n", &mut set),
+            parse_feed(FeedFormat::Hosts, "0.0.0.0 evil.example\n", &mut set, 10),
             1
         );
         assert_eq!(
-            parse_feed(FeedFormat::Domains, "*.bad.example\n", &mut set),
+            parse_feed(FeedFormat::Domains, "*.bad.example\n", &mut set, 10),
             1
         );
         assert!(set.contains("evil.example") && set.contains("bad.example"));
         // A plain domain line is not a hostfile line.
         assert_eq!(
-            parse_feed(FeedFormat::Hosts, "other.example\n", &mut set),
+            parse_feed(FeedFormat::Hosts, "other.example\n", &mut set, 10),
             0
         );
     }
@@ -762,6 +1046,217 @@ mod tests {
         assert!(bl.is_blocked("192.168.1.1").await.is_blocked());
         assert!(bl.is_blocked("http://10.0.0.1/steal").await.is_blocked());
         assert!(!bl.is_blocked("api.microsoft.com").await.is_blocked());
+    }
+
+    /// Client like the router's: never follows redirects.
+    fn test_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("client")
+    }
+
+    fn feed(format: FeedFormat, url: String) -> ExtraFeed {
+        let host = reqwest::Url::parse(&url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string))
+            .unwrap_or_default();
+        ExtraFeed { format, url, host }
+    }
+
+    /// Sources made of the given feeds only (no seed, no OISD).
+    fn feeds_only(feeds: &[ExtraFeed], limits: FeedLimits) -> RefreshSources {
+        RefreshSources::with_sources(Vec::new(), feeds, limits)
+    }
+
+    #[tokio::test]
+    async fn test_fetch_error_does_not_log_secret_query() {
+        // A port with nothing listening: the request fails in transport, the
+        // error type that carries the URL.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let url = format!("http://127.0.0.1:{port}/list?token=s3cr3t-value");
+
+        let err = fetch_feed(&test_client(), &url, 1024).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(matches!(err, FeedError::Request(_)), "{msg}");
+        assert!(!msg.contains("s3cr3t-value"), "{msg}");
+        assert!(!msg.contains("token="), "{msg}");
+        assert!(!format!("{err:?}").contains("s3cr3t-value"));
+
+        // HTTP error statuses carry no URL either.
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        let url = format!("{}/list?token=s3cr3t-value", server.uri());
+        let err = fetch_feed(&test_client(), &url, 1024).await.unwrap_err();
+        assert_eq!(err.to_string(), "HTTP 503 Service Unavailable");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_refuses_redirects() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::path("/moved"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(301)
+                    .insert_header("location", "https://elsewhere.example/list"),
+            )
+            .mount(&server)
+            .await;
+        let err = fetch_feed(&test_client(), &format!("{}/moved", server.uri()), 1024)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FeedError::Redirect(_)), "{err}");
+        assert!(err.to_string().contains("redirects are not followed"));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_caps_declared_length() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::path("/big"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string("x".repeat(2048)))
+            .mount(&server)
+            .await;
+        let url = format!("{}/big", server.uri());
+        let err = fetch_feed(&test_client(), &url, 1024).await.unwrap_err();
+        assert!(matches!(err, FeedError::TooLarge(1024)), "{err}");
+        // The same feed under the cap loads.
+        assert_eq!(
+            fetch_feed(&test_client(), &url, 4096).await.unwrap().len(),
+            2048
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fetch_caps_streamed_body_without_length() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // Chunked answer with no Content-Length: the cap must hold while streaming.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let mut resp = String::from("HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n");
+            for _ in 0..8 {
+                resp.push_str(&format!("200\r\n{}\r\n", "y".repeat(0x200)));
+            }
+            resp.push_str("0\r\n\r\n");
+            let _ = sock.write_all(resp.as_bytes()).await;
+        });
+        let err = fetch_feed(&test_client(), &format!("http://{addr}/stream"), 1024)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FeedError::TooLarge(1024)), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_refresh_keeps_last_good_entries_of_a_failed_feed() {
+        let server = wiremock::MockServer::start().await;
+        let mount = |p: &'static str, status: u16, body: &'static str| {
+            wiremock::Mock::given(wiremock::matchers::path(p))
+                .respond_with(wiremock::ResponseTemplate::new(status).set_body_string(body))
+        };
+        mount("/a", 200, "0.0.0.0 a1.example\n0.0.0.0 a2.example\n")
+            .mount(&server)
+            .await;
+        mount("/b", 200, "b1.example\n").mount(&server).await;
+        let feeds = [
+            feed(FeedFormat::Hosts, format!("{}/a", server.uri())),
+            feed(FeedFormat::Domains, format!("{}/b", server.uri())),
+        ];
+        let mut sources = feeds_only(&feeds, FeedLimits::default());
+        let client = test_client();
+
+        let first = sources.refresh(&client, false).await;
+        assert_eq!(first.failed, 0);
+        assert_eq!(first.merged.len(), 3);
+
+        // Feed a changes, feed b fails: b keeps its last-known-good entry.
+        server.reset().await;
+        mount("/a", 200, "0.0.0.0 a3.example\n")
+            .mount(&server)
+            .await;
+        mount("/b", 500, "").mount(&server).await;
+        let second = sources.refresh(&client, false).await;
+        assert_eq!(second.failed, 1);
+        let mut got: Vec<_> = second.merged.into_iter().collect();
+        got.sort();
+        assert_eq!(got, ["a3.example", "b1.example"]);
+
+        // A feed that never loaded adds nothing and does not block the others.
+        let never = [
+            feed(FeedFormat::Hosts, format!("{}/a", server.uri())),
+            feed(FeedFormat::Domains, format!("{}/missing", server.uri())),
+        ];
+        let mut sources = feeds_only(&never, FeedLimits::default());
+        let outcome = sources.refresh(&client, false).await;
+        assert_eq!(outcome.failed, 1);
+        assert_eq!(outcome.merged.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_refresh_missing_seed_file_is_not_a_failure() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::path("/a"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string("a1.example\n"))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let seed = Source {
+            name: "seed".into(),
+            kind: SourceKind::Seed(dir.path().join("missing.txt").display().to_string()),
+            last_good: None,
+        };
+        let feeds = [feed(FeedFormat::Domains, format!("{}/a", server.uri()))];
+        let mut sources = RefreshSources::with_sources(vec![seed], &feeds, FeedLimits::default());
+
+        let outcome = sources.refresh(&test_client(), false).await;
+        assert_eq!(outcome.failed, 0);
+        assert_eq!(outcome.merged.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_refresh_enforces_aggregate_budget() {
+        let server = wiremock::MockServer::start().await;
+        for (p, body) in [
+            ("/a", "a1.example\na2.example\na3.example\na4.example\n"),
+            ("/b", "b1.example\nb2.example\nb3.example\n"),
+            ("/c", "c1.example\n"),
+        ] {
+            wiremock::Mock::given(wiremock::matchers::path(p))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(body))
+                .mount(&server)
+                .await;
+        }
+        let feeds = [
+            feed(FeedFormat::Domains, format!("{}/a", server.uri())),
+            feed(FeedFormat::Domains, format!("{}/b", server.uri())),
+            feed(FeedFormat::Domains, format!("{}/c", server.uri())),
+        ];
+        let limits = FeedLimits {
+            per_source: 3,
+            total: 5,
+            max_bytes: 1024,
+        };
+        let mut sources = feeds_only(&feeds, limits);
+        let client = test_client();
+
+        // a: 3 of 4 (per-source cap), b: 2 of 3 (budget left), c: nothing left.
+        let outcome = sources.refresh(&client, false).await;
+        assert_eq!(outcome.merged.len(), 5);
+        let held: usize = sources.sources.iter().map(Source::len).sum();
+        assert_eq!(held, 5);
+        assert_eq!(sources.sources[2].len(), 0);
+
+        // The budget holds on every later cycle too.
+        let outcome = sources.refresh(&client, false).await;
+        assert_eq!(outcome.merged.len(), 5);
+        let held: usize = sources.sources.iter().map(Source::len).sum();
+        assert!(held <= limits.total);
     }
 
     #[tokio::test]

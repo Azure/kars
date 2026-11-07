@@ -333,7 +333,9 @@ The blocklist engine combines multiple layers of threat intelligence:
 Key properties:
 - Stored in `Arc<RwLock<HashSet<String>>>` — lock-free reads, rare write locks
 - Parent domain matching: blocking `example.com` also blocks `sub.example.com`
-- Max 500,000 domains per feed (memory safety limit)
+- Max 500,000 domains per source (seed file, OISD, each extra feed) and 1,000,000 across
+  all sources (memory safety limits). A source that would pass the total gets only the
+  space the others leave, and the router logs the truncation.
 - **Always enforced**, even when learn mode is on
 
 ### Auto-Refresh
@@ -346,7 +348,10 @@ The blocklist stays current through multiple refresh mechanisms:
 | K8s CronJob | Every 6 hours | Updates the ConfigMap mounted at `/etc/kars/blocklist/domains.txt` |
 | GitHub Actions CI | Daily | Refreshes the seed file in the repository (≤ 24h old) |
 
-**Safe refresh:** If all upstream feeds fail, the previous entries are preserved — no wipe-on-failure. The router logs a warning and retries on the next cycle.
+**Safe refresh:** Each source keeps the entries of its last successful load. When OISD or an
+extra feed fails, the router keeps that source's previous entries until it loads again and
+logs a warning naming the source, so a partial outage does not weaken coverage. A feed that
+has never loaded adds nothing until it does (also logged). No wipe-on-failure.
 
 ### Opt-in Feeds
 
@@ -363,15 +368,19 @@ controller:
       value: "domains:https://hole.cert.pl/domains/v2/domains.txt"
 ```
 
-- `https` URLs only, without credentials in the URL. A redirect to plain `http` is refused.
-  Invalid entries are skipped with a warning in the router log, which names the entry by
-  its position, not by its URL.
-- At most 8 extra feeds. Each one has the same caps as OISD: 60 s timeout, 50 MB,
-  500,000 domains.
+- `https` URLs only, without credentials in the URL. Invalid entries are skipped with a
+  warning in the router log, which names the entry by its position, not by its URL.
+- A feed must answer `200` from the configured URL. Redirects are not followed (the
+  router's HTTP client never follows them), so configure the URL that serves the list.
+- Fetch errors are logged with the feed host only, never the URL or its query string, so
+  a token in the query stays out of the logs.
+- At most 8 extra feeds. Each one has the same caps as OISD: 60 s timeout, 50 MB body
+  (checked while the body streams in, after decompression), 500,000 domains, within the
+  1,000,000-domain total.
 - Loaded by the router only. The CronJob and the seed file stay OISD-only, since the
   ConfigMap is capped at 1 MiB.
 - A listed domain is a hard deny like any other blocklist entry, so add only feeds you
-  trust. A feed that fails to load is left out until the next refresh.
+  trust.
 
 Examples of public feeds:
 
