@@ -23,6 +23,29 @@ def pods(h, namespace):
     return json.loads(h.k("get", "pods", "-n", namespace, "-o", "json"))["items"]
 
 
+def assert_control_cache(h, pod, epoch, expected):
+    name, uid = pod["metadata"]["name"], pod["metadata"]["uid"]
+
+    def cache_ready():
+        current = h.get("pod", name, CONTROL_NS)
+        require(current is not None and current["metadata"]["uid"] == uid
+                and not current["metadata"].get("deletionTimestamp"),
+                "Control consumer identity changed before cache verification")
+        require(current["metadata"].get("annotations", {}).get(EPOCH) == epoch,
+                "Control consumer privacy epoch changed before cache verification")
+        return any(container.get("name") == "credential-consumer"
+                   and container.get("ready") is True
+                   and container.get("state", {}).get("running") is not None
+                   for container in current.get("status", {}).get("containerStatuses", []))
+
+    # Authority Ready fences old caches; it cannot wait for workload readiness,
+    # because the router's readiness itself depends on the completed authority.
+    h.poll("rotated control consumer cache readiness", cache_ready, seconds=120)
+    cached = h.k("exec", "-n", CONTROL_NS, name, "-c", "credential-consumer",
+                 "--", "cat", "/proof/cached.sha", timeout=25).split()
+    require(cached and cached[0] == expected, "Restarted control consumer did not cache the rotated token")
+
+
 def snapshot_grants(h, spec):
     return {binding["name"]: h.get(binding["kind"].lower(), binding["name"], binding.get("namespace"))
             for binding in spec["legacyBindings"]}
@@ -182,9 +205,7 @@ def legacy_migration(h):
     for pod in current_pods:
         require(pod["metadata"].get("annotations", {}).get(EPOCH) == reg["status"]["privacyEpoch"],
                 "Control consumer lacks the new privacy epoch")
-        cached = h.k("exec", "-n", CONTROL_NS, pod["metadata"]["name"], "-c", "credential-consumer",
-                     "--", "cat", "/proof/cached.sha", timeout=25).split()[0]
-        require(cached == expected, "Restarted control consumer did not cache the rotated token")
+        assert_control_cache(h, pod, reg["status"]["privacyEpoch"], expected)
     h.passed("Owned router-services-admin token rotates and every cached old consumer is gone before Ready")
     h.cli("install", timeout=240)
     rollback_guard(h)

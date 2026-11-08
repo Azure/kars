@@ -262,6 +262,14 @@ Legacy-consumer retirement preserves that manager only when the Deployment is
 already controller-owned; a UID/resourceVersion review does not confer ownership.
 The UID/resourceVersion fences remain on every Deployment write.
 
+Kind E2E verifies old-consumer termination and the new privacy epoch before
+checking the replacement consumer's startup-cached token. Authority `Ready`
+does not imply workload availability: after that security check, the harness
+waits for the same Pod UID and epoch's `credential-consumer` readiness probe,
+which requires a nonempty cache file. It then compares the cached digest with
+the rotated Secret. A changed identity/epoch, missing cache, failed command or
+wrong digest still fails acceptance; readiness does not replace token proof.
+
 On Kind E2E failure, retained logs include `SRE-CONTROL-CONSUMER` records for
 `kars-e2e-control-rotation/e2e-control-rotation` and `kars-sre/sre` before cleanup.
 These explicitly request managedFields and project UID/resourceVersion,

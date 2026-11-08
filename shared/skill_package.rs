@@ -41,9 +41,16 @@ pub fn valid_path(path: &str) -> bool {
 }
 
 pub fn validate_manifest(paths: &[String]) -> Result<(), String> {
+    validate_manifest_paths(paths.iter().map(|path| Ok(path.as_str())))
+}
+
+fn validate_manifest_paths<'a>(
+    paths: impl Iterator<Item = Result<&'a str, String>> + Clone,
+) -> Result<(), String> {
     let mut seen = BTreeSet::new();
-    for path in paths {
-        if !valid_path(path) || !seen.insert(path.as_str()) {
+    for path in paths.clone() {
+        let path = path?;
+        if !valid_path(path) || !seen.insert(path) {
             return Err(format!("Invalid or duplicate skill file path '{path}'"));
         }
     }
@@ -51,6 +58,7 @@ pub fn validate_manifest(paths: &[String]) -> Result<(), String> {
         return Err("A skill package must contain SKILL.md".into());
     }
     for path in paths {
+        let path = path?;
         for (index, _) in path.match_indices('/') {
             if seen.contains(&path[..index]) {
                 return Err(format!("Skill file '{path}' conflicts with a parent file"));
@@ -157,9 +165,13 @@ pub fn validate_spec(spec: &Value) -> Result<(), String> {
         }
     }
     if spec.get("package").and_then(Value::as_bool) == Some(true) {
-        let paths: Vec<String> = serde_json::from_value(spec["files"].clone())
-            .map_err(|_| "Skill files must be an array of relative paths")?;
-        validate_manifest(&paths)?;
+        let paths = spec["files"]
+            .as_array()
+            .ok_or("Skill files must be an array of relative paths")?;
+        validate_manifest_paths(paths.iter().map(|path| {
+            path.as_str()
+                .ok_or_else(|| "Skill files must be an array of relative paths".into())
+        }))?;
         let digest = spec["packageDigest"]
             .as_str()
             .ok_or("Skill packageDigest is missing")?;
@@ -424,6 +436,33 @@ mod tests {
             )]))
             .is_err()
         );
+    }
+
+    #[test]
+    fn decoded_manifest_validates_borrowed_paths_and_rejects_invalid_shapes() {
+        for (files, valid) in [
+            (json!(["SKILL.md", "references/checklist.md"]), true),
+            (json!(["SKILL.md", "a".repeat(253)]), true),
+            (json!(["SKILL.md", "a".repeat(254)]), false),
+            (json!(["SKILL.md", "../secret"]), false),
+            (json!(["SKILL.md", "SKILL.md"]), false),
+            (json!(["SKILL.md", "refs", "refs/check.md"]), false),
+            (json!(["SKILL.md", null]), false),
+            (json!(["SKILL.md", {"path": "other.md"}]), false),
+            (json!(["SKILL.md", 1]), false),
+            (json!(["other.md"]), false),
+            (json!([]), false),
+            (json!("SKILL.md"), false),
+            (json!(null), false),
+        ] {
+            let spec = json!({
+                "summary": "Review documents", "version": "1", "boundingPolicy": "read-only",
+                "package": true, "files": files, "packageDigest": format!("sha256:{}", "a".repeat(64))
+            });
+            let before = spec.clone();
+            assert_eq!(validate_spec(&spec).is_ok(), valid, "{files}");
+            assert_eq!(spec, before);
+        }
     }
 
     #[test]

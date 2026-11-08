@@ -1025,6 +1025,13 @@ Task-status transition. Current Task authorization, the revalidated grant/input
 generation, fresh refill, consumed Deployment revision and old-Pod retirement
 are still required. If Task authorization was observed withdrawn, a fresh
 Ready attestation is required; the captured digest is never substituted for it.
+When Task authority has not yet recovered, the controller can apply the refilled
+projection template at zero replicas before restoring the captured replica
+intent in a separate write. Apply recognizes both this sequence and the combined
+template/replica restore. For an initially running runtime these mean exactly
+three or two Deployment spec-generation increments, respectively, including the
+initial pause. The intermediate refilled pause cannot complete settlement;
+unrelated template changes, extra generations and missing witnesses still fail.
 The projection recheck aligns kubectl JSON and JSONPath views only for
 `managedFields` absent from the captured JSON view. Originally captured
 `managedFields` and all other metadata remain compared; this does not grant

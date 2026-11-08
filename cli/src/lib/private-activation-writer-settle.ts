@@ -103,12 +103,21 @@ function bodySpec(deployment: ObjectValue, replicas: number, revision: string): 
   }
   return result;
 }
+function transitionGenerations(before: ObjectValue, replicas: number, changedRevision: boolean): number[] {
+  const initial = replicaIntent(before);
+  const base = gen(before);
+  if (replicas === 0) return [base + Number(initial !== 0) + Number(changedRevision)];
+  // Task authority may keep the refilled template at zero replicas. Its later
+  // resume is a separate spec write, unlike a combined template/replica restore.
+  return changedRevision ? [base + 2, base + 3] : [base, base + 2];
+}
 function possibleTransition(current: ObjectValue, runtime: RuntimeReview): boolean {
   const before = runtime.captured.deployment;
   const revision = at(template(current), "metadata", "annotations", PROJECTION);
+  const changedRevision = revision !== at(template(before), "metadata", "annotations", PROJECTION);
   if (typeof revision !== "string" || !revision.startsWith(`${reviewed(runtime.projection).uid}:`)
     || revision.endsWith(":") || ![0, replicaIntent(before)].includes(replicaIntent(current))
-    || gen(current) < gen(before) || gen(current) > gen(before) + 2) return false;
+    || !transitionGenerations(before, replicaIntent(current), changedRevision).includes(gen(current))) return false;
   const expected = bodySpec(before, replicaIntent(current), revision);
   if (sameBody(current, expected, true, true)) return true;
   record(at(expected, "metadata", "annotations"))[REVISION] = at(before, "metadata", "annotations", REVISION)!;
@@ -342,18 +351,23 @@ export async function observeWriterSettlement(
         .includes(reviewed(projection).resourceVersion)))) {
       throw new Error("Projection revision advanced without witnessed fresh revoke/refill; exact review preserved");
     }
-    const restoredGeneration = gen(before.deployment) + (initialReplicas ? 2 : Number(changedRevision));
-    if (!unchanged && !isPause && (!restoringShape || !runtime.pauseSeen || gen(deployment) !== restoredGeneration)) {
+    const refilledPause = bodySpec(before.deployment, 0, revision);
+    const awaitingPausedRevision = structuredClone(refilledPause);
+    record(at(awaitingPausedRevision, "metadata", "annotations"))[REVISION] = at(before.deployment, "metadata", "annotations", REVISION)!;
+    const refillingShape = changedRevision && (sameBody(deployment, refilledPause, true, true)
+      || sameBody(deployment, awaitingPausedRevision, true, true));
+    const generationMatches = transitionGenerations(before.deployment, replicas, changedRevision).includes(gen(deployment));
+    if (!unchanged && !isPause && (!(restoringShape || refillingShape) || !runtime.pauseSeen || !generationMatches)) {
       reportTransition(deployment, restored, runtime, {
         unchanged, paused: isPause, projectionSame, restoring: restoringShape,
-        generationMatches: gen(deployment) === restoredGeneration,
+        generationMatches,
       });
       throw new Error("Unreviewed template or controller pause/restore generation changed");
     }
-    if (unchanged && gen(deployment) !== gen(before.deployment) && (!runtime.pauseSeen || gen(deployment) !== restoredGeneration)) {
+    if (unchanged && gen(deployment) !== gen(before.deployment) && (!runtime.pauseSeen || !generationMatches)) {
       reportTransition(deployment, restored, runtime, {
         unchanged, paused: isPause, projectionSame, restoring: restoringShape,
-        generationMatches: gen(deployment) === restoredGeneration,
+        generationMatches,
       });
       throw new Error(ERROR);
     }

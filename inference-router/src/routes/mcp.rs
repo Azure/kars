@@ -337,6 +337,9 @@ async fn post_mcp(
 /// request body for log emission. Returns `(None, None)` on parse
 /// failure — logging must never fail the request.
 fn peek_request_method_and_tool(body: &[u8]) -> (Option<String>, Option<String>) {
+    if body.len() > crate::mcp::streamable_http::MAX_FRAME_BYTES {
+        return (None, None);
+    }
     let v: serde_json::Value = match serde_json::from_slice(body) {
         Ok(v) => v,
         Err(_) => return (None, None),
@@ -521,6 +524,19 @@ mod tests {
         assert_eq!(v["jsonrpc"], "2.0");
         assert_eq!(v["id"], 1);
         assert!(v["result"]["protocolVersion"].is_string());
+    }
+
+    #[test]
+    fn request_log_peek_obeys_frame_bound_before_parsing() {
+        let mut body =
+            br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#.to_vec();
+        body.resize(MAX_FRAME_BYTES, b' ');
+        assert_eq!(
+            peek_request_method_and_tool(&body),
+            (Some("tools/call".into()), Some("echo".into()))
+        );
+        body.push(b' ');
+        assert_eq!(peek_request_method_and_tool(&body), (None, None));
     }
 
     #[tokio::test]
