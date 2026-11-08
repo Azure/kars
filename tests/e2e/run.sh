@@ -219,19 +219,23 @@ install_crds() {
         --set sandbox.image.tag=dev \
         "${extra_set_args[@]}" \
         "$helm_wait_arg" --timeout 5m; then
-        warn "Helm install did not converge within 5m — dumping diagnostics"
-        PYTHONPATH="$ROOT_DIR/tests/e2e" python3 -m sre_authority.bootstrap_probe --diagnostics-only \
-            || warn "Bounded controller admission diagnostics were incomplete"
-        kubectl get all -n kars-system || true
+        warn "Helm install did not converge within 5m — diagnostics run before teardown"
         return 1
     fi
 }
 
 teardown() {
+    local result=$?
+    if [ "$result" -ne 0 ]; then
+        PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$ROOT_DIR/tests/e2e" \
+            python3 -m sre_authority.bootstrap_probe --diagnostics-only \
+            || warn "Bounded pre-cleanup controller admission diagnostics were incomplete"
+    fi
     sre_authority_cleanup || true
     info "Tearing down Kind cluster"
     kind delete cluster --name "$CLUSTER_NAME" 2>/dev/null || true
     rm -f "$E2E_KUBECONFIG"
+    return "$result"
 }
 
 # ─── Tests ────────────────────────────────────────────────────────────────────

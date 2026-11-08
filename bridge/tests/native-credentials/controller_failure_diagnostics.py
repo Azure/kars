@@ -11,6 +11,15 @@ from observation_diagnostics import READ_ERRORS, recheck_actor, resolve_actor
 from rollout_diagnostics import bounded_integer, container_state
 
 UNAVAILABLE = "Controller process diagnostic unavailable"
+GRANT_STAGE_TARGET = "kars_controller::credential_grants"
+GRANT_STAGE_MESSAGE = "Credential grant lifecycle stage"
+GRANT_STAGES = frozenset({
+    "parent", "validation", "writer-authority", "observer-issuance",
+    "observer-revocation", "control", "publication", "writer-reconcile",
+    "writer-rbac-apply", "writer-rbac-revoke", "writer-observer-revoke",
+    "writer-release", "observer-tls-ensure", "observer-ensure",
+    "observer-retire", "observer-tls-retire",
+})
 LEADER_ERRORS = {
     "renewal deadline exceeded": "renewal-deadline",
     "lease GET deadline exceeded": "read-deadline",
@@ -25,7 +34,8 @@ LEADER_ERRORS = {
 def project(raw, sources):
     require(isinstance(raw, str) and len(raw.encode()) <= 131072, UNAVAILABLE)
     result = {"coverage": "bounded-process-log-tail", "errorRecords": 0,
-              "panicLocations": [], "leaderFailures": [], "fatalRuntimeFailures": []}
+              "panicLocations": [], "leaderFailures": [], "fatalRuntimeFailures": [],
+              "grantStages": [], "grantStageInterpretation": "concurrent-work-precludes-crash-causation"}
     for line in raw.splitlines()[-512:]:
         # Rust's fatal runtime path is not a panic. Keep only fixed signatures,
         # never the thread name or arbitrary text adjacent to a runtime error.
@@ -42,6 +52,17 @@ def project(raw, sources):
             value = json.loads(line)
         except ValueError:
             continue
+        # Only fixed progress survives projection. An unfinished stage can be
+        # concurrent with the crashing worker; it is not a stack-frame diagnosis.
+        if (isinstance(value, dict) and value.get("level") == "INFO"
+                and value.get("target") == GRANT_STAGE_TARGET):
+            fields = value.get("fields")
+            if isinstance(fields, dict) and fields.get("message") == GRANT_STAGE_MESSAGE:
+                stage, phase = fields.get("stage"), fields.get("phase")
+                if (isinstance(stage, str) and stage in GRANT_STAGES and isinstance(phase, str)
+                        and (phase in ("before", "returned") or (stage == "parent" and phase == "entered"))):
+                    result["grantStages"].append({"stage": stage, "phase": phase})
+                    del result["grantStages"][:-32]
         if isinstance(value, dict) and value.get("level") == "ERROR":
             target = value.get("target")
             if isinstance(target, str) and (target == "kars_controller" or target.startswith("kars_controller::")):

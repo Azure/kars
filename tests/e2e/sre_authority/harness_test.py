@@ -342,6 +342,36 @@ class HarnessTests(unittest.TestCase):
             detail = f"SRE admission policy {name} is not observed, type-checked, and enforced; no privilege may be issued"
             self.assertEqual(authority_failure_site(root, detail), {"category": "unclassified"})
 
+    def test_blocked_authority_diagnostics_cover_shared_issuance_and_retirement_errors(self):
+        root = Path(__file__).resolve().parents[3]
+        cases = [
+            ("Private capability is unqualified; regenerate and apply the reviewed grant activation",
+             "controller/src/private_activation.rs"),
+            ("Private target namespace requires reviewed grant activation before issuance or reuse",
+             "controller/src/private_activation/runtime.rs"),
+            ("SRE CA issuance failed", "controller/src/providers/sre_tls.rs"),
+            ("Discover Cilium policy API: Kubernetes status 403",
+             "controller/src/reconciler/sre_egress.rs"),
+            ("Installed Cilium policy API has an unsupported resource contract",
+             "controller/src/reconciler/sre_egress.rs"),
+        ]
+        for detail, source in cases:
+            with self.subTest(source=source):
+                result = authority_failure_site(root, detail)
+                self.assertEqual(result.get("source"), source)
+                self.assertGreater(result["line"], 0)
+                self.assertNotIn(detail, json.dumps(result))
+                for unsafe in (MARKER + detail, detail + MARKER, detail + "\n" + MARKER):
+                    self.assertEqual(authority_failure_site(root, unsafe), {"category": "unclassified"})
+        primary = "Reviewed SRE consumer was changed or replaced"
+        cleanup = "Discover Cilium policy API: Kubernetes status 403"
+        result = authority_failure_site(root, primary + "; owned API policy retirement failed: " + cleanup)
+        self.assertEqual(result["category"], "controller-rejection-chain")
+        self.assertEqual(result["failures"], [
+            {"operation": "authority", **authority_failure_site(root, primary)},
+            {"operation": "API policy retirement", **authority_failure_site(root, cleanup)},
+        ])
+
     def test_blocked_authority_diagnostics_preserve_all_checked_cleanup_failure_sites(self):
         root = Path(__file__).resolve().parents[3]
         primary = "Reviewed SRE consumer was changed or replaced"
@@ -381,6 +411,45 @@ class HarnessTests(unittest.TestCase):
         ):
             with self.subTest(detail=detail[:100]):
                 self.assertEqual(authority_failure_site(root, detail), {"category": "unclassified"})
+
+    def test_exit_trap_collects_safe_failure_evidence_before_cleanup_and_preserves_exit(self):
+        root = Path(__file__).resolve().parents[3]
+        source = (root / "tests/e2e/run.sh").read_text()
+        teardown = "teardown() {" + source.split("teardown() {", 1)[1].split("\n}", 1)[0] + "\n}"
+        for status, diagnostic_status, cleanup_status in ((0, 0, 0), (7, 0, 0), (7, 3, 0), (7, 3, 4)):
+            with self.subTest(status=status, diagnostics=diagnostic_status, cleanup=cleanup_status), \
+                    tempfile.TemporaryDirectory() as directory:
+                config = Path(directory) / "kubeconfig"
+                config.write_text("disposable-test-config")
+                script = '''set -euo pipefail
+ROOT_DIR=/fixture
+CLUSTER_NAME=kars-e2e
+E2E_KUBECONFIG="$1"
+python3() { printf 'capture:%s\\n' "$*"; return CAPTURE_STATUS; }
+sre_authority_cleanup() { echo authority-cleanup; return CLEANUP_STATUS; }
+kind() { printf 'kind:%s\\n' "$*"; }
+info() { :; }
+warn() { echo bounded-capture-unavailable; }
+'''.replace("CAPTURE_STATUS", str(diagnostic_status)).replace("CLEANUP_STATUS", str(cleanup_status))
+                result = subprocess.run(["bash", "-c", script + teardown + "\ntrap teardown EXIT\nexit " + str(status),
+                                         "test", str(config)], capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, status, result.stderr)
+                self.assertFalse(config.exists())
+                events = result.stdout.splitlines()
+                cleanup_index = events.index("authority-cleanup")
+                self.assertLess(cleanup_index, events.index("kind:delete cluster --name kars-e2e"))
+                captures = [index for index, event in enumerate(events) if event.startswith("capture:")]
+                if status:
+                    self.assertEqual(len(captures), 1)
+                    self.assertLess(captures[0], cleanup_index)
+                    self.assertEqual(events[captures[0]], "capture:-m sre_authority.bootstrap_probe --diagnostics-only")
+                    self.assertEqual("bounded-capture-unavailable" in events, diagnostic_status != 0)
+                else:
+                    self.assertEqual(captures, [])
+        workflow = (root / ".github/workflows/ci.yml").read_text()
+        self.assertFalse("Collect cluster diagnostics on failure" in workflow,
+                         "Post-teardown collection cannot observe the deleted cluster")
+        self.assertIn("e2e-sre-schema-diag/bootstrap-*.json", workflow)
 
     def test_control_consumer_fixture_satisfies_required_sandbox_fields(self):
         captured = []

@@ -111,7 +111,9 @@ def authority_failure_site(root, detail):
     if not isinstance(detail, str) or not detail or len(detail) > 8192:
         return unknown
     paths = [root / "controller/src/sre_authority.rs", root / "controller/src/sre_registration.rs",
-             root / "shared/sre_privacy.rs", root / "controller/src/inference_budget/first_install.rs"]
+             root / "shared/sre_privacy.rs", root / "controller/src/inference_budget/first_install.rs",
+             root / "controller/src/private_activation.rs", root / "controller/src/private_activation/runtime.rs",
+             root / "controller/src/providers/sre_tls.rs", root / "controller/src/reconciler/sre_egress.rs"]
     paths += sorted((root / "controller/src/sre_authority").glob("*.rs"))
     sources = [(path, path.read_text().splitlines()) for path in paths if not path.name.endswith("tests.rs")]
 

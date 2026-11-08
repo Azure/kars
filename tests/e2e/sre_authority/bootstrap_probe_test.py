@@ -454,13 +454,18 @@ COMMIT
         self.assertFalse(result["allPoliciesObservedBeforeCreate"])
         self.assertEqual(result["readiness"], "not-claimed")
 
-    def test_failure_diagnostics_precede_teardown_without_pod_spec_or_log_dump(self):
+    def test_failure_diagnostics_precede_cleanup_without_pod_spec_or_log_dump(self):
         source = (Path(__file__).resolve().parents[1] / "run.sh").read_text()
         install = source.split("install_crds() {", 1)[1].split("\nteardown()", 1)[0]
-        self.assertIn("sre_authority.bootstrap_probe --diagnostics-only", install)
-        self.assertNotIn("kubectl describe pod", install)
-        self.assertNotIn("kubectl logs", install)
+        teardown = source.split("teardown() {", 1)[1].split("\n}", 1)[0]
+        collector = "sre_authority.bootstrap_probe --diagnostics-only"
+        self.assertEqual(source.count(collector), 1)
+        self.assertIn(collector, teardown)
+        self.assertLess(teardown.index(collector), teardown.index("sre_authority_cleanup"))
+        self.assertNotIn("kubectl describe pod", install + teardown)
+        self.assertNotIn("kubectl logs", install + teardown)
         self.assertIn("return 1", install)
+        self.assertIn('return "$result"', teardown)
 
 
 class PrivateConsumptionDiagnosticTests(unittest.TestCase):

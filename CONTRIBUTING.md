@@ -200,8 +200,15 @@ values before applying explicit fixture overrides, preserving its installed SRE
 provider/model and reviewed authority configuration.
 Blocked SRE migration diagnostics report checked-in source coordinates for exact
 rejections, including first-install funding and ordered authority-cleanup failures.
+The source inventory includes shared private-activation, TLS issuance and Cilium
+API-discovery errors propagated by SRE issuance or retirement. Unknown components
+still leave the complete cleanup chain unclassified.
 Only known public admission-policy names are recognized; unknown status content
 remains unclassified, and raw status details or credentials are never printed.
+On harness failure, the existing bounded controller/admission collector writes
+sanitized `bootstrap-*.json` artifacts before authority cleanup or cluster deletion.
+CI uploads those retained files rather than querying the already-deleted cluster;
+capture failure never changes the original test exit status or skips cleanup.
 Production image references, `Always` policies and migration deadlines are
 unchanged. The full historical journey explicitly requires the generated
 `.e2e-addon-values.json`; missing values fail before installation. Preparation

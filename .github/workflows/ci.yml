@@ -1099,23 +1099,12 @@ jobs:
           set -euo pipefail
           make test-e2e
 
-      - name: Collect cluster diagnostics on failure
-        if: failure() && steps.paths.outputs.run == 'true'
-        run: |
-          mkdir -p e2e-diag
-          kubectl get pods -A -o wide > e2e-diag/pods.txt 2>&1 || true
-          kubectl get events -A --sort-by='.lastTimestamp' > e2e-diag/events.txt 2>&1 || true
-          kubectl describe pods -n kars-system > e2e-diag/describe.txt 2>&1 || true
-          kubectl logs -n kars-system -l app.kubernetes.io/component=controller --tail=500 > e2e-diag/controller.log 2>&1 || true
-          kubectl logs -n kars-system -l app.kubernetes.io/component=inference-router --tail=500 > e2e-diag/router.log 2>&1 || true
-
       - name: Upload diagnostics
         if: failure() && steps.paths.outputs.run == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
         with:
           name: e2e-diagnostics-${{ github.run_id }}
           path: |
-            e2e-diag/
             e2e-sre-schema-diag/versions.json
             e2e-sre-schema-diag/validation.json
             e2e-sre-schema-diag/registration-create.json

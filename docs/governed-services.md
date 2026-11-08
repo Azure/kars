@@ -40,6 +40,25 @@ finalizer behavior. Existing controller process capture retains checked-in panic
 source coordinates and fixed stack-overflow signatures, not compiled stack
 frames; a stack-overflow abort without a panic location still requires hosted
 investigation and is not localized by enabling ordinary panic backtraces.
+Direct grant-lifecycle `INFO` events use the literal target
+`kars_controller::credential_grants` and message `Credential grant lifecycle stage`.
+They mark `before` construction/poll and `returned` results at the maintained parent,
+validation, writer-authority, observer issuance/revocation, control, publication,
+credential ensure/retire and writer release awaits; `parent/entered` marks the
+parent's first executable statement. `returned` includes errors, not just success;
+existing result propagation and authority/finalizer gates are unchanged. These
+are direct events, not destructor-based diagnostics that require panic unwinding.
+The existing process-log projector keeps only closed stage/phase pairs in
+`grantStages`, in log order, capped at the final 32 events within the unchanged
+512-line/131072-byte tail. Current and previous process histories remain separate,
+with the existing controller lineage and post-read identity recheck. Unknown values,
+extra fields, resource names, raw errors and credential/configuration bytes are never
+projected. `fatalRuntimeFailures` remains independent; `grantStageInterpretation`
+explicitly warns that concurrent work precludes attributing a crash to the last
+observed stage. Missing events may reflect filtering, truncation or abort-time log
+loss, not successful completion. This repairs missing progress evidence; it is not
+a stack fix, compiled frame trace, or acceptance proof, and changes no worker stack,
+profile or deadline.
 Namespace capture also records whether its discovery-failure message mentions
 `metrics.k8s.io/v1beta1`, and the fixed metrics APIService's closed availability
 status/reason. It never emits the message, service endpoints or API error body.

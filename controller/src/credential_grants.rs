@@ -272,14 +272,21 @@ async fn publish(
 }
 
 pub(crate) async fn reconcile(client: &Client, grant: &KarsCredentialGrant) -> Result<(), String> {
+    tracing::info!(target: "kars_controller::credential_grants", stage = "parent", phase = "entered", "Credential grant lifecycle stage");
     const FINALIZER: &str = "kars.azure.com/credential-authority";
     let namespace = grant.namespace().ok_or("Grant namespace missing")?;
     let api: Api<KarsCredentialGrant> = Api::namespaced(client.clone(), &namespace);
     if grant.metadata.deletion_timestamp.is_some() {
         github::revoke(client, grant).await?;
-        operator::revoke(client, grant).await?;
+        tracing::info!(target: "kars_controller::credential_grants", stage = "observer-revocation", phase = "before", "Credential grant lifecycle stage");
+        let result = operator::revoke(client, grant).await;
+        tracing::info!(target: "kars_controller::credential_grants", stage = "observer-revocation", phase = "returned", "Credential grant lifecycle stage");
+        result?;
         rbac::revoke(client, grant).await?;
-        writers::release(client, grant).await?;
+        tracing::info!(target: "kars_controller::credential_grants", stage = "writer-release", phase = "before", "Credential grant lifecycle stage");
+        let result = writers::release(client, grant).await;
+        tracing::info!(target: "kars_controller::credential_grants", stage = "writer-release", phase = "returned", "Credential grant lifecycle stage");
+        result?;
         let finalizers = grant
             .metadata
             .finalizers
@@ -307,6 +314,7 @@ pub(crate) async fn reconcile(client: &Client, grant: &KarsCredentialGrant) -> R
         }))).await.map_err(|e|api_error("Protect credential authority revocation lifecycle",e))?;
     }
     let grant = &owned;
+    tracing::info!(target: "kars_controller::credential_grants", stage = "validation", phase = "before", "Credential grant lifecycle stage");
     let validation = async {
         verify(client, grant).await?;
         admission::verify(client).await?;
@@ -315,18 +323,30 @@ pub(crate) async fn reconcile(client: &Client, grant: &KarsCredentialGrant) -> R
         Ok::<_, String>((sources, legacy))
     }
     .await;
+    tracing::info!(target: "kars_controller::credential_grants", stage = "validation", phase = "returned", "Credential grant lifecycle stage");
     match validation {
         Ok((sources, legacy)) => {
+            tracing::info!(target: "kars_controller::credential_grants", stage = "writer-authority", phase = "before", "Credential grant lifecycle stage");
             let (active, writer_error) = writers::authority(client, grant, &sources).await;
-            let observations =
-                if writer_error.is_some() && !grant.spec.observation_targets.is_empty() {
-                    Err("Observation recipient authority is unavailable".into())
-                } else if writer_error.is_some() {
-                    operator::revoke(client, grant).await.map(|_| true)
-                } else {
-                    operator::reconcile(client, &active).await
-                };
+            tracing::info!(target: "kars_controller::credential_grants", stage = "writer-authority", phase = "returned", "Credential grant lifecycle stage");
+            let observations = if writer_error.is_some()
+                && !grant.spec.observation_targets.is_empty()
+            {
+                Err("Observation recipient authority is unavailable".into())
+            } else if writer_error.is_some() {
+                tracing::info!(target: "kars_controller::credential_grants", stage = "observer-revocation", phase = "before", "Credential grant lifecycle stage");
+                let result = operator::revoke(client, grant).await;
+                tracing::info!(target: "kars_controller::credential_grants", stage = "observer-revocation", phase = "returned", "Credential grant lifecycle stage");
+                result.map(|_| true)
+            } else {
+                tracing::info!(target: "kars_controller::credential_grants", stage = "observer-issuance", phase = "before", "Credential grant lifecycle stage");
+                let result = operator::reconcile(client, &active).await;
+                tracing::info!(target: "kars_controller::credential_grants", stage = "observer-issuance", phase = "returned", "Credential grant lifecycle stage");
+                result
+            };
+            tracing::info!(target: "kars_controller::credential_grants", stage = "control", phase = "before", "Credential grant lifecycle stage");
             let controls = control::reconcile(client, grant).await;
+            tracing::info!(target: "kars_controller::credential_grants", stage = "control", phase = "returned", "Credential grant lifecycle stage");
             let integration = match observations {
                 Ok(true) => controls,
                 Ok(false) => Err(controls
@@ -340,7 +360,9 @@ pub(crate) async fn reconcile(client: &Client, grant: &KarsCredentialGrant) -> R
                         "Private observations awaiting verifier/consumer readiness".into()
                     })),
                 Err(error) => {
+                    tracing::info!(target: "kars_controller::credential_grants", stage = "observer-revocation", phase = "before", "Credential grant lifecycle stage");
                     let revoked = operator::revoke(client, grant).await;
+                    tracing::info!(target: "kars_controller::credential_grants", stage = "observer-revocation", phase = "returned", "Credential grant lifecycle stage");
                     let mut detail = match revoked {
                         Ok(()) => format!("Private observations unavailable: {error}"),
                         Err(revoke) => format!(
@@ -353,7 +375,8 @@ pub(crate) async fn reconcile(client: &Client, grant: &KarsCredentialGrant) -> R
                     Err(detail)
                 }
             };
-            publish(
+            tracing::info!(target: "kars_controller::credential_grants", stage = "publication", phase = "before", "Credential grant lifecycle stage");
+            let result = publish(
                 client,
                 grant,
                 "Ready",
@@ -365,14 +388,21 @@ pub(crate) async fn reconcile(client: &Client, grant: &KarsCredentialGrant) -> R
                     writer_error,
                 },
             )
-            .await
+            .await;
+            tracing::info!(target: "kars_controller::credential_grants", stage = "publication", phase = "returned", "Credential grant lifecycle stage");
+            result
         }
         Err(reason) => {
             let revoked = rbac::revoke(client, grant).await;
+            tracing::info!(target: "kars_controller::credential_grants", stage = "observer-revocation", phase = "before", "Credential grant lifecycle stage");
             let operators = operator::revoke(client, grant).await;
+            tracing::info!(target: "kars_controller::credential_grants", stage = "observer-revocation", phase = "returned", "Credential grant lifecycle stage");
             let github = github::revoke(client, grant).await;
             if revoked.is_ok() && operators.is_ok() {
-                writers::release(client, grant).await?;
+                tracing::info!(target: "kars_controller::credential_grants", stage = "writer-release", phase = "before", "Credential grant lifecycle stage");
+                let result = writers::release(client, grant).await;
+                tracing::info!(target: "kars_controller::credential_grants", stage = "writer-release", phase = "returned", "Credential grant lifecycle stage");
+                result?;
             }
             let reason = revoked
                 .err()
@@ -380,7 +410,8 @@ pub(crate) async fn reconcile(client: &Client, grant: &KarsCredentialGrant) -> R
                 .or_else(|| github.err())
                 .map(|e| format!("{reason}; owned writer revocation failed: {e}"))
                 .unwrap_or(reason);
-            publish(
+            tracing::info!(target: "kars_controller::credential_grants", stage = "publication", phase = "before", "Credential grant lifecycle stage");
+            let result = publish(
                 client,
                 grant,
                 if grant.spec.enabled {
@@ -396,7 +427,9 @@ pub(crate) async fn reconcile(client: &Client, grant: &KarsCredentialGrant) -> R
                     writer_error: Some("Writer authority is revoked".into()),
                 },
             )
-            .await?;
+            .await;
+            tracing::info!(target: "kars_controller::credential_grants", stage = "publication", phase = "returned", "Credential grant lifecycle stage");
+            result?;
             Err(reason)
         }
     }
@@ -408,7 +441,10 @@ pub async fn run(client: Client) {
         match grants.list(&ListParams::default()).await {
             Ok(list) => {
                 for grant in list {
-                    if let Err(error) = reconcile(&client, &grant).await {
+                    tracing::info!(target: "kars_controller::credential_grants", stage = "parent", phase = "before", "Credential grant lifecycle stage");
+                    let result = reconcile(&client, &grant).await;
+                    tracing::info!(target: "kars_controller::credential_grants", stage = "parent", phase = "returned", "Credential grant lifecycle stage");
+                    if let Err(error) = result {
                         tracing::warn!(namespace=?grant.namespace(),error=%error,"Credential grant is not ready");
                     }
                 }
