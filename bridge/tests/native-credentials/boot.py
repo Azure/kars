@@ -33,7 +33,8 @@ def install_core(setup):
                       "tag": "latest", "pullPolicy": "IfNotPresent"},
             "resources": {"requests": {"cpu": "100m", "memory": "256Mi"},
                           "limits": {"cpu": "2", "memory": "2Gi"}},
-            "extraEnv": [{"name": "RUST_LOG", "value": "warn"},
+            "extraEnv": [{"name": "RUST_LOG",
+                          "value": "warn,kars_controller::credential_grants=info"},
                          {"name": "LEADER_ELECTION_ENABLED", "value": "true"}],
         },
         "sandbox": {

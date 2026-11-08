@@ -32,8 +32,10 @@ It shares discovery/rendering with observer API policies, not observer authority
 The policy is registration-owned and pinned to source/runtime namespace UIDs;
 updates and retirement use UID/resourceVersion fences. Authority loss or
 disablement retires it, and foreign policies are never adopted or deleted.
-An absent Cilium API keeps standard NetworkPolicy behavior; discovery failures
-do not authorize a fallback or broader egress. Agent UID1000 remains loopback/DNS
+An absent Cilium API keeps standard NetworkPolicy behavior. Discovery HTTP 404
+means the optional API is absent, including responses without a Kubernetes
+`NotFound` reason. Other HTTP errors, transport failures and invalid resource
+contracts do not authorize a fallback or broader egress. Agent UID1000 remains loopback/DNS
 only; this policy does not bypass the router or grant Kubernetes permissions.
 
 Autonomous Hermes sweeps pass both the pinned loopback provider and the model

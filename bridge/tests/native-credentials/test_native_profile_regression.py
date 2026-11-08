@@ -1,6 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+import ast
 from pathlib import Path
 import re
 import unittest
@@ -150,6 +151,20 @@ class NativeProfileRegressionTests(unittest.TestCase):
 
 
 class GrantStageSourceTests(unittest.TestCase):
+    def test_native_controller_enables_grant_info_without_global_info_logging(self):
+        module = ast.parse((ROOT / "bridge/tests/native-credentials/boot.py").read_text())
+        install = next(node for node in module.body
+                       if isinstance(node, ast.FunctionDef) and node.name == "install_core")
+        values = next(node.value for node in install.body if isinstance(node, ast.Assign)
+                      and any(isinstance(target, ast.Name) and target.id == "values"
+                              for target in node.targets))
+        controller = next(value for key, value in zip(values.keys, values.values)
+                          if ast.literal_eval(key) == "controller")
+        env = next(ast.literal_eval(value) for key, value in zip(controller.keys, controller.values)
+                   if ast.literal_eval(key) == "extraEnv")
+        self.assertEqual([entry["value"] for entry in env if entry["name"] == "RUST_LOG"],
+                         ["warn,kars_controller::credential_grants=info"])
+
     @staticmethod
     def compact(value):
         return re.sub(r"\s+", "", value).replace(",)", ")")

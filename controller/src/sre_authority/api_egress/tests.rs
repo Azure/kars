@@ -106,6 +106,53 @@ async fn absent_cilium_does_not_write_optional_resources() {
 }
 
 #[tokio::test]
+async fn absent_discovery_without_a_status_reason_does_not_block_retirement() {
+    for response in [
+        ResponseTemplate::new(404).set_body_string("404 page not found\n"),
+        ResponseTemplate::new(404).set_body_json(json!({
+            "kind":"Status","apiVersion":"v1","status":"Failure",
+            "code":404,"reason":"","message":"PRIVATE_SENTINEL"})),
+    ] {
+        let (server, client, state, sandbox, namespace) = fixture().await;
+        Mock::given(method("GET"))
+            .and(path(DISCOVERY))
+            .respond_with(response)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        ensure(&client, &sandbox, &namespace, &rules())
+            .await
+            .unwrap();
+        retire(&client, &registration()).await.unwrap();
+        assert!(mutations(&state).is_empty());
+    }
+}
+
+#[tokio::test]
+async fn discovery_http_failures_never_authorize_retirement_or_leak_response() {
+    for code in [401, 403, 429, 500, 503] {
+        let (server, client, state, sandbox, namespace) = fixture().await;
+        Mock::given(method("GET"))
+            .and(path(DISCOVERY))
+            .respond_with(ResponseTemplate::new(code).set_body_json(json!({
+                "kind":"Status","apiVersion":"v1","status":"Failure",
+                "code":code,"reason":"NotFound","message":"PRIVATE_SENTINEL"})))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        for result in [
+            ensure(&client, &sandbox, &namespace, &rules()).await,
+            retire(&client, &registration()).await,
+        ] {
+            let error = result.unwrap_err();
+            assert!(error.contains(&code.to_string()));
+            assert!(!error.contains("PRIVATE_SENTINEL"));
+        }
+        assert!(mutations(&state).is_empty());
+    }
+}
+
+#[tokio::test]
 async fn discovery_failure_or_incomplete_contract_never_falls_back_or_leaks_response() {
     let (server, client, state, sandbox, namespace) = fixture().await;
     state.lock().unwrap().objects.get_mut(DISCOVERY).unwrap()["resources"][0]["namespaced"] =

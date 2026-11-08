@@ -14,7 +14,7 @@ const MAX_ENDPOINTS: usize = 32;
 pub(crate) async fn cilium_installed(client: &Client) -> Result<bool, String> {
     let resources = match client.list_api_group_resources("cilium.io/v2").await {
         Ok(resources) => resources,
-        Err(kube::Error::Api(error)) if error.code == 404 && error.reason == "NotFound" => {
+        Err(kube::Error::Api(error)) if error.code == 404 => {
             return Ok(false);
         }
         Err(error) => {

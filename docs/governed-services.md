@@ -42,6 +42,9 @@ frames; a stack-overflow abort without a panic location still requires hosted
 investigation and is not localized by enabling ordinary panic backtraces.
 Direct grant-lifecycle `INFO` events use the literal target
 `kars_controller::credential_grants` and message `Credential grant lifecycle stage`.
+The Native fixture enables that target with
+`RUST_LOG=warn,kars_controller::credential_grants=info`; unrelated controller targets
+and the BFF remain at `warn`, and production logging defaults are unchanged.
 They mark `before` construction/poll and `returned` results at the maintained parent,
 validation, writer-authority, observer issuance/revocation, control, publication,
 credential ensure/retire and writer release awaits; `parent/entered` marks the
