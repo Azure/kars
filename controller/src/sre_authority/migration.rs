@@ -229,7 +229,13 @@ pub(super) async fn stop_legacy_consumer(
         }
         validate_consumer(client, reg).await?;
         if deployment.spec.as_ref().and_then(|spec| spec.replicas) != Some(0) {
-            api.patch("sre",&PatchParams::default(),&Patch::Merge(json!({
+            // A legacy review authorizes retirement, not controller ownership.
+            let params = PatchParams {
+                field_manager: controller_managed(&deployment, "sre")
+                    .then(|| crate::field_managers::CLAWSANDBOX.into()),
+                ..Default::default()
+            };
+            api.patch("sre",&params,&Patch::Merge(json!({
                 "metadata":{"uid":deployment.metadata.uid,"resourceVersion":deployment.metadata.resource_version,
                     "annotations":{STOPPED:reg.metadata.uid}},
                 "spec":{"replicas":0},
@@ -489,6 +495,11 @@ pub(super) async fn rotate_owned_control_credentials(
         {
             return Err("Control credential consumer is not controller-owned".into());
         }
+        // Keep subsequent ownership checks valid after non-apply writes too.
+        let params = PatchParams {
+            field_manager: Some(crate::field_managers::CLAWSANDBOX.into()),
+            ..Default::default()
+        };
         let epoch = reg.epoch();
         let replicas = deployment
             .spec
@@ -534,7 +545,7 @@ pub(super) async fn rotate_owned_control_credentials(
             || (require_version
                 && template_annotations.and_then(|a| a.get(CONTROL_VERSION)) != Some(&version))
         {
-            deployments.patch(name,&PatchParams::default(),&Patch::Merge(json!({
+            deployments.patch(name,&params,&Patch::Merge(json!({
                 "metadata":{"uid":deployment.metadata.uid,"resourceVersion":deployment.metadata.resource_version},
                 "spec":{"template":{"metadata":{"annotations":{EPOCH:epoch,CONTROL_VERSION:version}}}},
             }))).await.map_err(|e|api_error("Restart owned control credential consumer",e))?;
@@ -562,7 +573,7 @@ pub(super) async fn rotate_owned_control_credentials(
             if !pods.items.is_empty() || !stopped {
                 return Err(WAITING_FOR_ROLLOUT.into());
             }
-            deployments.patch(name, &PatchParams::default(), &Patch::Merge(json!({
+            deployments.patch(name, &params, &Patch::Merge(json!({
                 "metadata":{"uid":deployment.metadata.uid,"resourceVersion":deployment.metadata.resource_version,
                     "annotations":{CONTROL_DRAIN:serde_json::Value::Null}},
                 "spec":{"replicas":restore},
@@ -580,7 +591,7 @@ pub(super) async fn rotate_owned_control_credentials(
             // update otherwise retains the old cache while its replacement waits
             // for this migration. Drain the owned consumer, preserving its intent.
             if replicas > 0 {
-                deployments.patch(name, &PatchParams::default(), &Patch::Merge(json!({
+                deployments.patch(name, &params, &Patch::Merge(json!({
                     "metadata":{"uid":deployment.metadata.uid,"resourceVersion":deployment.metadata.resource_version,
                         "annotations":{CONTROL_DRAIN:format!("{epoch}:{replicas}")}},
                     "spec":{"replicas":0},

@@ -255,6 +255,23 @@ only after the scale-down generation is observed and all Pods, including
 terminating ones, have disappeared. UID/resourceVersion checks protect both
 writes; a changed epoch or replica intent stops recovery for operator review.
 Readiness and accounting gates remain enforced throughout the cutover.
+Restart, drain, restore and quarantine merge patches use the established
+`kars-controller/karssandbox` field manager after verifying live controller
+ownership, keeping subsequent ownership checks valid when replicas change.
+Legacy-consumer retirement preserves that manager only when the Deployment is
+already controller-owned; a UID/resourceVersion review does not confer ownership.
+The UID/resourceVersion fences remain on every Deployment write.
+
+On Kind E2E failure, retained logs include `SRE-CONTROL-CONSUMER` records for
+`kars-e2e-control-rotation/e2e-control-rotation` and `kars-sre/sre` before cleanup.
+These explicitly request managedFields and project UID/resourceVersion,
+generation, deletion state, sandbox label, owner references, replica state,
+validated drain epoch/count, and managers' allowlisted ownership paths. Other
+managedFields paths are omitted, not proven absent. Credentials, environment
+values and workload payloads are never included; malformed drain markers and
+failed reads are classified without echoing their content. These snapshots
+preserve the original failure but do not alone identify which write changed
+ownership or prove migration acceptance.
 
 Ordinary owned Sandbox/namespace retirement is a migration wait, not loss of
 SRE authority. The controller waits for garbage collection and a fresh credential

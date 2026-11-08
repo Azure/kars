@@ -837,7 +837,7 @@ async fn privacy_revoked_during_consumer_inventory_retires_cache_without_issuing
 
 #[tokio::test]
 async fn standalone_privacy_loss_quarantines_then_rotates_instead_of_reusing_exposed_cache() {
-    let (_server, client, state) = fixture().await;
+    let (server, client, state) = fixture().await;
     {
         let mut state = state.lock().unwrap();
         state
@@ -851,6 +851,21 @@ async fn standalone_privacy_loss_quarantines_then_rotates_instead_of_reusing_exp
             .await
             .is_err()
     );
+    let requests = server.received_requests().await.unwrap();
+    let patches: Vec<_> = requests
+        .iter()
+        .filter(|request| request.method == "PATCH" && request.url.path() == DEPLOY)
+        .collect();
+    assert_eq!(patches.len(), 1);
+    assert!(
+        patches[0].url.query_pairs().any(
+            |(key, value)| key == "fieldManager" && value == crate::field_managers::CLAWSANDBOX
+        )
+    );
+    let body: Value = patches[0].body_json().unwrap();
+    assert_eq!(body["metadata"]["uid"], "deployment");
+    assert_eq!(body["metadata"]["resourceVersion"], "3");
+    assert_eq!(body["spec"]["replicas"], 0);
     {
         let mut state = state.lock().unwrap();
         assert_eq!(state.objects[DEPLOY]["spec"]["replicas"], 0);
@@ -873,6 +888,62 @@ async fn standalone_privacy_loss_quarantines_then_rotates_instead_of_reusing_exp
     );
     assert_eq!(projection.version, "secret:9");
     assert_eq!(token_issuances(&state), 1);
+}
+
+#[tokio::test]
+async fn control_quarantine_rejects_unowned_consumers_and_preserves_conflicting_deployments() {
+    for ownership in ["unowned", "conflict"] {
+        let (server, client, state) = fixture().await;
+        let mut before = deployment();
+        if ownership == "unowned" {
+            before["metadata"]["managedFields"] = json!([]);
+        }
+        {
+            let mut state = state.lock().unwrap();
+            state
+                .objects
+                .insert(format!("{SECRETS}/{SECRET}"), secret(None, true));
+            state.objects.insert(DEPLOY.into(), before.clone());
+            state.allow_verb = Some("watch".into());
+        }
+        if ownership == "conflict" {
+            Mock::given(wiremock::matchers::method("PATCH"))
+                .and(wiremock::matchers::path(DEPLOY))
+                .respond_with(failure(409))
+                .expect(1)
+                .with_priority(1)
+                .mount(&server)
+                .await;
+        }
+        let error = credentials::ensure(&client, &source(), &namespace())
+            .await
+            .err()
+            .unwrap();
+        assert!(!error.to_string().contains("PRIVATE_RESPONSE_SENTINEL"));
+        assert_eq!(state.lock().unwrap().objects[DEPLOY], before);
+        assert_eq!(token_issuances(&state.lock().unwrap()), 0);
+        let requests = server.received_requests().await.unwrap();
+        let patches: Vec<_> = requests
+            .iter()
+            .filter(|request| request.method == "PATCH" && request.url.path() == DEPLOY)
+            .collect();
+        assert_eq!(patches.len(), usize::from(ownership == "conflict"));
+        for request in patches {
+            assert!(
+                request
+                    .url
+                    .query_pairs()
+                    .any(|(key, value)| key == "fieldManager"
+                        && value == crate::field_managers::CLAWSANDBOX)
+            );
+            let body: Value = request.body_json().unwrap();
+            assert_eq!(body["metadata"]["uid"], before["metadata"]["uid"]);
+            assert_eq!(
+                body["metadata"]["resourceVersion"],
+                before["metadata"]["resourceVersion"]
+            );
+        }
+    }
 }
 
 #[tokio::test]

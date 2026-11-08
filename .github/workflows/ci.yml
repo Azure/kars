@@ -1118,6 +1118,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+    cache-mode: read
     # Compare both revisions on this runner, not against historical machine timings.
     # Normalize the bench profile explicitly; release package overrides otherwise
     # leak into benches and made the old measurements incomparable.
@@ -1150,11 +1151,10 @@ jobs:
           mkdir -p bench-evidence
           python3 ci/bench_regression.py --resolve-base | tee bench-evidence/base-output.txt >> "$GITHUB_OUTPUT"
           git rev-parse HEAD > bench-evidence/candidate.sha
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ steps.baseline.outputs.base_sha }}
-          path: .bench-baseline
-          persist-credentials: false
+      - name: Materialize validated local benchmark baseline
+        env:
+          BENCH_BASE_SHA: ${{ steps.baseline.outputs.base_sha }}
+        run: git -c protocol.allow=never worktree add --detach --no-guess-remote -- .bench-baseline "$BENCH_BASE_SHA"
       - name: Verify comparable Criterion harnesses
         env:
           BENCH_BASE_SHA: ${{ steps.baseline.outputs.base_sha }}

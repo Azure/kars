@@ -216,6 +216,37 @@ official bundle containing the upstream fix passes the same coverage and
 positive/negative controls. Do not mark the four alerts fixed until the corrected
 full Kars analysis proves it.
 
+### Follow-up: Actions cache-mode compatibility (2026-11-08)
+
+The H33 Actions analysis used `codeql/actions-queries` 0.6.39 and
+`codeql/actions-all` 0.7.1. Its cache-write predicate ignores the backend-enforced
+`cache-mode: read` policy. The workflow now prepares the complete Actions
+security-and-quality suite from the immutable upstream
+[github/codeql#22613](https://github.com/github/codeql/pull/22613) revision
+`dc2387baefc27bf00e6a8e6ecd2d4c6d3c8e07d7`. This is an unmerged compatibility
+candidate, not an official fixed release or accepted security clearance.
+
+The existing scanner-control runner supports both languages. Each matrix leg
+uses an isolated source checkout, checks full bundled query-ID coverage and exact
+source-library resolution, and binds analysis to that same verified source.
+Actions must pass the upstream CWE-349 expectations, including writable-cache
+positives, read-only negatives, job overrides and reusable caller limits.
+Expectations are never regenerated; failure stops analysis. The pinned official
+2.27.4 bundle and SHA-256 verification now also cover the Actions leg.
+
+- `PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest ci.tests.codeql_rust_controls_test`:
+  27 local guard/binding tests passed.
+- `bash -n ci/codeql-rust-controls.sh`: passed.
+- Actual Actions query compilation, upstream behavioral controls and the complete
+  Kars analysis remain pending hosted execution. No finding is dismissed.
+
+Remove the Actions source override and source-specific controls once an immutable
+released bundle passes the same coverage and behavioral controls. Rust remains
+on its existing pinned full suite: its 27 JSON deserialization alerts terminate
+at ordinary parser inputs, and upstream marks even documented safe cases as
+spurious. That evidence is not a blanket downstream-safety assessment; no parser
+rewrite, query exclusion, alert dismissal or human signature is implied.
+
 ## Follow-up: governed credentials and Headlamp scanner coverage
 
 The published `c6a255af` revision passed Bridge CI, all three cold API/admission

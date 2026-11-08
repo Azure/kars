@@ -17,7 +17,8 @@ from unittest.mock import patch
 
 from sre_authority.common import (
     CLAIM_VERSION, NAMESPACE_UID, RUNTIME, SOURCE_NAME, SOURCE_NS, SOURCE_UID, SYSTEM,
-    Harness, assert_claim, assert_denial, authority_failure_site, enrollment_json, printed_object, review_args,
+    Harness, assert_claim, assert_denial, authority_failure_site, control_consumer_facts,
+    enrollment_json, printed_object, review_args,
 )
 from sre_authority.fixtures import seed_control_consumer
 from sre_authority.admission import reserved_source_probe
@@ -450,6 +451,126 @@ warn() { echo bounded-capture-unavailable; }
         self.assertFalse("Collect cluster diagnostics on failure" in workflow,
                          "Post-teardown collection cannot observe the deleted cluster")
         self.assertIn("e2e-sre-schema-diag/bootstrap-*.json", workflow)
+
+    def test_control_consumer_writes_keep_manager_and_identity_fences(self):
+        root = Path(__file__).resolve().parents[3]
+        migration = (root / "controller/src/sre_authority/migration.rs").read_text()
+        credentials = (root / "controller/src/reconciler/governed_services/credentials.rs").read_text()
+        rotation = migration.split("async fn rotate_owned_control_credentials(", 1)[1]
+        quarantine = credentials.split("async fn quarantine(", 1)[1].split("async fn checked_epoch(", 1)[0]
+        stop = migration.split("async fn stop_legacy_consumer(", 1)[1].split("pub(crate) fn controller_managed(", 1)[0]
+        canonical = "field_manager:Some(crate::field_managers::CLAWSANDBOX.into())"
+        for source, writer, count in ((rotation, "deployments.patch(name,&params,", 3),
+                                      (quarantine, ".patch(name,&params,", 1),
+                                      (stop, 'api.patch("sre",&params,', 1)):
+            compact = re.sub(r"\s+", "", source)
+            writes = compact.split(writer)[1:]
+            self.assertEqual(len(writes), count)
+            for write in writes:
+                payload = write.split(".await", 1)[0]
+                self.assertIn("&Patch::Merge(json!", payload)
+                self.assertIn('"uid":deployment.metadata.uid', payload)
+                self.assertIn('"resourceVersion":deployment.metadata.resource_version', payload)
+            if source != stop:
+                self.assertIn(canonical, compact)
+        self.assertLess(rotation.index("if !controller_managed(&deployment, name)"),
+                        rotation.index("let params = PatchParams"))
+        self.assertLess(quarantine.index("review_consumer(client, namespace, name).await?"),
+                        quarantine.index("let params = PatchParams"))
+        self.assertIn('field_manager:controller_managed(&deployment,"sre").then(||crate::field_managers::CLAWSANDBOX.into())',
+                      re.sub(r"\s+", "", stop))
+        self.assertIn("validate_consumer(client, reg).await?", stop)
+
+    def test_control_consumer_diagnostics_project_ownership_without_workload_payloads(self):
+        epoch = "a" * 64
+        obj = {"metadata": {"name": "consumer", "namespace": "kars-consumer", "uid": "consumer-uid",
+            "resourceVersion": "42", "generation": 3, "deletionTimestamp": None,
+            "labels": {"kars.azure.com/sandbox": "consumer", "private": MARKER},
+            "annotations": {"kars.azure.com/sre-control-drain": epoch + ":3", "private": MARKER},
+            "ownerReferences": [{"apiVersion": "apps/v1", "kind": "Deployment", "name": "owner",
+                                 "uid": "owner-uid", "controller": True, "private": MARKER}],
+            "managedFields": [{"manager": "kars-controller/karssandbox", "operation": "Apply",
+                "apiVersion": "apps/v1", "fieldsV1": {"f:spec": {"f:replicas": {}, "f:template": {
+                    "f:spec": {"f:containers": {'k:{"name":"' + MARKER + '"}': {}}}}}}},
+                {"manager": "unknown", "operation": "Update", "fieldsV1": {"f:spec": {"f:replicas": {}}}}]},
+            "spec": {"replicas": 0, "template": {"spec": {"containers": [{"env": [{"value": MARKER}]}]}}},
+            "status": {"observedGeneration": 3, "replicas": 0, "conditions": [{"message": MARKER}]},
+            "data": {"control-token": MARKER}}
+        before = copy.deepcopy(obj)
+        facts = control_consumer_facts(obj)
+        self.assertEqual(facts["uid"], "consumer-uid")
+        self.assertEqual(facts["resourceVersion"], "42")
+        self.assertEqual(facts["generation"], 3)
+        self.assertEqual(facts["replicas"], 0)
+        self.assertEqual(facts["status"]["observedGeneration"], 3)
+        self.assertEqual(facts["drain"], {"present": True, "valid": True, "epoch": epoch, "restoreReplicas": 3})
+        self.assertEqual(facts["ownerReferences"][0]["uid"], "owner-uid")
+        self.assertEqual(facts["managedFields"][0]["fieldPaths"],
+                         ["f:spec", "f:spec/f:replicas", "f:spec/f:template"])
+        self.assertEqual(facts["managedFields"][1]["fieldPaths"], ["f:spec", "f:spec/f:replicas"])
+        self.assertNotIn(MARKER, json.dumps(facts))
+        self.assertEqual(obj, before)
+        obj["metadata"]["managedFields"][0]["fieldsV1"] = {"f:metadata": {"f:annotations": {}}}
+        self.assertEqual(control_consumer_facts(obj)["managedFields"][0]["fieldPaths"], [])
+
+    def test_control_consumer_diagnostics_never_echo_malformed_drain_markers(self):
+        self.assertEqual(control_consumer_facts({})["drain"], {"present": False, "valid": False})
+        for marker in (None, {}, MARKER, "a" * 64 + ":0", "a" * 64 + ":-1",
+                       "a" * 64 + ":2147483648", "a" * 64 + ":1:" + MARKER):
+            with self.subTest(marker=marker):
+                facts = control_consumer_facts({"metadata": {"annotations": {
+                    "kars.azure.com/sre-control-drain": marker}}})
+                self.assertEqual(facts["drain"], {"present": True, "valid": False})
+                self.assertNotIn(MARKER, json.dumps(facts))
+
+    def test_control_consumer_capture_requests_managed_fields_and_survives_missing_or_failed_reads(self):
+        from sre_authority.fixtures import CONTROL, CONTROL_NS
+        for first in ("", RuntimeError(MARKER), "{malformed " + MARKER):
+            h = Harness.__new__(Harness)
+            responses = iter([first, json.dumps({"metadata": {"name": "sre", "namespace": RUNTIME,
+                "uid": "live-sre", "resourceVersion": "2", "managedFields": [{"manager": "kube-client",
+                    "operation": "Update", "fieldsV1": {"f:spec": {"f:replicas": {}}}}]},
+                "spec": {"replicas": 0, "template": {"private": MARKER}}})])
+            calls = []
+            def read(*args, **kwargs):
+                calls.append((args, kwargs))
+                value = next(responses)
+                if isinstance(value, Exception):
+                    raise value
+                return value
+            h.k = read
+            with patch("builtins.print") as printed:
+                h.control_consumer_diagnostics()
+            self.assertEqual(len(calls), 2)
+            for (name, namespace), (args, kwargs) in zip(((CONTROL, CONTROL_NS), ("sre", RUNTIME)), calls):
+                self.assertEqual(args, ("get", "deployment", name, "-n", namespace, "--ignore-not-found",
+                                        "--show-managed-fields=true", "-o", "json"))
+                self.assertEqual(kwargs, {"timeout": 10})
+            facts = [json.loads(call.args[1]) for call in printed.call_args_list]
+            self.assertEqual(facts[0]["availability"], "absent" if first == "" else "unavailable")
+            self.assertEqual(facts[1]["uid"], "live-sre")
+            self.assertEqual(facts[1]["replicas"], 0)
+            self.assertEqual(facts[1]["managedFields"][0]["manager"], "kube-client")
+            self.assertEqual(facts[1]["managedFields"][0]["fieldPaths"], ["f:spec", "f:spec/f:replicas"])
+            self.assertNotIn(MARKER, json.dumps(facts))
+
+    def test_failure_diagnostics_retain_blocked_registration_and_capture_control_consumers(self):
+        h = Harness.__new__(Harness)
+        h.root = Path(__file__).resolve().parents[3]
+        h.deadline = time.monotonic() + 30
+        h.get = lambda kind, *_args: ({"metadata": {"uid": "registration", "generation": 3},
+            "status": {"phase": "Blocked", "observedGeneration": 3,
+                       "detail": "Control credential consumer is not controller-owned"}}
+            if kind == "karssreregistrations.kars.azure.com" else None)
+        h.k = lambda *_args, **_kwargs: '{"items": []}'
+        with patch("sre_authority.common.collect_stage_workloads"), \
+                patch.object(h, "control_consumer_diagnostics") as capture, patch("builtins.print") as printed:
+            h.diagnostics()
+        capture.assert_called_once_with()
+        facts = json.loads(printed.call_args_list[0].args[1])
+        self.assertEqual(facts["phase"], "Blocked")
+        self.assertEqual(facts["generation"], 3)
+        self.assertEqual(facts["authorityFailure"]["source"], "controller/src/sre_authority/migration.rs")
 
     def test_control_consumer_fixture_satisfies_required_sandbox_fields(self):
         captured = []

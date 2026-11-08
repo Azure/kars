@@ -36,7 +36,7 @@ class NativeProfileRegressionTests(unittest.TestCase):
         step = workflow.split("      - name: Exercise Team projection", 1)[1].split("      - name:", 1)[0]
         test = "runtime_control_material_receipts_preserve_rotation_and_resume_fences"
         self.assertIn("private_activation::late_scope::tests::" + test, step)
-        self.assertEqual(step.count("-- --exact --nocapture"), 2)
+        self.assertEqual(step.count("-- --exact --nocapture"), 3)
         source = (ROOT / "controller/src/private_activation/late_scope.rs").read_text()
         self.assertIn('#[tokio::test(flavor = "multi_thread", worker_threads = 1)]\n    async fn ' + test, source)
         regression = source.split("async fn " + test, 1)[1].split("    #[tokio::test]", 1)[0]
@@ -46,6 +46,21 @@ class NativeProfileRegressionTests(unittest.TestCase):
             self.assertIn("native-late-material-regression: " + phase, regression)
         for fault in ("tls-bytes", "memory-bytes", "extra-data", "tls-key", "memory-key", "anchor", "epoch", "binding", "version", "missing-tls", "unknown-proof"):
             self.assertIn('"' + fault + '"', regression)
+        for forbidden in ("Box::pin", "stack_size", "timeout(", "catch_unwind"):
+            self.assertNotIn(forbidden, regression)
+
+    def test_writer_regression_polls_existing_authority_on_default_worker(self):
+        workflow = (ROOT / ".github/workflows/bridge-native.yml").read_text()
+        test = "credential_writer_consumer_drift_withholds_authority_without_resetting_grant"
+        self.assertIn("credential_grants::writers::tests::" + test, workflow)
+        source = (ROOT / "controller/src/credential_grants/writers/tests.rs").read_text()
+        self.assertIn('#[tokio::test(flavor = "multi_thread", worker_threads = 1)]\nasync fn ' + test, source)
+        regression = source.split("async fn " + test, 1)[1].split("\n#[tokio::test]", 1)[0]
+        self.assertIn("tokio::spawn(exercise_consumer_drift(client, state, grant))", regression)
+        self.assertIn("size_of_val(&super::super::reconcile(&client, &grant))", regression)
+        self.assertIn("let (active, error) = authority(&client, &grant, &[]).await;", regression)
+        self.assertIn("assert!(active.spec.writers.is_empty());", regression)
+        self.assertIn("assert_eq!(state.objects[GRANT], serde_json::to_value(grant).unwrap());", regression)
         for forbidden in ("Box::pin", "stack_size", "timeout(", "catch_unwind"):
             self.assertNotIn(forbidden, regression)
 

@@ -185,7 +185,10 @@ control version in the Deployment template. Unknown data or missing proofs remai
 fail-closed; this byte binding does not replace the CLI's certificate and live-anchor
 validation. Native runs the existing runtime-apply fixture with these receipt shapes
 and negative cases on its normal debug profile/default worker stack after the Team
-regression. Neither regression alone establishes live observer or writer acceptance.
+regression. The existing reviewed-consumer drift/revocation test also runs on a
+spawned default-stack worker, through the normal writer authority path; it reports
+future sizes without changing stack limits or weakening the grant assertions.
+These focused regressions do not establish live observer or writer acceptance.
 Other credential purposes retain their existing version semantics.
 The controller does not report its credential transition complete while old
 version or mismatched verified-epoch Pods remain, including terminating Pods. Loss of the checked privacy

@@ -165,6 +165,50 @@ def authority_failure_site(root, detail):
     return {"category": "controller-rejection-chain", "failures": failures}
 
 
+def control_consumer_facts(obj):
+    metadata = obj.get("metadata", {})
+    # Project only fixed field paths: managedFields list-map keys can contain
+    # literal environment values, so recursively dumping that tree is unsafe.
+    paths = [
+        ("f:spec",), ("f:spec", "f:replicas"), ("f:spec", "f:template"),
+        ("f:metadata", "f:labels", "f:kars.azure.com/sandbox"),
+        ("f:metadata", "f:annotations", "f:kars.azure.com/sre-control-drain"),
+    ]
+    managers = []
+    for entry in metadata.get("managedFields", []):
+        owned = []
+        for path in paths:
+            node = entry.get("fieldsV1", {})
+            for part in path:
+                if not isinstance(node, dict) or part not in node:
+                    break
+                node = node[part]
+            else:
+                owned.append("/".join(path))
+        managers.append({**{key: entry.get(key) for key in
+                           ("manager", "operation", "apiVersion", "subresource")}, "fieldPaths": owned})
+    annotations = metadata.get("annotations", {})
+    key = "kars.azure.com/sre-control-drain"
+    marker = annotations.get(key)
+    match = re.fullmatch(r"([0-9a-f]{64}):([0-9]{1,10})", marker) if isinstance(marker, str) else None
+    valid = bool(match and 0 < int(match[2]) <= 2147483647)
+    drain = {"present": key in annotations, "valid": valid}
+    if valid:
+        drain.update(epoch=match[1], restoreReplicas=int(match[2]))
+    return {
+        **{key: metadata.get(key) for key in
+           ("name", "namespace", "uid", "resourceVersion", "generation", "deletionTimestamp")},
+        "sandboxLabel": metadata.get("labels", {}).get("kars.azure.com/sandbox"),
+        "ownerReferences": [{key: owner.get(key) for key in
+                             ("apiVersion", "kind", "name", "uid", "controller", "blockOwnerDeletion")}
+                            for owner in metadata.get("ownerReferences", [])],
+        "managedFields": managers, "drain": drain,
+        "replicas": obj.get("spec", {}).get("replicas"),
+        "status": {key: obj.get("status", {}).get(key) for key in
+                   ("observedGeneration", "replicas", "updatedReplicas", "availableReplicas")},
+    }
+
+
 def printed_object(output):
     start = output.find("{")
     require(start >= 0, "CLI omitted its JSON object")
@@ -459,6 +503,7 @@ class Harness:
                                        for condition in status.get("conditions", [])]}), flush=True)
             except Exception:
                 print(f"SRE-DIAG {kind}/{name} unavailable", flush=True)
+        self.control_consumer_diagnostics()
         try:
             pods = json.loads(self.k("get", "pods", "-n", RUNTIME, "-o", "json", timeout=10))["items"]
             for pod in pods:
@@ -486,6 +531,23 @@ class Harness:
                         print("SRE-DIAG Ready router authority log unavailable", flush=True)
         except Exception:
             print("SRE-DIAG runtime Pod status unavailable", flush=True)
+
+    def control_consumer_diagnostics(self):
+        from .fixtures import CONTROL, CONTROL_NS
+        for name, namespace in ((CONTROL, CONTROL_NS), ("sre", RUNTIME)):
+            facts = {"name": name, "namespace": namespace}
+            try:
+                # kubectl otherwise strips managedFields, hiding the ownership
+                # predicate used by the controller's control-credential migration.
+                raw = self.k("get", "deployment", name, "-n", namespace, "--ignore-not-found",
+                             "--show-managed-fields=true", "-o", "json", timeout=10)
+                facts.update(availability="present" if raw.strip() else "absent")
+                if raw.strip():
+                    facts.update(control_consumer_facts(json.loads(raw)))
+            except Exception:
+                # Never replace the primary failure or print the API error body.
+                facts = {"name": name, "namespace": namespace, "availability": "unavailable"}
+            print("SRE-CONTROL-CONSUMER", json.dumps(facts), flush=True)
 
     def readiness_diagnostics(self, pod):
         from .bootstrap_diagnostics import probe_command_result, router_log_summary, router_readiness_facts

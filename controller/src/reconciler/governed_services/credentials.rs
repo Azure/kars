@@ -318,8 +318,12 @@ async fn quarantine(
             .unwrap_or(1)
             != 0
     {
+        let params = PatchParams {
+            field_manager: Some(crate::field_managers::CLAWSANDBOX.into()),
+            ..Default::default()
+        };
         Api::<Deployment>::namespaced(client.clone(), namespace)
-            .patch(name, &PatchParams::default(), &Patch::Merge(json!({
+            .patch(name, &params, &Patch::Merge(json!({
                 "metadata":{"uid":deployment.metadata.uid,"resourceVersion":deployment.metadata.resource_version},
                 "spec":{"replicas":0},
             }))).await.map_err(api_error)?;

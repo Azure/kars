@@ -6,6 +6,7 @@
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -228,6 +229,60 @@ class ComparisonTests(unittest.TestCase):
         for component in ("controller", "router"):
             self.assertIn(f"bench-evidence/baseline-{component}-criterion bench-evidence/candidate-{component}-criterion", workflow)
         self.assertIn("path: bench-evidence/", workflow)
+
+    def test_benchmark_job_denies_cache_writes_at_the_token_boundary(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        job = workflow.split("  bench-regression:\n", 1)[1].split("    steps:\n", 1)[0]
+        self.assertIn("\n    cache-mode: read\n", job)
+        self.assertEqual(job.count("cache-mode:"), 1)
+        self.assertIn("\n    permissions:\n      contents: read\n", job)
+
+    def test_baseline_materializes_only_the_exact_local_commit(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        step = workflow.split("      - name: Materialize validated local benchmark baseline\n", 1)[1]
+        step = step.split("\n      - ", 1)[0]
+        self.assertIn("BENCH_BASE_SHA: ${{ steps.baseline.outputs.base_sha }}", step)
+        command = step.split("        run: ", 1)[1].strip()
+        self.assertEqual(command, 'git -c protocol.allow=never worktree add --detach '
+                         '--no-guess-remote -- .bench-baseline "$BENCH_BASE_SHA"')
+        self.assertNotIn("ref: ${{ steps.baseline.outputs.base_sha }}", workflow)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            git_env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+
+            def git(*args):
+                return subprocess.check_output(["git", *args], cwd=root, env=git_env, text=True,
+                                               stderr=subprocess.STDOUT).strip()
+
+            git("init", "--quiet")
+            for text in ("baseline", "candidate"):
+                (root / "revision.txt").write_text(text)
+                git("add", "revision.txt")
+                git("-c", "user.name=Benchmark Test", "-c", "user.email=benchmark@example.invalid",
+                    "commit", "--quiet", "-m", text)
+            base = git("rev-parse", "HEAD^")
+            candidate = git("rev-parse", "HEAD")
+            git("merge-base", "--is-ancestor", base, candidate)
+            env = {**git_env, "BENCH_BASE_SHA": base}
+            result = subprocess.run(["bash", "-c", command], cwd=root, env=env,
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(git("-C", ".bench-baseline", "rev-parse", "HEAD"), base)
+            self.assertEqual((root / ".bench-baseline/revision.txt").read_text(), "baseline")
+            self.assertEqual(git("rev-parse", "HEAD"), candidate)
+            self.assertEqual((root / "revision.txt").read_text(), "candidate")
+            self.assertEqual(git("status", "--porcelain", "--untracked-files=no"), "")
+            (root / ".bench-baseline/revision.txt").write_text("retained evidence")
+            repeat = subprocess.run(["bash", "-c", command], cwd=root, env=env,
+                                    capture_output=True, text=True)
+            self.assertNotEqual(repeat.returncode, 0)
+            self.assertEqual((root / ".bench-baseline/revision.txt").read_text(), "retained evidence")
+            git("worktree", "remove", "--force", ".bench-baseline")
+            missing = subprocess.run(["bash", "-c", command], cwd=root,
+                                     env={**env, "BENCH_BASE_SHA": "f" * 40},
+                                     capture_output=True, text=True)
+            self.assertNotEqual(missing.returncode, 0)
+            self.assertFalse((root / ".bench-baseline").exists())
 
     def test_hosted_measurement_pipeline_propagates_cargo_failure(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()

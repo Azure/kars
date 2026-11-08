@@ -196,7 +196,7 @@ jobs:
         id: native_runtime
         timeout-minutes: 35
         run: python3 tests/native-credentials/run.py
-      - name: Exercise Team projection on the same native debug profile and default worker stack
+      - name: Exercise Team projection and writer lifecycle on the same native debug profile and default worker stack
         if: ${{ !cancelled() && (steps.native_runtime.outcome == 'success' || steps.native_runtime.outcome == 'failure') }}
         run: |
           cargo test --manifest-path .native/core/Cargo.toml --locked \
@@ -206,6 +206,10 @@ jobs:
           cargo test --manifest-path .native/core/Cargo.toml --locked \
             -p kars-controller --bin kars-controller \
             private_activation::late_scope::tests::runtime_control_material_receipts_preserve_rotation_and_resume_fences \
+            -- --exact --nocapture
+          cargo test --manifest-path .native/core/Cargo.toml --locked \
+            -p kars-controller --bin kars-controller \
+            credential_grants::writers::tests::credential_writer_consumer_drift_withholds_authority_without_resetting_grant \
             -- --exact --nocapture
       - name: Retain only bounded secret-free native outcomes
         if: always()

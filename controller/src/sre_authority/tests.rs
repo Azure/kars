@@ -4,6 +4,7 @@
 use super::*;
 use crate::sre_registration::*;
 use base64::Engine;
+use k8s_openapi::api::apps::v1::Deployment;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -73,6 +74,44 @@ fn patched_binding(existing: &Value, patch: &Value, dry_run: bool) -> Value {
         .into();
     }
     value
+}
+
+// Model only changed replicas: non-apply updates transfer that leaf to the
+// updating manager, pruning empty ownership parents. Other spec fields survive.
+fn model_replica_ownership(value: &mut Value, patch: &Value, manager: &str) {
+    if value["spec"]["replicas"] == patch["spec"]["replicas"] {
+        return;
+    }
+    if !value["metadata"]["managedFields"].is_array() {
+        value["metadata"]["managedFields"] = json!([]);
+    }
+    let entries = value["metadata"]["managedFields"].as_array_mut().unwrap();
+    for entry in entries.iter_mut() {
+        if let Some(fields) = entry["fieldsV1"].as_object_mut()
+            && let Some(spec) = fields.get_mut("f:spec").and_then(Value::as_object_mut)
+        {
+            spec.remove("f:replicas");
+            if spec.is_empty() {
+                fields.remove("f:spec");
+            }
+        }
+    }
+    entries.retain(|entry| {
+        entry["fieldsV1"]
+            .as_object()
+            .is_some_and(|fields| !fields.is_empty())
+    });
+    if let Some(entry) = entries
+        .iter_mut()
+        .find(|entry| entry["manager"] == manager && entry["operation"] == "Update")
+    {
+        entry["fieldsV1"]["f:spec"]["f:replicas"] = json!({});
+    } else {
+        entries.push(
+            json!({"manager":manager,"operation":"Update","apiVersion":"apps/v1",
+            "fieldsType":"FieldsV1","fieldsV1":{"f:spec":{"f:replicas":{}}}}),
+        );
+    }
 }
 
 pub(super) struct State {
@@ -182,10 +221,13 @@ pub(super) async fn fixture() -> (MockServer, Client, Arc<Mutex<State>>) {
             if body["metadata"]["uid"] != value["metadata"]["uid"]
                 || body["metadata"]["resourceVersion"] != value["metadata"]["resourceVersion"] { return api_error(409); }
             if !value["metadata"]["annotations"].is_object() { value["metadata"]["annotations"] = json!({}); }
-            for (key, annotation) in body["metadata"]["annotations"].as_object().unwrap() {
+            for (key, annotation) in body["metadata"]["annotations"].as_object().into_iter().flatten() {
                 if annotation.is_null() { value["metadata"]["annotations"].as_object_mut().unwrap().remove(key); }
                 else { value["metadata"]["annotations"][key] = annotation.clone(); }
             }
+            let manager = request.url.query_pairs().find(|(key, _)| key == "fieldManager")
+                .map(|(_, manager)| manager.into_owned()).unwrap_or_else(|| "test-client".into());
+            model_replica_ownership(value, &body, &manager);
             value["spec"]["replicas"] = body["spec"]["replicas"].clone();
             value["metadata"]["generation"] = (value["metadata"]["generation"].as_i64().unwrap_or(1) + 1).into();
             value["metadata"]["resourceVersion"] =
@@ -655,7 +697,7 @@ fn control_consumer(state: &Arc<Mutex<State>>, reg: &KarsSRERegistration, replic
         "metadata":{"name":"sre","namespace":"kars-sre","uid":"consumer","resourceVersion":"1","generation":2,
             "labels":{"kars.azure.com/sandbox":"sre"},
             "managedFields":[{"manager":crate::field_managers::CLAWSANDBOX,"operation":"Apply","apiVersion":"apps/v1",
-                "fieldsType":"FieldsV1","fieldsV1":{"f:spec":{}}}]},
+                "fieldsType":"FieldsV1","fieldsV1":{"f:spec":{"f:replicas":{}}}}]},
         "spec":{"replicas":replicas,"selector":{"matchLabels":{"app":"sre"}},"template":{"metadata":{"annotations":{EPOCH:epoch,CONTROL_VERSION:"control:1"}},
             "spec":{"containers":[]}}},
         "status":{"observedGeneration":2,"updatedReplicas":0,"availableReplicas":0}}));
@@ -1122,8 +1164,145 @@ async fn old_control_token_consumers_must_disappear_even_after_rollout_counters_
 }
 
 #[tokio::test]
+async fn reviewed_legacy_stop_preserves_existing_ownership_without_adopting_consumers() {
+    for ownership in ["controller", "legacy", "wrong-label"] {
+        let (server, client, state) = fixture().await;
+        let mut reg = registration();
+        reg.spec.legacy_consumer = Some(ConsumerReview {
+            namespace: RUNTIME_NAMESPACE.into(),
+            name: "sre".into(),
+            uid: "consumer".into(),
+            resource_version: "1".into(),
+        });
+        control_consumer(&state, &reg, 3);
+        let path = "/apis/apps/v1/namespaces/kars-sre/deployments/sre";
+        {
+            let mut locked = state.lock().unwrap();
+            let deployment = locked.objects.get_mut(path).unwrap();
+            if ownership == "legacy" {
+                deployment["metadata"]["managedFields"][0]["manager"] = "legacy-fixture".into();
+            } else if ownership == "wrong-label" {
+                deployment["metadata"]["labels"]["kars.azure.com/sandbox"] = "other".into();
+            }
+        }
+        migration::stop_legacy_consumer(&client, &reg)
+            .await
+            .unwrap();
+        let requests = server.received_requests().await.unwrap();
+        let patches: Vec<_> = requests
+            .iter()
+            .filter(|request| request.method == "PATCH" && request.url.path() == path)
+            .collect();
+        assert_eq!(patches.len(), 1);
+        let manager = patches[0]
+            .url
+            .query_pairs()
+            .find(|(key, _)| key == "fieldManager")
+            .map(|(_, value)| value.into_owned());
+        assert_eq!(
+            manager.as_deref(),
+            (ownership == "controller").then_some(crate::field_managers::CLAWSANDBOX)
+        );
+        let body: Value = patches[0].body_json().unwrap();
+        assert_eq!(body["metadata"]["uid"], "consumer");
+        assert_eq!(body["metadata"]["resourceVersion"], "1");
+        assert_eq!(body["spec"]["replicas"], 0);
+        let deployment: Deployment =
+            serde_json::from_value(state.lock().unwrap().objects[path].clone()).unwrap();
+        assert_eq!(
+            migration::controller_managed(&deployment, "sre"),
+            ownership == "controller"
+        );
+    }
+}
+
+#[tokio::test]
+async fn control_replica_update_models_ownership_loss_and_explicit_manager_preservation() {
+    use kube::api::{Patch, PatchParams};
+    for explicit in [false, true] {
+        for replicas in [0, 3] {
+            let (_server, client, state) = fixture().await;
+            control_consumer(&state, &registration(), 3);
+            let params = PatchParams {
+                field_manager: explicit.then(|| crate::field_managers::CLAWSANDBOX.into()),
+                ..Default::default()
+            };
+            let updated = Api::<Deployment>::namespaced(client, RUNTIME_NAMESPACE)
+                .patch(
+                    "sre",
+                    &params,
+                    &Patch::Merge(json!({
+                        "metadata":{"uid":"consumer","resourceVersion":"1"},
+                        "spec":{"replicas":replicas},
+                    })),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                migration::controller_managed(&updated, "sre"),
+                explicit || replicas == 3
+            );
+            assert_eq!(updated.metadata.uid.as_deref(), Some("consumer"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn control_restart_preserves_manager_and_exact_identity_fences() {
+    let (server, client, state) = fixture().await;
+    let reg = registration();
+    control_consumer(&state, &reg, 3);
+    let path = "/apis/apps/v1/namespaces/kars-sre/deployments/sre";
+    let before = {
+        let mut locked = state.lock().unwrap();
+        let deployment = locked.objects.get_mut(path).unwrap();
+        deployment["spec"]["template"]["metadata"]["annotations"] = json!({});
+        deployment.clone()
+    };
+    Mock::given(wiremock::matchers::method("PATCH"))
+        .and(wiremock::matchers::path(path))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&before))
+        .expect(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    assert!(migration::is_waiting(
+        &migration::rotate_owned_control_credentials(&client, &reg)
+            .await
+            .unwrap_err()
+    ));
+    let requests = server.received_requests().await.unwrap();
+    let patches: Vec<_> = requests
+        .iter()
+        .filter(|request| request.method == "PATCH" && request.url.path() == path)
+        .collect();
+    assert_eq!(patches.len(), 1);
+    let request = patches[0];
+    assert!(
+        request.url.query_pairs().any(
+            |(key, value)| key == "fieldManager" && value == crate::field_managers::CLAWSANDBOX
+        )
+    );
+    let body: Value = request.body_json().unwrap();
+    assert_eq!(body["metadata"]["uid"], before["metadata"]["uid"]);
+    assert_eq!(
+        body["metadata"]["resourceVersion"],
+        before["metadata"]["resourceVersion"]
+    );
+    assert_eq!(
+        body["spec"]["template"]["metadata"]["annotations"][EPOCH],
+        reg.epoch()
+    );
+    assert_eq!(
+        body["spec"]["template"]["metadata"]["annotations"][CONTROL_VERSION],
+        "control:1"
+    );
+    assert!(body["spec"].get("replicas").is_none());
+}
+
+#[tokio::test]
 async fn control_rotation_drains_unready_consumers_and_restores_exact_replica_intent() {
-    let (_server, client, state) = fixture().await;
+    let (server, client, state) = fixture().await;
     let reg = registration();
     control_consumer(&state, &reg, 3);
     let path = "/apis/apps/v1/namespaces/kars-sre/deployments/sre";
@@ -1182,11 +1361,24 @@ async fn control_rotation_drains_unready_consumers_and_restores_exact_replica_in
             .filter(|(method, _, _)| method == "PATCH")
             .collect();
         assert_eq!(patches.len(), 2);
-        for (_, target, body) in patches {
+        for ((_, target, body), version) in patches.into_iter().zip(["1", "2"]) {
             assert_eq!(target, path);
             assert_eq!(body["metadata"]["uid"], "consumer");
-            assert!(body["metadata"]["resourceVersion"].is_string());
+            assert_eq!(body["metadata"]["resourceVersion"], version);
         }
+        let deployment: Deployment = serde_json::from_value(locked.objects[path].clone()).unwrap();
+        assert!(migration::controller_managed(&deployment, "sre"));
+    }
+    let requests = server.received_requests().await.unwrap();
+    let patches: Vec<_> = requests
+        .iter()
+        .filter(|request| request.method == "PATCH" && request.url.path() == path)
+        .collect();
+    assert_eq!(patches.len(), 2);
+    for request in patches {
+        assert!(request.url.query_pairs().any(
+            |(key, value)| key == "fieldManager" && value == crate::field_managers::CLAWSANDBOX
+        ));
     }
     // Restored containers need not be Ready to complete credential retirement.
     migration::rotate_owned_control_credentials(&client, &reg)
@@ -1256,7 +1448,14 @@ async fn control_drain_and_restore_propagate_compare_and_swap_conflicts() {
 
 #[tokio::test]
 async fn control_drain_requires_live_complete_consumer_identity_before_writing() {
-    for field in ["uid", "resourceVersion", "generation", "deletionTimestamp"] {
+    for field in [
+        "uid",
+        "resourceVersion",
+        "generation",
+        "deletionTimestamp",
+        "managedFields",
+        "labels",
+    ] {
         let (_server, client, state) = fixture().await;
         let reg = registration();
         control_consumer(&state, &reg, 3);

@@ -76,7 +76,21 @@ full ancestor commit SHA. Reusable callers forward that input on manual runs;
 they otherwise retain the originating PR/push event identity. Missing/all-zero
 bases, wrong repositories, unavailable commits, self-comparisons and non-ancestor
 bases (including divergent force pushes) fail closed. There is no fallback to
-`HEAD~1`, a branch name, or a historical timing snapshot.
+`HEAD~1`, a branch name, or a historical timing snapshot. After validation,
+Git creates a detached worktree from that exact local commit with transport and
+remote-branch guessing disabled. The existing full-history checkout supplies the
+objects; there is no second authenticated checkout or fetch. An occupied baseline
+path fails rather than reusing stale files. The harness then verifies the worktree's
+HEAD before any baseline compilation.
+
+The benchmark job declares `cache-mode: read`. GitHub enforces this through
+scoped cache tokens, so baseline and candidate code can restore existing caches
+but cannot save caches, including through direct cache-service calls. This is
+stronger than the cache action's existing `save-if: false`, which only disables
+that action's normal upload. Read-only repository permissions, non-persisted
+checkout credentials, and baseline ancestry validation remain in place. This
+restriction also applies to manual and reusable-workflow runs; it does not
+change benchmark measurements or thresholds.
 
 CI calls:
 
