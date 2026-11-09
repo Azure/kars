@@ -35,6 +35,31 @@ must cite that authorization and disclose its actual participants and limits
 in the record, never imply that AI review was a second human review or that
 technical gates were waived. No delegation is inferred by default.
 
+## One-time beta approval exception
+
+For Azure/kars#593 only, maintainer `pallakatos` explicitly authorized a
+single-maintainer approval of source `28ff64372ca97e6bdd6db833d68afa90239cde7c`
+against base `b2ec2094cc663d5b747fec7f3c9d37cce667a24a`. The authorization and
+one genuine sign-off are recorded in
+[`2026-11-04-beta-publication.md`](2026-11-04-beta-publication.md).
+**No second human sign-off is claimed.** This is an exception to, not fulfillment
+or replacement of, the normal author-plus-independent-reviewer policy.
+
+The gate requires that exact committed record, signer and source/base marker,
+the exact review base, and the approved source as an ancestor. Every tracked
+file must match that source except the four explicitly reviewed approval-plumbing
+paths: the gate, its regression test, this README and the approval record.
+GitHub CI additionally restricts this exception to Azure/kars#593's PR merge
+or its unchanged integration on `kars-bridge`. Synthetic merge commits are allowed;
+changed base, implementation, workflows, unrelated documents or new files are not.
+There is no configurable source SHA, signer or waiver environment variable.
+
+Future capability changes still need a new record with two distinct human
+signers. The exception grants neither merge/release authorization nor technical
+acceptance: all technical gates, signed-release checks and fresh-system customer
+journeys remain required. Remove the one-time exception when this beta approval
+no longer needs to be evaluated; do not repoint it at a later source revision.
+
 These docs are intentionally **tracked** (committed with the PR), unlike the
 private `docs/internal/` planning folder.
 

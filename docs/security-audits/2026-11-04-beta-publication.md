@@ -1,7 +1,7 @@
 <!-- Copyright (c) Microsoft Corporation.
 Licensed under the MIT License. -->
 
-# Security Audit — Core and Bridge beta publication (unsigned candidate)
+# Security Audit — Core and Bridge beta publication (scoped maintainer approval)
 
 Date: 2026-11-04
 Scope: Core, Bridge, runtime adapters, packaging, dependency locks and CI in Azure/kars#593.
@@ -9,13 +9,13 @@ Gated paths: `controller/src/`, `inference-router/src/`, `bridge/`, `cli/src/`, 
 
 ## Summary
 
-This is an **unsigned review record, not approval**. The PR base observed when
-preparing this record is `b2ec2094cc663d5b747fec7f3c9d37cce667a24a`; the previous
-published head is `b00670024b671ee04c0522888749666543dd8a45`. Reviewers must bind
-approval to the actual subsequent PR head, including its repair delta, rather
-than extending an older audit's signatures. This record covers the proposed
-publication scope; AI-assisted repair work does not constitute a second human
-review.
+This record began as an **unsigned candidate**, against base
+`b2ec2094cc663d5b747fec7f3c9d37cce667a24a`, when the previous published head was
+`b00670024b671ee04c0522888749666543dd8a45`. The historical findings and failed
+attempts below are retained, not current-head qualification claims. Current
+source binding, hosted results and the explicitly authorized single-maintainer
+exception appear in **H41 qualification and maintainer approval** below.
+AI-assisted repair and review do not constitute a second human review.
 
 The follow-up repairs address hosted compilation/lint and fixture failures,
 patched JavaScript dependency graphs, bounded filesystem access, GitHub URL
@@ -581,9 +581,54 @@ guide. No scanner configuration, metadata names or raw results changed, and inhe
 findings were not cleared. Subsequent terminal-run repairs require a fresh frozen
 candidate and review; H24 evidence does not qualify changed successor bytes.
 
+## H41 qualification and maintainer approval
+
+Approved implementation: `28ff64372ca97e6bdd6db833d68afa90239cde7c` (H41),
+tree `eae5fdee1132f98fa04726daaf1582990b046d40`, against base
+`b2ec2094cc663d5b747fec7f3c9d37cce667a24a`, in
+[Azure/kars#593](https://github.com/Azure/kars/pull/593).
+
+All 60 hosted checks completed on H41: **59 passed**, with only
+[`security-audit-required`](https://github.com/Azure/kars/actions/runs/42695460942/job/129425999088?pr=593)
+failing because the record had no two-person approval. Successful checks include
+Kind E2E, Native cold installs and combined acceptance, CodeQL findings,
+controller/router tests, governed inference, AL3 image validation, dependency
+review and secret scanning. This is hosted qualification of H41, not a signed
+release or fresh-system customer acceptance. Earlier failed attempts remain part
+of this audit's history and are not relabeled successful.
+
+Maintainer `pallakatos` (Pal Lakatos-Toth) explicitly approved the remaining audit
+requirement: “well I do sign-off and it is enough”. When asked “Should I implement
+a documented single-maintainer approval exception limited to this reviewed beta
+revision, while leaving the normal two-person policy unchanged?”, the maintainer
+answered **“Yes—make this beta-only exception”**. The authenticated GitHub account
+has repository admin/maintain permissions. The sign-off below records that actual
+decision using the maintainer's existing configured Git email; it is not a
+cryptographic signature or a second person's endorsement.
+
+**Exactly one human approved. No independent human sign-off occurred.** Automated
+and independent AI code reviews are technical evidence only. The maintainer
+accepts the governance risk of proceeding without the otherwise-required second
+human for this specific reviewed beta implementation. Authentication, isolation,
+encrypted transport, secret protection, governed egress, actual accounting and
+all technical gates remain unchanged.
+
+The exception permits only this record and its gate/test/README plumbing to
+differ from H41. It rejects a changed review base, any changed implementation or
+other tracked file, another record or a different approval identity. GitHub CI
+limits it to this PR or its unchanged `kars-bridge` integration. Later capability
+changes require the normal two-person approval; this authorization cannot be
+repointed to another implementation. The approval-plumbing successor still
+requires its own local tests, independent technical review and hosted checks.
+
+Beta-approval-exception: Azure/kars#593; source=28ff64372ca97e6bdd6db833d68afa90239cde7c; base=b2ec2094cc663d5b747fec7f3c9d37cce667a24a
+Signed-off-by: Pal Lakatos-Toth <lakatos.toth.pal@gmail.com>
+
 ## Verdict
 
-**Not accepted for release.** Required hosted verification and real author plus
-independent-reviewer approval remain outstanding. No human signatures have been
-supplied or inferred. Add genuine sign-offs only after the signers have reviewed
-and approved the exact source scope and remaining protocol/taint classifications.
+**H41's implementation has explicit maintainer approval under the narrowly
+scoped beta exception above.** The normal two-human policy remains in force for
+other capability changes. This approval does not authorize a merge or release,
+nor establish fresh-system acceptance. The approval-plumbing successor must pass
+its technical checks; the signed beta release and both fresh-system customer
+journeys remain outstanding.
