@@ -258,6 +258,7 @@ def delegate_operators(h):
                 {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list"]},
                 {"apiGroups": [""], "resources": ["pods/log"], "verbs": ["get"]},
                 {"apiGroups": [""], "resources": ["replicationcontrollers"], "verbs": ["create", "get", "update"]},
+                {"apiGroups": [""], "resources": ["configmaps"], "resourceNames": ["sre-health-report"], "verbs": ["get", "update", "delete"]},
                 {"apiGroups": [""], "resources": ["pods/exec", "pods/attach", "pods/portforward", "pods/proxy"], "verbs": ["get"]},
                 {"apiGroups": ["apps"], "resources": ["deployments", "replicasets", "statefulsets", "daemonsets"], "verbs": ["create", "patch", "update"]},
                 {"apiGroups": ["batch"], "resources": ["jobs", "cronjobs"], "verbs": ["create"]},

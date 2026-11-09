@@ -8,7 +8,7 @@ from .common import (
     assert_claim, assert_denial, enrollment_json, fingerprint, printed_object, require, review_args,
 )
 from .fixtures import CONTROL, CONTROL_NS, GROUP_BINDING, delegate_operators
-from .admission import admission_cases, policies_ready
+from .admission import admission_cases, policies_ready, retained_report_denials
 from .credential_paths import (
     assert_fresh_private_identity, block_prestaged_paths, fixture_review, secret_watch, token_secret_denials,
 )
@@ -263,6 +263,7 @@ def retire_and_uninstall(h):
         items = json.loads(h.k("get", kind, "-A", "-o", "json"))["items"]
         require(not any(item["metadata"].get("annotations", {}).get("kars.azure.com/sre-registration-uid") == reg["metadata"]["uid"]
                         for item in items), "Owned private grant survived retirement")
+    retained_report_denials(h, reg["metadata"]["uid"])
     h.cli("uninstall", timeout=180)
     h.poll("SRE source removal", lambda: h.get("karssandbox", "sre", SYSTEM) is None, seconds=120)
     h.poll("SRE namespace removal", lambda: h.get("namespace", RUNTIME) is None, seconds=120)
@@ -270,7 +271,7 @@ def retire_and_uninstall(h):
     retained = h.get("karssreregistrations.kars.azure.com", "canonical")
     require(retained["metadata"]["uid"] == reg["metadata"]["uid"] and retained["status"]["phase"] == "Retired",
             "Retired registration audit record was removed or replaced")
-    h.passed("Retire/uninstall revoke owned grants/credentials and remove the source namespace while retaining core UID and audit registration")
+    h.passed("Retire/uninstall revoke owned grants/credentials and remove the source namespace including its retained report while retaining core UID and audit registration")
 
 
 def fresh_reenrollment(h):

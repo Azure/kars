@@ -254,6 +254,44 @@ def admission_cases(h, enrollment):
     replication_controller_cases(h)
 
 
+def retained_report_denials(h, registration_uid):
+    from .bootstrap_diagnostics import api_result
+
+    def denied(response, label):
+        assert_denial(response, label, "kars-sre-report-authority")
+        facts = api_result(response.status_code, response.json(), {"kars-sre-report-authority": {}})
+        require(not (set(facts.get("categories", [])) - {"forbidden"}),
+                "Report proof received a CEL/schema failure instead of an authority denial")
+
+    namespace = h.get("namespace", RUNTIME)
+    require(namespace and not namespace["metadata"].get("deletionTimestamp")
+            and namespace.get("status", {}).get("phase") == "Active",
+            "Report denial proof requires the live non-terminating SRE namespace")
+    report = h.get("configmap", "sre-health-report", RUNTIME)
+    require(report and report["metadata"].get("uid")
+            and report["metadata"].get("resourceVersion")
+            and not report["metadata"].get("deletionTimestamp")
+            and report["metadata"].get("annotations", {}).get("kars.azure.com/sre-registration-uid") == registration_uid,
+            "Retirement must retain its owned report before namespace cleanup")
+    path = f"/api/v1/namespaces/{RUNTIME}/configmaps/sre-health-report"
+    candidate = copy.deepcopy(report)
+    candidate["data"] = {"report.json": "unauthorized report mutation"}
+    denied(h.api("PUT", path + "?dryRun=All", body=candidate, user="tenant"),
+           "retained report mutation")
+    deletion = {"apiVersion": "v1", "kind": "DeleteOptions", "dryRun": ["All"],
+                "preconditions": {"uid": report["metadata"]["uid"],
+                                  "resourceVersion": report["metadata"]["resourceVersion"]}}
+    denied(h.api("DELETE", path, body=deletion, user="tenant"), "retained report deletion")
+    # Exercise the real built-in principal, without granting it registrar use.
+    h.token_identity("namespace-controller", "kube-system", "namespace-controller")
+    for target in (path, f"/api/v1/namespaces/{RUNTIME}/configmaps?fieldSelector=metadata.name%3Dsre-health-report"):
+        denied(h.api("DELETE", target, body=deletion, user="namespace-controller"),
+               "non-terminating report cleanup")
+    after = h.get("configmap", "sre-health-report", RUNTIME)
+    require(after == report, "Report denial dry-runs changed the retained report")
+    h.passed("Retained report denies tenant mutation/deletion and actual namespace-controller named/collection deletion before namespace termination")
+
+
 def runtime_denials(h, pod):
     response = h.api("POST", f"/api/v1/namespaces/{RUNTIME}/serviceaccounts/sre-api-router/token",
                     body={"apiVersion": "authentication.k8s.io/v1", "kind": "TokenRequest",

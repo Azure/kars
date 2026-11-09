@@ -6,6 +6,8 @@ import {
   type Execute, type NamespaceReview,
 } from "./private-activation.js";
 
+import { projectObserver } from "./private-activation-observer.js";
+
 const FIELDS = [
   "kars.azure.com/inference-budget-ca-version", "kars.azure.com/inference-providers-version",
   "kars.azure.com/services-credential-version", "kars.azure.com/sre-private-credential-uid",
@@ -13,8 +15,9 @@ const FIELDS = [
 ];
 const RECEIPT = ["epoch", "baseline", "structure", "template", "sandbox_uid", "generation"];
 
-function structure(value: unknown, projectCredentials = true): string {
+function structure(value: unknown, projectCredentials = true, projectObservations = true): string {
   const current = structuredClone(template(value));
+  if (projectObservations) projectObserver(current);
   const fields = at(current, "metadata", "annotations");
   if (fields !== undefined) {
     for (const name of FIELDS) {
@@ -27,7 +30,7 @@ function structure(value: unknown, projectCredentials = true): string {
   return templateDigest({ kind: "Deployment", spec: { template: current } });
 }
 
-function modelStructure(value: unknown, projectCredentials = true): string {
+function modelStructure(value: unknown, projectCredentials = true, projectObservations = true): string {
   const current = structuredClone(record(value));
   const containers = at(template(current), "spec", "containers");
   if (!Array.isArray(containers)) throw new Error("Malformed model rollout containers");
@@ -51,7 +54,7 @@ function modelStructure(value: unknown, projectCredentials = true): string {
       record(entry).value = "controller-policy-model";
     }
   }
-  return structure(current, projectCredentials);
+  return structure(current, projectCredentials, projectObservations);
 }
 
 /** History is allowed only for operator migration review; ordinary continuity needs a projector receipt. */
@@ -90,8 +93,8 @@ export async function reviewedControllerRollout(
     return Object.keys(receipt).length === RECEIPT.length + Number(hasModelStructure)
       && Object.keys(receipt).every(key => RECEIPT.includes(key) || key === "model_structure")
       && ((receipt.structure === actual && (!hasModelStructure || receipt.model_structure === modelStructure(current)))
-        || (receipt.structure === structure(current, false)
-          && (!hasModelStructure || receipt.model_structure === modelStructure(current, false))))
+        || [true, false].some(projectCredentials => receipt.structure === structure(current, projectCredentials, false)
+          && (!hasModelStructure || receipt.model_structure === modelStructure(current, projectCredentials, false))))
       && receipt.epoch === scope.epoch && receipt.baseline === consumer.templateDigest
       && receipt.template === templateDigest(current)
       && receipt.sandbox_uid === reviewed(sandbox).uid && receipt.generation === generation;
@@ -110,6 +113,8 @@ export async function reviewedControllerRollout(
     const baseline = structuredClone(record(replica));
     const labels = at(template(baseline), "metadata", "labels");
     if (labels !== undefined) delete record(labels)["pod-template-hash"];
-    return templateDigest(baseline) === consumer.templateDigest && structure(baseline) === actual;
+    // History alone cannot issue or rotate an observer capability; only a core receipt can.
+    return templateDigest(baseline) === consumer.templateDigest
+      && structure(baseline, true, false) === structure(current, true, false);
   });
 }

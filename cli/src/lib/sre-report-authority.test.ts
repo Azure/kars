@@ -37,6 +37,14 @@ describe("SRE report-only authority manifests", () => {
       "!has(object.binaryData)", "!has(object.metadata.deletionTimestamp)",
     ]) expect(predicate).toContain(required);
     expect(predicate).not.toContain("object.data['report.json'].size()");
+    expect(predicate).toContain([
+      "(request.operation == 'DELETE' &&",
+      " request.userInfo.username == 'system:serviceaccount:kube-system:namespace-controller' &&",
+      " namespaceObject != null &&",
+      " dyn(namespaceObject.metadata).?deletionTimestamp.orValue(null) != null &&",
+      " namespaceObject.status.phase == 'Terminating') ||",
+    ].join("\n"));
+    expect(predicate.match(/namespace-controller/g)).toHaveLength(1);
     expect(binding.kind).toBe("ValidatingAdmissionPolicyBinding");
     expect(binding.spec).toEqual({ policyName: "kars-sre-report-authority", validationActions: ["Deny", "Audit"] });
     expect(stdout).not.toMatch(/kind: (InferencePolicy|KarsBudgetAccount|KarsSREAction)/);

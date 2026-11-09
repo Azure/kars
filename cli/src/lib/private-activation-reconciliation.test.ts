@@ -2,7 +2,8 @@
 // Licensed under the MIT License.
 
 import { describe, expect, it } from "vitest";
-import { PRIVATE_PREFIX as P, templateDigest, type Execute } from "./private-activation.js";
+import { PRIVATE_PREFIX as P, record, templateDigest, type Execute } from "./private-activation.js";
+import { projectObserver } from "./private-activation-observer.js";
 import { reviewedControllerRollout } from "./private-activation-reconciliation.js";
 
 function fixture(rolloutField = "kars.azure.com/inference-providers-version", legacyProjection = false) {
@@ -38,7 +39,114 @@ function fixture(rolloutField = "kars.azure.com/inference-providers-version", le
   return { current, consumer, scope, receipt, namespace, sandbox, calls, verify };
 }
 
+const OBSERVER = "kars.azure.com/services-observer-version";
+
+function observerFixture() {
+  const f = fixture();
+  const volumes = [{ name: "existing", emptyDir: {} }];
+  const env = [{ name: "EXISTING", value: "fixed" }];
+  const volumeMounts = [{ name: "existing", mountPath: "/existing" }];
+  Object.assign(f.current.spec.template.spec, { volumes, containers: [
+    { name: "agent", image: "reviewed-agent" }, { name: "inference-router", image: "reviewed-router", env, volumeMounts },
+  ] });
+  const baseline = structuredClone(f.current);
+  f.consumer.templateDigest = templateDigest(baseline);
+  f.receipt.baseline = f.consumer.templateDigest;
+  const normalized = structuredClone(baseline);
+  delete normalized.spec.template.metadata.annotations["kars.azure.com/inference-providers-version"];
+  f.receipt.structure = templateDigest(normalized);
+  f.current.spec.template.metadata.annotations[OBSERVER] = "observer:1";
+  Object.assign(volumes, [volumes[0],
+    { name: "service-observations", secret: { secretName: "router-services-observer", defaultMode: 420,
+      items: [{ key: "observation-token", path: "observation-token" }, { key: "config.json", path: "config.json" }] } },
+    { name: "service-observation-identity", secret: { secretName: "router-services-observer-identity", defaultMode: 420,
+      items: [{ key: "config.json", path: "config.json" }] } },
+  ]);
+  env.push({ name: "KARS_SERVICE_OBSERVATION_VERSION", value: "observer:1" });
+  Object.assign(volumeMounts, [volumeMounts[0],
+    { name: "service-observations", mountPath: "/etc/kars/observations", readOnly: true },
+    { name: "service-observation-identity", mountPath: "/etc/kars/observation-identity", readOnly: true },
+  ]);
+  const publish = () => {
+    f.receipt.template = templateDigest(f.current);
+    f.namespace.metadata.annotations[`${P}reconciled-${f.consumer.object.uid}`] = JSON.stringify(f.receipt);
+  };
+  return { ...f, baseline, volumes, env, volumeMounts, publish };
+}
+
 describe("protected controller rollout receipts", () => {
+  it("requires an exact receipt for observer enable, rotation and removal", async () => {
+    const f = observerFixture();
+    for (const version of ["observer:1", "observer:2"]) {
+      f.current.spec.template.metadata.annotations[OBSERVER] = version;
+      f.env[1]!.value = version;
+      expect(await f.verify()).toBe(false);
+      f.publish();
+      expect(await f.verify()).toBe(true);
+      const projected = structuredClone(f.current.spec.template);
+      expect(projectObserver(projected)).toBe(version);
+      expect(projected).toEqual(f.baseline.spec.template);
+    }
+    Object.assign(f.current, structuredClone(f.baseline));
+    expect(await f.verify()).toBe(false);
+    f.publish();
+    expect(await f.verify()).toBe(true);
+    expect(f.calls.every(args => ["namespace", "karssandbox"].includes(args[1]!))).toBe(true);
+  });
+
+  it.each([true, false])("reads observer-pinned legacy receipts with credential projection %s", async legacyProjection => {
+    const f = observerFixture();
+    const pinned = structuredClone(f.current);
+    if (!legacyProjection) delete pinned.spec.template.metadata.annotations["kars.azure.com/inference-providers-version"];
+    else {
+      // Legacy projection receipts still remove provider-version, but retain credential-projection-version.
+      pinned.spec.template.metadata.annotations["kars.azure.com/credential-projection-version"] = "projection:1";
+      f.current.spec.template.metadata.annotations["kars.azure.com/credential-projection-version"] = "projection:1";
+      delete pinned.spec.template.metadata.annotations["kars.azure.com/inference-providers-version"];
+    }
+    f.receipt.structure = templateDigest(pinned);
+    Object.assign(f.receipt, { model_structure: f.receipt.structure });
+    f.publish();
+    expect(await f.verify()).toBe(true);
+    f.current.spec.template.metadata.annotations[OBSERVER] = "observer:2";
+    f.env[1]!.value = "observer:2";
+    f.publish();
+    expect(await f.verify()).toBe(false);
+  });
+
+  it.each(["secret", "items", "mode", "mount", "env", "duplicate", "optional", "null", "image", "agent-mount"])(
+    "rejects observer-looking structural drift even with updated full digest: %s", async fault => {
+      const f = observerFixture();
+      if (fault === "secret") record(record(f.volumes[1]).secret).secretName = "other";
+      if (fault === "items") record(record(f.volumes[1]).secret).items = [];
+      if (fault === "mode") record(record(f.volumes[1]).secret).defaultMode = 511;
+      if (fault === "optional") record(record(f.volumes[1]).secret).optional = true;
+      if (fault === "mount") Object.assign(f.volumeMounts[1]!, { readOnly: false });
+      if (fault === "env") Object.assign(f.env[1]!, { valueFrom: { fieldRef: { fieldPath: "metadata.name" } } });
+      if (fault === "duplicate") f.volumes.push(f.volumes[1]!);
+      if (fault === "null") Object.assign(f.current.spec.template.metadata.annotations, { [OBSERVER]: null });
+      if (fault === "image") f.current.spec.template.spec.containers[0]!.image = "changed";
+      if (fault === "agent-mount") Object.assign(f.current.spec.template.spec.containers[0]!, { volumeMounts: [f.volumeMounts[1]] });
+      f.publish();
+      expect(await f.verify().catch(() => false)).toBe(false);
+      if (!["image", "agent-mount"].includes(fault)) {
+        expect(() => projectObserver(structuredClone(f.current.spec.template))).toThrow("Malformed observer projection");
+      }
+    },
+  );
+
+  it("never treats retained review history as observer issuance authority", async () => {
+    const f = observerFixture();
+    delete f.namespace.metadata.annotations[`${P}reconciled-${f.consumer.object.uid}`];
+    const replica = { ...f.baseline, kind: "ReplicaSet", metadata: { namespace: "kars-sre", ownerReferences: [
+      { apiVersion: "apps/v1", kind: "Deployment", name: "sre", uid: f.consumer.object.uid, controller: true },
+    ] } };
+    const execute: Execute = async args => JSON.stringify(args[1] === "namespace" ? f.namespace
+      : args[1] === "karssandbox" ? f.sandbox : { items: [replica] });
+    expect(await reviewedControllerRollout(execute, f.scope, f.consumer, f.current, true)).toBe(false);
+    Object.assign(f.current, structuredClone(f.baseline));
+    expect(await reviewedControllerRollout(execute, f.scope, f.consumer, f.current, true)).toBe(true);
+  });
   it.each(["kars.azure.com/inference-providers-version", "kars.azure.com/credential-projection-version"])(
     "accepts repeated %s rotations only with a current receipt after ReplicaSets are collected", async field => {
       const f = fixture(field);

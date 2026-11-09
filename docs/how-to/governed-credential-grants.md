@@ -507,8 +507,24 @@ Model transitions
 may change only the literal values of agent `KARS_MODEL`, OpenClaw
 `OPENCLAW_MODEL`, and router `AZURE_OPENAI_DEPLOYMENT`. Those values must match
 both the controller-rendered workload and the current same-namespace
-InferencePolicy primary. Environment names, presence, ordering and other fields
-remain pinned; duplicate model entries and `valueFrom` substitutions are refused.
+InferencePolicy primary. For model transitions, environment names, presence,
+ordering and other fields remain pinned; duplicate model entries and `valueFrom`
+substitutions are refused.
+
+Current-observer enable, rotation and removal also use protected reconciliation
+receipts. Only the exact controller-rendered observer Secret volumes, router-only
+read-only mounts, version environment entry and annotation may change. Duplicate,
+extra or altered projection fields are rejected; only Kubernetes' Secret volume
+`defaultMode: 420` default is normalized. Applied and desired projections must
+match fresh issued status, with unchanged observation status since rendering.
+Enable/rotation require the current grant UID and same-workspace Sandbox target,
+runtime namespace and Deployment UIDs, capability, privacy revision and issued
+Secret UID/version to agree. Removal must match the absence of projected issuance
+in fresh status. Observer-pinned legacy receipts upgrade through verified
+reconciliation; CLI history alone cannot authorize observer enable or rotation.
+`Prepared` is not readiness: current-consumer and fresh privacy verification still
+must succeed.
+
 The receipt binds the privacy epoch, original template, current complete template
 and live Sandbox UID/generation. All other pod spec fields, labels, annotations
 and consumer identities remain pinned. Initial upgrade recovery may use an owned

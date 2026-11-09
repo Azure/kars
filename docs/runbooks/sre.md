@@ -183,8 +183,11 @@ owned by the canonical registration, with one `report.json` value. The router
 receives only named `get/update` permission through its existing private namespaced
 Role; no report create/delete, generic resource write, remediation approval or
 inference capacity is granted. A dedicated fail-closed admission policy reserves
-creation/deletion and metadata/source changes for registrar authority; even
-Bridge's general ConfigMap mutation grant cannot edit this target. The publisher
+creation/deletion and metadata/source changes for registrar authority, except that
+`system:serviceaccount:kube-system:namespace-controller` may DELETE the retained
+report only when the actual namespace has a deletion timestamp and phase
+`Terminating`; this grants no CREATE/UPDATE rights. Even Bridge's general ConfigMap
+mutation grant cannot edit this target. The publisher
 is bound to live registration, sandbox and runtime namespace UIDs, not caller
 supplied identities. The existing authority checks run before storage operations
 and again before acknowledgment. UID/resourceVersion compare-and-swap prevents

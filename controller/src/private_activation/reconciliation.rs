@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Preserve reviewed workload structure across controller-owned credential and model rollouts.
+//! Preserve reviewed workload structure across controller-owned credential, observer and model rollouts.
 
 use super::{EPOCH, ERROR, PREFIX, live, verification::template_digest};
 use crate::{
@@ -16,6 +16,9 @@ use kube::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+#[path = "reconciliation_observer.rs"]
+mod observer;
 
 const ROLLOUT_FIELDS: [&str; 6] = [
     "kars.azure.com/inference-budget-ca-version",
@@ -43,7 +46,8 @@ fn key(uid: &str) -> String {
     format!("{PREFIX}reconciled-{uid}")
 }
 
-fn structure(template: Value) -> Result<String, String> {
+fn structure(mut template: Value) -> Result<String, String> {
+    observer::project(&mut template)?;
     rollout_structure(template, true)
 }
 
@@ -98,7 +102,8 @@ fn model_values(template: &Value) -> Result<Vec<(String, String, String)>, Strin
     Ok(values)
 }
 
-fn model_structure(template: Value) -> Result<String, String> {
+fn model_structure(mut template: Value) -> Result<String, String> {
+    observer::project(&mut template)?;
     rollout_model_structure(template, true)
 }
 
@@ -127,7 +132,15 @@ fn rollout_model_structure(
 }
 
 fn receipt_structure_matches(receipt: &Reconciliation, template: &Value) -> Result<bool, String> {
-    // Pre-upgrade receipts pinned the projection revision. Read them until the
+    if receipt.structure == structure(template.clone())?
+        && receipt
+            .model_structure
+            .as_ref()
+            .is_none_or(|digest| model_structure(template.clone()).as_ref() == Ok(digest))
+    {
+        return Ok(true);
+    }
+    // Pre-upgrade receipts pinned the observer rendering and/or projection revision. Read them until the
     // next verified controller reconciliation replaces them with the new form.
     for project_credentials in [true, false] {
         if receipt.structure == rollout_structure(template.clone(), project_credentials)?
@@ -250,8 +263,9 @@ pub(super) async fn matches(
 }
 
 /// Only the qualified projector can write these namespace annotations. A receipt
-/// permits only credential annotations and policy-verified model values, never
-/// other spec/label changes or a replacement Deployment/Sandbox.
+/// permits only credential annotations, exact current observer projections and
+/// policy-verified model values, never other spec/label changes or a replacement
+/// Deployment/Sandbox. Full current template digests remain mandatory.
 pub(super) async fn record(
     client: &Client,
     sandbox: &KarsSandbox,
@@ -268,7 +282,7 @@ pub(super) async fn record(
     else {
         return Ok(None);
     };
-    let Some(activation) = grant.spec.private_activation else {
+    let Some(activation) = grant.spec.private_activation.as_ref() else {
         return Ok(None);
     };
     let Some(consumer) = activation
@@ -312,7 +326,17 @@ pub(super) async fn record(
     {
         return Err(ERROR.into());
     }
+    observer::verify_rendering(
+        template,
+        &expected,
+        sandbox,
+        &fresh_source,
+        &grant,
+        namespace,
+        &consumer.object.uid,
+    )?;
     let actual_structure = structure(template.clone())?;
+    let observer_pinned_structure = rollout_structure(template.clone(), true)?;
     let legacy_structure = rollout_structure(template.clone(), false)?;
     let actual_template = template_digest(template.clone())?;
     let prior = stored(namespace, &consumer.object.uid)?;
@@ -321,9 +345,12 @@ pub(super) async fn record(
             prior.epoch == epoch
                 && prior.baseline == consumer.template_digest
                 && Some(&prior.sandbox_uid) == sandbox.metadata.uid.as_ref()
-                && (prior.structure == actual_structure || prior.structure == legacy_structure)
+                && (prior.structure == actual_structure
+                    || prior.structure == observer_pinned_structure
+                    || prior.structure == legacy_structure)
         });
     let route_structure = model_structure(template.clone())?;
+    let observer_pinned_route_structure = rollout_model_structure(template.clone(), true)?;
     let legacy_route_structure = rollout_model_structure(template.clone(), false)?;
     let mut model_transition = !qualified
         && prior.as_ref().is_some_and(|prior| {
@@ -331,6 +358,7 @@ pub(super) async fn record(
                 && prior.baseline == consumer.template_digest
                 && Some(&prior.sandbox_uid) == sandbox.metadata.uid.as_ref()
                 && (prior.model_structure.as_ref() == Some(&route_structure)
+                    || prior.model_structure.as_ref() == Some(&observer_pinned_route_structure)
                     || prior.model_structure.as_ref() == Some(&legacy_route_structure))
         });
     if !qualified && !model_transition {

@@ -68,7 +68,7 @@ pub struct TeamsChannelCredentials {
 const MAX_ENTRA_ROLE_MAP_BYTES: usize = 2 * 1024 * 1024;
 
 fn parse_entra_role_map(input: &str) -> AppResult<serde_json::Value> {
-    let input = input.trim();
+    let input: &str = input.trim();
     if input.len() > MAX_ENTRA_ROLE_MAP_BYTES {
         return Err(AppError::BadRequest(
             "entra_role_map must be valid JSON".into(),

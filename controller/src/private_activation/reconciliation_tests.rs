@@ -10,6 +10,9 @@ use std::{
 };
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+#[path = "reconciliation_observer_tests.rs"]
+mod observer_tests;
+
 const NS: &str = "/api/v1/namespaces/kars-runtime";
 const SOURCE: &str = "/apis/kars.azure.com/v1alpha1/namespaces/work/karssandboxes/runtime";
 const DEPLOYMENT: &str = "/apis/apps/v1/namespaces/kars-runtime/deployments/runtime";

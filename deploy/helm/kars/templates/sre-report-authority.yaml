@@ -27,6 +27,11 @@ spec:
     - expression: >-
         authorizer.group('kars.azure.com').resource('karssreregistrations')
           .name('canonical').check('use').allowed() ||
+        (request.operation == 'DELETE' &&
+         request.userInfo.username == 'system:serviceaccount:kube-system:namespace-controller' &&
+         namespaceObject != null &&
+         dyn(namespaceObject.metadata).?deletionTimestamp.orValue(null) != null &&
+         namespaceObject.status.phase == 'Terminating') ||
         (request.operation == 'UPDATE' &&
          request.userInfo.username == 'system:serviceaccount:kars-sre:sre-api-router' &&
          oldObject != null && object.metadata.uid == oldObject.metadata.uid &&
@@ -43,7 +48,7 @@ spec:
          !has(object.binaryData) && (!has(object.immutable) || !object.immutable) &&
          has(object.data) && object.data.size() == 1 && 'report.json' in object.data &&
          bytes(object.data['report.json']).size() <= 65536)
-      message: "Only the registrar owns the report target; the private SRE router may update its bounded report data only"
+      message: "Only the registrar owns the report target; the private SRE router may update bounded report data, and the namespace controller may delete it only during namespace termination"
       reason: Forbidden
 ---
 apiVersion: admissionregistration.k8s.io/v1
