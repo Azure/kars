@@ -23,6 +23,30 @@ def pods(h, namespace):
     return json.loads(h.k("get", "pods", "-n", namespace, "-o", "json"))["items"]
 
 
+def rotated_control_pods(h, old_uids, epoch):
+    def inventory():
+        current = pods(h, CONTROL_NS)
+        require(not old_uids.intersection(pod["metadata"]["uid"] for pod in current),
+                "A startup-cached old control-token consumer survived Ready")
+        for pod in current:
+            require(pod["metadata"].get("annotations", {}).get(EPOCH) == epoch,
+                    "Control consumer lacks the new privacy epoch")
+        return current
+
+    # Check the security boundary immediately. Authority Ready does not imply
+    # workload rollout completion; pin cache-observation UIDs only afterwards.
+    inventory()
+    h.k("rollout", "status", f"deployment/{CONTROL}", "-n", CONTROL_NS,
+        "--timeout=120s", timeout=130)
+
+    def settled():
+        current = inventory()
+        return current if current and all(not pod["metadata"].get("deletionTimestamp")
+                                          for pod in current) else False
+
+    return h.poll("rotated control consumer rollout completion", settled, seconds=120)
+
+
 def assert_control_cache(h, pod, epoch, expected):
     name, uid = pod["metadata"]["name"], pod["metadata"]["uid"]
 
@@ -198,13 +222,9 @@ def legacy_migration(h):
     rotated = h.get("secret", "router-services-admin", CONTROL_NS)
     require(rotated["metadata"]["uid"] == h.state["control_secret_uid"], "Owned control Secret was replaced instead of rotated")
     require(fingerprint(rotated) != h.state["control_digest"], "Owned exposed control token was not rotated")
-    current_pods = pods(h, CONTROL_NS)
-    require(current_pods and not old_control_pods.intersection(pod["metadata"]["uid"] for pod in current_pods),
-            "A startup-cached old control-token consumer survived Ready")
+    current_pods = rotated_control_pods(h, old_control_pods, reg["status"]["privacyEpoch"])
     expected = fingerprint(rotated)
     for pod in current_pods:
-        require(pod["metadata"].get("annotations", {}).get(EPOCH) == reg["status"]["privacyEpoch"],
-                "Control consumer lacks the new privacy epoch")
         assert_control_cache(h, pod, reg["status"]["privacyEpoch"], expected)
     h.passed("Owned router-services-admin token rotates and every cached old consumer is gone before Ready")
     h.cli("install", timeout=240)

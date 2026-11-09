@@ -110,9 +110,11 @@ fn api_error(code: u16) -> ResponseTemplate {
 }
 
 fn metadata_response(object: &Value) -> ResponseTemplate {
-    ResponseTemplate::new(200).set_body_json(json!({
-        "apiVersion":"meta.k8s.io/v1", "kind":"PartialObjectMetadata", "metadata":object["metadata"],
-    }))
+    let mut response = json!({
+        "apiVersion":"meta.k8s.io/v1", "kind":"PartialObjectMetadata",
+    });
+    response["metadata"] = object["metadata"].clone();
+    ResponseTemplate::new(200).set_body_json(response)
 }
 
 fn replace_namespace(state: &mut State) {

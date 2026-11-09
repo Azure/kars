@@ -265,10 +265,14 @@ The UID/resourceVersion fences remain on every Deployment write.
 Kind E2E verifies old-consumer termination and the new privacy epoch before
 checking the replacement consumer's startup-cached token. Authority `Ready`
 does not imply workload availability: after that security check, the harness
-waits for the same Pod UID and epoch's `credential-consumer` readiness probe,
-which requires a nonempty cache file. It then compares the cached digest with
-the rotated Secret. A changed identity/epoch, missing cache, failed command or
-wrong digest still fails acceptance; readiness does not replace token proof.
+waits for the control Deployment rollout and termination of transient new-epoch
+Pods before selecting the cache-observation Pod UIDs. Old consumer UIDs or a
+wrong epoch fail immediately, including on every post-rollout inventory; they
+are never filtered out. The selected Pod must then retain its UID and epoch
+while its `credential-consumer` readiness probe verifies a nonempty cache file.
+The cached digest must match the rotated Secret. A changed selected identity,
+missing cache, failed command or wrong digest still fails acceptance; rollout
+and readiness checks do not replace token proof.
 
 On Kind E2E failure, retained logs include `SRE-CONTROL-CONSUMER` records for
 `kars-e2e-control-rotation/e2e-control-rotation` and `kars-sre/sre` before cleanup.

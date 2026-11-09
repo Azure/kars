@@ -43,6 +43,51 @@
     }
   },
   "files": {
+    "ci/codeql/bounded-value/LICENSE.upstream": {
+      "category": "legal",
+      "reason": "Exact MIT license from the pinned github/codeql source; preserve GitHub ownership and permission notice for the unmodified offline fixture.",
+      "notice": "NOTICE"
+    },
+    "ci/codeql/bounded-value/fixtures/UnsafeDeserializationExtensions.qll": {
+      "category": "third-party",
+      "reason": "Unmodified github/codeql fixture from the commit recorded in manifest.json, with original checksum and LICENSE.upstream retained; do not insert a Microsoft ownership header.",
+      "notice": "NOTICE"
+    },
+    "ci/codeql/bounded-value/controls/BoundedJsonValue.qll": {
+      "category": "repository-license",
+      "reason": "Frozen first-party CodeQL recognizer qualified byte-for-byte with the controls and bound by manifest.json; retain the qualified payload rather than rewrite its hash-bound source.",
+      "notice": "LICENSE"
+    },
+    "ci/codeql/bounded-value/controls/BoundedValueControl.ql": {
+      "category": "repository-license",
+      "reason": "Frozen first-party recognizer control bound by manifest.json and qualified with unchanged location-sensitive expected results; retain exact control bytes.",
+      "notice": "LICENSE"
+    },
+    "ci/codeql/bounded-value/controls/BoundedValueControl.expected": {
+      "category": "repository-license",
+      "reason": "Exact first-party CodeQL test result table, bound by manifest.json; comments would change the expected-result data.",
+      "notice": "LICENSE"
+    },
+    "ci/codeql/bounded-value/controls/IntegratedFlowControl.ql": {
+      "category": "repository-license",
+      "reason": "Frozen first-party integrated-flow control bound by manifest.json and qualified with unchanged location-sensitive expected results; retain exact control bytes.",
+      "notice": "LICENSE"
+    },
+    "ci/codeql/bounded-value/controls/IntegratedFlowControl.expected": {
+      "category": "repository-license",
+      "reason": "Exact first-party CodeQL test result table, bound by manifest.json; comments would change the expected-result data.",
+      "notice": "LICENSE"
+    },
+    "ci/codeql/bounded-value/controls/main.rs": {
+      "category": "repository-license",
+      "reason": "Frozen first-party positive and negative test input; adding lines invalidates the qualified location-sensitive expected results and manifest.json digest.",
+      "notice": "LICENSE"
+    },
+    "ci/codeql/bounded-value/controls/options.yml": {
+      "category": "repository-license",
+      "reason": "Frozen first-party CodeQL extraction options included in the exact qualified control payload and bound by manifest.json; retain verified bytes.",
+      "notice": "LICENSE"
+    },
     "tools/headlamp-plugin/build-tool/LICENSE.upstream": {
       "category": "legal",
       "reason": "Original Headlamp build-tool distribution license; preserve upstream legal text without adding a first-party source header.",

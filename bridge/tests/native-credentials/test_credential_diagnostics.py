@@ -22,6 +22,11 @@ class CredentialDiagnosticsTests(unittest.TestCase):
             self.assertEqual(condition_category(message), category)
             self.assertEqual(condition_category("CredentialSourceUnavailable: " + message), category)
             self.assertEqual(condition_category(message + PRIVATE), "unclassified")
+            self.assertEqual(condition_category(PRIVATE + message), "unclassified")
+            self.assertEqual(condition_category(message + "; read authority revocation pending: " + PRIVATE),
+                             "unclassified")
+            self.assertEqual(condition_category(json.dumps({"message": message, "body": PRIVATE})),
+                             "unclassified")
         for message in (None, {}, PRIVATE, "prefix" + next(iter(CATEGORIES))):
             self.assertEqual(condition_category(message), "unclassified")
 

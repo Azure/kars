@@ -18,6 +18,12 @@ CATEGORIES = {
     "Private target namespace requires reviewed grant activation before issuance or reuse": "runtime_scope_unreviewed",
     "Private capability is unqualified; regenerate and apply the reviewed grant activation": "private_qualification_invalid",
     "SRE privacy qualification is still pending; no credential issued or reused": "privacy_pending",
+    "Writer identity lacks an enforced name-continuity guard": "writer_name_guard",
+    "Writer identity is absent, terminating or replaced; valid source delivery is retained": "writer_identity_unavailable",
+    "Writer has broad credential, workload, RBAC or impersonation authority (including inherited authentication groups); remove it before enrollment": "writer_excess_authority",
+    "Private capability reviewed consumer identity or template differs from its qualification": "private_consumer_identity_or_template",
+    "Private capability reviewed consumer lacks its qualified epoch": "private_consumer_epoch",
+    "Private capability issuer is not the operator-reviewed root identity": "private_issuer_identity",
 }
 GOVERNED_CATEGORIES = {
     "binding_shape", "grant_identity", "target_identity", "owner_authority",

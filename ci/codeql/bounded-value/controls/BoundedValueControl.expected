@@ -1,0 +1,17 @@
+| case_after_parse | false |
+| case_bounded_alias | true |
+| case_bounded_annotated | true |
+| case_bounded_bytes | true |
+| case_bounded_str | true |
+| case_branch_only | false |
+| case_custom_deserialize | false |
+| case_expanded | false |
+| case_generic | false |
+| case_huge_limit | false |
+| case_mixed_sinks | false |
+| case_mixed_sinks | true |
+| case_rebound | false |
+| case_spoofed_deref | false |
+| case_spoofed_value | false |
+| case_unbounded | false |
+| case_wrong_input | false |

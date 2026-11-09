@@ -1,0 +1,4 @@
+qltest_cargo_check: true
+qltest_dependencies:
+  - serde = { version = "1", features = ["derive"] }
+  - serde_json = { version = "1" }

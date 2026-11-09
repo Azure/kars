@@ -33,6 +33,11 @@ printf '%s\n' "$CODEQL_SOURCE_SHA" > "$CODEQL_EVIDENCE/source-sha.txt"
 # Resolve bundled coverage before introducing the corrected source workspace.
 "$CODEQL_BIN" resolve queries "codeql/$language-queries:codeql-suites/$language-security-and-quality.qls" \
   --format=text > "$CODEQL_EVIDENCE/bundled-queries.txt"
+if [[ "$language" == rust ]]; then
+  # Patch only the isolated source that controls and the real analysis both use.
+  controls_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/codeql/bounded-value"
+  python3 -B "$controls_root/apply.py" "$CODEQL_SOURCE" "$CODEQL_EVIDENCE" "$CODEQL_SOURCE_SHA"
+fi
 "$CODEQL_BIN" pack install "$CODEQL_SOURCE/$language/ql/src"
 "$CODEQL_BIN" pack install "$CODEQL_SOURCE/$language/ql/test"
 "$CODEQL_BIN" resolve queries "./.github/codeql-$language.qls" \
@@ -101,6 +106,9 @@ if [[ "$language" == rust ]]; then
     "$CODEQL_SOURCE/rust/ql/test/library-tests/dataflow/lambdas"
     "$CODEQL_SOURCE/rust/ql/test/library-tests/dataflow/local"
     "$CODEQL_SOURCE/rust/ql/test/library-tests/dataflow/models"
+    "$CODEQL_SOURCE/rust/ql/test/query-tests/security/CWE-502-bounded-value-controls"
+    "$CODEQL_SOURCE/rust/ql/test/query-tests/security/CWE-502"
+    "$CODEQL_SOURCE/rust/ql/test/query-tests/unusedentities"
   )
 else
   # Includes writable-cache positives, read-only negatives and reusable caller limits.

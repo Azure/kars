@@ -5,12 +5,13 @@
 
 import base64
 import copy
+import json
 import unittest
 from unittest.mock import Mock, patch
 
 from sre_authority.common import EPOCH
-from sre_authority.fixtures import CONTROL_NS, seed_control_consumer
-from sre_authority.migration import assert_control_cache
+from sre_authority.fixtures import CONTROL, CONTROL_NS, seed_control_consumer
+from sre_authority.migration import assert_control_cache, rotated_control_pods
 
 
 class ControlCacheTests(unittest.TestCase):
@@ -90,6 +91,79 @@ class ControlCacheTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "command failed"):
             self.verify(h)
         self.assertEqual(h.k.call_count, 1)
+
+    def rollout_harness(self, inventories, rollout_error=None):
+        h = Mock()
+        inventory = iter(inventories)
+        events = []
+
+        def kubectl(*args, **kwargs):
+            if args[0] == "get":
+                self.assertEqual(args, ("get", "pods", "-n", CONTROL_NS, "-o", "json"))
+                events.append("inventory")
+                return json.dumps({"items": next(inventory)})
+            self.assertEqual(args, ("rollout", "status", f"deployment/{CONTROL}", "-n",
+                                    CONTROL_NS, "--timeout=120s"))
+            self.assertEqual(kwargs, {"timeout": 130})
+            events.append("rollout")
+            if rollout_error:
+                raise rollout_error
+            return "successfully rolled out"
+
+        def poll(_label, predicate, *, seconds):
+            self.assertEqual(seconds, 120)
+            for _ in inventories[1:]:
+                result = predicate()
+                if result:
+                    return result
+            raise AssertionError("control rollout deadline")
+
+        h.k.side_effect = kubectl
+        h.poll.side_effect = poll
+        return h, events
+
+    def test_selects_post_rollout_pods_not_transient_post_rotation_pods(self):
+        transient = copy.deepcopy(self.pod)
+        transient["metadata"].update(name="transient", uid="transient-uid")
+        terminating = copy.deepcopy(transient)
+        terminating["metadata"]["deletionTimestamp"] = "2026-11-09T07:40:00Z"
+        h, events = self.rollout_harness([[transient], [terminating, self.pod], [self.pod]])
+        self.assertEqual(rotated_control_pods(h, {"old-uid"}, "new-epoch"), [self.pod])
+        self.assertEqual(events, ["inventory", "rollout", "inventory", "inventory"])
+
+    def test_old_cache_is_rejected_before_waiting_for_rollout(self):
+        h, events = self.rollout_harness([[self.pod]])
+        with self.assertRaisesRegex(AssertionError, "survived Ready"):
+            rotated_control_pods(h, {"control-uid"}, "new-epoch")
+        self.assertEqual(events, ["inventory"])
+        h.poll.assert_not_called()
+
+    def test_old_cache_or_wrong_epoch_after_rollout_is_not_skipped(self):
+        old = copy.deepcopy(self.pod)
+        old["metadata"]["uid"] = "old-uid"
+        wrong_epoch = copy.deepcopy(self.pod)
+        wrong_epoch["metadata"]["annotations"][EPOCH] = "old-epoch"
+        for bad in (old, wrong_epoch):
+            with self.subTest(pod=bad):
+                h, _ = self.rollout_harness([[self.pod], [bad, self.pod]])
+                with self.assertRaises(AssertionError):
+                    rotated_control_pods(h, {"old-uid"}, "new-epoch")
+
+    def test_empty_or_terminating_post_rollout_inventory_cannot_pass(self):
+        terminating = copy.deepcopy(self.pod)
+        terminating["metadata"]["deletionTimestamp"] = "2026-11-09T07:40:00Z"
+        for inventory in ([], [terminating]):
+            with self.subTest(inventory=inventory):
+                h, _ = self.rollout_harness([[self.pod], inventory])
+                with self.assertRaisesRegex(AssertionError, "deadline"):
+                    rotated_control_pods(h, {"old-uid"}, "new-epoch")
+
+    def test_rollout_failure_is_not_hidden(self):
+        h, events = self.rollout_harness([[self.pod]], AssertionError("rollout failed"))
+        with self.assertRaisesRegex(AssertionError, "rollout failed"):
+            rotated_control_pods(h, {"old-uid"}, "new-epoch")
+        self.assertEqual(events, ["inventory", "rollout"])
+        h.poll.assert_not_called()
 
     def test_fixture_readiness_requires_successfully_written_cache(self):
         objects = []
