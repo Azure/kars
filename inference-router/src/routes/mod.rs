@@ -75,6 +75,7 @@ pub use inference::{foundry_agent_routes, foundry_standalone_routes, inference_r
 
 mod anthropic_messages;
 mod chat_completions;
+mod request_json;
 
 mod mcp;
 pub use mcp::{
@@ -509,7 +510,7 @@ pub(crate) fn resolve_primary_upstream(
     mut upstream: UpstreamConfig,
 ) -> anyhow::Result<UpstreamConfig> {
     apply_provider_resolution(state, &mut upstream, policy)?;
-    let candidates = crate::failover::candidates_for_request(&upstream, policy, b"{}");
+    let candidates = crate::failover::build_candidates(&upstream, policy);
     let candidate = candidates
         .first()
         .ok_or_else(|| anyhow::anyhow!("model route absent"))?;
@@ -669,7 +670,7 @@ async fn admin_get_model(State(state): State<AppState>) -> impl IntoResponse {
 
 /// PUT /admin/model — switch model live (body: {"model": "gpt-5-mini"})
 async fn admin_set_model(State(state): State<AppState>, body: Bytes) -> impl IntoResponse {
-    let model = serde_json::from_slice::<serde_json::Value>(&body)
+    let model = request_json::parse(&body)
         .ok()
         .and_then(|v| v.get("model")?.as_str().map(String::from));
 

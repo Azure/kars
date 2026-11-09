@@ -362,7 +362,9 @@ pub fn extract_anthropic_output_text(body: &serde_json::Value) -> String {
 /// Extract scan text via `extract`, falling back to raw lossy-UTF-8
 /// bytes when the body isn't JSON, so a declared guardrail is never
 /// skipped on a parse failure. (Parsed-but-empty extraction — e.g. a
-/// tool-call-only response — is a deliberate pass.)
+/// tool-call-only response — is a deliberate pass.) Use an already validated
+/// ingress Value directly for input extraction; provider output is not subject
+/// to the ingress byte limit and must retain this raw fallback.
 #[must_use]
 pub fn scan_text_or_raw(body: &[u8], extract: impl FnOnce(&serde_json::Value) -> String) -> String {
     match serde_json::from_slice::<serde_json::Value>(body) {

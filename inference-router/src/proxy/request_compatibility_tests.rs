@@ -5,6 +5,214 @@ use super::*;
 use serde_json::{Value, json};
 
 #[test]
+fn generated_request_rewrites_preserve_extensions_above_ingress_limit() {
+    let mut expected = json!({
+        "extension": "x".repeat(2 * 1024 * 1024),
+        "stream_options": {"other": "keep"},
+        "thinking": {"type": "enabled", "budget_tokens": 1024},
+    });
+    let body = Bytes::from(serde_json::to_vec(&expected).unwrap());
+    assert!(body.len() > 2 * 1024 * 1024);
+    let injected = inject_stream_usage(RequestBody::from_value(expected.clone()));
+    expected["stream_options"]["include_usage"] = json!(true);
+    assert_eq!(
+        injected.to_bytes().unwrap().as_ref(),
+        serde_json::to_vec(&expected).unwrap()
+    );
+    let upstream = UpstreamConfig::azure(
+        "https://example.openai.azure.com".into(),
+        "claude-sonnet-5".into(),
+        "sandbox".into(),
+    );
+    let (_, rewritten) = build_upstream_url(
+        &WorkloadIdentityAuth::new(),
+        &upstream,
+        "chat/completions",
+        injected,
+    )
+    .unwrap();
+    expected["model"] = json!("claude-sonnet-5");
+    expected["thinking"] = json!({"type": "adaptive"});
+    assert_eq!(rewritten.as_ref(), serde_json::to_vec(&expected).unwrap());
+    let invalid = Bytes::from(format!(
+        "{} trailing",
+        String::from_utf8(body.to_vec()).unwrap()
+    ));
+    assert_eq!(
+        inject_stream_usage(RequestBody::from_bytes(invalid.clone()))
+            .to_bytes()
+            .unwrap(),
+        invalid
+    );
+    let (_, forwarded) = build_upstream_url(
+        &WorkloadIdentityAuth::new(),
+        &upstream,
+        "chat/completions",
+        invalid.clone(),
+    )
+    .unwrap();
+    assert_eq!(forwarded, invalid);
+}
+
+#[test]
+fn retained_provider_filtering_preserves_other_candidates_and_model_presence() {
+    let original = json!({
+        "input":[{"type":"reasoning","encrypted_content":"keep-off-azure"},{"type":"message","content":"hi"}],
+        "include":["reasoning.encrypted_content","other"],
+        "extension":"x".repeat(2 * 1024 * 1024),
+    });
+    let body = RequestBody::from_value(original.clone());
+    for (endpoint, provider, path, filtered) in [
+        (
+            "https://example.openai.azure.com",
+            ProviderKind::AzureOpenAI,
+            "responses",
+            true,
+        ),
+        (
+            "https://example.openai.azure.com",
+            ProviderKind::AzureOpenAI,
+            "chat/completions",
+            false,
+        ),
+        (
+            "https://example.openai.azure.com",
+            ProviderKind::Anthropic,
+            "responses",
+            false,
+        ),
+        (
+            "https://api.openai.com/v1",
+            ProviderKind::AzureOpenAI,
+            "responses",
+            false,
+        ),
+        (
+            "https://example.openai.azure.com.evil.example",
+            ProviderKind::AzureOpenAI,
+            "responses",
+            false,
+        ),
+    ] {
+        let mut upstream =
+            UpstreamConfig::azure(endpoint.into(), "selected".into(), "sandbox".into());
+        upstream.provider = provider;
+        let (_, bytes) =
+            build_upstream_url(&WorkloadIdentityAuth::new(), &upstream, path, body.clone())
+                .unwrap();
+        let mut expected = original.clone();
+        expected["model"] = json!("selected");
+        if filtered {
+            expected["input"].as_array_mut().unwrap().remove(0);
+            expected["include"].as_array_mut().unwrap().remove(0);
+        }
+        assert_eq!(bytes.as_ref(), serde_json::to_vec(&expected).unwrap());
+        assert!(bytes.len() > 2 * 1024 * 1024);
+        assert_eq!(body.json(), Some(&original));
+    }
+    let upstream = UpstreamConfig::azure(
+        "https://api.githubcopilot.com".into(),
+        "claude-sonnet-5".into(),
+        "sandbox".into(),
+    );
+    for model in [
+        None,
+        Some(json!(null)),
+        Some(json!(42)),
+        Some(json!("other-model")),
+    ] {
+        let mut original = json!({"reasoning_effort":"none", "extension":"keep"});
+        if let Some(model) = model {
+            original["model"] = model;
+        }
+        let body = RequestBody::from_value(original.clone());
+        let (_, bytes) = build_upstream_url(
+            &WorkloadIdentityAuth::new(),
+            &upstream,
+            "chat/completions",
+            body.clone(),
+        )
+        .unwrap();
+        let mut expected = original.clone();
+        if expected.get("model").is_none() {
+            expected["model"] = json!("claude-sonnet-5");
+            expected.as_object_mut().unwrap().remove("reasoning_effort");
+        }
+        assert_eq!(bytes.as_ref(), serde_json::to_vec(&expected).unwrap());
+        assert_eq!(body.json(), Some(&original));
+    }
+}
+
+#[tokio::test]
+async fn retained_stream_preparation_preserves_messages_responses_and_nonobject_options() {
+    use futures::TryStreamExt;
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string("data: [DONE]\n\n"),
+        )
+        .expect(12)
+        .mount(&server)
+        .await;
+    let auth = Arc::new(WorkloadIdentityAuth::for_test(Some("test-key"), None));
+    let client = Client::builder().no_proxy().build().unwrap();
+    let upstream = UpstreamConfig::azure(server.uri(), "selected".into(), "sandbox".into());
+    let mut expected_requests = Vec::new();
+    for path in ["chat/completions", "v1/messages", "responses"] {
+        for options in [
+            None,
+            Some(json!(null)),
+            Some(json!([])),
+            Some(json!({"include_usage":false,"other":"keep"})),
+        ] {
+            let mut original = json!({"model":"selected", "stream":true});
+            if let Some(options) = options {
+                original["stream_options"] = options;
+            }
+            let body = RequestBody::from_value(original.clone());
+            let (status, _, response) = forward_stream_parsed(
+                auth.clone(),
+                None,
+                client.clone(),
+                upstream.clone(),
+                path,
+                HeaderMap::new(),
+                body.clone(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(status, StatusCode::OK);
+            response.try_collect::<Vec<_>>().await.unwrap();
+            assert_eq!(body.json(), Some(&original));
+            let mut expected = original;
+            if path == "chat/completions" {
+                let opts = expected
+                    .as_object_mut()
+                    .unwrap()
+                    .entry("stream_options")
+                    .or_insert_with(|| json!({}));
+                if let Some(opts) = opts.as_object_mut() {
+                    opts.insert("include_usage".into(), json!(true));
+                }
+            }
+            expected_requests.push((format!("/{path}"), expected));
+        }
+    }
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), expected_requests.len());
+    for (request, (path, expected)) in requests.iter().zip(expected_requests) {
+        assert_eq!(request.url.path(), path);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&request.body).unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
 fn model_capacity_rejects_missing_ambiguous_and_invalid_provider_metadata() {
     let upstream = UpstreamConfig::azure(
         "https://example.com".into(),
@@ -140,7 +348,7 @@ fn wire(endpoint: &str, path: &str, body: &Value) -> Value {
         &WorkloadIdentityAuth::new(),
         &upstream,
         path,
-        serde_json::to_vec(body).unwrap().into(),
+        Bytes::from(serde_json::to_vec(body).unwrap()),
     )
     .unwrap();
     serde_json::from_slice(&body).unwrap()

@@ -41,7 +41,8 @@ async fn fixture() -> (
     }
     let epoch = namespace["metadata"]["annotations"][EPOCH].clone();
     let template = json!({"metadata":{"labels":{"app":"runtime"},"annotations":{
-        EPOCH:epoch,ROLLOUT_FIELDS[1]:"old-providers",ROLLOUT_FIELDS[2]:"old-credential"}},
+        EPOCH:epoch,ROLLOUT_FIELDS[1]:"old-providers",ROLLOUT_FIELDS[2]:"old-credential",
+        crate::credential_source::POD_VERSION:"projection-uid:1"}},
         "spec":{"containers":[{"name":"router","image":"reviewed"}]}});
     let consumer: ReviewedConsumer = serde_json::from_value(json!({"kind":"Deployment",
         "object":{"name":"runtime","uid":"deployment","resourceVersion":"1"},
@@ -124,6 +125,9 @@ async fn credential_rollout_reuses_qualified_structure_without_history_or_new_gr
             changed["spec"]["template"]["metadata"]["annotations"][field] =
                 json!(format!("rotation-{index}"));
         }
+        changed["spec"]["template"]["metadata"]["annotations"]
+            [crate::credential_source::POD_VERSION] =
+            json!(format!("projection-uid:{}", index + 2));
         objects
             .lock()
             .unwrap()
@@ -526,18 +530,42 @@ async fn model_rollouts_require_pinned_structure_and_current_policy_for_both_run
 
 #[tokio::test]
 async fn replaced_consumers_and_resource_version_races_cannot_be_recorded() {
-    for fault in ["replacement", "version", "absent-review", "absent-grant"] {
+    for fault in [
+        "replacement",
+        "version",
+        "absent-review",
+        "absent-grant",
+        "projection-render",
+    ] {
         let (_server, client, objects, _) = fixture().await;
         let original = objects.lock().unwrap().clone();
         let ns = serde_json::from_value(original[NS].clone()).unwrap();
         let source = serde_json::from_value(original[SOURCE].clone()).unwrap();
         let mut applied: Deployment = serde_json::from_value(original[DEPLOYMENT].clone()).unwrap();
+        let mut desired = applied.clone();
         let epoch = original[NS]["metadata"]["annotations"][EPOCH]
             .as_str()
             .unwrap();
         match fault {
             "replacement" => applied.metadata.uid = Some("replacement".into()),
             "version" => applied.metadata.resource_version = Some("different".into()),
+            "projection-render" => {
+                desired
+                    .spec
+                    .as_mut()
+                    .unwrap()
+                    .template
+                    .metadata
+                    .as_mut()
+                    .unwrap()
+                    .annotations
+                    .as_mut()
+                    .unwrap()
+                    .insert(
+                        crate::credential_source::POD_VERSION.into(),
+                        "projection-uid:2".into(),
+                    );
+            }
             "absent-review" => objects
                 .lock()
                 .unwrap()
@@ -554,10 +582,92 @@ async fn replaced_consumers_and_resource_version_races_cannot_be_recorded() {
         }
         assert!(
             !matches!(
-                record(&client, &source, &ns, &applied, &applied, epoch).await,
+                record(&client, &source, &ns, &desired, &applied, epoch).await,
                 Ok(Some(_))
             ),
             "{fault}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn projection_pinned_receipts_upgrade_before_authorizing_new_projection_revisions() {
+    for model_binding in [false, true] {
+        let (_server, client, objects, consumer) = fixture().await;
+        let mut state = objects.lock().unwrap().clone();
+        let mut legacy = state[DEPLOYMENT]["spec"]["template"].clone();
+        let annotations = legacy["metadata"]["annotations"].as_object_mut().unwrap();
+        annotations.remove("kars.azure.com/inference-providers-version");
+        annotations.remove("kars.azure.com/services-credential-version");
+        let legacy_structure = template_digest(legacy).unwrap();
+        state.get_mut(DEPLOYMENT).unwrap()["spec"]["template"]["metadata"]["annotations"]["kars.azure.com/inference-providers-version"] =
+            "previously-rotated".into();
+        let epoch = state[NS]["metadata"]["annotations"][EPOCH]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let mut receipt = json!({"epoch":epoch,"baseline":consumer.template_digest,
+            "structure":legacy_structure,"template":template_digest(state[DEPLOYMENT]["spec"]["template"].clone()).unwrap(),
+            "sandbox_uid":"sandbox","generation":1});
+        if model_binding {
+            receipt["model_structure"] = legacy_structure.into();
+        }
+        state.get_mut(NS).unwrap()["metadata"]["annotations"][key("deployment")] =
+            receipt.to_string().into();
+        *objects.lock().unwrap() = state.clone();
+        let mut namespace: Namespace = serde_json::from_value(state[NS].clone()).unwrap();
+        let source = serde_json::from_value(state[SOURCE].clone()).unwrap();
+        let current = serde_json::from_value(state[DEPLOYMENT].clone()).unwrap();
+        assert!(
+            matches(&client, &namespace, &consumer, &current, &epoch)
+                .await
+                .unwrap()
+        );
+        let applied = serde_json::from_value(state[DEPLOYMENT].clone()).unwrap();
+        let (name, upgraded) = record(&client, &source, &namespace, &applied, &applied, &epoch)
+            .await
+            .unwrap()
+            .unwrap();
+        let parsed: Value = serde_json::from_str(&upgraded).unwrap();
+        assert_eq!(
+            parsed["structure"],
+            structure(state[DEPLOYMENT]["spec"]["template"].clone()).unwrap()
+        );
+        namespace
+            .metadata
+            .annotations
+            .as_mut()
+            .unwrap()
+            .insert(name.clone(), upgraded);
+        state.insert(NS.into(), serde_json::to_value(&namespace).unwrap());
+        state.get_mut(DEPLOYMENT).unwrap()["spec"]["template"]["metadata"]["annotations"]
+            [crate::credential_source::POD_VERSION] = "projection-uid:2".into();
+        *objects.lock().unwrap() = state.clone();
+        let current = serde_json::from_value(state[DEPLOYMENT].clone()).unwrap();
+        assert!(
+            !matches(&client, &namespace, &consumer, &current, &epoch)
+                .await
+                .unwrap()
+        );
+        let applied = serde_json::from_value(state[DEPLOYMENT].clone()).unwrap();
+        let (_, rotated) = record(&client, &source, &namespace, &applied, &applied, &epoch)
+            .await
+            .unwrap()
+            .unwrap();
+        namespace
+            .metadata
+            .annotations
+            .as_mut()
+            .unwrap()
+            .insert(name, rotated);
+        objects
+            .lock()
+            .unwrap()
+            .insert(NS.into(), serde_json::to_value(&namespace).unwrap());
+        assert!(
+            matches(&client, &namespace, &consumer, &current, &epoch)
+                .await
+                .unwrap()
         );
     }
 }

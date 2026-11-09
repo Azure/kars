@@ -9,15 +9,16 @@ import {
 const FIELDS = [
   "kars.azure.com/inference-budget-ca-version", "kars.azure.com/inference-providers-version",
   "kars.azure.com/services-credential-version", "kars.azure.com/sre-private-credential-uid",
-  "kars.azure.com/sre-tls-expiry",
+  "kars.azure.com/sre-tls-expiry", "kars.azure.com/credential-projection-version",
 ];
 const RECEIPT = ["epoch", "baseline", "structure", "template", "sandbox_uid", "generation"];
 
-function structure(value: unknown): string {
+function structure(value: unknown, projectCredentials = true): string {
   const current = structuredClone(template(value));
   const fields = at(current, "metadata", "annotations");
   if (fields !== undefined) {
     for (const name of FIELDS) {
+      if (!projectCredentials && name === "kars.azure.com/credential-projection-version") continue;
       const annotations = record(fields);
       if (annotations[name] !== undefined && typeof annotations[name] !== "string") throw new Error("Malformed credential rollout annotation");
       delete annotations[name];
@@ -26,7 +27,7 @@ function structure(value: unknown): string {
   return templateDigest({ kind: "Deployment", spec: { template: current } });
 }
 
-function modelStructure(value: unknown): string {
+function modelStructure(value: unknown, projectCredentials = true): string {
   const current = structuredClone(record(value));
   const containers = at(template(current), "spec", "containers");
   if (!Array.isArray(containers)) throw new Error("Malformed model rollout containers");
@@ -50,7 +51,7 @@ function modelStructure(value: unknown): string {
       record(entry).value = "controller-policy-model";
     }
   }
-  return structure(current);
+  return structure(current, projectCredentials);
 }
 
 /** History is allowed only for operator migration review; ordinary continuity needs a projector receipt. */
@@ -88,9 +89,11 @@ export async function reviewedControllerRollout(
     const hasModelStructure = Object.hasOwn(receipt, "model_structure");
     return Object.keys(receipt).length === RECEIPT.length + Number(hasModelStructure)
       && Object.keys(receipt).every(key => RECEIPT.includes(key) || key === "model_structure")
-      && (!hasModelStructure || receipt.model_structure === modelStructure(current))
+      && ((receipt.structure === actual && (!hasModelStructure || receipt.model_structure === modelStructure(current)))
+        || (receipt.structure === structure(current, false)
+          && (!hasModelStructure || receipt.model_structure === modelStructure(current, false))))
       && receipt.epoch === scope.epoch && receipt.baseline === consumer.templateDigest
-      && receipt.structure === actual && receipt.template === templateDigest(current)
+      && receipt.template === templateDigest(current)
       && receipt.sandbox_uid === reviewed(sandbox).uid && receipt.generation === generation;
   }
   const history = record(JSON.parse(await execute(["get", "replicasets.apps", "-n", scope.namespace.name, "--chunk-size=0", "-o", "json"])));

@@ -198,6 +198,16 @@ def log_reader_facts(root, value):
     return facts
 
 
+def pending_proposal(h, sre):
+    action, _created = sre._create_karssreaction_cr(
+        action={"type": "RolloutRestart", "namespace": SYSTEM, "kind": "Deployment", "name": "kars-controller"},
+        diagnosis="Kind acceptance only", rationale="Pending proposal; never approve or execute", ttl_minutes=5)
+    persisted = h.get("karssreaction", action, RUNTIME)
+    require(persisted and persisted["spec"]["approval"] == {"state": "Pending"},
+            "Real Hermes proposal did not persist Pending")
+    return action, persisted
+
+
 def proxy_acceptance(h):
     install_metrics(h)
     pod = alive_pinned_source(h)
@@ -228,11 +238,7 @@ def proxy_acceptance(h):
             require("error" not in logs and "sre-standin-alive" in logs.get("logs", ""), "Unchanged Hermes raw log reader failed")
             metrics = kube.get("/apis/metrics.k8s.io/v1beta1/nodes")
             require(metrics.get("kind") == "NodeMetricsList" and metrics.get("items"), "Real metrics did not pass the filtered proxy")
-            action = sre._create_karssreaction_cr(
-                action={"type": "RolloutRestart", "namespace": SYSTEM, "kind": "Deployment", "name": "kars-controller"},
-                diagnosis="Kind acceptance only", rationale="Pending proposal; never approve or execute", ttl_minutes=5)
-            created = h.get("karssreaction", action, RUNTIME)
-            require(created and created["spec"]["approval"] == {"state": "Pending"}, "Real Hermes proposal did not persist Pending")
+            action, created = pending_proposal(h, sre)
             h.passed("Actual logs, real metrics and unchanged Hermes Pending proposal builder work over Pod TLS; no model run claimed")
             raw = kube._ensure_client()
             base = f"https://127.0.0.1:{port}"

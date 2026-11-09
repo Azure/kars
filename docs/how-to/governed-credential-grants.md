@@ -494,8 +494,16 @@ Ordinary provider, credential and standing-model rollouts do not require a new
 permission grant. For an already reviewed, controller-owned runtime Deployment,
 the projector records reconciliation in a protected namespace annotation. The
 credential annotations `inference-budget-ca-version`, `inference-providers-version`,
-`services-credential-version`, `sre-private-credential-uid`, and `sre-tls-expiry`
-(under `kars.azure.com/`) may differ from its qualified template. Model transitions
+`services-credential-version`, `sre-private-credential-uid`, `sre-tls-expiry`, and
+`credential-projection-version` (under `kars.azure.com/`) may differ from its
+qualified template. A governed agent credential projection refresh changes its
+UID/resource-version rollout annotation; the applied revision must match the
+controller-rendered revision and a fresh protected receipt before verification
+accepts the workload. Existing receipts that pinned that annotation remain valid
+while its revision is unchanged; the next verified reconciliation upgrades them.
+If the revision already differs, upgrade recovery still requires the exact
+reviewed ReplicaSet or renewed operator review, not an unchecked receipt rewrite.
+Model transitions
 may change only the literal values of agent `KARS_MODEL`, OpenClaw
 `OPENCLAW_MODEL`, and router `AZURE_OPENAI_DEPLOYMENT`. Those values must match
 both the controller-rendered workload and the current same-namespace

@@ -34,11 +34,11 @@ use crate::copilot_auth::CopilotTokenCache;
 use crate::deployment_health::DeploymentHealthRegistry;
 use crate::inference_policy_loader::{InferencePolicySnapshot, ModelRef};
 use crate::proxy::failure::{ForwardFailure, retryable_failure};
-use crate::proxy::{AuthenticationProvenance, UpstreamConfig, forward};
+use crate::proxy::{AuthenticationProvenance, RequestBody, UpstreamConfig, forward_parsed};
 
 mod stream;
-pub(crate) use stream::forward_stream_with_authorization;
 pub use stream::forward_stream_with_failover;
+pub(crate) use stream::{forward_stream_with_authorization, forward_stream_with_parsed_request};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
@@ -258,18 +258,15 @@ pub(crate) fn resolve_candidate(
     Ok(upstream)
 }
 
-pub(crate) fn candidates_for_request(
+pub(crate) fn candidates_for_parsed_request(
     base: &UpstreamConfig,
     policy: &InferencePolicySnapshot,
-    body: &[u8],
+    body: &RequestBody,
 ) -> Vec<Candidate> {
+    let model = body.json().and_then(|value| value.get("model")?.as_str());
     let mut candidates = build_candidates(base, policy);
     if policy.model_preference.is_none()
-        && let Ok(value) = serde_json::from_slice::<serde_json::Value>(body)
-        && let Some(model) = value
-            .get("model")
-            .and_then(|model| model.as_str())
-            .filter(|model| !model.trim().is_empty())
+        && let Some(model) = model.filter(|model| !model.trim().is_empty())
         && model != candidates[0].deployment
     {
         // No policy-selected model: preserve the pre-existing public API's
@@ -280,20 +277,9 @@ pub(crate) fn candidates_for_request(
     }
     candidates
 }
-
-fn request_body_for_candidate(body: &Bytes, deployment: &str) -> Bytes {
-    let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(body) else {
-        return body.clone();
-    };
-    let Some(object) = value.as_object_mut() else {
-        return body.clone();
-    };
-    object.insert("model".into(), deployment.into());
-    serde_json::to_vec(&value)
-        .map(Bytes::from)
-        .unwrap_or_else(|_| body.clone())
+fn request_body_for_candidate(body: &RequestBody, deployment: &str) -> RequestBody {
+    body.with_model(deployment)
 }
-
 /// Walks `build_candidates(...)`, skipping deployments the health
 /// cache currently flags as unhealthy, and returns the first
 /// successful (or non-retryable) response. If every candidate either
@@ -319,7 +305,37 @@ pub async fn forward_with_failover(
     request_headers: &HeaderMap,
     request_body: Bytes,
 ) -> Result<(StatusCode, HeaderMap, Bytes, UpstreamConfig)> {
-    let candidates = candidates_for_request(upstream_base, snapshot, &request_body);
+    forward_with_parsed_request(
+        auth,
+        copilot,
+        client,
+        health,
+        upstream_base,
+        config,
+        snapshot,
+        method,
+        path,
+        request_headers,
+        RequestBody::from_bytes(request_body),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn forward_with_parsed_request(
+    auth: &WorkloadIdentityAuth,
+    copilot: Option<&CopilotTokenCache>,
+    client: &Client,
+    health: &Arc<DeploymentHealthRegistry>,
+    upstream_base: &UpstreamConfig,
+    config: &Config,
+    snapshot: &InferencePolicySnapshot,
+    method: Method,
+    path: &str,
+    request_headers: &HeaderMap,
+    request_body: RequestBody,
+) -> Result<(StatusCode, HeaderMap, Bytes, UpstreamConfig)> {
+    let candidates = candidates_for_parsed_request(upstream_base, snapshot, &request_body);
 
     // Track the last *actually attempted* response so we can surface
     // a real upstream error if every candidate fails.
@@ -359,7 +375,7 @@ pub async fn forward_with_failover(
             );
         }
 
-        let attempt = forward(
+        let attempt = forward_parsed(
             auth,
             copilot,
             client,
@@ -427,7 +443,7 @@ pub async fn forward_with_failover(
     );
     let upstream = resolve_candidate(upstream_base, config, &first_candidate)
         .map_err(ForwardFailure::configuration)?;
-    let attempt = forward(
+    let attempt = forward_parsed(
         auth,
         copilot,
         client,
@@ -498,6 +514,102 @@ mod tests {
             }),
             ..InferencePolicySnapshot::default()
         }
+    }
+
+    #[test]
+    fn request_metadata_preserves_candidate_order_and_policy_precedence() {
+        let base = upstream("default");
+        for (body, expected) in [
+            (
+                r#"{"model":"first","model":"selected"}"#,
+                vec!["selected", "default"],
+            ),
+            (r#"{"model":"first","model":null}"#, vec!["default"]),
+            (
+                r#"{"model":"first","mo\u0064el":"\u03bb"}"#,
+                vec!["λ", "default"],
+            ),
+            (r#"{"model":"first","model":["last"]}"#, vec!["default"]),
+            (
+                r#"{"model":"first","model":{"model":"nested"}}"#,
+                vec!["default"],
+            ),
+            (
+                r#"{"model":"selected","other":{"model":"nested"}}"#,
+                vec!["selected", "default"],
+            ),
+            (r#"[{"model":"nested"}]"#, vec!["default"]),
+            ("{}", vec!["default"]),
+            (r#""model""#, vec!["default"]),
+            (
+                r#"{"model":42,"unknown":[null,true,false,{},[],1.5,-0,18446744073709551616]}"#,
+                vec!["default"],
+            ),
+            (r#"{"model":"selected"} {}"#, vec!["default"]),
+            (r#"{"model":"selected","unknown":[false,"#, vec!["default"]),
+            ("null", vec!["default"]),
+            ("true", vec!["default"]),
+            ("1.5", vec!["default"]),
+            ("", vec!["default"]),
+            (r#"{"model":"selected","unknown":01}"#, vec!["default"]),
+            (
+                r#"{"model":"selected","unknown":"\uD800"}"#,
+                vec!["default"],
+            ),
+            (r#"{"model":"selected","unknown":true,}"#, vec!["default"]),
+            (r#"{"model":"  "}"#, vec!["default"]),
+            (r#"{"model":" selected "}"#, vec![" selected ", "default"]),
+            (r#"{"model":"selected","unknown":1e999}"#, vec!["default"]),
+            (r#"{"model":"selected"} trailing"#, vec!["default"]),
+        ] {
+            let candidates = candidates_for_parsed_request(
+                &base,
+                &Default::default(),
+                &RequestBody::from_bytes(Bytes::copy_from_slice(body.as_bytes())),
+            );
+            assert_eq!(deployments(&candidates), expected);
+            let policy = snapshot_with("primary", &["fallback"]);
+            let candidates = candidates_for_parsed_request(
+                &base,
+                &policy,
+                &RequestBody::from_bytes(Bytes::copy_from_slice(body.as_bytes())),
+            );
+            assert_eq!(deployments(&candidates), ["primary", "fallback", "default"]);
+        }
+    }
+
+    #[test]
+    fn generated_candidate_body_is_not_capped_at_ingress_limit() {
+        let original = serde_json::json!({
+            "model": "requested",
+            "extension": "x".repeat(2 * 1024 * 1024),
+        });
+        let body = Bytes::from(serde_json::to_vec(&original).unwrap());
+        assert!(body.len() > 2 * 1024 * 1024);
+        let candidates = candidates_for_parsed_request(
+            &upstream("default"),
+            &Default::default(),
+            &RequestBody::from_value(original.clone()),
+        );
+        assert_eq!(deployments(&candidates), ["requested", "default"]);
+        let rewritten =
+            request_body_for_candidate(&RequestBody::from_value(original.clone()), "fallback");
+        let mut expected = original;
+        expected["model"] = "fallback".into();
+        assert_eq!(
+            rewritten.to_bytes().unwrap().as_ref(),
+            serde_json::to_vec(&expected).unwrap()
+        );
+        let invalid = Bytes::from(format!(
+            "{} trailing",
+            String::from_utf8(body.to_vec()).unwrap()
+        ));
+        assert_eq!(
+            request_body_for_candidate(&RequestBody::from_bytes(invalid.clone()), "fallback")
+                .to_bytes()
+                .unwrap(),
+            invalid
+        );
     }
 
     #[test]

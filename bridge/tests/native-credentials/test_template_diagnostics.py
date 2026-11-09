@@ -222,8 +222,21 @@ class TemplateDiagnosticsTests(unittest.TestCase):
             self.assertFalse(result["available"])
             self.assertNotIn("actors", result)
 
+    def test_observer_deadline_compares_existing_review_and_late_qualification(self):
+        expected = fixture_hashes([deployment("runtime")])[0]
+        receipt = {"version": 4, "phase": "Qualified", "deployment": {"uid": "runtime-uid"},
+                   "qualified": {"template": expected}, "private": PRIVATE}
+        result, reads = self.collect(
+            failure="Deadline: core-issued current observer capability", receipt=receipt)
+        self.assertTrue(result["available"])
+        self.assertEqual(len(reads), 8)
+        self.assertTrue(result["lateRetirement"]["currentMatchesRecordedTemplate"])
+        self.assertFalse(result["lateRetirement"]["authorityVerified"])
+        self.assertNotIn(expected, json.dumps(result))
+
     def test_ineligible_failures_do_not_read_anything(self):
-        for failure in ("Deadline: core-issued current observer capability", "", None):
+        for failure in ("Deadline: other readiness check",
+                        "Deadline: core-issued current observer capability " + PRIVATE, "", None):
             with patch.object(diagnostics, "hashes") as hashing:
                 result = diagnostics.collect(None, None, failure)
             hashing.assert_not_called()

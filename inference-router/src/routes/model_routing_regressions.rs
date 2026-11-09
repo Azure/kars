@@ -202,6 +202,107 @@ async fn output_limit_guidance_retries_once_without_changing_model_or_request_co
     }
 }
 
+#[tokio::test]
+async fn retained_and_generated_requests_keep_candidate_mutations_isolated_on_the_wire() {
+    for stream in [false, true] {
+        for origin in ["ingress", "generated", "legacy-bytes"] {
+            let primary = MockServer::start().await;
+            let fallback = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(503))
+                .expect(1)
+                .mount(&primary)
+                .await;
+            let response = if stream {
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(
+                        "data: {\"choices\":[],\"usage\":{\"total_tokens\":1}}\n\ndata: [DONE]\n\n",
+                    )
+            } else {
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"choices":[], "usage":{"total_tokens":1}}))
+            };
+            Mock::given(method("POST"))
+                .respond_with(response)
+                .expect(1)
+                .mount(&fallback)
+                .await;
+            let state = state(config(
+                &fallback.uri(),
+                &[
+                    ("primary", &primary.uri(), Some("primary-key")),
+                    ("fallback", &fallback.uri(), Some("fallback-key")),
+                ],
+            ));
+            let mut policy = policy("primary", "claude-sonnet-5");
+            policy
+                .model_preference
+                .as_mut()
+                .unwrap()
+                .fallback
+                .push(ModelRef {
+                    provider: "fallback".into(),
+                    deployment: "plain-fallback".into(),
+                });
+            let original = json!({
+                "model":"caller-model", "messages":[{"role":"user","content":"hello"}],
+                "stream":stream, "max_tokens":123,
+                "thinking":{"type":"enabled","budget_tokens":1024},
+                "stream_options":{"other":"keep"},
+                "extension":"x".repeat(if origin == "ingress" { 16 } else { 2 * 1024 * 1024 }),
+            });
+            let body = if origin == "generated" {
+                RequestBody::from_value(original.clone())
+            } else {
+                let bytes = Bytes::from(serde_json::to_vec(&original).unwrap());
+                if origin == "ingress" {
+                    let value = crate::routes::request_json::parse(&bytes).unwrap();
+                    RequestBody::from_validated(bytes, value)
+                } else {
+                    RequestBody::from_bytes(bytes)
+                }
+            };
+            let base = state.upstream_config(&state.sandbox_name);
+            if stream {
+                let (status, _, response, selected) =
+                    forward_stream_chat(&state, &base, &policy, HeaderMap::new(), body.clone())
+                        .await
+                        .unwrap();
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(selected.deployment, "plain-fallback");
+                response.try_collect::<Vec<_>>().await.unwrap();
+            } else {
+                let (status, _, _, selected) =
+                    forward_chat(&state, &base, &policy, &HeaderMap::new(), body.clone())
+                        .await
+                        .unwrap();
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(selected.deployment, "plain-fallback");
+            }
+            assert_eq!(body.json(), Some(&original));
+            for (server, model) in [(&primary, "claude-sonnet-5"), (&fallback, "plain-fallback")] {
+                let requests = server.received_requests().await.unwrap();
+                assert_eq!(requests.len(), 1, "{origin}, stream={stream}");
+                assert_eq!(requests[0].url.path(), "/chat/completions");
+                let actual: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+                let mut expected = original.clone();
+                expected["model"] = json!(model);
+                if model == "claude-sonnet-5" {
+                    expected["thinking"] = json!({"type":"adaptive"});
+                }
+                if stream {
+                    expected["stream_options"]["include_usage"] = json!(true);
+                }
+                assert_eq!(actual, expected, "{origin}, stream={stream}, model={model}");
+                if origin != "ingress" {
+                    assert!(requests[0].body.len() > 2 * 1024 * 1024);
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn output_limit_correction_requires_explicit_guidance_and_unambiguous_positive_limit() {
     let error = json!({"error": {
@@ -210,11 +311,14 @@ fn output_limit_correction_requires_explicit_guidance_and_unambiguous_positive_l
     }});
     let request = json!({"model":"selected-alias", "max_tokens":1024, "stream":true});
     let encode = |value: &serde_json::Value| serde_json::to_vec(value).unwrap();
-    let corrected =
-        corrected_output_limit_request(StatusCode::BAD_REQUEST, &encode(&error), &encode(&request))
-            .unwrap();
+    let corrected = corrected_output_limit_request(
+        StatusCode::BAD_REQUEST,
+        &encode(&error),
+        &RequestBody::from_value(request.clone()),
+    )
+    .unwrap();
     assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&corrected).unwrap(),
+        corrected.json().unwrap().clone(),
         json!({"model":"selected-alias", "max_completion_tokens":1024, "stream":true})
     );
     for status in [
@@ -225,7 +329,12 @@ fn output_limit_correction_requires_explicit_guidance_and_unambiguous_positive_l
         StatusCode::INTERNAL_SERVER_ERROR,
     ] {
         assert!(
-            corrected_output_limit_request(status, &encode(&error), &encode(&request)).is_none()
+            corrected_output_limit_request(
+                status,
+                &encode(&error),
+                &RequestBody::from_value(request.clone())
+            )
+            .is_none()
         );
     }
     for body in [
@@ -242,7 +351,7 @@ fn output_limit_correction_requires_explicit_guidance_and_unambiguous_positive_l
             corrected_output_limit_request(
                 StatusCode::BAD_REQUEST,
                 &encode(&error),
-                &encode(&body)
+                &RequestBody::from_value(body.clone())
             )
             .is_none()
         );
@@ -264,17 +373,26 @@ fn output_limit_correction_requires_explicit_guidance_and_unambiguous_positive_l
             corrected_output_limit_request(
                 StatusCode::BAD_REQUEST,
                 &encode(&modified),
-                &encode(&request)
+                &RequestBody::from_value(request.clone())
             )
             .is_none()
         );
     }
     assert!(
-        corrected_output_limit_request(StatusCode::BAD_REQUEST, b"{\"error\":", &encode(&request))
-            .is_none()
+        corrected_output_limit_request(
+            StatusCode::BAD_REQUEST,
+            b"{\"error\":",
+            &RequestBody::from_value(request.clone())
+        )
+        .is_none()
     );
     assert!(
-        corrected_output_limit_request(StatusCode::BAD_REQUEST, &encode(&error), b"{").is_none()
+        corrected_output_limit_request(
+            StatusCode::BAD_REQUEST,
+            &encode(&error),
+            &RequestBody::from_bytes(Bytes::from_static(b"{"))
+        )
+        .is_none()
     );
 }
 
@@ -455,7 +573,7 @@ async fn content_safety_floor_never_falls_back_to_responses() {
                     &state,
                     &state.upstream_config(&state.sandbox_name),
                     &policy,
-                    b"{}",
+                    &RequestBody::from_value(json!({})),
                 )
                 .unwrap();
                 state
@@ -573,8 +691,20 @@ async fn availability_cache_does_not_skip_another_credential_on_the_same_endpoin
             .unwrap();
     let _: Vec<_> = stream.try_collect().await.unwrap();
     assert_eq!(selected.endpoint, shared.uri());
-    let a = primary_target(&state, &base, &a, b"{}").unwrap();
-    let b = primary_target(&state, &base, &b, b"{}").unwrap();
+    let a = primary_target(
+        &state,
+        &base,
+        &a,
+        &RequestBody::from_value(serde_json::json!({})),
+    )
+    .unwrap();
+    let b = primary_target(
+        &state,
+        &base,
+        &b,
+        &RequestBody::from_value(serde_json::json!({})),
+    )
+    .unwrap();
     assert_ne!(model_capability_key(&a), model_capability_key(&b));
     let cache = state.unavailable_models.read().unwrap();
     assert!(cache.contains(&model_capability_key(&a)));

@@ -17,12 +17,13 @@ use kube::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-const ROLLOUT_FIELDS: [&str; 5] = [
+const ROLLOUT_FIELDS: [&str; 6] = [
     "kars.azure.com/inference-budget-ca-version",
     "kars.azure.com/inference-providers-version",
     "kars.azure.com/services-credential-version",
     "kars.azure.com/sre-private-credential-uid",
     "kars.azure.com/sre-tls-expiry",
+    crate::credential_source::POD_VERSION,
 ];
 
 #[derive(Deserialize, Serialize)]
@@ -42,10 +43,17 @@ fn key(uid: &str) -> String {
     format!("{PREFIX}reconciled-{uid}")
 }
 
-fn structure(mut template: Value) -> Result<String, String> {
+fn structure(template: Value) -> Result<String, String> {
+    rollout_structure(template, true)
+}
+
+fn rollout_structure(mut template: Value, project_credentials: bool) -> Result<String, String> {
     if let Some(annotations) = template.pointer_mut("/metadata/annotations") {
         let annotations = annotations.as_object_mut().ok_or(ERROR)?;
         for name in ROLLOUT_FIELDS {
+            if !project_credentials && name == crate::credential_source::POD_VERSION {
+                continue;
+            }
             if annotations
                 .get(name)
                 .is_some_and(|value| !value.is_string())
@@ -90,7 +98,14 @@ fn model_values(template: &Value) -> Result<Vec<(String, String, String)>, Strin
     Ok(values)
 }
 
-fn model_structure(mut template: Value) -> Result<String, String> {
+fn model_structure(template: Value) -> Result<String, String> {
+    rollout_model_structure(template, true)
+}
+
+fn rollout_model_structure(
+    mut template: Value,
+    project_credentials: bool,
+) -> Result<String, String> {
     let values = model_values(&template)?;
     for container in template["spec"]["containers"].as_array_mut().ok_or(ERROR)? {
         let name = container["name"].as_str().ok_or(ERROR)?.to_owned();
@@ -108,7 +123,23 @@ fn model_structure(mut template: Value) -> Result<String, String> {
             }
         }
     }
-    structure(template)
+    rollout_structure(template, project_credentials)
+}
+
+fn receipt_structure_matches(receipt: &Reconciliation, template: &Value) -> Result<bool, String> {
+    // Pre-upgrade receipts pinned the projection revision. Read them until the
+    // next verified controller reconciliation replaces them with the new form.
+    for project_credentials in [true, false] {
+        if receipt.structure == rollout_structure(template.clone(), project_credentials)?
+            && receipt.model_structure.as_ref().is_none_or(|digest| {
+                rollout_model_structure(template.clone(), project_credentials).as_ref()
+                    == Ok(digest)
+            })
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 async fn verify_model_transition(
@@ -206,11 +237,7 @@ pub(super) async fn matches(
     if receipt.epoch != epoch
         || receipt.baseline != consumer.template_digest
         || receipt.template != template_digest(template.clone())?
-        || receipt.structure != structure(template.clone())?
-        || receipt
-            .model_structure
-            .as_ref()
-            .is_some_and(|digest| model_structure(template.clone()).as_ref() != Ok(digest))
+        || !receipt_structure_matches(&receipt, template)?
         || template["metadata"]["annotations"][EPOCH] != epoch
     {
         return Ok(false);
@@ -286,6 +313,7 @@ pub(super) async fn record(
         return Err(ERROR.into());
     }
     let actual_structure = structure(template.clone())?;
+    let legacy_structure = rollout_structure(template.clone(), false)?;
     let actual_template = template_digest(template.clone())?;
     let prior = stored(namespace, &consumer.object.uid)?;
     let mut qualified = actual_template == consumer.template_digest
@@ -293,15 +321,17 @@ pub(super) async fn record(
             prior.epoch == epoch
                 && prior.baseline == consumer.template_digest
                 && Some(&prior.sandbox_uid) == sandbox.metadata.uid.as_ref()
-                && prior.structure == actual_structure
+                && (prior.structure == actual_structure || prior.structure == legacy_structure)
         });
     let route_structure = model_structure(template.clone())?;
+    let legacy_route_structure = rollout_model_structure(template.clone(), false)?;
     let mut model_transition = !qualified
         && prior.as_ref().is_some_and(|prior| {
             prior.epoch == epoch
                 && prior.baseline == consumer.template_digest
                 && Some(&prior.sandbox_uid) == sandbox.metadata.uid.as_ref()
-                && prior.model_structure.as_ref() == Some(&route_structure)
+                && (prior.model_structure.as_ref() == Some(&route_structure)
+                    || prior.model_structure.as_ref() == Some(&legacy_route_structure))
         });
     if !qualified && !model_transition {
         // Upgrade recovery can use a retained ReplicaSet only when its complete

@@ -3,21 +3,11 @@
 
 //! Chat ↔ Responses API body translation helpers.
 //!
-//! Extracted from `routes/inference.rs` in `phase1/hotspot-pass2-inference-split`
-//! to bring that file under the §4.2 Phase 1 LOC cap (1500). No behaviour
-//! change — this module is a literal lift of the three translation helpers
-//! plus their unit tests.
-//!
-//! ## Public surface
-//! - `uuid_v4()` — best-effort UUIDv4-like string for synthetic message IDs.
-//! - `chat_to_responses_body(&Bytes) -> Bytes` — converts a `/v1/chat/completions`
-//!   request body to `/v1/responses` shape.
-//! - `responses_to_chat_body(&Bytes) -> Bytes` — converts a `/v1/responses`
-//!   response body back to chat-completions shape.
-//!
-//! Both translators are tolerant of malformed input (return the original
-//! bytes on parse failure) — they're not validators, they're shape-mappers.
+//! Request translation operates on retained JSON, keeping the original request
+//! for rollback when a shape cannot be translated. Response translation still
+//! accepts provider bytes and returns them unchanged on parse failure.
 
+use crate::proxy::RequestBody;
 use bytes::Bytes;
 
 #[allow(dead_code)]
@@ -33,8 +23,8 @@ pub(super) fn uuid_v4() -> String {
 
 /// Convert a chat/completions request body to Responses API format.
 /// messages[] → input, max_completion_tokens → max_output_tokens
-pub(super) fn chat_to_responses_body(chat_body: &Bytes) -> Bytes {
-    let Ok(mut body) = serde_json::from_slice::<serde_json::Value>(chat_body) else {
+pub(super) fn chat_to_responses_request(chat_body: &RequestBody) -> RequestBody {
+    let Some(mut body) = chat_body.json().cloned() else {
         return chat_body.clone();
     };
     let obj = match body.as_object_mut() {
@@ -300,11 +290,15 @@ pub(super) fn chat_to_responses_body(chat_body: &Bytes) -> Bytes {
     obj.remove("top_logprobs");
     obj.remove("n");
 
-    serde_json::to_vec(&body)
-        .map(Bytes::from)
-        .unwrap_or_else(|_| chat_body.clone())
+    RequestBody::from_value(body)
 }
 
+#[cfg(test)]
+fn chat_to_responses_body(chat_body: &Bytes) -> Bytes {
+    chat_to_responses_request(&RequestBody::from_bytes(chat_body.clone()))
+        .to_bytes()
+        .unwrap()
+}
 /// Convert a Responses API response back to chat/completions format.
 /// output[].content[].text → choices[].message.content
 /// output[] function_call items → choices[].message.tool_calls
@@ -420,6 +414,76 @@ pub(super) fn responses_to_chat_body(resp_body: &Bytes) -> Bytes {
 mod tests {
     use super::*;
     use bytes::Bytes;
+
+    #[test]
+    fn retained_translation_preserves_large_generated_extensions_and_source_state() {
+        let original = serde_json::json!({
+            "model":"selected", "messages":[{"role":"user","content":"hello"}],
+            "max_tokens":123, "stream":true, "stream_options":{"include_usage":true},
+            "extension":"x".repeat(2 * 1024 * 1024),
+        });
+        let body = RequestBody::from_value(original.clone());
+        let translated = chat_to_responses_request(&body);
+        let value = translated.json().unwrap();
+        assert_eq!(value["extension"], original["extension"]);
+        assert_eq!(value["model"], "selected");
+        assert_eq!(value["max_output_tokens"], 123);
+        assert_eq!(value["input"][0]["content"][0]["text"], "hello");
+        for field in ["messages", "max_tokens", "stream", "stream_options"] {
+            assert!(value.get(field).is_none());
+        }
+        assert!(translated.to_bytes().unwrap().len() > 2 * 1024 * 1024);
+        assert_eq!(body.json(), Some(&original));
+    }
+
+    #[test]
+    fn retained_translation_rolls_back_exact_original_bytes_and_generated_json() {
+        let bytes = Bytes::from_static(b" {\"model\":\"first\",\"model\":\"last\", \"messages\":[], \"max_tokens\":10, \"reasoning_effort\":null} \n");
+        let value = crate::routes::request_json::parse(&bytes).unwrap();
+        let original = RequestBody::from_validated(bytes.clone(), value);
+        assert_eq!(
+            chat_to_responses_request(&original).to_bytes().unwrap(),
+            bytes
+        );
+        for raw in ["{broken", " [1, 2] "] {
+            let bytes = Bytes::copy_from_slice(raw.as_bytes());
+            let body = RequestBody::from_bytes(bytes.clone());
+            assert_eq!(chat_to_responses_request(&body).to_bytes().unwrap(), bytes);
+        }
+        let value = serde_json::json!({
+            "model":"selected", "messages":[], "max_tokens":10,
+            "response_format":{"type":"json_object"}, "text":{"format":{"type":"text"}},
+            "extension":"x".repeat(2 * 1024 * 1024),
+        });
+        let body = RequestBody::from_value(value.clone());
+        assert_eq!(chat_to_responses_request(&body).json(), Some(&value));
+    }
+
+    #[test]
+    fn added_translation_container_keeps_the_historical_raw_depth_fallback() {
+        let mut nested = serde_json::json!(0);
+        for _ in 0..125 {
+            nested = serde_json::json!([nested]);
+        }
+        let format = serde_json::json!({"type":"json_object", "nested":nested});
+        let original = serde_json::json!({"model":"selected", "response_format":format.clone()});
+        let bytes = Bytes::from(serde_json::to_vec(&original).unwrap());
+        let parsed = crate::routes::request_json::parse(&bytes).unwrap();
+        let translated = chat_to_responses_request(&RequestBody::from_validated(bytes, parsed));
+        let expected =
+            serde_json::to_vec(&serde_json::json!({"model":"selected", "text":{"format":format}}))
+                .unwrap();
+        assert!(serde_json::from_slice::<serde_json::Value>(&expected).is_err());
+        assert!(translated.json().is_none());
+        assert_eq!(
+            translated
+                .with_model("fallback")
+                .to_bytes()
+                .unwrap()
+                .as_ref(),
+            expected
+        );
+    }
 
     #[test]
     fn test_chat_to_responses_simple_message() {

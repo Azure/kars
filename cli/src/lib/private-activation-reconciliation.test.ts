@@ -5,15 +5,15 @@ import { describe, expect, it } from "vitest";
 import { PRIVATE_PREFIX as P, templateDigest, type Execute } from "./private-activation.js";
 import { reviewedControllerRollout } from "./private-activation-reconciliation.js";
 
-function fixture() {
+function fixture(rolloutField = "kars.azure.com/inference-providers-version", legacyProjection = false) {
   const epoch = "a".repeat(64);
   const identity = { name: "sre", uid: "deployment-uid", resourceVersion: "1" };
   const current = { kind: "Deployment", apiVersion: "apps/v1", metadata: { ...identity, namespace: "kars-sre" },
     spec: { template: { metadata: { labels: { app: "sre" }, annotations: {
-      [`${P}epoch`]: epoch, "kars.azure.com/inference-providers-version": "one",
+      [`${P}epoch`]: epoch, [rolloutField]: "one",
     } }, spec: { containers: [{ name: "router", image: "example.test/router:latest" }] } } } };
   const structure = structuredClone(current);
-  delete (structure.spec.template.metadata.annotations as Record<string, string>)["kars.azure.com/inference-providers-version"];
+  if (!legacyProjection) delete structure.spec.template.metadata.annotations[rolloutField];
   const consumer = { kind: "Deployment", object: identity, templateDigest: "b".repeat(64) };
   const scope = { namespace: { name: "kars-sre", uid: "namespace-uid", resourceVersion: "1" }, epoch, consumers: [consumer] };
   const receipt = { epoch, baseline: consumer.templateDigest, structure: templateDigest(structure), template: templateDigest(current),
@@ -39,16 +39,33 @@ function fixture() {
 }
 
 describe("protected controller rollout receipts", () => {
-  it("accepts repeated rotations after ReplicaSets are collected without changing the original qualification", async () => {
-    const f = fixture();
-    for (let n = 0; n < 15; n++) {
-      f.current.spec.template.metadata.annotations["kars.azure.com/inference-providers-version"] = `rotation-${n}`;
-      f.receipt.template = templateDigest(f.current);
-      f.namespace.metadata.annotations[`${P}reconciled-${f.consumer.object.uid}`] = JSON.stringify(f.receipt);
-      expect(await f.verify()).toBe(true);
-    }
-    expect(f.consumer.templateDigest).toBe("b".repeat(64));
-    expect(f.calls.every(args => ["namespace", "karssandbox"].includes(args[1]!))).toBe(true);
+  it.each(["kars.azure.com/inference-providers-version", "kars.azure.com/credential-projection-version"])(
+    "accepts repeated %s rotations only with a current receipt after ReplicaSets are collected", async field => {
+      const f = fixture(field);
+      for (let n = 0; n < 15; n++) {
+        f.current.spec.template.metadata.annotations[field] = `projection-uid:${n + 2}`;
+        expect(await f.verify()).toBe(false);
+        f.receipt.template = templateDigest(f.current);
+        f.namespace.metadata.annotations[`${P}reconciled-${f.consumer.object.uid}`] = JSON.stringify(f.receipt);
+        expect(await f.verify()).toBe(true);
+      }
+      expect(f.consumer.templateDigest).toBe("b".repeat(64));
+      expect(f.calls.every(args => ["namespace", "karssandbox"].includes(args[1]!))).toBe(true);
+      Object.assign(f.current.spec.template.metadata.annotations, { [field]: { invalid: true } });
+      await expect(f.verify()).rejects.toThrow("Malformed credential rollout annotation");
+    },
+  );
+
+  it.each([false, true])("preserves existing projection-pinned receipts with model binding: %s", async modelBinding => {
+    const field = "kars.azure.com/credential-projection-version";
+    const f = fixture(field, true);
+    if (modelBinding) Object.assign(f.receipt, { model_structure: f.receipt.structure });
+    f.namespace.metadata.annotations[`${P}reconciled-${f.consumer.object.uid}`] = JSON.stringify(f.receipt);
+    expect(await f.verify()).toBe(true);
+    f.current.spec.template.metadata.annotations[field] = "projection-uid:2";
+    f.receipt.template = templateDigest(f.current);
+    f.namespace.metadata.annotations[`${P}reconciled-${f.consumer.object.uid}`] = JSON.stringify(f.receipt);
+    expect(await f.verify()).toBe(false);
   });
 
   it.each(["agent", "openclaw"])("verifies extended %s model receipts and rejects malformed projections", async runtime => {

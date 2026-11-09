@@ -22,7 +22,7 @@ from sre_authority.common import (
 )
 from sre_authority.fixtures import seed_control_consumer
 from sre_authority.admission import reserved_source_probe
-from sre_authority.proxy import MARKER, assert_filtered, log_reader_facts, secret_list_wire_facts
+from sre_authority.proxy import MARKER, assert_filtered, log_reader_facts, pending_proposal, secret_list_wire_facts
 from sre_authority.credential_paths import assert_token_type_immutable, assert_watch_result
 
 
@@ -36,6 +36,27 @@ class Response:
 
 
 class HarnessTests(unittest.TestCase):
+    def test_pending_proposal_uses_the_name_from_created_and_reused_hermes_results(self):
+        for newly_created in (True, False):
+            calls = []
+            persisted = {"metadata": {"name": "sre-action-fixture"},
+                         "spec": {"approval": {"state": "Pending"}}}
+            def get(kind, name, namespace):
+                self.assertEqual((kind, name, namespace), ("karssreaction", "sre-action-fixture", RUNTIME))
+                return persisted
+            def propose(**kwargs):
+                calls.append(kwargs)
+                return "sre-action-fixture", newly_created
+            with self.subTest(created=newly_created):
+                h = types.SimpleNamespace(get=get)
+                sre = types.SimpleNamespace(_create_karssreaction_cr=propose)
+                self.assertEqual(pending_proposal(h, sre), ("sre-action-fixture", persisted))
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0]["action"]["type"], "RolloutRestart")
+                persisted["spec"]["approval"]["state"] = "Approved"
+                with self.assertRaisesRegex(AssertionError, "did not persist Pending"):
+                    pending_proposal(h, sre)
+
     def test_real_failed_command_relays_sanitized_preparation_facts_without_its_output(self):
         facts = {"step": "data-returned-identity", "source": "cli/src/lib/sre-migration-data.ts",
                  "kind": "KarsTask", "category": "local-check"}

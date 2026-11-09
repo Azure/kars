@@ -25,8 +25,10 @@ const INFERENCE_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 
 mod authentication;
 pub mod failure;
+mod request_body;
 pub use authentication::{AuthenticationProvenance, credential_for_upstream, token_for_endpoint};
 use failure::ForwardFailure;
+pub(crate) use request_body::RequestBody;
 
 #[cfg(test)]
 mod authentication_tests;
@@ -356,15 +358,41 @@ pub async fn forward(
     request_body: Bytes,
 ) -> Result<(StatusCode, HeaderMap, Bytes)> {
     crate::inference_budget::dispatch::preflight(upstream, &method, path)?;
+    forward_parsed(
+        auth,
+        copilot,
+        client,
+        upstream,
+        method,
+        path,
+        request_headers,
+        RequestBody::from_bytes(request_body),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn forward_parsed(
+    auth: &WorkloadIdentityAuth,
+    copilot: Option<&CopilotTokenCache>,
+    client: &Client,
+    upstream: &UpstreamConfig,
+    method: Method,
+    path: &str,
+    request_headers: &HeaderMap,
+    request_body: RequestBody,
+) -> Result<(StatusCode, HeaderMap, Bytes)> {
+    crate::inference_budget::dispatch::preflight(upstream, &method, path)?;
     let start = Instant::now();
-    let mut observation = upstream.telemetry.as_ref().and_then(|telemetry| {
-        telemetry.begin(
+    let mut observation = match &upstream.telemetry {
+        Some(telemetry) => telemetry.begin(
             path,
             upstream.telemetry_provider(),
             &upstream.deployment,
-            &request_body,
-        )
-    });
+            &request_body.to_bytes()?,
+        ),
+        None => None,
+    };
 
     let (upstream_url, body) =
         build_upstream_url(auth, upstream, path, request_body).map_err(|error| {
@@ -632,14 +660,40 @@ pub async fn forward_stream(
     futures::stream::BoxStream<'static, Result<Bytes, std::io::Error>>,
 )> {
     crate::inference_budget::dispatch::preflight(&upstream, &Method::POST, path)?;
-    let mut observation = upstream.telemetry.as_ref().and_then(|telemetry| {
-        telemetry.begin(
+    forward_stream_parsed(
+        auth,
+        copilot,
+        client,
+        upstream,
+        path,
+        request_headers,
+        RequestBody::from_bytes(request_body),
+    )
+    .await
+}
+pub(crate) async fn forward_stream_parsed(
+    auth: Arc<WorkloadIdentityAuth>,
+    copilot: Option<Arc<CopilotTokenCache>>,
+    client: Client,
+    upstream: UpstreamConfig,
+    path: &str,
+    request_headers: HeaderMap,
+    request_body: RequestBody,
+) -> Result<(
+    StatusCode,
+    HeaderMap,
+    futures::stream::BoxStream<'static, Result<Bytes, std::io::Error>>,
+)> {
+    crate::inference_budget::dispatch::preflight(&upstream, &Method::POST, path)?;
+    let mut observation = match &upstream.telemetry {
+        Some(telemetry) => telemetry.begin(
             path,
             upstream.telemetry_provider(),
             &upstream.deployment,
-            &request_body,
-        )
-    });
+            &request_body.to_bytes()?,
+        ),
+        None => None,
+    };
     // Inject stream_options.include_usage into request body so the final
     // SSE chunk contains a `usage` object with token counts. ONLY for
     // chat/completions — Anthropic Messages API (/v1/messages) rejects
@@ -835,23 +889,18 @@ pub async fn forward_stream(
 
 /// Inject `stream_options: { include_usage: true }` into the request body
 /// so Azure OpenAI includes token usage in the final SSE chunk.
-fn inject_stream_usage(body: Bytes) -> Bytes {
-    if let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(&body)
-        && let Some(obj) = json.as_object_mut()
-    {
+fn inject_stream_usage(mut body: RequestBody) -> RequestBody {
+    if body.json().is_some_and(serde_json::Value::is_object) {
+        let obj = body.json_mut().unwrap().as_object_mut().unwrap();
         let opts = obj
             .entry("stream_options")
             .or_insert_with(|| serde_json::json!({}));
         if let Some(opts_obj) = opts.as_object_mut() {
             opts_obj.insert("include_usage".to_string(), serde_json::json!(true));
         }
-        if let Ok(bytes) = serde_json::to_vec(&json) {
-            return Bytes::from(bytes);
-        }
     }
     body
 }
-
 /// Build the upstream URL and optionally inject model into request body.
 /// Azure hosts use /openai/v1/; custom OpenAI-compatible endpoints retain their base path.
 ///
@@ -869,8 +918,9 @@ fn build_upstream_url(
     _auth: &WorkloadIdentityAuth,
     upstream: &UpstreamConfig,
     path: &str,
-    request_body: Bytes,
+    request_body: impl Into<RequestBody>,
 ) -> Result<(String, Bytes)> {
+    let mut request_body = request_body.into();
     let url = match upstream.provider {
         ProviderKind::Anthropic => format!(
             "{}/{}",
@@ -898,8 +948,7 @@ fn build_upstream_url(
             }
         }
     };
-    let body = if let Ok(mut body_json) = serde_json::from_slice::<serde_json::Value>(&request_body)
-    {
+    if let Some(body_json) = request_body.json_mut() {
         if body_json.get("model").is_none()
             && let Some(object) = body_json.as_object_mut()
         {
@@ -956,12 +1005,9 @@ fn build_upstream_url(
                 .unwrap()
                 .remove("reasoning_effort");
         }
-        rewrite_unsupported_thinking(&mut body_json);
-        serde_json::to_vec(&body_json)?.into()
-    } else {
-        request_body
-    };
-    Ok((url, body))
+        rewrite_unsupported_thinking(body_json);
+    }
+    Ok((url, request_body.into_upstream_bytes()?))
 }
 
 pub(crate) fn model_requires_adaptive_thinking(model: &str) -> bool {

@@ -122,6 +122,39 @@ fn scan_text_or_raw_extracts_json_and_falls_back_to_raw() {
 }
 
 #[test]
+fn output_scan_preserves_unbounded_provider_text_and_raw_failure_fallback() {
+    let padding = "x".repeat(2 * 1024 * 1024);
+    for (body, extract) in [
+        (
+            serde_json::json!({"choices": [{"message": {"content": "answer"}}], "extension": &padding}),
+            extract_openai_output_text as fn(&serde_json::Value) -> String,
+        ),
+        (
+            serde_json::json!({"content": [{"text": "answer"}], "extension": &padding}),
+            extract_anthropic_output_text as fn(&serde_json::Value) -> String,
+        ),
+    ] {
+        let body = serde_json::to_vec(&body).unwrap();
+        assert!(body.len() > 2 * 1024 * 1024);
+        assert_eq!(scan_text_or_raw(&body, extract), "answer");
+        let mut malformed = body;
+        malformed.extend_from_slice(b" trailing\xff");
+        assert_eq!(
+            scan_text_or_raw(&malformed, extract),
+            String::from_utf8_lossy(&malformed)
+        );
+        let deep = format!("{}0{}", "[".repeat(140), "]".repeat(140));
+        assert_eq!(scan_text_or_raw(deep.as_bytes(), extract), deep);
+        let tool_only = serde_json::to_vec(&serde_json::json!({
+            "choices": [{"message": {"content": null, "tool_calls": [{"arguments": &padding}]}}],
+            "content": [{"type": "tool_use", "input": &padding}],
+        }))
+        .unwrap();
+        assert_eq!(scan_text_or_raw(&tool_only, extract), "");
+    }
+}
+
+#[test]
 fn openai_input_text_handles_string_and_parts() {
     let body = serde_json::json!({
         "messages": [

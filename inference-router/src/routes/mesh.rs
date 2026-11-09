@@ -575,7 +575,7 @@ pub(super) fn enforce_identity_claim(path: &str, body: &Bytes) -> Result<(), (St
         return Ok(());
     }
 
-    let parsed: serde_json::Value = match serde_json::from_slice(body) {
+    let parsed = match super::request_json::parse(body) {
         Ok(v) => v,
         Err(_) => {
             // The registry may accept JSON that exceeds this parser's limits.
@@ -943,6 +943,32 @@ mod tests {
     fn enforce_passes_empty_body() {
         with_env("SANDBOX_NAME", "viz", || {
             assert!(enforce_identity_claim("v1/agents", &Bytes::new()).is_ok());
+        });
+    }
+
+    #[test]
+    fn enforce_preserves_identity_checks_at_request_byte_limit() {
+        with_env("SANDBOX_NAME", "viz", || {
+            const LIMIT: usize = 2 * 1024 * 1024;
+            for (claim, expected) in [
+                (br#"{"display_name":"viz"}"#.as_slice(), None),
+                (
+                    br#"{"display_name":"victim"}"#.as_slice(),
+                    Some(StatusCode::FORBIDDEN),
+                ),
+            ] {
+                let mut body = claim.to_vec();
+                body.resize(LIMIT, b' ');
+                let result = enforce_identity_claim("v1/agents", &Bytes::from(body.clone()));
+                assert_eq!(result.err().map(|error| error.0), expected);
+                body.push(b' ');
+                let error = enforce_identity_claim("v1/agents", &Bytes::from(body)).unwrap_err();
+                assert_eq!(error.0, StatusCode::BAD_REQUEST);
+                assert_eq!(
+                    error.1,
+                    "registry identity claim must be valid JSON within router parsing limits"
+                );
+            }
         });
     }
 

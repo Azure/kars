@@ -5,7 +5,7 @@ use super::AppState;
 use crate::{
     failover,
     inference_policy_loader::InferencePolicySnapshot,
-    proxy::{self, UpstreamConfig},
+    proxy::{self, RequestBody, UpstreamConfig},
 };
 use anyhow::Result;
 use axum::http::{HeaderMap, Method, StatusCode};
@@ -45,8 +45,8 @@ fn is_non_model_parameter_error(error: &serde_json::Value) -> bool {
 fn corrected_output_limit_request(
     status: StatusCode,
     response: &[u8],
-    body: &[u8],
-) -> Option<Bytes> {
+    body: &RequestBody,
+) -> Option<RequestBody> {
     if status != StatusCode::BAD_REQUEST {
         return None;
     }
@@ -67,16 +67,15 @@ fn corrected_output_limit_request(
     {
         return None;
     }
-    let mut request: serde_json::Value = serde_json::from_slice(body).ok()?;
-    let object = request.as_object_mut()?;
+    let mut request = body.clone();
+    let object = request.json_mut()?.as_object_mut()?;
     if object.contains_key("max_completion_tokens") || object.get("max_tokens")?.as_u64()? == 0 {
         return None;
     }
     let limit = object.remove("max_tokens")?;
     object.insert("max_completion_tokens".into(), limit);
-    serde_json::to_vec(&request).ok().map(Bytes::from)
+    Some(request)
 }
-
 pub(super) fn is_responses_only_error(body: &[u8]) -> bool {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
         return false;
@@ -146,18 +145,9 @@ fn is_model_unavailable_error(status: StatusCode, body: &[u8]) -> bool {
         .any(|phrase| message.contains(phrase)))
 }
 
-pub(super) fn override_model_in_body(body: &[u8], model: &str) -> Bytes {
-    match serde_json::from_slice::<serde_json::Value>(body) {
-        Ok(mut value) if value.is_object() => {
-            value["model"] = model.into();
-            serde_json::to_vec(&value)
-                .map(Bytes::from)
-                .unwrap_or_else(|_| Bytes::copy_from_slice(body))
-        }
-        _ => Bytes::copy_from_slice(body),
-    }
+pub(super) fn override_model_in_body(body: &RequestBody, model: &str) -> RequestBody {
+    body.with_model(model)
 }
-
 fn default_target(state: &AppState, base: &UpstreamConfig) -> UpstreamConfig {
     let mut target = base.clone();
     target.deployment = state.config.default_model.clone();
@@ -168,9 +158,9 @@ fn primary_target(
     state: &AppState,
     base: &UpstreamConfig,
     policy: &InferencePolicySnapshot,
-    body: &[u8],
+    body: &RequestBody,
 ) -> Result<UpstreamConfig> {
-    let candidates = failover::candidates_for_request(base, policy, body);
+    let candidates = failover::candidates_for_parsed_request(base, policy, body);
     failover::resolve_candidate(base, &state.config, &candidates[0])
         .map_err(proxy::failure::ForwardFailure::configuration)
 }
@@ -197,7 +187,7 @@ pub(super) fn effective_primary(
     state: &AppState,
     base: &UpstreamConfig,
     policy: &InferencePolicySnapshot,
-    body: &[u8],
+    body: &RequestBody,
 ) -> Result<UpstreamConfig> {
     let primary = primary_target(state, base, policy, body)?;
     let fallback = default_target(state, base);
@@ -216,8 +206,9 @@ pub(super) async fn forward_responses(
     policy: &InferencePolicySnapshot,
     selected: &UpstreamConfig,
     headers: &HeaderMap,
-    body: Bytes,
+    body: impl Into<RequestBody>,
 ) -> Result<BufferedResult> {
+    let body = body.into();
     use crate::inference_policy_loader::{ModelPreference, ModelRef};
     let candidates = failover::build_candidates(base, policy);
     let mut start = None;
@@ -248,7 +239,7 @@ pub(super) async fn forward_responses(
             primary: models[0].clone(),
             fallback: models[1..].to_vec(),
         });
-        return failover::forward_with_failover(
+        return failover::forward_with_parsed_request(
             &state.auth,
             Some(&state.copilot),
             &state.client,
@@ -263,7 +254,7 @@ pub(super) async fn forward_responses(
         )
         .await;
     }
-    proxy::forward(
+    proxy::forward_parsed(
         &state.auth,
         Some(&state.copilot),
         &state.client,
@@ -282,12 +273,13 @@ pub(super) async fn forward_chat(
     base: &UpstreamConfig,
     policy: &InferencePolicySnapshot,
     headers: &HeaderMap,
-    body: Bytes,
+    body: impl Into<RequestBody>,
 ) -> Result<BufferedResult> {
+    let body = body.into();
     let fallback = default_target(state, base);
     let primary = primary_target(state, base, policy, &body)?;
     let result = if cached_unavailable(state, &primary, &fallback) {
-        proxy::forward(
+        proxy::forward_parsed(
             &state.auth,
             Some(&state.copilot),
             &state.client,
@@ -300,7 +292,7 @@ pub(super) async fn forward_chat(
         .await
         .map(|(status, headers, bytes)| (status, headers, bytes, fallback.clone()))
     } else {
-        failover::forward_with_failover(
+        failover::forward_with_parsed_request(
             &state.auth,
             Some(&state.copilot),
             &state.client,
@@ -322,7 +314,7 @@ pub(super) async fn forward_chat(
             &override_model_in_body(&body, &selected.deployment),
         )
     {
-        return proxy::forward(
+        return proxy::forward_parsed(
             &state.auth,
             Some(&state.copilot),
             &state.client,
@@ -341,7 +333,7 @@ pub(super) async fn forward_chat(
         && model_capability_key(selected) != model_capability_key(&fallback)
     {
         remember_unavailable(state, selected);
-        return proxy::forward(
+        return proxy::forward_parsed(
             &state.auth,
             Some(&state.copilot),
             &state.client,
@@ -362,13 +354,14 @@ pub(super) async fn forward_stream_chat(
     base: &UpstreamConfig,
     policy: &InferencePolicySnapshot,
     headers: HeaderMap,
-    body: Bytes,
+    body: impl Into<RequestBody>,
 ) -> Result<StreamingResult> {
+    let body = body.into();
     let fallback = default_target(state, base);
     let primary = primary_target(state, base, policy, &body)?;
     let (status, response_headers, stream, selected) =
         if cached_unavailable(state, &primary, &fallback) {
-            proxy::forward_stream(
+            proxy::forward_stream_parsed(
                 state.auth.clone(),
                 Some(state.copilot.clone()),
                 state.client.clone(),
@@ -380,7 +373,7 @@ pub(super) async fn forward_stream_chat(
             .await
             .map(|(status, headers, stream)| (status, headers, stream, fallback.clone()))?
         } else {
-            failover::forward_stream_with_failover(
+            failover::forward_stream_with_parsed_request(
                 state.auth.clone(),
                 Some(state.copilot.clone()),
                 state.client.clone(),
@@ -408,7 +401,7 @@ pub(super) async fn forward_stream_chat(
         &bytes,
         &override_model_in_body(&body, &selected.deployment),
     ) {
-        return proxy::forward_stream(
+        return proxy::forward_stream_parsed(
             state.auth.clone(),
             Some(state.copilot.clone()),
             state.client.clone(),
@@ -425,7 +418,7 @@ pub(super) async fn forward_stream_chat(
         && model_capability_key(&selected) != model_capability_key(&fallback)
     {
         remember_unavailable(state, &selected);
-        return proxy::forward_stream(
+        return proxy::forward_stream_parsed(
             state.auth.clone(),
             Some(state.copilot.clone()),
             state.client.clone(),
@@ -463,6 +456,33 @@ pub(super) mod tests {
         matchers::{body_partial_json, header, path},
     };
 
+    #[test]
+    fn generated_model_override_preserves_extensions_above_ingress_limit() {
+        let mut expected = json!({
+            "model": "requested", "extension": "x".repeat(2 * 1024 * 1024),
+        });
+        let body = serde_json::to_vec(&expected).unwrap();
+        assert!(body.len() > 2 * 1024 * 1024);
+        let rewritten =
+            override_model_in_body(&RequestBody::from_value(expected.clone()), "fallback");
+        expected["model"] = json!("fallback");
+        assert_eq!(
+            rewritten.to_bytes().unwrap().as_ref(),
+            serde_json::to_vec(&expected).unwrap()
+        );
+        let mut invalid = body;
+        invalid.extend_from_slice(b" trailing");
+        assert_eq!(
+            override_model_in_body(
+                &RequestBody::from_bytes(Bytes::copy_from_slice(&invalid)),
+                "fallback"
+            )
+            .to_bytes()
+            .unwrap()
+            .as_ref(),
+            invalid
+        );
+    }
     pub(crate) fn test_state(config: crate::config::Config) -> AppState {
         let policy_status = Arc::new(crate::policy_status::PolicyStatusRegistry::new());
         let governance = Arc::new(crate::governance::Governance::new_with_status(

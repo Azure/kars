@@ -215,7 +215,8 @@ async fn completions(
     }
 
     let upstream = state.upstream_config(sandbox_name);
-    match proxy::forward(
+    let body = super::request_json::retain(body);
+    match proxy::forward_parsed(
         &state.auth,
         Some(&state.copilot),
         &state.client,
@@ -257,7 +258,7 @@ async fn responses(
     // emitted from this handler can carry `inference_policy_digest`.
     let policy = crate::inference_policy_loader::current_snapshot(&state.inference_policy).await;
 
-    let request = match serde_json::from_slice::<serde_json::Value>(&body) {
+    let request = match super::request_json::parse(&body) {
         Ok(value) if value.is_object() => value,
         _ => {
             return errors::openai_coded(
@@ -271,7 +272,7 @@ async fn responses(
     };
     let requested_model = match request.get("model") {
         None => None,
-        Some(serde_json::Value::String(model)) if !model.trim().is_empty() => Some(model.as_str()),
+        Some(serde_json::Value::String(model)) if !model.trim().is_empty() => Some(model.clone()),
         Some(_) => {
             return errors::openai_coded(
                 StatusCode::BAD_REQUEST,
@@ -283,6 +284,7 @@ async fn responses(
         }
     };
     // Retain explicit caller-model denials even when routing replaces that model.
+    let requested_model = requested_model.as_deref();
     if let Some(model) = requested_model
         && let Err(denied) = super::inference_policy::require(
             &state,
@@ -358,7 +360,7 @@ async fn responses(
         &policy,
         "responses",
         headers.clone(),
-        body,
+        proxy::RequestBody::from_validated(body, request),
         |candidate| async move {
             if requested_model != Some(candidate.deployment.as_str()) {
                 super::inference_policy::require(
@@ -433,7 +435,8 @@ async fn embeddings(
 
     // Embeddings need a different deployment than chat — extract model from request body
     let mut upstream = state.upstream_config(sandbox_name);
-    if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(&body) {
+    let body = super::request_json::retain(body);
+    if let Some(body_json) = body.json() {
         if let Some(model) = body_json.get("model").and_then(|m| m.as_str()) {
             // Strip "azure/" or "azure-openai/" prefix if present
             let clean = model
@@ -443,7 +446,7 @@ async fn embeddings(
         }
     }
 
-    match proxy::forward(
+    match proxy::forward_parsed(
         &state.auth,
         Some(&state.copilot),
         &state.client,
@@ -475,6 +478,20 @@ async fn images_generations(
     _query: axum::extract::RawQuery,
     body: Bytes,
 ) -> impl IntoResponse {
+    forward_images_generations(
+        state,
+        deployment,
+        headers,
+        super::request_json::retain(body),
+    )
+    .await
+}
+async fn forward_images_generations(
+    state: AppState,
+    deployment: String,
+    headers: HeaderMap,
+    body: proxy::RequestBody,
+) -> axum::response::Response {
     let sandbox_name = state.sandbox_name.as_str();
 
     if let Some(resp) =
@@ -518,7 +535,7 @@ async fn images_generations(
         "Image generation request"
     );
 
-    match proxy::forward(
+    match proxy::forward_parsed(
         &state.auth,
         Some(&state.copilot),
         &state.client,
@@ -557,13 +574,13 @@ async fn images_generations(
 /// Translates OpenAI-format requests to Azure OpenAI format: extracts `model` for the
 /// deployment path and strips parameters Azure doesn't accept (response_format, model).
 async fn images_generations_v1(
-    state: State<AppState>,
+    State(state): State<AppState>,
     headers: HeaderMap,
-    query: axum::extract::RawQuery,
+    _query: axum::extract::RawQuery,
     body: Bytes,
 ) -> impl IntoResponse {
     let mut parsed: serde_json::Value =
-        serde_json::from_slice(&body).unwrap_or_else(|_| serde_json::json!({}));
+        super::request_json::parse(&body).unwrap_or_else(|_| serde_json::json!({}));
     let deployment = parsed
         .get("model")
         .and_then(|m| m.as_str())
@@ -575,9 +592,13 @@ async fn images_generations_v1(
         obj.remove("model");
         obj.remove("response_format");
     }
-    let patched_body = Bytes::from(serde_json::to_vec(&parsed).unwrap_or_default());
-
-    images_generations(state, Path(deployment), headers, query, patched_body).await
+    forward_images_generations(
+        state,
+        deployment,
+        headers,
+        proxy::RequestBody::from_value(parsed),
+    )
+    .await
 }
 /// GET /v1/models — list available models from the OpenAI endpoint.
 async fn list_models(State(state): State<AppState>) -> impl IntoResponse {

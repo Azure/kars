@@ -18,11 +18,12 @@ use bytes::Bytes;
 use futures::stream::StreamExt;
 
 use super::AppState;
-use super::inference_translate::{chat_to_responses_body, responses_to_chat_body};
+use super::inference_translate::{chat_to_responses_request, responses_to_chat_body};
 use super::model_routing::{is_responses_only_error, model_capability_key, override_model_in_body};
 use crate::errors;
 use crate::guardrails::{self, Direction, GuardrailError, GuardrailPipeline, GuardrailViolation};
 use crate::provider::{ProviderError, ProviderKind};
+use crate::proxy::RequestBody;
 use crate::safety;
 use std::sync::Arc;
 
@@ -325,15 +326,11 @@ pub(super) async fn guard_unenforced_route(
 pub(super) async fn chat_completions(
     State(state): State<AppState>,
     headers: HeaderMap,
-    mut body: Bytes,
+    body: Bytes,
 ) -> impl IntoResponse {
     // Downstream parsers may accept bodies that our policy checks cannot parse.
-    let model = match serde_json::from_slice::<serde_json::Value>(&body) {
-        Ok(request) => request
-            .get("model")
-            .and_then(|value| value.as_str())
-            .unwrap_or_default()
-            .to_owned(),
+    let mut request = match super::request_json::parse(&body) {
+        Ok(request) => request,
         Err(_) => {
             return errors::openai_coded(
                 StatusCode::BAD_REQUEST,
@@ -344,6 +341,16 @@ pub(super) async fn chat_completions(
             .into_response();
         }
     };
+
+    let requested_model = request
+        .get("model")
+        .and_then(|value| value.as_str())
+        .map(str::to_owned);
+    let is_stream = request
+        .get("stream")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let model = requested_model.as_deref().unwrap_or_default();
 
     // The sidecar owns one sandbox; request headers cannot select another budget.
     let sandbox_name = state.sandbox_name.as_str();
@@ -445,7 +452,7 @@ pub(super) async fn chat_completions(
     // remains in place for the implicit `max_tokens=null` path
     // (router does not yet reject mid-stream).
     if let Some(cap) = policy.per_request_tokens
-        && let Some(requested) = extract_requested_max_tokens(&body)
+        && let Some(requested) = requested_max_tokens(&request)
         && let PerRequestGate::Reject { requested, cap } =
             decide_per_request_gate(Some(cap), Some(requested))
     {
@@ -533,11 +540,15 @@ pub(super) async fn chat_completions(
         }
     };
 
-    // Input-direction scan, before any upstream forward.
+    // Ingress JSON is already validated. Reuse it for input extraction; raw
+    // fallback remains necessary for unvalidated upstream responses only.
+    let input_text = guardrail_pipeline
+        .as_ref()
+        .filter(|p| p.covers(Direction::Input))
+        .map(|_| guardrails::extract_openai_input_text(&request));
     if let Some(ref p) = guardrail_pipeline
-        && p.covers(Direction::Input)
+        && let Some(input_text) = input_text
     {
-        let input_text = guardrails::scan_text_or_raw(&body, guardrails::extract_openai_input_text);
         match p.scan(&input_text, Direction::Input).await {
             Ok(None) => {}
             Ok(Some(v)) => {
@@ -574,26 +585,27 @@ pub(super) async fn chat_completions(
     // `tool.invoke:<name>` action is denied by the active AGT
     // profile. This is opt-in — AGT defaults to Allow for unknown
     // actions, so operators must add explicit `deny tool.invoke:*`
-    // rules to take effect. Pure passthrough cost is one parse +
-    // one walk when `tools[]` is absent or empty.
-    if let Some((new_body, dropped)) = filter_disallowed_tools(&state, sandbox_name, &body).await {
-        tracing::warn!(
-            target: "inference.audit",
-            sandbox = %sandbox_name,
-            inference_policy_digest = %policy.digest,
-            decision = "filter",
-            gate = "tool_advertise",
-            dropped_tools = ?dropped,
-            "AGT policy stripped disallowed tool schemas from chat.completions body"
-        );
-        body = new_body;
-    }
+    // rules to take effect. Keep the validated JSON across tool filtering and
+    // routing; generated serialization is not subject to the ingress byte limit.
+    let body =
+        if let Some(dropped) = filter_disallowed_tools(&state, sandbox_name, &mut request).await {
+            tracing::warn!(
+                target: "inference.audit",
+                sandbox = %sandbox_name,
+                inference_policy_digest = %policy.digest,
+                decision = "filter",
+                gate = "tool_advertise",
+                dropped_tools = ?dropped,
+                "AGT policy stripped disallowed tool schemas from chat.completions body"
+            );
+            RequestBody::from_value(request)
+        } else {
+            RequestBody::from_validated(body, request)
+        };
 
+    // Tool filtering changes only tools, so retain the original routing fields.
+    let model_name = requested_model.unwrap_or_else(|| upstream.deployment.clone());
     // Check if this model is known to require Responses API (cached from prior 400s)
-    let model_name = serde_json::from_slice::<serde_json::Value>(&body)
-        .ok()
-        .and_then(|v| v.get("model")?.as_str().map(String::from))
-        .unwrap_or_else(|| upstream.deployment.clone());
     upstream = match super::model_routing::effective_primary(
         &state,
         &true_default_upstream,
@@ -638,12 +650,7 @@ pub(super) async fn chat_completions(
         // client timeouts while the Responses API processes (30-50s for reasoning models).
         tracing::info!(sandbox = %sandbox_name, model = %model_name, "Using Responses API path");
         let responses_body =
-            chat_to_responses_body(&override_model_in_body(&body, &upstream.deployment));
-
-        let is_stream = serde_json::from_slice::<serde_json::Value>(&body)
-            .ok()
-            .and_then(|v| v.get("stream")?.as_bool())
-            .unwrap_or(false);
+            chat_to_responses_request(&override_model_in_body(&body, &upstream.deployment));
 
         if is_stream {
             // Stream keepalive comments while the Responses API call is in progress,
@@ -806,12 +813,6 @@ pub(super) async fn chat_completions(
         }
     }
 
-    // Check if client requested streaming
-    let is_stream = serde_json::from_slice::<serde_json::Value>(&body)
-        .ok()
-        .and_then(|v| v.get("stream")?.as_bool())
-        .unwrap_or(false);
-
     if is_stream {
         // SSE streaming — wrap stream to capture token usage from final [DONE] chunk
         let sandbox_owned = sandbox_name.to_string();
@@ -863,7 +864,7 @@ pub(super) async fn chat_completions(
                     }
                     // Fallback: convert to Responses API, return result as single SSE frame
                     tracing::info!(sandbox = %sandbox_name, "Streaming chat/completions unsupported, falling back to Responses API");
-                    let responses_body = chat_to_responses_body(&override_model_in_body(
+                    let responses_body = chat_to_responses_request(&override_model_in_body(
                         &body,
                         &selected_upstream.deployment,
                     ));
@@ -1107,7 +1108,7 @@ pub(super) async fn chat_completions(
                 }
                 // Convert messages → input and proxy to /openai/v1/responses.
                 tracing::info!(sandbox = %sandbox_name, "chat/completions unsupported, falling back to Responses API");
-                let responses_body = chat_to_responses_body(&override_model_in_body(
+                let responses_body = chat_to_responses_request(&override_model_in_body(
                     &body,
                     &selected_upstream.deployment,
                 ));
@@ -1495,31 +1496,39 @@ pub(super) fn decide_per_request_gate(cap: Option<u64>, requested: Option<u64>) 
     }
 }
 
-/// Extract the requested completion-tokens budget from the chat
-/// completions request body. Both `max_tokens` (legacy) and
+/// Extract the requested completion-tokens budget from the original,
+/// default-limited chat completions request body. Both `max_tokens` (legacy) and
 /// `max_completion_tokens` (o-series models) are honoured —
 /// `max_completion_tokens` wins when both are set, matching upstream
 /// OpenAI semantics. Returns `None` when the body is unparseable or
 /// neither field is present (in which case the gate defaults to
 /// Allow — pre-flight cannot estimate prompt tokens in Slice 2a).
+#[cfg(test)]
 pub(super) fn extract_requested_max_tokens(body: &[u8]) -> Option<u64> {
-    let v: serde_json::Value = serde_json::from_slice(body).ok()?;
+    requested_max_tokens(&super::request_json::parse(body).ok()?)
+}
+
+fn requested_max_tokens(v: &serde_json::Value) -> Option<u64> {
     v.get("max_completion_tokens")
         .and_then(|x| x.as_u64())
         .or_else(|| v.get("max_tokens").and_then(|x| x.as_u64()))
 }
 
-/// Extract every advertised tool name from a chat.completions request
-/// body, in original order. Handles both the chat shape
+/// Extract every advertised tool name from the original, default-limited
+/// chat.completions request body, in original order. Handles both the chat shape
 /// (`{"type":"function","function":{"name":"x"}}`) and the
 /// flattened Responses shape (`{"type":"function","name":"x"}`),
 /// since a non-OpenClaw client may have pre-translated. Returns
 /// the empty vector when `tools[]` is absent / empty / malformed —
 /// nothing to filter.
+#[cfg(test)]
 pub(super) fn extract_advertised_tool_names(body: &[u8]) -> Vec<String> {
-    let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
-        return Vec::new();
-    };
+    super::request_json::parse(body)
+        .map(|value| advertised_tool_names(&value))
+        .unwrap_or_default()
+}
+
+fn advertised_tool_names(v: &serde_json::Value) -> Vec<String> {
     let Some(tools) = v.get("tools").and_then(|t| t.as_array()) else {
         return Vec::new();
     };
@@ -1535,18 +1544,28 @@ pub(super) fn extract_advertised_tool_names(body: &[u8]) -> Vec<String> {
         .collect()
 }
 
-/// Rewrite a chat.completions body, dropping every entry of `tools[]`
-/// whose extracted name is **not** in `allowed`. Returns `None`
+/// Rewrite the original, default-limited chat.completions body, dropping
+/// every entry of `tools[]` whose extracted name is **not** in `allowed`.
+/// Serialized output may exceed the input byte limit. Returns `None`
 /// (i.e. "no rewrite needed") when the body has no `tools[]` array,
 /// when every advertised tool is allowed, or when the body is not
 /// parseable JSON. Tools with no extractable name are kept (we cannot
 /// gate something we cannot identify; logged at WARN above the call
 /// site for forensics, not here).
+#[cfg(test)]
 pub(super) fn rewrite_body_dropping_tools(
     body: &Bytes,
     allowed: &std::collections::HashSet<String>,
 ) -> Option<(Bytes, Vec<String>)> {
-    let mut v: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let mut v = super::request_json::parse(body).ok()?;
+    let dropped = drop_disallowed_tools(&mut v, allowed)?;
+    Some((Bytes::from(serde_json::to_vec(&v).ok()?), dropped))
+}
+
+fn drop_disallowed_tools(
+    v: &mut serde_json::Value,
+    allowed: &std::collections::HashSet<String>,
+) -> Option<Vec<String>> {
     let tools_arr = v.get_mut("tools").and_then(|t| t.as_array_mut())?;
     if tools_arr.is_empty() {
         return None;
@@ -1569,21 +1588,19 @@ pub(super) fn rewrite_body_dropping_tools(
     if dropped.is_empty() {
         return None;
     }
-    let bytes = serde_json::to_vec(&v).ok()?;
-    Some((Bytes::from(bytes), dropped))
+    Some(dropped)
 }
 
-/// Async wrapper that ties [`extract_advertised_tool_names`] to the
-/// four-seam `PolicyDecisionProvider` and emits the rewritten body
-/// when any tool was denied. Action format is
+/// Tie advertised tools to the four-seam `PolicyDecisionProvider`, updating
+/// the retained request only when a tool was denied. Action format is
 /// `tool.invoke:<name>` — same as the OpenClaw plugin uses
 /// in-process, so a single AGT rule covers both layers.
 async fn filter_disallowed_tools(
     state: &AppState,
     sandbox: &str,
-    body: &Bytes,
-) -> Option<(Bytes, Vec<String>)> {
-    let names = extract_advertised_tool_names(body);
+    body: &mut serde_json::Value,
+) -> Option<Vec<String>> {
+    let names = advertised_tool_names(body);
     if names.is_empty() {
         return None;
     }
@@ -1601,7 +1618,7 @@ async fn filter_disallowed_tools(
     if allowed.len() == names.len() {
         return None;
     }
-    rewrite_body_dropping_tools(body, &allowed)
+    drop_disallowed_tools(body, &allowed)
 }
 
 #[cfg(test)]

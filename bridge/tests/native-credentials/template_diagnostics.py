@@ -180,8 +180,11 @@ def late_retirement(setup, scopes, runtime, current_digest):
 
 def collect(setup, baselines, failure):
     result = {"diagnosticOnly": True, "available": False, "category": "not-eligible"}
-    if not isinstance(failure, str) or not any(failure.startswith(f"Native operator apply failed: {category} ")
-            for category in ("consumer-template-drift", "writer-runtime-transition")):
+    if not isinstance(failure, str) or not (
+        failure == "Deadline: core-issued current observer capability"
+        or any(failure.startswith(f"Native operator apply failed: {category} ")
+               for category in ("consumer-template-drift", "writer-runtime-transition"))
+    ):
         return result
     result["category"] = "unavailable"
     try:

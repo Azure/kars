@@ -156,8 +156,7 @@ fn authorize(
         scope: None,
         update: false,
     };
-    let body =
-        || serde_json::from_slice::<Value>(body).map_err(|_| "memory request must be valid JSON");
+    let body = || super::request_json::parse(body).map_err(|_| "memory request must be valid JSON");
     if segments.len() == 1 && method == Method::POST {
         if body()?["name"].as_str() != Some(access.store_name.as_str()) {
             return Err("memory store creation is not authorized");
@@ -238,6 +237,57 @@ mod tests {
     }
     fn path(value: &str) -> Vec<String> {
         value.split('/').map(String::from).collect()
+    }
+
+    #[test]
+    fn memory_rest_request_byte_limit_preserves_scope_checks() {
+        let updates = MemoryUpdates::default();
+        const LIMIT: usize = 2 * 1024 * 1024;
+        for (resource, input, allowed) in [
+            ("memory_stores", br#"{"name":"bound"}"#.as_slice(), true),
+            (
+                "memory_stores/bound:update_memories",
+                br#"{"scope":"agent_alice"}"#.as_slice(),
+                true,
+            ),
+            (
+                "memory_stores/bound:search_memories",
+                br#"{"scope":"other"}"#.as_slice(),
+                false,
+            ),
+        ] {
+            let mut body = input.to_vec();
+            body.resize(LIMIT, b' ');
+            assert_eq!(
+                authorize(&access(), &updates, &Method::POST, &path(resource), &body).is_ok(),
+                allowed
+            );
+            body.push(b' ');
+            assert_eq!(
+                authorize(&access(), &updates, &Method::POST, &path(resource), &body).err(),
+                Some("memory request must be valid JSON")
+            );
+        }
+    }
+
+    #[test]
+    fn memory_update_response_is_not_capped_at_request_byte_limit() {
+        let updates = MemoryUpdates::default();
+        let request = authorize(
+            &access(),
+            &updates,
+            &Method::POST,
+            &path("memory_stores/bound:update_memories"),
+            br#"{"scope":"agent_alice"}"#,
+        )
+        .unwrap();
+        let mut response = br#"{"update_id":"accepted"}"#.to_vec();
+        response.resize(2 * 1024 * 1024 + 1, b' ');
+        observe(&request, &updates, StatusCode::ACCEPTED, &response);
+        assert_eq!(
+            updates.scope("bound", "accepted").as_deref(),
+            Some("agent_alice")
+        );
     }
 
     #[test]
