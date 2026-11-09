@@ -169,6 +169,7 @@ describe("SRE controller upgrade namespace preflight", () => {
 
   it("passes the same selection through explicit authority source staging", async () => {
     execute.mockImplementation(async (file, args) => {
+      if (file === "helm" && args[0] === "list") return { stdout: "[]" };
       if (file === "helm" && args[0] === "template") {
         expect(args).toEqual(expect.arrayContaining([
           "--set-json", 'sre.provider="local"', "--set-json", 'sre.model="org/model:small"',

@@ -1584,6 +1584,12 @@ maximum input plus enforced output reservation fits. Review the governing
 limits/capacity before explicitly resubmitting; this response adds no funding,
 changes no quotes, and resets no charges or replay fences.
 
+The maintained Kind acceptance checks this public refusal for both sibling
+configured-price exhaustion and a concurrent token reservation. It requires the
+specific error code, type and no-retry header, verifies that refused requests do
+not reach the provider, and retains exact settled/reserved ledger assertions.
+A bare HTTP 400 or the private broker's HTTP 429 is not accepted as proof.
+
 Private broker wire statuses remain compatible (429 for exhausted ceilings, 503
 for capacity); only an explicit recognized code with its matching status is
 classified as an admission refusal. Broker transport errors, unrecovered contention,

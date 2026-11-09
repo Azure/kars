@@ -336,8 +336,15 @@ permission for the live check. This API is not exposed through the agent proxy.
    registrar role explicitly to the operator performing enrollment. Do not
    grant it to the tenant GitOps controller or SRE agent.
 3. For a fresh source, run `kars sre authority stage-source`, which atomically
-   CREATEs the CR and reports its actual source/namespace UIDs. For an existing
-   source, run `authority preview` instead; no source adoption by name occurs.
+   CREATEs the CR and reports its actual source/namespace UIDs. It renders with
+   the installed Helm release's values, including inherited inference defaults
+   and policy limits; explicit `--provider`/`--model` override only that selection.
+   Offline fresh-source rendering sets `sre.authorityStage=false` to disable
+   existing-source retention without changing saved release values or bypassing
+   the registrar, foreign-occupant, or atomic CREATE guards.
+   Failed release/value reads stop staging rather than falling back to defaults.
+   For an existing source, run `authority preview` instead; no source adoption
+   by name occurs.
 4. Review the `authority enroll --dry-run` JSON and exact binding/consumer
    reviews. CREATE that cluster-scoped registration under registrar authority,
    or apply an explicitly reviewed UID/resourceVersion-fenced update. The CLI

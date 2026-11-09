@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { prepareRouterImage } from "./kind-router-image.mjs";
 import { PROVIDER, ENDPOINT, providerSource,
   budgetStageFacts, routerTemplateFacts, TLS_SERVER_EXTENSIONS, verifyFixtureCertificate,
-  unsupportedOperationFact } from "./budget-fixture-route.mjs";
+  unsupportedOperationFact, budgetExhaustionFact } from "./budget-fixture-route.mjs";
 import { ownedRouterResolver, startForward, waitForOwnedRouter } from "./budget-router-readiness.mjs";
 import { withKindApi } from "./budget-api-client.mjs";
 import { cancelAcceptedTask } from "./budget-cancellation.mjs";
@@ -87,7 +87,13 @@ async function request(url, path, body, timeout = 30_000) {
   const text = await response.text();
   const value = text && response.headers.get("content-type")?.includes("application/json")
     ? JSON.parse(text) : text;
-  return { status: response.status, value };
+  return { status: response.status, value, shouldRetry: response.headers.get("x-should-retry") };
+}
+
+function assertExhausted(response) {
+  const fact = budgetExhaustionFact(response);
+  console.log("BUDGET-FAILURE-CONTRACT " + JSON.stringify(fact));
+  assert(fact.matchesContract, "Budget exhaustion must return the coded non-retryable public refusal");
 }
 
 const message = { messages: [{ role: "user", content: "fixture" }] };
@@ -264,7 +270,9 @@ async function scenario() {
   const right = await router("budget-money-right");
   const results = await Promise.all([left, right, left].map((router) =>
     request(router.url, "/v1/chat/completions", message)));
-  assert.deepEqual(results.map((result) => result.status).sort(), [200, 200, 429]);
+  assert.deepEqual(results.map((result) => result.status).sort(), [200, 200, 400]);
+  assertExhausted(results.find(result => result.status !== 200));
+  assert.equal((await request(provider, "/count")).value.count, 2);
   const money = accountFor("budget-money-left");
   assert.equal(money.metadata.uid, accountFor("budget-money-right").metadata.uid);
   assert.equal(money.status.ledger.meters.settled.usdMicros, 10);
@@ -279,7 +287,8 @@ async function scenario() {
   await request(provider, "/hold");
   const first = request(tokenLeft.url, "/v1/chat/completions", message, 90_000);
   await until(async () => (await request(provider, "/count")).value.count === before + 1, "actual first dispatch");
-  assert.equal((await request(tokenRight.url, "/v1/chat/completions", message)).status, 429);
+  assertExhausted(await request(tokenRight.url, "/v1/chat/completions", message));
+  assert.equal((await request(provider, "/count")).value.count, before + 1);
   assert.equal(accountFor("budget-token-left").status.ledger.meters.reserved.tokens, 30);
   await request(provider, "/release");
   assert.equal((await first).status, 200);
