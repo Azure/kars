@@ -410,9 +410,13 @@ pin only when it matches the recorded old version. Missing/incompatible
 dependencies, unexpected versions and symlinked targets fail the build rather
 than triggering network installation. The temporary updater/archives are
 removed from the final image; plugin seed, host-peer binding and runtime startup
-remain unchanged.
+remain unchanged. When OverlayFS refuses to rename a package inherited from an
+older image layer (`EXDEV`), the updater finishes a local rollback copy before
+removing the original and installing the prepared replacement. Other rename
+errors still fail closed; an installation failure restores the original package.
 
-The regressions exercise actual offline extraction, rejection paths and both
+The regressions exercise actual offline extraction, layered-filesystem rename
+fallback and rollback failures, rejection paths and both
 vendored Undici implementations against loopback HTTP. They do not qualify the
 complete OpenClaw/MCP behavior on AL3. Rebuild, run the unchanged native plugin
 acceptance, and scan the complete image before deployment. Known unresolved

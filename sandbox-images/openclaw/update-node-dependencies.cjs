@@ -176,7 +176,21 @@ async function main() {
         const nested = path.join(plan.target, "node_modules");
         if (fs.existsSync(nested)) fs.cpSync(nested, path.join(next, "node_modules"), { recursive: true });
         fs.chmodSync(next, fs.statSync(plan.target).mode & 0o777);
-        fs.renameSync(plan.target, backup);
+        try {
+          fs.renameSync(plan.target, backup);
+        } catch (error) {
+          if (error.code !== "EXDEV") throw error;
+          // OverlayFS cannot rename directories inherited from a lower image layer.
+          // Keep the original until its rollback copy has been fully written.
+          try {
+            fs.cpSync(plan.target, backup, { recursive: true, verbatimSymlinks: true });
+            fs.chmodSync(backup, fs.statSync(plan.target).mode & 0o777);
+          } catch (copyError) {
+            fs.rmSync(backup, { recursive: true, force: true });
+            throw copyError;
+          }
+          fs.rmSync(plan.target, { recursive: true });
+        }
         try {
           fs.renameSync(next, plan.target);
         } catch (error) {

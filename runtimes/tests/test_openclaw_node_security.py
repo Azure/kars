@@ -110,11 +110,11 @@ class NodeSecurityUpdaterTests(unittest.TestCase):
                 output.addfile(info, io.BytesIO(data))
         self.manifest["packages"][0]["sha256"] = hashlib.sha256(archive.read_bytes()).hexdigest()
 
-    def execute(self, error=None):
+    def execute(self, error=None, preload=None):
         manifest = self.base / "updates.json"
         manifest.write_text(json.dumps(self.manifest))
         result = subprocess.run(
-            ["node", str(UPDATER), str(self.modules), str(manifest)],
+            ["node", *(["--require", str(preload)] if preload else []), str(UPDATER), str(self.modules), str(manifest)],
             text=True, capture_output=True, timeout=30,
         )
         if error is None:
@@ -139,6 +139,73 @@ class NodeSecurityUpdaterTests(unittest.TestCase):
         self.assertEqual(value.strip(), "new")
         self.assertEqual(list(self.target.parent.glob(".kars-node-*")), [])
         self.execute()
+
+    def filesystem_faults(self, rename_code="EXDEV", fail_install=False, fail_backup=False):
+        preload = self.base / "filesystem-faults.cjs"
+        preload.write_text("""
+const fs = require('node:fs');
+const path = require('node:path');
+const rename = fs.renameSync;
+const copy = fs.cpSync;
+const options = OPTIONS;
+const target = TARGET;
+fs.renameSync = (source, destination) => {
+  if (source === target && destination.endsWith('-previous')) {
+    throw Object.assign(new Error('injected backup rename'), { code: options.rename_code });
+  }
+  if (options.fail_install && destination === target && !source.endsWith('-previous')) {
+    throw Object.assign(new Error('injected install failure'), { code: 'EIO' });
+  }
+  return rename(source, destination);
+};
+fs.cpSync = (source, destination, settings) => {
+  if (source === target && destination.endsWith('-previous')) {
+    if (options.rename_code !== 'EXDEV') throw new Error('unexpected fallback');
+    if (options.fail_backup) {
+      fs.mkdirSync(destination);
+      fs.writeFileSync(path.join(destination, 'partial'), 'incomplete');
+      throw Object.assign(new Error('injected backup failure'), { code: 'ENOSPC' });
+    }
+  }
+  return copy(source, destination, settings);
+};
+""".replace("OPTIONS", json.dumps({
+            "rename_code": rename_code, "fail_install": fail_install, "fail_backup": fail_backup,
+        })).replace("TARGET", json.dumps(str(self.target))))
+        return preload
+
+    def test_overlay_directory_rename_falls_back_to_copy_and_replaces_code(self):
+        self.write_package(self.target / "node_modules/required", "required", "4.0.4")
+        self.archive(dependencies={"required": "^4.0.2"})
+        self.execute(preload=self.filesystem_faults())
+        self.assertEqual(json.loads((self.target / "package.json").read_text())["version"], "1.1.0")
+        self.assertEqual(json.loads((self.parent / "package.json").read_text())["dependencies"]["library"], "1.1.0")
+        self.assertEqual(json.loads((self.target / "node_modules/required/package.json").read_text())["version"], "4.0.4")
+        self.assertFalse((self.target / "old.cjs").exists())
+        self.assertEqual((self.target / "index.cjs").read_text(), "module.exports = 'new';\n")
+        self.assertEqual(list(self.target.parent.glob(".kars-node-*")), [])
+
+    def test_overlay_install_failure_restores_original_and_relative_links(self):
+        (self.target / "old-link.cjs").symlink_to("old.cjs")
+        self.target.chmod(0o750)
+        parent_before = (self.parent / "package.json").read_bytes()
+        self.execute("injected install failure", preload=self.filesystem_faults(fail_install=True))
+        self.assertEqual((self.target / "old.cjs").read_text(), "module.exports = 'old';\n")
+        self.assertEqual((self.target / "old-link.cjs").readlink(), Path("old.cjs"))
+        self.assertEqual(self.target.stat().st_mode & 0o777, 0o750)
+        self.assertEqual((self.parent / "package.json").read_bytes(), parent_before)
+        self.assertFalse((self.target / "index.cjs").exists())
+        self.assertEqual(list(self.target.parent.glob(".kars-node-*")), [])
+
+    def test_overlay_backup_failure_keeps_original_and_removes_partial_copy(self):
+        self.execute("injected backup failure", preload=self.filesystem_faults(fail_backup=True))
+        self.assertEqual((self.target / "old.cjs").read_text(), "module.exports = 'old';\n")
+        self.assertEqual(list(self.target.parent.glob(".kars-node-*")), [])
+
+    def test_other_rename_failures_do_not_fall_back_or_modify_original(self):
+        self.execute("injected backup rename", preload=self.filesystem_faults(rename_code="EACCES"))
+        self.assertEqual((self.target / "old.cjs").read_text(), "module.exports = 'old';\n")
+        self.assertEqual(list(self.target.parent.glob(".kars-node-*")), [])
 
     def test_checksum_mismatch_fails_before_modification(self):
         self.manifest["packages"][0]["sha256"] = "0" * 64
