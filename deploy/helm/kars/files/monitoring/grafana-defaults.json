@@ -1,0 +1,543 @@
+{
+  "global": {
+    "imageRegistry": null,
+    "imagePullSecrets": []
+  },
+  "rbac": {
+    "create": true,
+    "pspEnabled": false,
+    "pspUseAppArmor": false,
+    "namespaced": false,
+    "namespaces": [],
+    "extraRoleRules": [],
+    "extraClusterRoleRules": []
+  },
+  "serviceAccount": {
+    "create": true,
+    "name": "",
+    "nameTest": "",
+    "labels": {},
+    "automountServiceAccountToken": false
+  },
+  "replicas": 1,
+  "headlessService": false,
+  "automountServiceAccountToken": true,
+  "autoscaling": {
+    "enabled": false,
+    "minReplicas": 1,
+    "maxReplicas": 5,
+    "targetCPU": "60",
+    "targetMemory": "",
+    "behavior": {}
+  },
+  "podDisruptionBudget": {},
+  "deploymentStrategy": {
+    "type": "RollingUpdate"
+  },
+  "progressDeadlineSeconds": null,
+  "readinessProbe": {
+    "httpGet": {
+      "path": "/api/health",
+      "port": "grafana"
+    }
+  },
+  "livenessProbe": {
+    "httpGet": {
+      "path": "/api/health",
+      "port": "grafana"
+    },
+    "initialDelaySeconds": 60,
+    "timeoutSeconds": 30,
+    "failureThreshold": 10
+  },
+  "image": {
+    "registry": "docker.io",
+    "repository": "grafana/grafana",
+    "tag": "",
+    "sha": "",
+    "pullPolicy": "IfNotPresent",
+    "pullSecrets": []
+  },
+  "testFramework": {
+    "enabled": true,
+    "image": {
+      "registry": "docker.io",
+      "repository": "bats/bats",
+      "tag": "1.13.0"
+    },
+    "imagePullPolicy": "IfNotPresent",
+    "securityContext": {},
+    "containerSecurityContext": {},
+    "resources": {}
+  },
+  "dnsPolicy": null,
+  "dnsConfig": {},
+  "hostUsers": null,
+  "securityContext": {
+    "runAsNonRoot": true,
+    "runAsUser": 472,
+    "runAsGroup": 472,
+    "fsGroup": 472
+  },
+  "containerSecurityContext": {
+    "allowPrivilegeEscalation": false,
+    "privileged": false,
+    "capabilities": {
+      "drop": [
+        "ALL"
+      ]
+    },
+    "seccompProfile": {
+      "type": "RuntimeDefault"
+    }
+  },
+  "createConfigmap": true,
+  "extraConfigmapMounts": [],
+  "extraEmptyDirMounts": [],
+  "shadowBundledPlugins": false,
+  "extraLabels": {},
+  "downloadDashboardsImage": {
+    "registry": "docker.io",
+    "repository": "curlimages/curl",
+    "tag": "8.20.0",
+    "sha": "",
+    "pullPolicy": "IfNotPresent"
+  },
+  "downloadDashboards": {
+    "env": {},
+    "envFromSecret": "",
+    "resources": {},
+    "securityContext": {
+      "allowPrivilegeEscalation": false,
+      "capabilities": {
+        "drop": [
+          "ALL"
+        ]
+      },
+      "seccompProfile": {
+        "type": "RuntimeDefault"
+      }
+    },
+    "envValueFrom": {}
+  },
+  "podPortName": "grafana",
+  "gossipPortName": "gossip",
+  "service": {
+    "enabled": true,
+    "type": "ClusterIP",
+    "ipFamilyPolicy": "",
+    "ipFamilies": [],
+    "loadBalancerIP": "",
+    "loadBalancerClass": "",
+    "loadBalancerSourceRanges": [],
+    "port": 80,
+    "targetPort": 3000,
+    "annotations": {},
+    "labels": {},
+    "portName": "service",
+    "appProtocol": "",
+    "sessionAffinity": "",
+    "trafficDistribution": ""
+  },
+  "serviceMonitor": {
+    "enabled": false,
+    "path": "/metrics",
+    "labels": {},
+    "scheme": "http",
+    "tlsConfig": {},
+    "relabelings": [],
+    "metricRelabelings": [],
+    "basicAuth": {},
+    "targetLabels": []
+  },
+  "extraExposePorts": [],
+  "hostAliases": [],
+  "ingress": {
+    "enabled": false,
+    "annotations": {},
+    "labels": {},
+    "path": "/",
+    "pathType": "Prefix",
+    "hosts": [
+      "chart-example.local"
+    ],
+    "extraPaths": [],
+    "tls": []
+  },
+  "route": {
+    "main": {
+      "enabled": false,
+      "apiVersion": "gateway.networking.k8s.io/v1",
+      "kind": "HTTPRoute",
+      "annotations": {},
+      "labels": {},
+      "hostnames": [],
+      "parentRefs": [],
+      "matches": [
+        {
+          "path": {
+            "type": "PathPrefix",
+            "value": "/"
+          }
+        }
+      ],
+      "timeouts": {},
+      "sessionPersistence": {},
+      "filters": [],
+      "additionalRules": [],
+      "httpsRedirect": false
+    }
+  },
+  "resources": {},
+  "nodeSelector": {},
+  "tolerations": [],
+  "affinity": {},
+  "topologySpreadConstraints": [],
+  "extraInitContainers": [],
+  "extraContainers": "",
+  "extraContainerVolumes": [],
+  "persistence": {
+    "type": "pvc",
+    "enabled": false,
+    "volumeName": "",
+    "accessModes": [
+      "ReadWriteOnce"
+    ],
+    "size": "10Gi",
+    "finalizers": [
+      "kubernetes.io/pvc-protection"
+    ],
+    "extraPvcLabels": {},
+    "disableWarning": false,
+    "inMemory": {
+      "enabled": false
+    },
+    "lookupVolumeName": true
+  },
+  "initChownData": {
+    "enabled": true,
+    "image": {
+      "registry": "docker.io",
+      "repository": "library/busybox",
+      "tag": "1.38.0",
+      "sha": "",
+      "pullPolicy": "IfNotPresent"
+    },
+    "resources": {},
+    "securityContext": {
+      "readOnlyRootFilesystem": false,
+      "runAsNonRoot": false,
+      "runAsUser": 0,
+      "seccompProfile": {
+        "type": "RuntimeDefault"
+      },
+      "capabilities": {
+        "add": [
+          "CHOWN"
+        ],
+        "drop": [
+          "ALL"
+        ]
+      }
+    }
+  },
+  "adminUser": "admin",
+  "admin": {
+    "existingSecret": "",
+    "userKey": "admin-user",
+    "passwordKey": "admin-password"
+  },
+  "env": {},
+  "envValueFrom": {},
+  "envFromSecret": "",
+  "envRenderSecret": {},
+  "envFromSecrets": [],
+  "envFromConfigMaps": [],
+  "enableServiceLinks": true,
+  "extraSecretMounts": [],
+  "extraVolumeMounts": [],
+  "extraVolumes": [],
+  "lifecycleHooks": {},
+  "plugins": [],
+  "datasources": {},
+  "alerting": {},
+  "notifiers": {},
+  "dashboardProviders": {},
+  "defaultCurlOptions": "-skf",
+  "dashboards": {},
+  "dashboardsConfigMaps": {},
+  "grafana.ini": {
+    "paths": {
+      "data": "/var/lib/grafana/",
+      "logs": "/var/log/grafana",
+      "plugins": "/var/lib/grafana/plugins",
+      "provisioning": "/etc/grafana/provisioning"
+    },
+    "analytics": {
+      "check_for_updates": true
+    },
+    "log": {
+      "mode": "console"
+    },
+    "server": {
+      "domain": "{{ if (and .Values.ingress.enabled .Values.ingress.hosts) }}{{ tpl (.Values.ingress.hosts | first) . }}{{ else if (and .Values.route.main.enabled .Values.route.main.hostnames) }}{{ tpl (.Values.route.main.hostnames | first) . }}{{ else }}''{{ end }}"
+    },
+    "unified_storage": {
+      "index_path": "/var/lib/grafana-search/bleve"
+    }
+  },
+  "ldap": {
+    "enabled": false,
+    "existingSecret": "",
+    "config": ""
+  },
+  "shareProcessNamespace": false,
+  "smtp": {
+    "existingSecret": "",
+    "userKey": "user",
+    "passwordKey": "password"
+  },
+  "sidecar": {
+    "image": {
+      "registry": "quay.io",
+      "repository": "kiwigrid/k8s-sidecar",
+      "tag": "2.7.3",
+      "sha": ""
+    },
+    "imagePullPolicy": "IfNotPresent",
+    "resources": {},
+    "securityContext": {
+      "allowPrivilegeEscalation": false,
+      "capabilities": {
+        "drop": [
+          "ALL"
+        ]
+      },
+      "seccompProfile": {
+        "type": "RuntimeDefault"
+      }
+    },
+    "enableUniqueFilenames": false,
+    "readinessProbe": {},
+    "livenessProbe": {},
+    "alerts": {
+      "enabled": false,
+      "env": {},
+      "envValueFrom": {},
+      "label": "grafana_alert",
+      "labelValue": "",
+      "searchNamespace": null,
+      "watchMethod": "WATCH",
+      "resource": "both",
+      "resourceName": "",
+      "reloadURL": "http://localhost:3000/api/admin/provisioning/alerting/reload",
+      "script": null,
+      "skipReload": false,
+      "initAlerts": false,
+      "extraMounts": [],
+      "sizeLimit": ""
+    },
+    "dashboards": {
+      "enabled": false,
+      "env": {},
+      "envValueFrom": {},
+      "SCProvider": true,
+      "label": "grafana_dashboard",
+      "labelValue": "",
+      "folder": "/tmp/dashboards",
+      "defaultFolderName": null,
+      "searchNamespace": null,
+      "watchMethod": "WATCH",
+      "resource": "both",
+      "folderAnnotation": null,
+      "resourceName": "",
+      "reloadURL": "http://localhost:3000/api/admin/provisioning/dashboards/reload",
+      "script": null,
+      "skipReload": false,
+      "initDashboards": false,
+      "provider": {
+        "name": "sidecarProvider",
+        "orgid": 1,
+        "folder": "",
+        "folderUid": "",
+        "type": "file",
+        "disableDelete": false,
+        "allowUiUpdates": false,
+        "foldersFromFilesStructure": false
+      },
+      "extraMounts": [],
+      "sizeLimit": ""
+    },
+    "datasources": {
+      "enabled": false,
+      "env": {},
+      "envValueFrom": {},
+      "label": "grafana_datasource",
+      "labelValue": "",
+      "searchNamespace": null,
+      "watchMethod": "WATCH",
+      "resource": "both",
+      "resourceName": "",
+      "reloadURL": "http://localhost:3000/api/admin/provisioning/datasources/reload",
+      "script": null,
+      "skipReload": false,
+      "initDatasources": false,
+      "extraMounts": [],
+      "sizeLimit": ""
+    },
+    "plugins": {
+      "enabled": false,
+      "env": {},
+      "label": "grafana_plugin",
+      "labelValue": "",
+      "searchNamespace": null,
+      "watchMethod": "WATCH",
+      "resource": "both",
+      "resourceName": "",
+      "reloadURL": "http://localhost:3000/api/admin/provisioning/plugins/reload",
+      "script": null,
+      "skipReload": false,
+      "initPlugins": false,
+      "extraMounts": [],
+      "sizeLimit": ""
+    },
+    "notifiers": {
+      "enabled": false,
+      "env": {},
+      "label": "grafana_notifier",
+      "labelValue": "",
+      "searchNamespace": null,
+      "watchMethod": "WATCH",
+      "resource": "both",
+      "resourceName": "",
+      "reloadURL": "http://localhost:3000/api/admin/provisioning/notifications/reload",
+      "script": null,
+      "skipReload": false,
+      "initNotifiers": false,
+      "extraMounts": [],
+      "sizeLimit": ""
+    }
+  },
+  "namespaceOverride": "",
+  "revisionHistoryLimit": 10,
+  "imageRenderer": {
+    "deploymentStrategy": {},
+    "progressDeadlineSeconds": null,
+    "enabled": false,
+    "replicas": 1,
+    "autoscaling": {
+      "enabled": false,
+      "minReplicas": 1,
+      "maxReplicas": 5,
+      "targetCPU": "60",
+      "targetMemory": "",
+      "behavior": {}
+    },
+    "serverURL": "",
+    "renderingCallbackURL": "",
+    "token": "",
+    "existingSecret": "",
+    "image": {
+      "registry": "docker.io",
+      "repository": "grafana/grafana-image-renderer",
+      "tag": "latest",
+      "sha": "",
+      "pullSecrets": [],
+      "pullPolicy": "Always"
+    },
+    "dnsPolicy": null,
+    "dnsConfig": {},
+    "env": {
+      "HTTP_HOST": "0.0.0.0",
+      "XDG_CONFIG_HOME": "/tmp/.chromium",
+      "XDG_CACHE_HOME": "/tmp/.chromium"
+    },
+    "envValueFrom": {},
+    "serviceAccountName": "",
+    "automountServiceAccountToken": false,
+    "hostUsers": null,
+    "securityContext": {},
+    "containerSecurityContext": {
+      "seccompProfile": {
+        "type": "RuntimeDefault"
+      },
+      "capabilities": {
+        "drop": [
+          "ALL"
+        ]
+      },
+      "allowPrivilegeEscalation": false,
+      "readOnlyRootFilesystem": true
+    },
+    "podAnnotations": {},
+    "hostAliases": [],
+    "priorityClassName": "",
+    "healthcheckPath": "/healthz",
+    "service": {
+      "enabled": true,
+      "portName": "http",
+      "port": 8081,
+      "targetPort": 8081,
+      "appProtocol": ""
+    },
+    "serviceMonitor": {
+      "enabled": false,
+      "path": "/metrics",
+      "labels": {},
+      "scheme": "http",
+      "tlsConfig": {},
+      "relabelings": [],
+      "targetLabels": []
+    },
+    "grafanaProtocol": "http",
+    "grafanaSubPath": "",
+    "podPortName": "http",
+    "revisionHistoryLimit": 10,
+    "networkPolicy": {
+      "limitIngress": true,
+      "limitEgress": false,
+      "extraIngressSelectors": []
+    },
+    "resources": {},
+    "nodeSelector": {},
+    "tolerations": [],
+    "affinity": {},
+    "extraConfigmapMounts": [],
+    "extraSecretMounts": [],
+    "extraVolumeMounts": [],
+    "extraVolumes": []
+  },
+  "networkPolicy": {
+    "enabled": false,
+    "ingress": true,
+    "allowExternal": true,
+    "explicitNamespacesSelector": {},
+    "explicitIpBlocks": [],
+    "egress": {
+      "enabled": false,
+      "blockDNSResolution": false,
+      "ports": [],
+      "to": []
+    }
+  },
+  "enableKubeBackwardCompatibility": false,
+  "useStatefulSet": false,
+  "extraObjects": [],
+  "assertNoLeakedSecrets": true,
+  "verticalPodAutoscaler": {
+    "enabled": false,
+    "updateMode": "Off",
+    "controlledResources": {
+      "cpu": true,
+      "memory": true
+    },
+    "minAllowed": {
+      "cpu": "25m",
+      "memory": "128Mi"
+    },
+    "maxAllowed": {
+      "cpu": "1000m",
+      "memory": "1Gi"
+    }
+  }
+}

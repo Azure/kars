@@ -88,8 +88,11 @@ Plus Warning events (not conditions) for soft deprecations:
 | `Ready` | `Reconciled`, `SpecInvalid`, `Failed` |
 | `Progressing` | `Reconciling`, `Creating` |
 
-`status.versionHash` + `status.lastCompiledAt` reflect the last
-successful AgentCard compile. `status.agentCardConfigMapRef` points
+`status.versionHash` identifies the compiled AgentCard.
+`status.lastCompiledAt` records when a changed compilation result was
+published to status; unchanged periodic verification retains the timestamp.
+Check conditions for success or failure rather than treating that timestamp
+as a health heartbeat. `status.agentCardConfigMapRef` points
 at the ConfigMap mounted into the inference-router for outbound
 calls.
 

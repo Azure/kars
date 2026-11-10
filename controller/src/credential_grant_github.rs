@@ -67,16 +67,9 @@ pub fn agent_sources(bindings: Option<&CredentialBindings>) -> Result<(), String
     Ok(())
 }
 
-pub fn opaque_github_egress(host: &str) -> bool {
-    let host = host.trim_end_matches('.').to_ascii_lowercase();
-    host == "*"
-        || ["github.com", "api.github.com"].iter().any(|target| {
-            host == *target
-                || host.strip_prefix("*.").is_some_and(|suffix| {
-                    *target == suffix || target.ends_with(&format!(".{suffix}"))
-                })
-        })
-}
+#[path = "../../shared/github_egress.rs"]
+mod github_egress;
+pub use github_egress::opaque_github_egress;
 
 #[cfg(test)]
 mod tests {

@@ -7,6 +7,7 @@ import { requireBundledAsset } from "../lib/repo-assets.js";
 import { enroll, preview, requireRegistrar, retire, waitForAuthority, type Execute } from "../lib/sre-authority.js";
 import { stageSource } from "../lib/sre-source.js";
 import { stageAuthority } from "../lib/sre-stage.js";
+import { listSreHelmReleases, sreInferenceFlags } from "../lib/sre-helm.js";
 
 function executor(context?: string): Execute {
   return (file, args, options) => execa(file, [
@@ -44,13 +45,30 @@ export function authorityCommand(): Command {
     });
   common("stage-source").description("Atomically create a genuinely new, unprivileged SRE source and wait for its exact claim")
     .option("--model <model>", "SRE model deployment")
+    .option("--provider <tag>", "Configured inference provider tag for SRE")
     .action(async options => {
+      const inferenceFlags = sreInferenceFlags(options);
       const execute=executor(options.context);
       await requireRegistrar(execute);
+      const releases: unknown = JSON.parse(await listSreHelmReleases(execute, options.namespace));
+      if (!Array.isArray(releases) || releases.some(item => !item || typeof item.name !== "string"
+          || item.namespace !== options.namespace)) throw new Error("Helm ownership inventory is invalid");
+      let releaseValues: string | undefined;
+      if (releases.some(item => item.name === options.release)) {
+        const saved = await execute("helm", ["get", "values", options.release,
+          "--namespace", options.namespace, "--all", "-o", "json"], { stdio: "pipe" });
+        const values: unknown = JSON.parse(saved.stdout);
+        if (!values || typeof values !== "object" || Array.isArray(values)) {
+          throw new Error("Installed Helm values must be an object; no SRE source was staged");
+        }
+        releaseValues = JSON.stringify(values);
+      }
       const result=await execute("helm",["template",options.release,requireBundledAsset("deploy/helm/kars"),
         "--namespace",options.namespace,"--show-only","templates/sre.yaml",
-        "--set","sre.enabled=true","--set","azure.workloadIdentity.clientId=dummy",
-        ...(options.model?["--set-string",`sre.model=${options.model}`]:[])],{stdio:"pipe"});
+        ...(releaseValues === undefined ? [] : ["--values", "-"]),
+        "--set","sre.enabled=true","--set","sre.authorityStage=false",
+        "--set","azure.workloadIdentity.clientId=dummy",
+        ...inferenceFlags],{stdio:"pipe", ...(releaseValues === undefined ? {} : { input: releaseValues })});
       const created=await stageSource(execute,result.stdout,options.namespace,options.release);
       console.log(`Created and claimed source: --sandbox-uid ${created.uid} --namespace-uid ${created.namespaceUid}`);
     });

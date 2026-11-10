@@ -80,9 +80,12 @@ fn approved_task() -> (KarsTask, KarsApproval) {
                 requested_tier: Some(4),
                 ..Default::default()
             },
+            requested_by: None,
             decision: Some(ApprovalDecision {
                 verdict: "approve".into(),
                 decider: "alice".into(),
+                decider_subject: None,
+                decider_roles: vec![],
                 reason: None,
             }),
             ttl: Some("PT1H".into()),

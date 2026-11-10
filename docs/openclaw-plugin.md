@@ -15,16 +15,65 @@ The **kars OpenClaw plugin** is the agent-side runtime surface for kars. When a 
 
 For the conceptual split between plugin-owned mesh and router-owned governance/audit, see [Architecture → The mesh](architecture.md#the-mesh) and [AGT boundary](architecture/agt-boundary.md).
 
+The generated system prompt and workspace instructions reserve the welcome for
+conversations without an actionable request. New Mission sessions execute their
+reviewed assignment directly rather than responding with onboarding. The native
+prompt hook retains the reviewed phase and required outputs; general capability
+examples never grant tools outside that phase. This applies to revision feedback
+as well as the first assignment. In both OpenClaw and Hermes, feedback about a
+customer-facing filename changes the relevant content, not a worker's required
+export names. The validated reviewed slot explicitly identifies each native call
+as an internal worker or final synthesis before presenting the overall Mission
+context. This distinction comes from the execution contract, not filename matching.
+Workers still write their exact phase exports; synthesis produces the final
+customer document without identifying it as an internal handoff.
+Both adapters identify the current role, phase, and own discovery name from the
+validated peer map, distinguishing self from other specialists. Native Hermes
+discovery resolves exact names against full registry records, excludes offline,
+stale, future-dated and undated entries using the same 90-second freshness window
+and five-second clock tolerance as OpenClaw, orders fresh results newest first,
+and explicitly reports ambiguous registrations. Discovery is not delivery proof;
+workers must not guess between multiple fresh registrations or treat self-messages
+as peer review. Synthesis is instructed to reconcile current handoffs and revision
+feedback in the exported file, not copy historical claims or merely describe fixes
+in its chat response. These instructions do not establish acceptance or add authority.
+Requests to deliver only the final document do not forbid internal phase exports.
+OpenClaw's write results report the outstanding export names and explain this
+separation; Hermes repeats it with the remaining reviewed tool attempts.
+Missing required exports remain failures, not successful deliverables or an
+invitation to bypass the output contract.
+
+Peer-document aliases are assigned in lexical artifact-name order, independent of
+which file the native runtime exported first. The controller and dispatcher use
+this same order while preserving the original source identity and content hash.
+
 Reviewed execution reads immutable peer handoffs and retained Team documents through
 the authorized filesystem tool before exporting findings. Each model round lists
 the inputs still unread and the next complete read, so already-consumed documents
 do not compete with required exports for the phase's fixed tool-call allowance.
-Reading `/sandbox/.kars-inputs` with `max_bytes: 65536` returns the complete
+Reading `/sandbox/.kars-inputs` with `max_bytes: 196608` returns the complete
 bounded JSON bundle, including every document's content, source and SHA256, in
-one authorized tool call. Individual document reads remain supported. Only a
-complete bundle read satisfies all its input-consumption requirements.
+one authorized tool call. Individual document reads remain supported. Each file
+remains at most 64 KiB; aggregate inputs share the existing 192 KiB Mission base
+envelope capacity, and the full assignment including metadata must also fit.
+Approved Team recall uses that same 192 KiB capacity rather than a separate
+32 KiB ceiling. It selects at most eight files in whole recent-run bundles,
+including retained handoffs and provenance; it never truncates a bundle to fit.
+Each phase rechecks the combined memory and new peer exports against the unchanged
+16-file/192 KiB transport limit. An oversized latest bundle fails before a new
+run is created; oversized combined phase inputs cannot dispatch.
+Only a complete bundle read satisfies all its input-consumption requirements.
+These retained assignment inputs support downstream execution after a producer
+stops; they are distinct from live AgentMesh peer file transfers.
 Repeated or partial reads still consume that allowance; insufficient remaining
 calls stop the phase rather than increasing limits or claiming successful recall.
+When every remaining call is needed for named outputs, execution accepts only
+`file_write` with an exact missing `artifact_name`; private writes, other names,
+and other tools are rejected before authorization or filesystem access. Rejected
+calls still consume the reviewed attempt allowance. Required-output missions use
+the existing strict `file_write` schema on supported GPT-family Foundry deployments,
+without enabling strict schemas for unrelated tools or unsupported/slim providers.
+Private scratch remains private and is never automatically promoted to an export.
 
 ---
 
@@ -70,7 +119,7 @@ All Foundry tools route through the router which adds Entra Agent ID auth (when 
 | `foundry_image_generation` | Image generation via `gpt-image-1`. PNG persists directly into the sandbox FS at `/sandbox/.openclaw/workspace/<output_filename>`. |
 | `foundry_web_search` | Real-time web search via Bing Grounding (auto-discovered from the Foundry project's connections). |
 | `foundry_file_search` | Retrieval-augmented search (RAG) over uploaded files. |
-| `foundry_memory` | Persistent long-term memory store (per-sandbox scope by default; cross-sandbox sharing via `KarsMemory` CRD). |
+| `foundry_memory` | Router-selected persistent memory, private by default: discovered/configured Foundry project, otherwise Bridge-owned built-in lexical memory. See [backend and lifecycle contract](memory.md). `KarsMemory.sharedScopes` explicitly grants search/update/delete_scope on exact additional partitions; router authorization applies equally to OpenClaw and Hermes. Update-status IDs are router-local (4,096 entries, one hour, lost on restart); a denied poll must **not** trigger resubmission of the update POST. See [memory binding contract](api/crd-reference.md#karsmemory--memory-store-binding). |
 | `foundry_conversations` | Manage multi-turn conversation state on the Foundry side. |
 | `foundry_deployments` | Discover model deployments + connections + indexes in the Foundry project. Exercised at every sandbox startup (the bootstrap probes `/deployments`, `/connections`, `/indexes`). |
 | `foundry_evaluations` | 🧪 **Experimental — not yet exercised in any verified run.** Implementation surface for the Azure AI Foundry OpenAI Evals API (operations: `list / create / run / get_run / list_evaluators`). The tool is registered and the router proxies the calls, but no scenario or example currently invokes it end-to-end. Treat as a placeholder for future evaluation workflows — wiring it into an agent that actually calls it will likely surface integration gaps. Unrelated to the `KarsEval` CRD, which has its own controller-driven runner pipeline. |

@@ -73,7 +73,8 @@ class StagingCompatibilityTests(unittest.TestCase):
     def test_native_fixture_checks_exact_historical_action_spec_and_uid_after_stage(self):
         source = (Path(__file__).parent / "fixtures.py").read_text()
         self.assertIn('action_params.pop("additionalProperties", None) is True', source)
-        self.assertIn('action_params["x-kubernetes-preserve-unknown-fields"] = True', source)
+        self.assertIn('"--show-only", "templates/crd-karssreaction.yaml"', source)
+        self.assertIn('action_spec["versions"][0]["schema"] = desired_action["spec"]["versions"][0]["schema"]', source)
         self.assertIn('action_after["metadata"]["uid"] == action_before["metadata"]["uid"]', source)
         self.assertIn('action_after["spec"] == action_spec', source)
         self.assertLess(source.index("action_before ="), source.index('h.cli("authority", "stage"'))

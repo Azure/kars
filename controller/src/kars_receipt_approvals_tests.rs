@@ -56,10 +56,13 @@ fn fixture() -> (KarsTask, KarsApproval) {
                 requested_tier: Some(2),
                 ..Default::default()
             },
+            requested_by: None,
             ttl: Some("PT1H".into()),
             decision: Some(ApprovalDecision {
                 verdict: "approve".into(),
                 decider: "alice".into(),
+                decider_subject: None,
+                decider_roles: vec![],
                 reason: None,
             }),
         },

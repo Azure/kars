@@ -102,6 +102,43 @@ fn governed_github_factory_rejects_replacement_adoption_and_scope_expansion() {
 }
 
 #[test]
+fn governed_github_repository_scopes_preserve_independent_write_permissions() {
+    let (selection, mut grant, mut connection, store, identity) = fixture();
+    grant.spec.github_connections[0].write = true;
+    let mut private = grant.spec.github_connections[0].clone();
+    private.repositories = vec!["owner/private".into()];
+    private.write = false;
+    grant.spec.github_connections.push(private);
+    connection.data.as_mut().unwrap().insert(
+        "repos".into(),
+        json!(["owner/repo", "owner/private"]).to_string(),
+    );
+    for _ in 0..2 {
+        for (repos, write, allowed) in [
+            (vec!["owner/repo"], false, true),
+            (vec!["owner/repo"], true, true),
+            (vec!["owner/private"], false, true),
+            (vec!["owner/private"], true, false),
+            (vec!["owner/repo", "owner/private"], false, false),
+            (vec!["owner/repo", "owner/private"], true, false),
+            (vec!["owner/foreign"], false, false),
+        ] {
+            let mut selected = selection.clone();
+            selected.repositories = repos.iter().map(|repo| (*repo).into()).collect();
+            selected.write = write;
+            let result = configuration(&selected, &grant, &connection, &store, &identity);
+            assert_eq!(result.is_ok(), allowed, "{repos:?}, write={write}");
+            if let Ok(configuration) = result {
+                let value: Value = serde_json::from_str(&configuration).unwrap();
+                assert_eq!(value["repositories"], json!(repos));
+                assert_eq!(value["write"], write);
+            }
+        }
+        grant.spec.github_connections.reverse();
+    }
+}
+
+#[test]
 fn governed_github_factory_canonicalizes_app_id_without_mutating_the_customer_store() {
     let (selection, mut grant, connection, mut store, identity) = fixture();
     grant.spec.github_connections[0].app_id = "00123".into();

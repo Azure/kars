@@ -10,7 +10,7 @@
 // It lives in the header (account area), never auto-linked from content.
 // Entitlement-gating lands with auth; today the role flags come from config.
 
-import Link from "next/link";
+import Link from "@/components/navigation-link";
 import { usePathname } from "next/navigation";
 
 type Target = { href: string; label: string };

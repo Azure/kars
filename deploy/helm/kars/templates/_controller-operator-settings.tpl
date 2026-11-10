@@ -6,6 +6,13 @@ Render its current UID-bound configuration for both Helm 3 merge and Helm 4 SSA.
 Credentials remain Secret references, never copied values in release storage.
 */}}
 {{- define "kars.controller.operatorSettings" -}}
+{{- with .precondition -}}
+  {{- if or (not (kindIs "string" .uid)) (not (kindIs "string" .resourceVersion)) -}}
+    {{- fail "controller.upgradePrecondition requires string UID and resourceVersion fences" -}}
+  {{- end -}}
+  {{- $_ := set $.deployment.metadata "uid" (required "controller.upgradePrecondition.uid is required" .uid) -}}
+  {{- $_ := set $.deployment.metadata "resourceVersion" (required "controller.upgradePrecondition.resourceVersion is required" .resourceVersion) -}}
+{{- end -}}
 {{- $annotation := dig "spec" "template" "metadata" "annotations" "kars.azure.com/credential-settings-revision" "" .live -}}
 {{- if $annotation -}}
   {{- $verified := false -}}
@@ -65,6 +72,48 @@ Credentials remain Secret references, never copied values in release storage.
         {{- if not (hasKey $owned .name) -}}{{- $env = append $env . -}}{{- end -}}
       {{- end -}}
       {{- $_ := set . "env" (concat $env $operatorEnv) -}}
+    {{- end -}}
+  {{- end -}}
+{{- end -}}
+{{/* A fenced publication of a protected root must not restart it solely because
+     bootstrap and migration appended identical environment entries differently.
+     Retain live ordering only for the same declarations, after operator settings. */}}
+{{- if and .precondition (dig "spec" "template" "metadata" "annotations" "kars.azure.com/private-epoch" "" .live)
+      (eq .precondition.uid (dig "metadata" "uid" "" .live))
+      (eq .precondition.resourceVersion (dig "metadata" "resourceVersion" "" .live)) -}}
+  {{- range .deployment.spec.template.spec.containers -}}
+    {{- $desired := . -}}
+    {{- range (dig "spec" "template" "spec" "containers" list $.live) -}}
+      {{- if eq .name $desired.name -}}
+        {{- $liveEnv := .env | default list -}}
+        {{- $desiredEnv := $desired.env | default list -}}
+        {{- $maps := list -}}
+        {{- range (list $liveEnv $desiredEnv) -}}
+          {{- $entries := dict -}}
+          {{- range . -}}
+            {{- if hasKey $entries .name -}}{{- fail "Fenced controller environments require unique names" -}}{{- end -}}
+            {{- $entry := deepCopy . -}}
+            {{- if eq (toJson $entry.value) (toJson "") -}}
+              {{- $_ := unset $entry "value" -}}
+            {{- end -}}
+            {{- if eq (dig "valueFrom" "fieldRef" "apiVersion" "" $entry) "v1" -}}
+              {{- $_ := unset $entry.valueFrom.fieldRef "apiVersion" -}}
+            {{- end -}}
+            {{- $_ := set $entries .name $entry -}}
+          {{- end -}}
+          {{- $maps = append $maps $entries -}}
+        {{- end -}}
+        {{- if eq (toJson (index $maps 0)) (toJson (index $maps 1)) -}}
+          {{- $ordered := list -}}
+          {{- range $liveEnv -}}
+            {{- $name := .name -}}
+            {{- range $desiredEnv -}}
+              {{- if eq .name $name -}}{{- $ordered = append $ordered . -}}{{- end -}}
+            {{- end -}}
+          {{- end -}}
+          {{- $_ := set $desired "env" $ordered -}}
+        {{- end -}}
+      {{- end -}}
     {{- end -}}
   {{- end -}}
 {{- end -}}

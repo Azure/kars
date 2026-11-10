@@ -22,7 +22,8 @@ use crate::inference_budget_contract::{BudgetScope, Limits, RootIdentity, ledger
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct KarsBudgetAccountSpec {
     pub scope: BudgetScope,
-    /// Root Task UID, or lifetime Team UID. This is never a display-name key.
+    /// Root Task, lifetime Team, or explicitly enrolled built-in Sandbox UID.
+    /// This is never a display-name key.
     pub root: RootIdentity,
     pub limits: Limits,
 }
@@ -47,6 +48,9 @@ pub struct KarsBudgetAccountStatus {
     pub phase: Option<AccountStatusPhase>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_generation: Option<i64>,
+    /// Recorded additive ceiling, not a substitute for live funding authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_limits: Option<Limits>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(schema_with = "conditions_schema")]
     pub conditions: Vec<Condition>,
@@ -113,4 +117,25 @@ pub const OWNER: &str = "kars-inference-budget";
 
 pub fn name_for_root(root: &RootIdentity) -> String {
     format!("inference-budget-{}", root.resource.uid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn receipt_storage_preserves_the_existing_ledger_envelope() {
+        let schema = ledger_schema(&mut schemars::SchemaGenerator::default());
+        assert_eq!(
+            schema.get("x-kubernetes-preserve-unknown-fields"),
+            Some(&serde_json::json!(true))
+        );
+        assert!(
+            schema
+                .get("properties")
+                .unwrap()
+                .get("tokenTopUps")
+                .is_none()
+        );
+    }
 }

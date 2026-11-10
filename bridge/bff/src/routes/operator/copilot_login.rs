@@ -10,7 +10,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::additional_providers::{INFERENCE_PROVIDERS_NS, INFERENCE_PROVIDERS_SECRET};
+use super::additional_providers::{
+    INFERENCE_PROVIDERS_NS, INFERENCE_PROVIDERS_SECRET, bind_copilot_route,
+};
 use super::copilot_transport::{CopilotClient, CopilotEndpoint};
 use super::providers::{
     DiscoveredModelDto, copilot_jwt_with_client, fetch_copilot_models_with_client,
@@ -259,7 +261,7 @@ async fn poll(
         }
         cluster
             .mutate_secret_keys(INFERENCE_PROVIDERS_NS, INFERENCE_PROVIDERS_SECRET, |keys| {
-                keys.insert("COPILOT_GITHUB_TOKEN".into(), token.into());
+                bind_copilot_route(keys, token);
             })
             .await
             .map_err(|_| CopilotLoginError::StorageUnconfirmed)?;

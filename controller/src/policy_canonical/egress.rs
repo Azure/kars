@@ -134,10 +134,9 @@ fn cache() -> &'static Mutex<HashMap<String, CacheEntry>> {
 // generation present). Any deviation returns
 // [`FetchError::CanonicalFormViolation`].
 //
-// Parses with `serde_yaml` for structural deserialization, then
-// independently re-checks the byte-level invariants that
-// `serde_yaml` would silently tolerate (key order, sort order,
-// duplicate detection, etc.). This catches the case where a
+// Parses with `serde_saphyr` for bounded structural deserialization, then
+// independently re-checks the byte-level invariants (key order, endpoint
+// order and deduplication). This catches the case where a
 // producer signs structurally-valid-but-non-canonical bytes —
 // verification still rejects them.
 
@@ -173,15 +172,15 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<VerifiedAllowlist, FetchError> {
     // Top-level key order check (rule #2).
     validate_top_level_key_order(s)?;
 
-    let doc: serde_yaml::Value = serde_yaml::from_str(s)
+    let doc: serde_json::Value = serde_saphyr::from_str(s)
         .map_err(|e| FetchError::CanonicalFormViolation(format!("yaml parse: {e}")))?;
     let map = doc
-        .as_mapping()
+        .as_object()
         .ok_or_else(|| FetchError::CanonicalFormViolation("not a mapping".into()))?;
 
     // Rule #3 + #4.
     let api_version = map
-        .get(serde_yaml::Value::String("apiVersion".into()))
+        .get("apiVersion")
         .and_then(|v| v.as_str())
         .ok_or_else(|| FetchError::CanonicalFormViolation("missing apiVersion".into()))?;
     if api_version != CANONICAL_API_VERSION {
@@ -190,7 +189,7 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<VerifiedAllowlist, FetchError> {
         )));
     }
     let kind = map
-        .get(serde_yaml::Value::String("kind".into()))
+        .get("kind")
         .and_then(|v| v.as_str())
         .ok_or_else(|| FetchError::CanonicalFormViolation("missing kind".into()))?;
     if kind != CANONICAL_KIND {
@@ -201,11 +200,11 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<VerifiedAllowlist, FetchError> {
 
     // Rule #5: metadata.generation must be a positive integer.
     let metadata = map
-        .get(serde_yaml::Value::String("metadata".into()))
-        .and_then(|v| v.as_mapping())
+        .get("metadata")
+        .and_then(|v| v.as_object())
         .ok_or_else(|| FetchError::CanonicalFormViolation("missing metadata".into()))?;
     let generation = metadata
-        .get(serde_yaml::Value::String("generation".into()))
+        .get("generation")
         .and_then(|v| v.as_u64())
         .ok_or_else(|| {
             FetchError::CanonicalFormViolation(
@@ -220,28 +219,28 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<VerifiedAllowlist, FetchError> {
 
     // Rule #6: spec.endpoints required.
     let spec = map
-        .get(serde_yaml::Value::String("spec".into()))
-        .and_then(|v| v.as_mapping())
+        .get("spec")
+        .and_then(|v| v.as_object())
         .ok_or_else(|| FetchError::CanonicalFormViolation("missing spec".into()))?;
     let endpoints_node = spec
-        .get(serde_yaml::Value::String("endpoints".into()))
+        .get("endpoints")
         .ok_or_else(|| FetchError::CanonicalFormViolation("missing spec.endpoints".into()))?;
-    let endpoints_seq = endpoints_node.as_sequence().ok_or_else(|| {
+    let endpoints_seq = endpoints_node.as_array().ok_or_else(|| {
         FetchError::CanonicalFormViolation("spec.endpoints not a sequence".into())
     })?;
 
     // Parse endpoints + per-endpoint validation (rules #7, #8, #11).
     let mut parsed: Vec<CanonicalEndpoint> = Vec::with_capacity(endpoints_seq.len());
     for (i, ep) in endpoints_seq.iter().enumerate() {
-        let m = ep.as_mapping().ok_or_else(|| {
+        let m = ep.as_object().ok_or_else(|| {
             FetchError::CanonicalFormViolation(format!("endpoint[{i}] not a mapping"))
         })?;
         // Rule #11: keys must be host then port, in that order.
         let mut keys = m.keys();
-        let k1 = keys.next().and_then(|v| v.as_str()).ok_or_else(|| {
+        let k1 = keys.next().map(String::as_str).ok_or_else(|| {
             FetchError::CanonicalFormViolation(format!("endpoint[{i}] missing first key"))
         })?;
-        let k2 = keys.next().and_then(|v| v.as_str()).ok_or_else(|| {
+        let k2 = keys.next().map(String::as_str).ok_or_else(|| {
             FetchError::CanonicalFormViolation(format!("endpoint[{i}] missing second key"))
         })?;
         if keys.next().is_some() {
@@ -254,19 +253,13 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<VerifiedAllowlist, FetchError> {
                 "endpoint[{i}] key order must be host,port (got {k1},{k2})"
             )));
         }
-        let host = m
-            .get(serde_yaml::Value::String("host".into()))
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                FetchError::CanonicalFormViolation(format!("endpoint[{i}] host not a string"))
-            })?;
+        let host = m.get("host").and_then(|v| v.as_str()).ok_or_else(|| {
+            FetchError::CanonicalFormViolation(format!("endpoint[{i}] host not a string"))
+        })?;
         validate_host(host, i)?;
-        let port = m
-            .get(serde_yaml::Value::String("port".into()))
-            .and_then(|v| v.as_u64())
-            .ok_or_else(|| {
-                FetchError::CanonicalFormViolation(format!("endpoint[{i}] port not an integer"))
-            })?;
+        let port = m.get("port").and_then(|v| v.as_u64()).ok_or_else(|| {
+            FetchError::CanonicalFormViolation(format!("endpoint[{i}] port not an integer"))
+        })?;
         if port == 0 || port > 65535 {
             return Err(FetchError::CanonicalFormViolation(format!(
                 "endpoint[{i}] port {port} out of range [1,65535]"
@@ -484,6 +477,28 @@ mod tests {
         let bytes = good_doc().replace("port: 443", "port: 99999");
         let err = parse(bytes.as_bytes()).unwrap_err();
         assert!(matches!(err, FetchError::CanonicalFormViolation(_)));
+    }
+
+    #[test]
+    fn rejects_duplicate_endpoint_keys() {
+        let bytes = good_doc().replace("port: 443", "port: 443\n      port: 8443");
+        assert!(matches!(
+            parse(bytes.as_bytes()),
+            Err(FetchError::CanonicalFormViolation(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_string_generation_and_port() {
+        for bytes in [
+            good_doc().replace("generation: 1", "generation: \"1\""),
+            good_doc().replace("port: 443", "port: \"443\""),
+        ] {
+            assert!(matches!(
+                parse(bytes.as_bytes()),
+                Err(FetchError::CanonicalFormViolation(_))
+            ));
+        }
     }
 
     #[test]

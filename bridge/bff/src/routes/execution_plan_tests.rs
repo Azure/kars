@@ -278,6 +278,7 @@ fn fixture(object: Value) -> (AppState, Arc<Mutex<Store>>) {
                 }
                 Method::PATCH
                     if path == TASK
+                        || path.starts_with(&format!("{TASK}-rep-"))
                         || path == TEAM
                         || path == format!("{API}/karstasks/created-task")
                         || path == format!("{API}/karsteams/created-team") =>
@@ -1072,6 +1073,93 @@ async fn execution_plan_task_launch_cannot_activate_a_replaced_or_changed_task()
         assert_eq!(store.calls.len(), 2);
         assert_fence(&store.calls[1].2, "task-uid");
         assert_eq!(store.objects[TASK]["spec"]["execution"]["launch"], false);
+    }
+}
+
+#[tokio::test]
+async fn execution_plan_completed_source_allows_independent_replicas_not_relaunch() {
+    let mut source = reviewed(task());
+    source["spec"]["blueprint"]["executionPlan"] =
+        json!(crate::kars::task::execution_plan::tests::filesystem_plan());
+    source["spec"]["envelope"]["delegationDepth"] = json!(3);
+    source["spec"]["envelope"]["budget"] = json!({"scope":"GovernedInference","tokens":2_000_000});
+    source["metadata"]["annotations"]["kars.azure.com/run-requested"] = json!("completed-run");
+    source["metadata"]["annotations"]["kars.azure.com/run-completed"] = json!("completed-run");
+    for (route, launch) in [
+        ("tasks/task/launch", true),
+        ("tasks/task/replicate", true),
+        ("tasks/task/replicate", false),
+    ] {
+        let (state, store) = fixture(source.clone());
+        with_options(&mut store.lock().unwrap());
+        let (status, body) = request(
+            state,
+            Method::POST,
+            route,
+            json!({"launch":launch,"count":2}),
+        )
+        .await;
+        let store = store.lock().unwrap();
+        assert_eq!(store.objects[TASK], source);
+        if route.ends_with("/launch") {
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert!(body.to_string().contains("CompletedReviewedRun"), "{body}");
+            assert_only_read(&store, TASK);
+            continue;
+        }
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["count"], 2);
+        for name in body["runs"].as_array().unwrap() {
+            let name = name.as_str().unwrap();
+            let replica = &store.objects[&format!("{API}/karstasks/{name}")];
+            assert_eq!(replica["metadata"]["uid"], format!("{name}-uid"));
+            assert_eq!(replica["spec"]["blueprint"], source["spec"]["blueprint"]);
+            assert_eq!(replica["spec"]["envelope"], source["spec"]["envelope"]);
+            assert_eq!(replica["spec"]["execution"]["launch"], launch);
+            assert!(replica["spec"]["parentRef"].is_null());
+            let annotations = &replica["metadata"]["annotations"];
+            assert_eq!(annotations[MARKER], "execution-plan/v1");
+            assert_eq!(annotations["kars.azure.com/owner-sub"], "owner");
+            assert!(annotations["kars.azure.com/run-completed"].is_null());
+            if launch {
+                assert_eq!(
+                    annotations["kars.azure.com/run-requested"],
+                    crate::kars::cluster::run_nonce("run", &format!("{name}-uid"), "1")
+                );
+            } else {
+                assert!(annotations["kars.azure.com/run-requested"].is_null());
+            }
+        }
+        for (_, _, created) in store
+            .calls
+            .iter()
+            .filter(|(method, _, _)| *method == Method::POST)
+        {
+            assert!(created["metadata"]["uid"].is_null());
+            assert!(created["metadata"]["annotations"]["kars.azure.com/run-requested"].is_null());
+            assert!(created["metadata"]["annotations"]["kars.azure.com/run-completed"].is_null());
+        }
+    }
+}
+
+#[tokio::test]
+async fn execution_plan_completed_replica_keeps_active_plan_checks_before_writes() {
+    for mut source in blocked_tasks() {
+        source["metadata"]["annotations"]["kars.azure.com/run-requested"] = json!("completed-run");
+        source["metadata"]["annotations"]["kars.azure.com/run-completed"] = json!("completed-run");
+        let (state, store) = fixture(source.clone());
+        let (status, body) = request(
+            state,
+            Method::POST,
+            "tasks/task/replicate",
+            json!({"launch":true,"count":2}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(!body.to_string().contains("CompletedReviewedRun"), "{body}");
+        let store = store.lock().unwrap();
+        assert_only_read(&store, TASK);
+        assert_eq!(store.objects[TASK], source);
     }
 }
 

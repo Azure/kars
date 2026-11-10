@@ -110,9 +110,11 @@ fn api_error(code: u16) -> ResponseTemplate {
 }
 
 fn metadata_response(object: &Value) -> ResponseTemplate {
-    ResponseTemplate::new(200).set_body_json(json!({
-        "apiVersion":"meta.k8s.io/v1", "kind":"PartialObjectMetadata", "metadata":object["metadata"],
-    }))
+    let mut response = json!({
+        "apiVersion":"meta.k8s.io/v1", "kind":"PartialObjectMetadata",
+    });
+    response["metadata"] = object["metadata"].clone();
+    ResponseTemplate::new(200).set_body_json(response)
 }
 
 fn replace_namespace(state: &mut State) {
@@ -294,6 +296,9 @@ pub(super) async fn start(state: State) -> (MockServer, Client, Arc<Mutex<State>
         .mount(&server)
         .await;
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
+    let config = crate::kube_client_config::preserve_request_semantics(kube::Config::new(
+        server.uri().parse().unwrap(),
+    ));
+    let client = Client::try_from(config).unwrap();
     (server, client, state)
 }

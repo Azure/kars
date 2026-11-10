@@ -1,7 +1,5 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-
-{{- if and .Values.monitoring.enabled .Values.monitoring.prometheus.enabled .Values.monitoring.jsonExporter.enabled }}
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}{{- if and .Values.monitoring.enabled .Values.monitoring.prometheus.enabled .Values.monitoring.jsonExporter.enabled }}
 apiVersion: v1
 kind: ConfigMap
 metadata:

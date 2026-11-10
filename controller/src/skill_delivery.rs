@@ -143,7 +143,7 @@ mod tests {
         ] {
             let rendered =
                 crate::helm_drift::render_helm_template(std::path::Path::new(installed), installed);
-            let installed: Value = serde_yaml::from_str(&rendered).unwrap();
+            let installed: Value = serde_saphyr::from_str(&rendered).unwrap();
             for path in paths {
                 let pointer = format!(
                     "/spec/versions/0/schema/openAPIV3Schema/properties/spec/properties/{path}"

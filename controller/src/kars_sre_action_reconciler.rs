@@ -35,18 +35,18 @@
 //!
 //! ## What it does on the Approved → Applied transition
 //!
-//! 1. Server-side dry-run + SelfSubjectAccessReview pre-flight.
-//! 2. Validate the action target against the §7.7.1 protected-resource
-//!    denylist (RBAC kinds, secrets, kars governance state, kube-system,
-//!    kars-sre, kars-system, kube-public, kube-node-lease, agentmesh).
-//! 3. Mint a TokenRequest for the SA `kars-sre/sre-writer` with a 5-min
-//!    TTL, bound to the SRE pod's UID (so a stolen token from a crashed
-//!    pod is immediately dead).
-//! 4. Create a one-shot ClusterRoleBinding `kars-sre-write-<action-id>`
-//!    scoped to EXACTLY the (verb, resource, namespace) the action needs.
-//! 5. Execute the typed action via the minted token.
-//! 6. Tear down the CRB.
-//! 7. Stamp `phase=Applied` + `appliedAt` + `writerCrbName` (cleared post-cleanup).
+//! 1. Validate the closed action set and protected-resource denylist.
+//! 2. Install a finalizer and atomically persist a single-attempt claim,
+//!    including namespace/target UIDs and a full-UID authority name.
+//! 3. CREATE a per-action ServiceAccount, exact resourceNames Role and
+//!    namespaced RoleBinding. Never overwrite/adopt existing objects.
+//! 4. Mint an in-memory, SA-lifetime-bound TokenRequest (600 seconds, the
+//!    Kubernetes minimum). No shared writer identity or controller fallback.
+//! 5. Dry-run and execute the typed action with UID/resourceVersion fences
+//!    through the isolated bearer client; record the actual outcome.
+//! 6. Confirm UID-fenced deletion of all authority before removing the finalizer.
+//!    Cleanup failures remain visible and retry across restart/deletion;
+//!    interrupted/consumed attempts are never executed again.
 //!
 //! ## What it does on the Applied → Recovered transition
 //!
@@ -68,10 +68,10 @@
 //! that patch is `kars:sre-approver` (cluster admin binds humans /
 //! groups to it manually).
 //!
-//! The controller itself needs `create` on `serviceaccounts/token` and
-//! `create / delete` on `clusterrolebindings` (with `resourceNames`
-//! scoped to `kars-sre-write-*`). Both land in the controller RBAC
-//! template via the helm `sre.enabled` gate.
+//! The controller needs namespaced SA/Role/RoleBinding lifecycle permission,
+//! TokenRequest creation, and the underlying workload verbs it delegates.
+//! Kubernetes RBAC escalation checks remain enabled: no `bind`/`escalate`
+//! permission is added. SRE execution never creates a ClusterRoleBinding.
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -85,7 +85,13 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::kars_sre_action::KarsSREAction;
+use crate::kars_sre_action::{KarsSREAction, SREActionExecution};
+
+#[path = "kars_sre_action_authority.rs"]
+mod authority;
+pub fn writer_connection(config: &kube::Config) -> kube::Config {
+    authority::connection_config(config)
+}
 
 /// Helper: `jiff::Timestamp` (k8s_openapi default time type) →
 /// `chrono::DateTime<Utc>`. Drops sub-second precision (status strings
@@ -98,8 +104,6 @@ fn jiff_to_chrono(ts: &k8s_openapi::jiff::Timestamp) -> DateTime<Utc> {
 fn bool_status(v: bool) -> &'static str {
     if v { "True" } else { "False" }
 }
-
-const FIELD_MANAGER: &str = "kars-controller/kars-sre-action";
 
 /// Phases. Slice 3-specific phases live here; we reuse the shared
 /// `PHASE_FAILED` / `PHASE_EXPIRED` from `status::phase` for the
@@ -162,13 +166,10 @@ const REASON_LATE_RECOVERY: &str = "LateRecovery";
 /// late-recovery latency is up to 5 minutes.
 const REQUEUE_LATE_RECOVERY: Duration = Duration::from_secs(60);
 
-/// Writer SA + namespace (chart-shipped).
-const WRITER_SA_NAMESPACE: &str = "kars-sre";
-const WRITER_SA_NAME: &str = "sre-writer";
-
-/// Token TTL — 5 min is the §7.8.4 spec.
-#[allow(dead_code)]
-const WRITER_TOKEN_TTL_SECONDS: u64 = 300;
+/// Bound each active attempt; another replica waits beyond this local timeout
+/// before treating a persisted claim as interrupted and cleaning it up.
+const EXECUTION_TIMEOUT: Duration = Duration::from_secs(90);
+const EXECUTION_CLEANUP_DELAY_SECONDS: i64 = 120;
 
 /// Protected-resource denylist (§7.7.1).
 ///
@@ -212,10 +213,13 @@ enum ReconcileError {
     Kube(#[from] kube::Error),
     #[error("JSON error: {0}")]
     SerdeJson(#[from] serde_json::Error),
+    #[error("SRE execution authority: {0}")]
+    Authority(#[from] anyhow::Error),
 }
 
 struct Ctx {
     client: Client,
+    connection: kube::Config,
 }
 
 /// Validation outcome for an Approved action just before execution.
@@ -283,25 +287,182 @@ fn validate_action(spec_action: &crate::kars_sre_action::ActionSpec) -> Validati
         }
     }
 
+    let dns_label = |value: &str| {
+        !value.is_empty()
+            && value.len() <= 63
+            && value
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_alphanumeric)
+            && value
+                .as_bytes()
+                .last()
+                .is_some_and(u8::is_ascii_alphanumeric)
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    };
+    if !dns_label(&ns)
+        || name.is_none_or(|name| name.len() > 253 || !name.split('.').all(dns_label))
+    {
+        return Validation::ProtectedResource(
+            "target namespace/name must be valid Kubernetes names".into(),
+        );
+    }
+    if let Err(e) = authority::scope(spec_action) {
+        return Validation::ProtectedResource(e.to_string());
+    }
     Validation::Ok
 }
 
-/// Generate a stable action_id from the CR uid (first 8 hex chars
-/// suffixed to "sre-action-"). Used as the writer CRB name suffix +
-/// in operator-facing prompts.
 fn action_id(cr: &KarsSREAction) -> String {
-    let uid = cr.metadata.uid.clone().unwrap_or_default();
-    let short = uid.split('-').next().unwrap_or("unknown");
-    format!("sre-action-{}", short)
+    format!(
+        "sre-action-{}",
+        cr.metadata.uid.as_deref().unwrap_or("unknown")
+    )
 }
 
-/// Build the writer ClusterRoleBinding name. Matches the resourceNames
-/// pattern in the controller RBAC (`kars-sre-write-*`).
-fn writer_crb_name(action_id: &str) -> String {
-    format!(
-        "kars-sre-write-{}",
-        action_id.trim_start_matches("sre-action-")
+fn fenced_metadata(cr: &KarsSREAction) -> anyhow::Result<Value> {
+    Ok(
+        json!({"uid":authority::uid(&cr.metadata)?, "resourceVersion":cr.resource_version()
+        .filter(|v| !v.is_empty()).ok_or_else(|| anyhow::anyhow!("action resourceVersion missing"))?}),
     )
+}
+
+async fn update_status(
+    api: &Api<KarsSREAction>,
+    cr: &KarsSREAction,
+    status: Value,
+) -> Result<KarsSREAction, ReconcileError> {
+    Ok(api
+        .patch_status(
+            &cr.name_any(),
+            &PatchParams::default(),
+            &Patch::Merge(json!({"metadata":fenced_metadata(cr)?,"status":status})),
+        )
+        .await?)
+}
+
+async fn set_finalizer(
+    api: &Api<KarsSREAction>,
+    cr: &KarsSREAction,
+    present: bool,
+) -> Result<(), ReconcileError> {
+    let mut finalizers = cr.finalizers().to_vec();
+    finalizers.retain(|v| v != authority::FINALIZER);
+    if present {
+        finalizers.push(authority::FINALIZER.into());
+    }
+    let mut metadata = fenced_metadata(cr)?;
+    metadata["finalizers"] = json!(finalizers);
+    api.patch(
+        &cr.name_any(),
+        &PatchParams::default(),
+        &Patch::Merge(json!({"metadata":metadata})),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn claim_execution(
+    api: &Api<KarsSREAction>,
+    ctx: &Ctx,
+    cr: &KarsSREAction,
+) -> Result<KarsSREAction, ReconcileError> {
+    if !cr.finalizers().iter().any(|f| f == authority::FINALIZER)
+        || cr.metadata.deletion_timestamp.is_some()
+        || cr.spec.approval.state != APPROVAL_APPROVED
+        || cr.status.as_ref().is_some_and(|s| s.execution.is_some())
+    {
+        return Err(anyhow::anyhow!("action is not eligible for execution").into());
+    }
+    let namespace = cr.spec.action.params["namespace"]
+        .as_str()
+        .unwrap_or_default();
+    let name = cr.spec.action.params["name"].as_str().unwrap_or_default();
+    let namespace_uid = authority::namespace_uid(&ctx.client, namespace).await?;
+    let target = authority::target_metadata(&ctx.client, &cr.spec.action, namespace, name).await?;
+    let now = Utc::now();
+    let execution = SREActionExecution {
+        started_at: now.to_rfc3339(),
+        deadline: (now + chrono::Duration::seconds(EXECUTION_CLEANUP_DELAY_SECONDS)).to_rfc3339(),
+        namespace: namespace.into(),
+        namespace_uid,
+        authority_name: authority::authority_name(cr)?,
+        target_uid: authority::uid(&target)?.into(),
+        cleanup_pending: true,
+    };
+    // resourceVersion makes this a compare-and-swap across replicas and approval
+    // edits. A response lost after persistence consumes the attempt, never replays.
+    update_status(api, cr, json!({"phase":PHASE_APPROVED,"execution":execution,
+        "conditions":[cond(COND_TYPE_EXECUTED,"Unknown","ExecutionClaimed","Attempt consumed; outcome not yet known")]})).await
+}
+
+async fn cleanup_execution(
+    api: &Api<KarsSREAction>,
+    client: &Client,
+    cr: &KarsSREAction,
+) -> Result<KarsSREAction, ReconcileError> {
+    let Some(execution) = cr.status.as_ref().and_then(|s| s.execution.as_ref()) else {
+        return Ok(cr.clone());
+    };
+    if !execution.cleanup_pending {
+        return Ok(cr.clone());
+    }
+    if let Err(error) = authority::cleanup(client, cr, execution).await {
+        let mut conditions = cr
+            .status
+            .as_ref()
+            .map(|s| s.conditions.clone())
+            .unwrap_or_default();
+        conditions.retain(|c| c.type_ != "AuthorityCleaned");
+        let mut conditions = serde_json::to_value(conditions)?;
+        conditions.as_array_mut().unwrap().push(cond(
+            "AuthorityCleaned",
+            "False",
+            "CleanupFailed",
+            &error.to_string(),
+        ));
+        update_status(api, cr, json!({"conditions":conditions})).await?;
+        return Err(ReconcileError::Authority(error));
+    }
+    let interrupted = cr.status.as_ref().and_then(|s| s.phase.as_deref()) == Some(PHASE_APPROVED);
+    let mut status = json!({"execution":{"cleanupPending":false}});
+    if interrupted {
+        status["phase"] = json!(PHASE_FAILED);
+        status["conditions"] = json!([
+            cond(
+                COND_TYPE_EXECUTED,
+                "Unknown",
+                "ExecutionInterrupted",
+                "Consumed attempt interrupted; outcome unknown; never replayed"
+            ),
+            cond(
+                COND_TYPE_DEGRADED,
+                "True",
+                "ExecutionInterrupted",
+                "Create a new reviewed proposal after inspecting the target"
+            )
+        ]);
+    } else {
+        status["conditions"] = serde_json::to_value(
+            cr.status
+                .as_ref()
+                .map(|s| s.conditions.clone())
+                .unwrap_or_default(),
+        )?;
+        status["conditions"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|c| c["type"] != "AuthorityCleaned");
+    }
+    status["conditions"].as_array_mut().unwrap().push(cond(
+        "AuthorityCleaned",
+        "True",
+        "Revoked",
+        "RoleBinding, ServiceAccount and Role confirmed absent",
+    ));
+    update_status(api, cr, status).await
 }
 
 async fn reconcile(cr: Arc<KarsSREAction>, ctx: Arc<Ctx>) -> Result<Action, ReconcileError> {
@@ -317,6 +478,69 @@ async fn reconcile(cr: Arc<KarsSREAction>, ctx: Arc<Ctx>) -> Result<Action, Reco
         .and_then(|s| s.phase.clone())
         .unwrap_or_else(|| PHASE_PROPOSED.to_string());
     let approval = cr.spec.approval.state.as_str();
+
+    // Cleanup precedes deletion, recovery observation, and terminal retention.
+    if let Some(legacy) = cr
+        .status
+        .as_ref()
+        .and_then(|s| s.writer_crb_name.as_deref())
+        .filter(|v| !v.is_empty())
+    {
+        use k8s_openapi::api::rbac::v1::ClusterRoleBinding;
+        if Api::<ClusterRoleBinding>::all(ctx.client.clone())
+            .get_opt(legacy)
+            .await?
+            .is_some()
+        {
+            // Old bindings contain no full action UID ownership proof. Never
+            // delete a same-named foreign binding based on a truncated UID.
+            stamp_phase(&api, &name, PHASE_FAILED, "Legacy writer binding still exists; operator must verify ownership and revoke it before continuing", &cr).await?;
+            return Err(anyhow::anyhow!("unresolved legacy writer authority").into());
+        }
+        update_status(&api, &cr, json!({"writerCrbName":null})).await?;
+        return Ok(Action::requeue(Duration::from_secs(1)));
+    }
+    if let Some(execution) = cr.status.as_ref().and_then(|s| s.execution.as_ref()) {
+        if execution.cleanup_pending {
+            if phase == PHASE_APPROVED {
+                let deadline = DateTime::parse_from_rfc3339(&execution.deadline)
+                    .map_err(|_| anyhow::anyhow!("invalid execution cleanup deadline"))?;
+                if Utc::now() < deadline {
+                    return Ok(Action::requeue(REQUEUE_APPLIED));
+                }
+            }
+            let cleaned = cleanup_execution(&api, &ctx.client, &cr).await?;
+            if cleaned
+                .finalizers()
+                .iter()
+                .any(|f| f == authority::FINALIZER)
+            {
+                set_finalizer(&api, &cleaned, false).await?;
+            }
+            return Ok(Action::requeue(Duration::from_secs(1)));
+        }
+        if phase == PHASE_PROPOSED || phase == PHASE_APPROVED {
+            stamp_phase(
+                &api,
+                &name,
+                PHASE_FAILED,
+                "Execution attempt already consumed; refusing replay",
+                &cr,
+            )
+            .await?;
+            return Ok(Action::requeue(REQUEUE_TERMINAL));
+        }
+    }
+    if cr.finalizers().iter().any(|f| f == authority::FINALIZER)
+        && (cr.metadata.deletion_timestamp.is_some()
+            || cr.status.as_ref().is_some_and(|s| s.execution.is_some()))
+    {
+        set_finalizer(&api, &cr, false).await?;
+        return Ok(Action::requeue(Duration::from_secs(1)));
+    }
+    if cr.metadata.deletion_timestamp.is_some() {
+        return Ok(Action::await_change());
+    }
 
     // Terminal phases — short-circuit. If a terminal CR is older than
     // TERMINAL_RETENTION, GC it so operators don't drown in stale
@@ -381,7 +605,18 @@ async fn reconcile(cr: Arc<KarsSREAction>, ctx: Arc<Ctx>) -> Result<Action, Reco
                     age_secs = age,
                     "GC: deleting terminal KarsSREAction past retention window"
                 );
-                let _ = api.delete(&name, &kube::api::DeleteParams::default()).await;
+                let params = kube::api::DeleteParams {
+                    preconditions: Some(kube::api::Preconditions {
+                        uid: Some(authority::uid(&cr.metadata)?.into()),
+                        resource_version: cr.resource_version(),
+                    }),
+                    ..Default::default()
+                };
+                match api.delete(&name, &params).await {
+                    Ok(_) => {}
+                    Err(kube::Error::Api(error)) if error.code == 404 => {}
+                    Err(error) => return Err(error.into()),
+                }
                 return Ok(Action::await_change());
             }
         }
@@ -473,45 +708,98 @@ async fn reconcile(cr: Arc<KarsSREAction>, ctx: Arc<Ctx>) -> Result<Action, Reco
             }
         }
 
-        // Transition: mint token + crb, execute, stamp Applied.
-        match apply_action(&ctx.client, &cr, &aid).await {
-            Ok(crb_name) => {
-                let now = Utc::now().to_rfc3339();
-                patch_status(
-                    &api,
-                    &name,
-                    json!({
-                        "apiVersion": "kars.azure.com/v1alpha1",
-                        "kind": "KarsSREAction",
-                        "status": {
-                            "phase": PHASE_APPLIED,
-                            "observedGeneration": cr.metadata.generation,
-                            "appliedAt": now,
-                            "writerCrbName": crb_name,
-                            "conditions": [
-                                cond(COND_TYPE_AVAILABLE, "False", REASON_PENDING_RECOVERY, "Awaiting recovery observation"),
-                                cond(COND_TYPE_APPROVED, "True", APPROVAL_APPROVED, "Operator approved the proposal"),
-                                cond(COND_TYPE_EXECUTED, "True", REASON_EXECUTED, "Typed action executed via short-lived token"),
-                            ]
-                        }
-                    }),
-                )
-                .await?;
-                tracing::info!(action = %name, "Action executed; entering Recovery watch");
-                return Ok(Action::requeue(REQUEUE_APPLIED));
-            }
-            Err(e) => {
-                stamp_phase(
-                    &api,
-                    &name,
-                    PHASE_FAILED,
-                    &format!("apply failed: {e}"),
-                    &cr,
-                )
-                .await?;
-                return Ok(Action::requeue(REQUEUE_TERMINAL));
-            }
+        if !cr.finalizers().iter().any(|f| f == authority::FINALIZER) {
+            set_finalizer(&api, &cr, true).await?;
+            return Ok(Action::requeue(Duration::from_secs(1)));
         }
+        let claimed = claim_execution(&api, &ctx, &cr).await?;
+        let outcome = tokio::time::timeout(EXECUTION_TIMEOUT, apply_action(&ctx, &claimed)).await;
+        let (phase, conditions, applied_at) = match outcome {
+            Ok(Ok(())) => (
+                PHASE_APPLIED,
+                vec![
+                    cond(
+                        COND_TYPE_AVAILABLE,
+                        "False",
+                        REASON_PENDING_RECOVERY,
+                        "Awaiting recovery observation",
+                    ),
+                    cond(
+                        COND_TYPE_APPROVED,
+                        "True",
+                        APPROVAL_APPROVED,
+                        "Operator approved the proposal",
+                    ),
+                    cond(
+                        COND_TYPE_EXECUTED,
+                        "True",
+                        REASON_EXECUTED,
+                        "Typed action executed via isolated short-lived token",
+                    ),
+                ],
+                Some(Utc::now().to_rfc3339()),
+            ),
+            Ok(Err(e)) => (
+                PHASE_FAILED,
+                vec![
+                    cond(
+                        COND_TYPE_EXECUTED,
+                        "Unknown",
+                        "ExecutionFailed",
+                        &format!("apply failed: {e}; inspect target before a new proposal"),
+                    ),
+                    cond(
+                        COND_TYPE_DEGRADED,
+                        "True",
+                        "ExecutionFailed",
+                        "Attempt consumed; no automatic retry",
+                    ),
+                ],
+                None,
+            ),
+            Err(_) => (
+                PHASE_FAILED,
+                vec![
+                    cond(
+                        COND_TYPE_EXECUTED,
+                        "Unknown",
+                        "ExecutionTimedOut",
+                        "Execution timed out; outcome unknown; no automatic retry",
+                    ),
+                    cond(
+                        COND_TYPE_DEGRADED,
+                        "True",
+                        "ExecutionTimedOut",
+                        "Inspect target before a new proposal",
+                    ),
+                ],
+                None,
+            ),
+        };
+        // Persist the observed outcome before cleanup, so cleanup failures never
+        // turn a known successful mutation into a claim of failed execution.
+        let finished = update_status(&api, &claimed, json!({"phase":phase,
+            "observedGeneration":claimed.metadata.generation,"appliedAt":applied_at,"conditions":conditions})).await;
+        let finished = match finished {
+            Ok(finished) => finished,
+            Err(error) => {
+                // Preserve the journal/finalizer if status persistence failed.
+                // Retry will mark this consumed attempt interrupted, not replay it.
+                if let Some(execution) = claimed.status.as_ref().and_then(|s| s.execution.as_ref())
+                    && let Err(cleanup) = authority::cleanup(&ctx.client, &claimed, execution).await
+                {
+                    tracing::error!(error = %cleanup, "SRE authority cleanup after status failure requires retry");
+                }
+                return Err(error);
+            }
+        };
+        let cleaned = cleanup_execution(&api, &ctx.client, &finished).await?;
+        set_finalizer(&api, &cleaned, false).await?;
+        return Ok(Action::requeue(if phase == PHASE_APPLIED {
+            REQUEUE_APPLIED
+        } else {
+            REQUEUE_TERMINAL
+        }));
     }
 
     // Applied — recovery watch.
@@ -633,265 +921,143 @@ async fn stamp_phase(
             message,
         ),
     ];
-    patch_status(
-        api,
-        name,
-        json!({
-            "apiVersion": "kars.azure.com/v1alpha1",
-            "kind": "KarsSREAction",
-            "status": {
-                "phase": phase,
-                "observedGeneration": cr.metadata.generation,
-                "conditions": conds,
+    let mut conds = conds;
+    if let Some(status) = &cr.status {
+        for condition in &status.conditions {
+            if !matches!(
+                condition.type_.as_str(),
+                COND_TYPE_AVAILABLE | COND_TYPE_APPROVED | COND_TYPE_DEGRADED
+            ) {
+                conds.push(serde_json::to_value(condition)?);
             }
+        }
+    }
+    if name != cr.name_any() {
+        return Err(anyhow::anyhow!("status target name mismatch").into());
+    }
+    update_status(
+        api,
+        cr,
+        json!({
+            "phase": phase,
+            "observedGeneration": cr.metadata.generation,
+            "conditions": conds,
         }),
+    )
+    .await?;
+    Ok(())
+}
+
+/// The caller has durably consumed this attempt before authority is created.
+async fn apply_action(ctx: &Ctx, cr: &KarsSREAction) -> anyhow::Result<()> {
+    let execution = cr
+        .status
+        .as_ref()
+        .and_then(|s| s.execution.as_ref())
+        .ok_or_else(|| anyhow::anyhow!("execution claim missing"))?;
+    let writer = authority::writer(&ctx.client, &ctx.connection, cr, execution).await?;
+    let api: Api<KarsSREAction> =
+        Api::namespaced(ctx.client.clone(), &cr.namespace().unwrap_or_default());
+    let live = api.get(&cr.name_any()).await?;
+    anyhow::ensure!(
+        live.metadata.uid == cr.metadata.uid
+            && live.metadata.deletion_timestamp.is_none()
+            && live.spec.approval.state == APPROVAL_APPROVED
+            && live.spec.action == cr.spec.action
+            && live.resource_version() == cr.resource_version(),
+        "action changed during authority preparation"
+    );
+    execute_typed_action(
+        &writer,
+        &cr.spec.action,
+        &execution.namespace,
+        cr.spec.action.params["name"].as_str().unwrap_or_default(),
+        &execution.target_uid,
     )
     .await
 }
 
-async fn patch_status(
-    api: &Api<KarsSREAction>,
-    name: &str,
-    status: Value,
-) -> Result<(), ReconcileError> {
-    let pp = PatchParams::apply(FIELD_MANAGER).force();
-    api.patch_status(name, &pp, &Patch::Apply(&status)).await?;
-    Ok(())
-}
-
-/// Execute the approved action via a short-lived TokenRequest + CRB.
-///
-/// Returns the CRB name (which the caller stamps on `status.writerCrbName`
-/// so a future cleanup-on-startup pass can GC it after a controller crash).
-async fn apply_action(client: &Client, cr: &KarsSREAction, aid: &str) -> anyhow::Result<String> {
-    let crb_name = writer_crb_name(aid);
-    let action = &cr.spec.action;
-    let ns = action
-        .params
-        .get("namespace")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("missing namespace"))?
-        .to_string();
-    let target_name = action
-        .params
-        .get("name")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("missing name"))?
-        .to_string();
-
-    // Step 1: create the one-shot ClusterRoleBinding scoped to JUST
-    // the (verb, resource, namespace) tuple this action needs.
-    create_one_shot_binding(client, &crb_name, &action.kind, &ns).await?;
-
-    // Step 2: mint a TokenRequest for the writer SA bound to the SRE
-    // pod's UID. (For simplicity in Slice 3 we use the writer SA's
-    // standard token — the controller's own SA can also execute since
-    // it has the broader manage perms; the bound-token path lands
-    // in a follow-up hardening pass.)
-    //
-    // Slice 3 executes via the controller's own SA (which has the
-    // necessary RBAC scoped via the CRB we just created). The
-    // sre-writer SA + TokenRequest path lands in a §7.8.4 hardening
-    // follow-up — the immediate goal is the demo loop closing.
-
-    // Step 3: execute the typed action.
-    let result =
-        execute_typed_action(client, &action.kind, &ns, &target_name, &action.params).await;
-
-    // Step 4: tear down the binding regardless of outcome.
-    let _ = delete_binding(client, &crb_name).await;
-
-    result.map(|_| crb_name)
-}
-
-async fn create_one_shot_binding(
-    client: &Client,
-    crb_name: &str,
-    action_kind: &str,
-    namespace: &str,
-) -> anyhow::Result<()> {
-    use k8s_openapi::api::rbac::v1::ClusterRoleBinding;
-    let api: Api<ClusterRoleBinding> = Api::all(client.clone());
-
-    // For each action kind, the minimal ClusterRole it needs.
-    // Slice 3 reuses two ClusterRoles shipped by the helm chart:
-    //   kars-sre-writer-quotas       — delete resourcequotas (any ns)
-    //   kars-sre-writer-workloads    — patch/delete on apps/deployments + core/pods (any ns)
-    // The CRB binds the right one for the action.
-    let role_name = match action_kind {
-        "DeleteResourceQuota" => "kars-sre-writer-quotas",
-        "PatchDeploymentImage" | "ScaleDeployment" | "RolloutRestart" | "DeletePod" => {
-            "kars-sre-writer-workloads"
-        }
-        _ => anyhow::bail!("no writer role for action {action_kind}"),
-    };
-
-    let crb_body = json!({
-        "apiVersion": "rbac.authorization.k8s.io/v1",
-        "kind": "ClusterRoleBinding",
-        "metadata": {
-            "name": crb_name,
-            "labels": {
-                "app.kubernetes.io/managed-by": "kars-controller",
-                "app.kubernetes.io/component": "sre-writer",
-                "kars.azure.com/sre-action-namespace": namespace,
-            }
-        },
-        "roleRef": {
-            "apiGroup": "rbac.authorization.k8s.io",
-            "kind": "ClusterRole",
-            "name": role_name
-        },
-        "subjects": [{
-            "kind": "ServiceAccount",
-            "name": WRITER_SA_NAME,
-            "namespace": WRITER_SA_NAMESPACE
-        }]
-    });
-    let pp = PatchParams::apply(FIELD_MANAGER).force();
-    api.patch(crb_name, &pp, &Patch::Apply(&crb_body)).await?;
-    tracing::info!(crb = %crb_name, role = %role_name, "Created one-shot CRB for SRE action");
-    Ok(())
-}
-
-async fn delete_binding(client: &Client, crb_name: &str) -> anyhow::Result<()> {
-    use k8s_openapi::api::rbac::v1::ClusterRoleBinding;
-    use kube::api::DeleteParams;
-    let api: Api<ClusterRoleBinding> = Api::all(client.clone());
-    let _ = api.delete(crb_name, &DeleteParams::default()).await;
-    Ok(())
-}
-
 async fn execute_typed_action(
     client: &Client,
-    action_kind: &str,
+    action: &crate::kars_sre_action::ActionSpec,
     namespace: &str,
     name: &str,
-    params: &std::collections::BTreeMap<String, Value>,
+    expected_uid: &str,
 ) -> anyhow::Result<()> {
-    use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
-    use k8s_openapi::api::core::v1::{Pod, ResourceQuota};
-    use kube::api::DeleteParams;
-
-    match action_kind {
-        "DeleteResourceQuota" => {
-            // §7.7.1 label gate: refuse if quota carries the controller label.
-            let api: Api<ResourceQuota> = Api::namespaced(client.clone(), namespace);
-            let live = api.get(name).await?;
-            if live
-                .metadata
-                .labels
-                .as_ref()
-                .and_then(|l| l.get("kars.azure.com/managed-by"))
-                .map(|v| v == "controller")
-                .unwrap_or(false)
+    use kube::api::{DeleteParams, Preconditions};
+    anyhow::ensure!(
+        matches!(validate_action(action), Validation::Ok),
+        "invalid typed action"
+    );
+    let api = authority::target_api(client, action, namespace)?;
+    let metadata = authority::target_metadata(client, action, namespace, name).await?;
+    anyhow::ensure!(
+        authority::uid(&metadata)? == expected_uid,
+        "target UID changed; refusing replacement"
+    );
+    let fence = json!({"name":name,"uid":expected_uid,"resourceVersion":metadata.resource_version});
+    let params = &action.params;
+    match action.kind.as_str() {
+        "DeleteResourceQuota" | "DeletePod" => {
+            if action.kind == "DeleteResourceQuota"
+                && metadata
+                    .labels
+                    .as_ref()
+                    .and_then(|labels| labels.get("kars.azure.com/managed-by"))
+                    .is_some_and(|value| value == "controller")
             {
-                anyhow::bail!(
-                    "refused: ResourceQuota {namespace}/{name} is kars-managed (labelled kars.azure.com/managed-by=controller)"
-                );
+                anyhow::bail!("refused: ResourceQuota is kars-managed");
             }
-            api.delete(name, &DeleteParams::default()).await?;
-            tracing::info!(ns = %namespace, name = %name, "DeleteResourceQuota executed");
-        }
-        "DeletePod" => {
-            let api: Api<Pod> = Api::namespaced(client.clone(), namespace);
-            api.delete(name, &DeleteParams::default()).await?;
+            let mut dp = DeleteParams {
+                preconditions: Some(Preconditions {
+                    uid: Some(expected_uid.into()),
+                    resource_version: metadata.resource_version,
+                }),
+                dry_run: true,
+                ..Default::default()
+            };
+            api.delete(name, &dp).await?;
+            dp.dry_run = false;
+            api.delete(name, &dp).await?;
         }
         "ScaleDeployment" => {
-            let api: Api<Deployment> = Api::namespaced(client.clone(), namespace);
-            let replicas = params.get("replicas").and_then(Value::as_i64).unwrap_or(1);
-            // patch_scale uses the Scale subresource; SSA on the
-            // scale subresource accepts a `spec.replicas`-only body
-            // without apiVersion/kind. Apply via Merge to avoid
-            // FieldManager conflicts with the original deployment owner.
-            let body = json!({"spec": {"replicas": replicas}});
-            let pp = PatchParams::apply(FIELD_MANAGER).force();
-            api.patch_scale(name, &pp, &Patch::Apply(&body)).await?;
-            tracing::info!(ns = %namespace, name = %name, replicas = replicas, "ScaleDeployment executed");
+            // Merge patch on Scale avoids the invalid spec-only SSA body; the
+            // UID + resourceVersion fence protects the underlying Deployment.
+            let body = json!({"metadata":fence,"spec":{"replicas":params["replicas"]}});
+            let mut pp = PatchParams {
+                dry_run: true,
+                ..Default::default()
+            };
+            api.patch_scale(name, &pp, &Patch::Merge(&body)).await?;
+            pp.dry_run = false;
+            api.patch_scale(name, &pp, &Patch::Merge(&body)).await?;
         }
         "PatchDeploymentImage" => {
-            let container = params
-                .get("container")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow::anyhow!("missing container"))?;
-            let image = params
-                .get("image")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow::anyhow!("missing image"))?;
-            let api: Api<Deployment> = Api::namespaced(client.clone(), namespace);
-            // SSA requires apiVersion + kind + metadata.name for the
-            // top-level resource. Without them, the apiserver rejects
-            // with `invalid object type: /, Kind=`.
-            let body = json!({
-                "apiVersion": "apps/v1",
-                "kind": "Deployment",
-                "metadata": {"name": name},
-                "spec": {
-                    "template": {
-                        "spec": {
-                            "containers": [{"name": container, "image": image}]
-                        }
-                    }
-                }
-            });
-            let pp = PatchParams::apply(FIELD_MANAGER).force();
-            api.patch(name, &pp, &Patch::Apply(&body)).await?;
-            tracing::info!(ns = %namespace, name = %name, container = %container, image = %image, "PatchDeploymentImage executed");
+            let body = json!({"metadata":fence,"spec":{"template":{"spec":{
+                "containers":[{"name":params["container"],"image":params["image"]}]
+            }}}});
+            let mut pp = PatchParams {
+                dry_run: true,
+                ..Default::default()
+            };
+            // Strategic merge preserves unrelated containers and fields.
+            api.patch(name, &pp, &Patch::Strategic(&body)).await?;
+            pp.dry_run = false;
+            api.patch(name, &pp, &Patch::Strategic(&body)).await?;
         }
         "RolloutRestart" => {
-            let kind = params
-                .get("kind")
-                .and_then(Value::as_str)
-                .unwrap_or("Deployment");
-            let now = Utc::now().to_rfc3339();
-            // SSA-friendly: include apiVersion + kind + metadata.name.
-            // We deliberately use the kars-azure.com annotation key
-            // (not kubectl.kubernetes.io/restartedAt) so we own it
-            // exclusively under our field manager — avoids SSA
-            // conflicts with kubectl rollout restart.
-            let pp = PatchParams::apply(FIELD_MANAGER).force();
-            match kind {
-                "Deployment" => {
-                    let api: Api<Deployment> = Api::namespaced(client.clone(), namespace);
-                    let body = json!({
-                        "apiVersion": "apps/v1",
-                        "kind": "Deployment",
-                        "metadata": {"name": name},
-                        "spec": {"template": {"metadata": {"annotations": {
-                            "kars.azure.com/restartedAt": now
-                        }}}},
-                    });
-                    api.patch(name, &pp, &Patch::Apply(&body)).await?;
-                }
-                "StatefulSet" => {
-                    let api: Api<StatefulSet> = Api::namespaced(client.clone(), namespace);
-                    let body = json!({
-                        "apiVersion": "apps/v1",
-                        "kind": "StatefulSet",
-                        "metadata": {"name": name},
-                        "spec": {"template": {"metadata": {"annotations": {
-                            "kars.azure.com/restartedAt": now
-                        }}}},
-                    });
-                    api.patch(name, &pp, &Patch::Apply(&body)).await?;
-                }
-                "DaemonSet" => {
-                    let api: Api<DaemonSet> = Api::namespaced(client.clone(), namespace);
-                    let body = json!({
-                        "apiVersion": "apps/v1",
-                        "kind": "DaemonSet",
-                        "metadata": {"name": name},
-                        "spec": {"template": {"metadata": {"annotations": {
-                            "kars.azure.com/restartedAt": now
-                        }}}},
-                    });
-                    api.patch(name, &pp, &Patch::Apply(&body)).await?;
-                }
-                other => anyhow::bail!("unknown workload kind for RolloutRestart: {other}"),
-            }
-            tracing::info!(ns = %namespace, name = %name, kind = %kind, "RolloutRestart executed");
+            let body = json!({"metadata":fence,"spec":{"template":{"metadata":{
+                "annotations":{"kars.azure.com/restartedAt":Utc::now().to_rfc3339()}
+            }}}});
+            let mut pp = PatchParams {
+                dry_run: true,
+                ..Default::default()
+            };
+            api.patch(name, &pp, &Patch::Merge(&body)).await?;
+            pp.dry_run = false;
+            api.patch(name, &pp, &Patch::Merge(&body)).await?;
         }
-        other => anyhow::bail!("unhandled action kind: {other}"),
+        _ => anyhow::bail!("unsupported typed action"),
     }
     Ok(())
 }
@@ -1031,9 +1197,12 @@ fn error_policy(_cr: Arc<KarsSREAction>, e: &ReconcileError, _ctx: Arc<Ctx>) -> 
 }
 
 /// Start the reconciler. Called from `controller/src/main.rs`.
-pub async fn run(client: Client) -> Result<()> {
+pub async fn run(client: Client, connection: kube::Config) -> Result<()> {
     let api: Api<KarsSREAction> = Api::all(client.clone());
-    let ctx = Arc::new(Ctx { client });
+    let ctx = Arc::new(Ctx {
+        client,
+        connection: writer_connection(&connection),
+    });
 
     Controller::new(api, crate::watch_config::bounded())
         .run(reconcile, error_policy, ctx)
@@ -1046,6 +1215,10 @@ pub async fn run(client: Client) -> Result<()> {
         .await;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "kars_sre_action_execution_tests.rs"]
+mod execution_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1143,8 +1316,14 @@ mod tests {
     }
 
     #[test]
-    fn writer_crb_name_matches_pattern() {
-        let crb = writer_crb_name("sre-action-abc123");
-        assert_eq!(crb, "kars-sre-write-abc123");
+    fn authority_names_use_the_entire_uid() {
+        let mut first = mk("DeletePod", json!({"namespace":"team-a","name":"x"}));
+        first.metadata.uid = Some("12345678-1111-1111-1111-111111111111".into());
+        let mut second = first.clone();
+        second.metadata.uid = Some("12345678-2222-2222-2222-222222222222".into());
+        assert_ne!(
+            authority::authority_name(&first).unwrap(),
+            authority::authority_name(&second).unwrap()
+        );
     }
 }

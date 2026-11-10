@@ -16,7 +16,7 @@ import tarfile
 import tempfile
 import uuid
 
-from contracts import BASE, RPM_MANIFEST, check_modules, check_rootfs, check_scan, require, resolve_base_file
+from contracts import BASE, CA_BUNDLE, RPM_MANIFEST, check_ca_bundle, check_modules, check_rootfs, check_scan, require, resolve_base_file
 
 
 def run(*args, **kwargs):
@@ -37,7 +37,7 @@ def export(image, directory, prefix):
                     with archive.extractfile(member) as stream:
                         data = stream.read()
                     entries[name] = ("file", member.mode, hashlib.sha256(data).hexdigest())
-                    if name == RPM_MANIFEST or name.startswith("usr/share/doc/dex/elf-"):
+                    if name in (RPM_MANIFEST, CA_BUNDLE) or name.startswith("usr/share/doc/dex/elf-"):
                         documents[name] = data.decode()
                 elif member.issym():
                     entries[name] = ("symlink", member.mode, member.linkname)
@@ -117,6 +117,10 @@ def main():
         base, _ = export(BASE, scratch, "base")
         runtime, documents = export(image_id, scratch, "runtime")
         check_rootfs(base, runtime, documents[RPM_MANIFEST])
+        certificate_count = check_ca_bundle(documents[CA_BUNDLE])
+        (args.evidence / "ca-distrust.json").write_text(json.dumps({
+            "certificates": certificate_count, "affectedRootsAbsent": True,
+        }, indent=2))
         (args.evidence / "runtime-inventory.json").write_text(json.dumps(runtime, indent=2))
         for name, contents in documents.items():
             (args.evidence / Path(name).name).write_text(contents)

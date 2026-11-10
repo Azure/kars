@@ -10,6 +10,7 @@ import hashlib
 import io
 import json
 from pathlib import Path, PurePosixPath
+import posixpath
 import re
 import stat
 import subprocess
@@ -31,8 +32,8 @@ STYLES = {
     "handlebars": f"{{{{!-- {COPYRIGHT}\n{LICENSE} --}}}}",
 }
 SUFFIX_STYLES = {
-    **dict.fromkeys((".rs", ".go", ".ts", ".tsx", ".js", ".mjs", ".bicep"), "slash"),
-    **dict.fromkeys((".sh", ".py", ".toml", ".yaml", ".yml"), "hash"),
+    **dict.fromkeys((".rs", ".go", ".ts", ".tsx", ".mts", ".js", ".mjs", ".cjs", ".bicep"), "slash"),
+    **dict.fromkeys((".sh", ".py", ".toml", ".yaml", ".yml", ".qls"), "hash"),
     ".md": "html",
     ".css": "css",
     ".hbs": "handlebars",
@@ -62,7 +63,7 @@ def load_policy(root):
         for key, rule in policy[group].items():
             if (
                 not isinstance(rule, dict)
-                or set(rule) != {"category", "reason", "notice"}
+                or set(rule) not in ({"category", "reason", "notice"}, {"category", "reason", "notice", "target"})
                 or not isinstance(rule["category"], str)
                 or rule["category"] not in allowed_categories
                 or not isinstance(rule["reason"], str)
@@ -71,6 +72,15 @@ def load_policy(root):
                 or rule["notice"] not in ("LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.txt")
             ):
                 raise CoverageError(f"invalid coverage rule: {key}")
+            if "target" in rule:
+                target = rule["target"]
+                if (
+                    group != "files" or rule["category"] != "repository-license"
+                    or not isinstance(target, str) or not target
+                    or PurePosixPath(target).is_absolute() or ".." in PurePosixPath(target).parts
+                    or str(PurePosixPath(target)) != target or target == key
+                ):
+                    raise CoverageError(f"invalid reviewed symlink target: {key}")
             if group == "files":
                 path = PurePosixPath(key)
                 if path.is_absolute() or ".." in path.parts or str(path) != key:
@@ -139,6 +149,12 @@ def anchor(path, data):
             if not DOCKER_DIRECTIVE.match(line):
                 break
             count += 1
+    if p.suffix == ".go":
+        for line in lines:
+            if line.startswith((b"//go:build ", b"// +build ")) or (count and not line.strip()):
+                count += 1
+            else:
+                break
     if p.suffix == ".md" and lines and lines[0].strip() in (b"---", b"+++"):
         delimiter = lines[0].strip()
         endings = (delimiter, b"...") if delimiter == b"---" else (delimiter,)
@@ -181,13 +197,23 @@ def yaml_document_start(data, start):
     return start
 
 
+def license_prefixes(style, data):
+    canonical = header_for(style, data)
+    if style == "helm":
+        return (canonical, canonical.replace(b"\r\n", b" ").replace(b"\n", b" "))
+    if style == "hash":
+        newline = b"\r\n" if b"\r\n" in canonical else b"\n"
+        return (canonical, canonical[:-len(newline)])
+    return (canonical,)
+
+
 def yaml_license_prefix(data):
     start = len(codecs.BOM_UTF8) if data.startswith(codecs.BOM_UTF8) else 0
     for offset in (start, yaml_document_start(data, start)):
         for style in ("hash", "helm"):
-            prefix = header_for(style, data[offset:])
-            if data[offset:].startswith(prefix):
-                return offset, prefix
+            for prefix in license_prefixes(style, data[offset:]):
+                if data[offset:].startswith(prefix):
+                    return offset, prefix
     return start, b""
 
 
@@ -221,6 +247,8 @@ def has_header(data, offset, style):
             if line.strip() and not line.startswith(marker):
                 return False
         return False
+    if style == "helm":
+        return any(prefix.startswith(block) for block in license_prefixes(style, prefix))
     if style == "html":
         alternative = f"<!--\n{COPYRIGHT}\n{LICENSE}\n-->".encode("ascii")
         if prefix.startswith(alternative):
@@ -282,11 +310,40 @@ def file_bytes(root, name):
     return target.read_bytes(), mode
 
 
+def check_reviewed_symlink(root, name, rule, policy):
+    path = PurePosixPath(name)
+    target = root
+    for part in path.parts[:-1]:
+        target /= part
+        if target.is_symlink():
+            raise CoverageError("reviewed symlink parent must not be a symlink")
+    link = target / path.name
+    if not link.is_symlink():
+        raise CoverageError("reviewed symlink must remain a symlink")
+    destination = link.readlink().as_posix()
+    if PurePosixPath(destination).is_absolute() or posixpath.normpath(
+        str(path.parent / destination)
+    ) != rule["target"]:
+        raise CoverageError("symlink differs from its reviewed repository target")
+    data, _ = file_bytes(root, rule["target"])
+    coverage = classification(rule["target"], policy, data)
+    if coverage["category"] != "header" or insertion(
+        rule["target"], data, coverage["style"]
+    )[1]:
+        raise CoverageError("reviewed symlink target must have its own source header")
+
+
 def process(root, paths, policy, apply=False):
     records, changes = [], []
     for name in sorted(set(paths)):
         record = {"path": name}
         try:
+            rule = policy["files"].get(name, {})
+            if "target" in rule:
+                check_reviewed_symlink(root, name, rule, policy)
+                record.update(rule, status="covered-without-header")
+                records.append(record)
+                continue
             data, mode = file_bytes(root, name)
             record.update(classification(name, policy, data))
             if record["category"] == "header":

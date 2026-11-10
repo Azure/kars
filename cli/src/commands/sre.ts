@@ -9,8 +9,10 @@ import { inspectNamespaceOwnership } from "../lib/namespace-ownership.js";
 import { authorityCommand } from "./sre-authority.js";
 import { assertDestroySafe, assertSafeMutation, enroll, get, preview, registration, requireRegistrar, waitForAuthority } from "../lib/sre-authority.js";
 import { stageSource } from "../lib/sre-source.js";
-import { listSreHelmReleases } from "../lib/sre-helm.js";
+import { listSreHelmReleases, sreInferenceFlags } from "../lib/sre-helm.js";
 import { prepareCoreHelmSchemas, prepareCoreTemplateSchemas } from "../lib/core-helm-schemas.js";
+import { assertControllerMutationAllowed, PrivateRootUpgradeBlocked } from "../lib/private-root-upgrade-guard.js";
+import { parseSreFunding, planSreFunding, SreFundingError } from "../lib/sre-funding.js";
 
 const HELM_RELEASE_NAME = /^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]*[a-z0-9])?)*$/;
 
@@ -53,19 +55,27 @@ export function sreCommand(): Command {
     )
     .option(
       "--model <name>",
-      "Azure OpenAI deployment / model name for the SRE agent (defaults to gpt-5.4)",
+      "Deployment / model name on the SRE provider (preserves the existing value when omitted)",
     )
+    .option("--provider <tag>", "Configured inference provider tag for SRE (preserves the existing value when omitted)")
     .option(
       "--no-wait",
       "Don't wait for the sre sandbox to reach Running (default: wait)",
     )
+    .option("--lifetime-tokens <tokens>", "Explicit lifetime token ceiling for a genuinely new SRE source")
+    .option("--funding-expires-at <utc>", "Funding expiry in UTC, paired with --lifetime-tokens")
     .action(async (options: {
       release: string;
       namespace: string;
       context?: string;
       model?: string;
+      provider?: string;
       wait: boolean;
+      lifetimeTokens?: string;
+      fundingExpiresAt?: string;
     }) => {
+      let inferenceFlags = sreInferenceFlags(options);
+      const funding = parseSreFunding(options.lifetimeTokens, options.fundingExpiresAt);
       let chartPath: string;
       try {
         chartPath = requireBundledAsset("deploy/helm/kars");
@@ -123,6 +133,9 @@ export function sreCommand(): Command {
         }
       }
 
+      if (funding && mode !== "upgrade") {
+        throw new Error("Fresh SRE lifetime funding requires an existing Helm Core release with its broker configured");
+      }
       if (mode !== "install") {
         await inspectNamespaceOwnership((file, args, commandOptions) =>
           execa(file, [...(options.context ? ["--context", options.context] : []), ...args], commandOptions));
@@ -143,7 +156,11 @@ export function sreCommand(): Command {
         throw new Error("Stage the SRE authority prerequisite controller/APIs before installing SRE");
       }
       const enrolled = await registration(execute);
+      let fundingFlags: string[] = [];
+      let beforeFundingPublication: (() => Promise<void>) | undefined;
+      let afterFundingPublication: (() => Promise<void>) | undefined;
       if (enrolled) {
+        if (funding) throw new Error("Existing SRE authority cannot be re-funded or migrated by install");
         if (enrolled.spec?.controller?.namespace?.name !== options.namespace
             || enrolled.spec?.controller?.release !== options.release) {
           throw new Error("Canonical SRE is registered to another source/release; no privilege was granted");
@@ -152,19 +169,61 @@ export function sreCommand(): Command {
           throw new Error("Retired SRE authority must be explicitly re-enrolled with reviewed current UIDs before install");
         }
         await assertSafeMutation(execute);
+        if (enrolled.spec?.firstInstallFunding && inferenceFlags.length) {
+          const { stdout } = await execute("helm", ["get", "values", options.release,
+            "--namespace", options.namespace, "-o", "json"], { stdio: "pipe" });
+          inferenceFlags = sreInferenceFlags(options, JSON.parse(stdout));
+        }
       } else {
+        // Stage the same policy that the final release will use, not chart
+        // defaults that could temporarily expand its budget or change provider.
+        let releaseValues: string | undefined;
+        let fundingPlan: Awaited<ReturnType<typeof planSreFunding>> | undefined;
+        if (mode === "upgrade") {
+          const { stdout } = await execute("helm", ["get", "values", options.release,
+            "--namespace", options.namespace, "-o", "json"], { stdio: "pipe" });
+          const values: unknown = JSON.parse(stdout);
+          if (values !== null && (typeof values !== "object" || Array.isArray(values))) {
+            throw new Error("Helm returned invalid stored values; no SRE source was staged.");
+          }
+          const budget = values && typeof values === "object" && "inferenceBudget" in values
+            ? values.inferenceBudget : undefined;
+          if (!funding && budget && typeof budget === "object" && "enabled" in budget && budget.enabled === true) {
+            throw new SreFundingError("Fresh SRE in a governed Core release requires --lifetime-tokens and --funding-expires-at; no calendar-only fallback is authorized");
+          }
+          releaseValues = JSON.stringify(values ?? {});
+          if (funding) {
+            await assertControllerMutationAllowed(execute, options.namespace);
+            fundingPlan = await planSreFunding(execute, options.namespace, options.release, values, funding);
+          }
+        }
         const rendered = await execute("helm", ["template", options.release, chartPath,
           "--namespace", options.namespace, "--show-only", "templates/sre.yaml",
+          ...(releaseValues === undefined ? [] : ["--values", "-"]),
           "--set", "sre.enabled=true", "--set", "azure.workloadIdentity.clientId=dummy",
-          ...(options.model ? ["--set-string", `sre.model=${options.model}`] : [])], { stdio: "pipe" });
+          ...inferenceFlags],
+        { stdio: "pipe", ...(releaseValues === undefined ? {} : { input: releaseValues }) });
         const created = await stageSource(execute, rendered.stdout, options.namespace, options.release);
-        const spec = await preview(execute, options.namespace, options.release);
-        if (spec.legacyBindings.length) throw new Error("A legacy grant appeared during staging; explicit review is required");
-        if (spec.legacyConsumer) throw new Error("An SRE consumer appeared during staging; explicitly review its UID/resourceVersion before enrollment");
-        await enroll(execute, spec, {
-          sandboxUid: created.uid, namespaceUid: created.namespaceUid, binding: [],
-        }, false);
-        await waitForAuthority(execute, "Ready");
+        const completeEnrollment = async () => {
+          const spec = await preview(execute, options.namespace, options.release);
+          if (spec.legacyBindings.length) throw new Error("A legacy grant appeared during staging; explicit review is required");
+          if (spec.legacyConsumer) throw new Error("An SRE consumer appeared during staging; explicitly review its UID/resourceVersion before enrollment");
+          await enroll(execute, spec, {
+            sandboxUid: created.uid, namespaceUid: created.namespaceUid, binding: [],
+          }, false);
+          await waitForAuthority(execute, "Ready");
+        };
+        if (fundingPlan) {
+          const plan = fundingPlan;
+          fundingFlags = await plan.flags(created);
+          beforeFundingPublication = async () => { await plan.flags(created); };
+          afterFundingPublication = async () => {
+            await plan.verify(created);
+            await completeEnrollment();
+          };
+        } else {
+          await completeEnrollment();
+        }
       }
 
       const helmArgs =
@@ -209,7 +268,8 @@ export function sreCommand(): Command {
               // which sets this properly.
               "--set", "azure.workloadIdentity.clientId=dummy",
             ];
-      if (options.model) helmArgs.push("--set", `sre.model=${options.model}`);
+      helmArgs.push(...inferenceFlags);
+      helmArgs.push(...fundingFlags);
       if (options.context) helmArgs.push("--kube-context", options.context);
 
       const verbHuman =
@@ -244,13 +304,16 @@ export function sreCommand(): Command {
           );
         } else {
           await prepareCoreHelmSchemas(execa, helmArgs);
+          await beforeFundingPublication?.();
           await execa("helm", helmArgs, { stdio: "inherit" });
         }
-      } catch {
+      } catch (error) {
+        if (error instanceof PrivateRootUpgradeBlocked || error instanceof SreFundingError) console.error(chalk.red(error.message));
         console.error(chalk.red(`✗ helm ${verbHuman} failed`));
         process.exit(1);
       }
       console.log(chalk.green("✓ chart patched"));
+      await afterFundingPublication?.();
 
       if (options.wait) {
         const kctxArgs = options.context ? ["--context", options.context] : [];
@@ -322,7 +385,8 @@ export function sreCommand(): Command {
       try {
         await prepareCoreHelmSchemas(execa, helmArgs);
         await execa("helm", helmArgs, { stdio: "inherit" });
-      } catch {
+      } catch (error) {
+        if (error instanceof PrivateRootUpgradeBlocked) console.error(chalk.red(error.message));
         console.error(chalk.red("✗ helm upgrade failed"));
         process.exit(1);
       }

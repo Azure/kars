@@ -153,6 +153,12 @@ pub enum DispatchError {
     /// resource exhaustion, etc.). Returns -32000 (server error).
     #[error("tool `{tool}` execution failed: {reason}")]
     ExecutionFailed { tool: String, reason: String },
+    #[error("tool `{tool}` denied by {policy_kind}: {reason}")]
+    PolicyDenied {
+        tool: String,
+        policy_kind: String,
+        reason: String,
+    },
 }
 
 /// Strategy injected by the route handler: how to invoke a named
@@ -383,6 +389,26 @@ pub fn handle_tools_call(req: &Request, dispatcher: &dyn ToolDispatcher) -> Resp
             }),
             id: req.id.clone(),
         },
+        Err(DispatchError::PolicyDenied {
+            tool,
+            policy_kind,
+            reason,
+        }) => policy_denied(req, tool, policy_kind, reason),
+    }
+}
+
+fn policy_denied(req: &Request, tool: String, policy_kind: String, reason: String) -> Response {
+    Response {
+        jsonrpc: "2.0".into(),
+        result: None,
+        id: req.id.clone(),
+        error: Some(JsonRpcError {
+            code: -32003,
+            message: "Tool denied by policy".into(),
+            data: Some(
+                serde_json::json!({"tool": tool, "decision": "Blocked", "byPolicyKind": policy_kind, "reason": reason}),
+            ),
+        }),
     }
 }
 
@@ -497,6 +523,11 @@ pub async fn handle_tools_call_async(
             }),
             id: req.id.clone(),
         },
+        Err(DispatchError::PolicyDenied {
+            tool,
+            policy_kind,
+            reason,
+        }) => policy_denied(req, tool, policy_kind, reason),
     }
 }
 
@@ -790,6 +821,46 @@ mod tests {
                 reason: "synthetic".into(),
             })
         }
+    }
+
+    struct MemoryDenyDispatcher(ToolCatalog);
+    impl ToolDispatcher for MemoryDenyDispatcher {
+        fn catalog(&self) -> &ToolCatalog {
+            &self.0
+        }
+        fn invoke(&self, name: &str, _: &Value) -> Result<ToolCallOutput, DispatchError> {
+            Err(DispatchError::PolicyDenied {
+                tool: name.into(),
+                policy_kind: "KarsMemory".into(),
+                reason: "memory scope is not authorized".into(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn memory_policy_denial_sync_and_async_encode_the_same_error() {
+        let dispatcher = MemoryDenyDispatcher(
+            ToolCatalog::new(vec![ToolDefinition {
+                name: "memory".into(),
+                description: "memory".into(),
+                input_schema: serde_json::json!({}),
+            }])
+            .unwrap(),
+        );
+        let request = req(
+            "tools/call",
+            Some(serde_json::json!({"name":"memory","arguments":{}})),
+        );
+        let sync = handle_tools_call(&request, &dispatcher);
+        let asynchronous = handle_tools_call_async(&request, &SyncToAsync::new(dispatcher)).await;
+        assert_eq!(
+            serde_json::to_value(&sync).unwrap(),
+            serde_json::to_value(&asynchronous).unwrap()
+        );
+        assert_eq!(sync.id, request.id);
+        let error = sync.error.unwrap();
+        assert_eq!(error.code, -32003);
+        assert_eq!(error.data.unwrap()["byPolicyKind"], "KarsMemory");
     }
 
     #[test]

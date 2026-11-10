@@ -4,9 +4,9 @@
 "use client";
 
 // kars Bridge — governed emergency-stop ("red button"). One click halts a
-// running mission: the BFF un-launches it (the controller tears down the
-// sandbox, removing the agent from the mesh so it can no longer receive or
-// answer delegated work) and records the halt as a governed decision. The
+// launched mission: the BFF records the stop gate and the controller tears
+// down UID-owned execution throughout its Task tree, without removing records.
+// Scheduling cannot undo the halt. The
 // mission record, deliverable, and audit trail are retained — this is a STOP,
 // not a delete. No major agent platform ships a governed kill.
 
@@ -48,7 +48,7 @@ export function HaltButton({ ns, task }: { ns: string; task: string }) {
         type="button"
         onClick={() => setOpen(true)}
         className="inline-flex items-center gap-1.5 rounded-lg border border-danger/40 bg-danger/[0.06] px-3 py-1.5 text-xs font-semibold text-danger transition hover:bg-danger/10"
-        title="Governed emergency-stop — halt this running agent and record the decision"
+        title="Governed emergency-stop — halt this Mission and its descendant agents"
       >
         <span aria-hidden>⏹</span> Halt agent
       </button>
@@ -59,8 +59,10 @@ export function HaltButton({ ns, task }: { ns: string; task: string }) {
     <div className="rounded-xl border border-danger/40 bg-danger/[0.05] p-4">
       <p className="text-sm font-semibold text-danger">Halt this mission?</p>
       <p className="mt-1 text-xs text-foreground-muted">
-        The agent&apos;s sandbox is torn down immediately — it leaves the mesh and stops all work.
-        The deliverable, trace, and receipt are kept. The halt is recorded as a governed decision.
+        This permanently halts this Mission and its descendant agents. You cannot relaunch
+        this Mission or request another revision; create a new Mission to continue the work.
+        Cleanup is asynchronous. Deliverables, traces, receipts, and accounting are kept.
+        The halt is recorded as a governed decision.
       </p>
       <input
         type="text"

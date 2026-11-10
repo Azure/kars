@@ -21,6 +21,7 @@ export interface GuardRetirementReview {
 
 export async function captureGuardRetirement(
   execute: Execute, activation: PrivateActivation, grant: unknown,
+  namespaceSnapshots?: readonly Record<string, Json>[],
 ): Promise<GuardRetirementReview> {
   const key = `${PREFIX}${reviewed(grant).uid}`;
   const writers = at(grant, "spec", "writers");
@@ -39,7 +40,10 @@ export async function captureGuardRetirement(
     const object = await read(execute, "namespace", name);
     const identity = reviewed(object);
     const expected = activation.namespaces.find(scope => scope.namespace.name === name)?.namespace;
-    if (expected && (identity.uid !== expected.uid || identity.resourceVersion !== expected.resourceVersion)) throw new Error(failure);
+    const snapshot = namespaceSnapshots?.find(value => at(value, "metadata", "name") === name);
+    if (expected && (identity.uid !== expected.uid || (snapshot
+      ? comparable(snapshot) !== comparable(object)
+      : identity.resourceVersion !== expected.resourceVersion))) throw new Error(failure);
     const previous = Array.isArray(previousScopes) ? previousScopes.find(scope => at(scope, "namespace", "name") === name) : undefined;
     if (previous && at(previous, "namespace", "uid") !== identity.uid) throw new Error(failure);
     const finalizers = at(object, "metadata", "finalizers") ?? [];
@@ -53,7 +57,11 @@ export async function captureGuardRetirement(
       || !(at(object, "spec", "finalizers") as Json[]).includes("kubernetes"))) throw new Error(failure);
     namespaces.push({ identity, object, guarded });
   }
-  return { activation: structuredClone(activation), key, namespaces };
+  const captured = structuredClone(activation);
+  for (const scope of captured.namespaces) {
+    scope.namespace = namespaces.find(snapshot => snapshot.identity.uid === scope.namespace.uid)!.identity;
+  }
+  return { activation: captured, key, namespaces };
 }
 
 function comparable(value: Record<string, Json>, removed = false): string {
@@ -83,6 +91,7 @@ function released(snapshot: NamespaceSnapshot, key: string): Record<string, Json
 export async function refreshGuardRetirement(
   execute: Execute, review: GuardRetirementReview,
   settle?: (activation: PrivateActivation) => Promise<PrivateActivation>,
+  validate: (execute: Execute, activation: PrivateActivation) => Promise<void> = validatePrivateActivation,
 ): Promise<PrivateActivation | undefined> {
   const activation = structuredClone(review.activation);
   let pending = false;
@@ -90,8 +99,11 @@ export async function refreshGuardRetirement(
     const current = await read(execute, "namespace", snapshot.identity.name);
     const identity = reviewed(current);
     if (identity.uid !== snapshot.identity.uid) throw new Error(failure);
-    if (canonical(current) === canonical(snapshot.object)) {
+    if (canonical(current) === canonical(snapshot.object)
+      || (!snapshot.guarded && comparable(current) === comparable(snapshot.object))) {
       pending ||= snapshot.guarded;
+      const scope = activation.namespaces.find(scope => scope.namespace.name === identity.name);
+      if (scope) scope.namespace.resourceVersion = identity.resourceVersion;
       continue;
     }
     if (!snapshot.guarded || identity.resourceVersion === snapshot.identity.resourceVersion
@@ -101,6 +113,6 @@ export async function refreshGuardRetirement(
   }
   if (pending) return undefined;
   const settled = settle ? await settle(activation) : activation;
-  await validatePrivateActivation(execute, settled);
+  await validate(execute, settled);
   return settled;
 }

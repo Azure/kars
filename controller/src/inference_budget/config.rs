@@ -18,6 +18,7 @@ pub struct Settings {
     pub address: String,
     pub tls_secret: String,
     pub router_image_digest: String,
+    pub first_install_router_digest: Option<String>,
 }
 
 impl Settings {
@@ -40,24 +41,44 @@ impl Settings {
                 .map_err(|_| BudgetError::Contract)?,
             router_image_digest: std::env::var("KARS_INFERENCE_BUDGET_ROUTER_DIGEST")
                 .map_err(|_| BudgetError::Contract)?,
+            first_install_router_digest: match std::env::var(
+                "KARS_INFERENCE_BUDGET_FIRST_INSTALL_ROUTER_DIGEST",
+            ) {
+                Ok(digest) => Some(digest),
+                Err(std::env::VarError::NotPresent) => None,
+                Err(_) => return Err(BudgetError::Contract.into()),
+            },
         };
         if !crate::inference_budget_contract::valid_label(&settings.accounting_namespace)
             || !crate::inference_budget_contract::valid_name(&settings.catalog_name)
             || !crate::inference_budget_contract::valid_name(&settings.tls_secret)
             || settings.address.parse::<std::net::SocketAddr>().is_err()
             || !crate::inference_budget_contract::valid_digest(&settings.router_image_digest)
+            || settings
+                .first_install_router_digest
+                .as_deref()
+                .is_some_and(|digest| !crate::inference_budget_contract::valid_digest(digest))
         {
             return Err(BudgetError::Contract.into());
         }
         Ok(Some(settings))
     }
 
-    pub async fn catalog(
-        &self,
-        client: &Client,
-        now: i64,
-    ) -> Result<ConfiguredCatalog, StoreError> {
-        super::admission::verify(client, &self.accounting_namespace).await?;
+    pub(super) fn matches_first_install_router(&self, original: Option<&str>) -> bool {
+        // The sealed original validates the funding intent, never the live router.
+        // Authentication continues to use router_image_digest exclusively.
+        original.is_some_and(|digest| {
+            crate::inference_budget_contract::valid_digest(digest)
+                && crate::inference_budget_contract::valid_digest(&self.router_image_digest)
+                && digest
+                    == self
+                        .first_install_router_digest
+                        .as_deref()
+                        .unwrap_or(&self.router_image_digest)
+        })
+    }
+
+    pub(super) async fn operator_config(&self, client: &Client) -> Result<ConfigMap, StoreError> {
         let api: Api<ConfigMap> = Api::namespaced(client.clone(), &self.accounting_namespace);
         let value = api
             .get(&self.catalog_name)
@@ -84,6 +105,16 @@ impl Settings {
         {
             return Err(BudgetError::Contract.into());
         }
+        Ok(value)
+    }
+
+    pub async fn catalog(
+        &self,
+        client: &Client,
+        now: i64,
+    ) -> Result<ConfiguredCatalog, StoreError> {
+        super::admission::verify(client, &self.accounting_namespace).await?;
+        let value = self.operator_config(client).await?;
         let encoded = value
             .data
             .as_ref()
@@ -156,5 +187,70 @@ impl Settings {
         }
         let digest = crate::providers::signing::sha256_hex(ca.as_bytes());
         Ok((ca.clone(), digest))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Settings;
+
+    fn settings(selected: &str, baseline: Option<&str>) -> Settings {
+        Settings {
+            accounting_namespace: "kars-system".into(),
+            catalog_name: "contracts".into(),
+            address: "0.0.0.0:9447".into(),
+            tls_secret: "budget-tls".into(),
+            router_image_digest: selected.into(),
+            first_install_router_digest: baseline.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn first_install_router_requires_the_original_without_an_explicit_baseline() {
+        let original = format!("sha256:{}", "a".repeat(64));
+        let refreshed = format!("sha256:{}", "b".repeat(64));
+        assert!(settings(&original, None).matches_first_install_router(Some(&original)));
+        assert!(!settings(&refreshed, None).matches_first_install_router(Some(&original)));
+    }
+
+    #[test]
+    fn first_install_router_refresh_preserves_the_sealed_original_and_selected_identity() {
+        let original = format!("sha256:{}", "a".repeat(64));
+        for digit in ['a', 'b', 'c'] {
+            let selected = format!("sha256:{}", digit.to_string().repeat(64));
+            let refreshed = settings(&selected, Some(&original));
+            assert!(refreshed.matches_first_install_router(Some(&original)));
+            assert_eq!(refreshed.router_image_digest, selected);
+            assert_eq!(
+                refreshed.first_install_router_digest.as_deref(),
+                Some(original.as_str())
+            );
+            if selected != original {
+                assert!(!refreshed.matches_first_install_router(Some(&selected)));
+                assert!(
+                    !settings(&selected, Some(&selected))
+                        .matches_first_install_router(Some(&original))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn first_install_router_rejects_missing_malformed_and_contradictory_bindings() {
+        let original = format!("sha256:{}", "a".repeat(64));
+        let foreign = format!("sha256:{}", "f".repeat(64));
+        for invalid in ["", "latest", "sha256:abc", foreign.as_str()] {
+            assert!(
+                !settings(&original, Some(invalid)).matches_first_install_router(Some(&original))
+            );
+        }
+        for invalid in [None, Some(""), Some("latest"), Some("sha256:abc")] {
+            assert!(!settings(&original, Some(&original)).matches_first_install_router(invalid));
+        }
+        for invalid in ["", "latest", "sha256:abc"] {
+            assert!(
+                !settings(invalid, Some(&original)).matches_first_install_router(Some(&original))
+            );
+        }
     }
 }

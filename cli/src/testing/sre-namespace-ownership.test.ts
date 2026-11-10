@@ -2,13 +2,13 @@
 // Licensed under the MIT License.
 
 import { createServer } from "node:http";
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execa } from "execa";
 import { describe, expect, it } from "vitest";
-import { parseAllDocuments } from "yaml";
+import { parse, parseAllDocuments } from "yaml";
 
 const chart = fileURLToPath(new URL("../../../deploy/helm/kars", import.meta.url));
 interface Resource {
@@ -18,6 +18,7 @@ interface Resource {
     labels?: Record<string, string>; annotations?: Record<string, string>;
   };
   automountServiceAccountToken?: boolean;
+  spec?: { tokenBudget?: { perRequestTokens: number; dailyTokens: number } };
 }
 function documents(output: string): Resource[] {
   return parseAllDocuments(output).map(document => {
@@ -45,9 +46,13 @@ function legacy(kind: string, name: string, release = "kars"): Resource {
 function fixtureChart(directory: string): string {
   const target = join(directory, "chart");
   mkdirSync(join(target, "templates"), { recursive: true });
-  for (const file of ["Chart.yaml", "values.yaml", "templates/sre.yaml"]) {
+  writeFileSync(join(target, "Chart.yaml"), "apiVersion: v2\nname: kars\nversion: 0.1.0\n");
+  for (const file of ["values.yaml", "templates/sre.yaml", "templates/_sre-resources.tpl"]) {
     copyFileSync(join(chart, file), join(target, file));
   }
+  const values = parse(readFileSync(join(target, "values.yaml"), "utf8"));
+  values.controller.inferenceDefaults = { provider: "azure-openai", model: "test-model" };
+  writeFileSync(join(target, "values.yaml"), JSON.stringify(values));
   return target;
 }
 
@@ -159,6 +164,26 @@ describe("SRE namespace ownership (actual Helm lookup against an isolated test A
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
+  }, 30_000);
+
+  it.each([
+    ["kind-beta", { unboundedTokens: true }, undefined],
+    ["production", { unboundedTokens: true }, { perRequestTokens: 32000, dailyTokens: 2000000 }],
+    ["kind-beta", { tokens: 1000, expiresAt: "2999-01-01T00:00:00Z" }, { perRequestTokens: 32000, dailyTokens: 2000000 }],
+    ["production", {}, { perRequestTokens: 32000, dailyTokens: 2000000 }],
+  ])("renders token ceilings only outside explicitly unbounded Kind: %s %j", async (profile, funding, expected) => {
+    const directory = mkdtempSync(join(tmpdir(), "kars-sre-budget-"));
+    try {
+      const { stdout } = await execa("helm", [
+        "template", "kars", fixtureChart(directory), "--namespace", "kars-system",
+        "--dry-run=client", "--set", "sre.enabled=true", "--show-only", "templates/sre.yaml",
+        "--set-string", `global.installationProfile=${profile}`, "--set-json", `sre.firstInstallFunding=${JSON.stringify(funding)}`,
+      ], { timeout: 20_000 });
+      const policy = documents(stdout).find(resource => resource.kind === "InferencePolicy");
+      expect(policy).toBeDefined();
+      expect(policy!.spec!.tokenBudget).toEqual(expected);
+      if (expected === undefined) expect(policy!.spec).not.toHaveProperty("tokenBudget");
+    } finally { rmSync(directory, { recursive: true, force: true }); }
   }, 30_000);
 
   it.each([true, false])("retains a legacy namespace without deleting its data when enabled=%s", async enabled => {

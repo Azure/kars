@@ -14,14 +14,15 @@ const state = globals[KEY] ??= { initialized: false, protocol: PROTOCOL, nextId:
 interface Response { status: number; headers: http.IncomingHttpHeaders; body: unknown }
 interface Result { content: Array<{ type: "text"; text: string }>; isError?: boolean }
 interface Tool { name: string; label: string; description: string; parameters: Record<string, unknown>;
-  execute(id: string, args?: Record<string, unknown>): Promise<Result> }
+  execute(id: string, args?: Record<string, unknown>, signal?: AbortSignal): Promise<Result> }
 
-function request(payload: Record<string, unknown>, server?: string): Promise<Response> {
+function request(payload: Record<string, unknown>, server?: string, signal?: AbortSignal): Promise<Response> {
+  signal?.throwIfAborted();
   const body = JSON.stringify(payload);
   if (Buffer.byteLength(body) > MAX_BYTES) return Promise.reject(new Error("MCP request exceeds its byte limit"));
   return new Promise((resolve, reject) => {
     const req = http.request({
-      hostname: "127.0.0.1", port: 8443, path: "/mcp", method: "POST",
+      hostname: "127.0.0.1", port: 8443, path: "/mcp", method: "POST", signal,
       headers: { accept: "application/json, text/event-stream", "content-type": "application/json",
         "content-length": Buffer.byteLength(body), "mcp-protocol-version": state.protocol,
         ...(state.session ? { "mcp-session-id": state.session } : {}),
@@ -64,12 +65,12 @@ function rpc(response: Response, id: number): Record<string, unknown> {
   return body.result as Record<string, unknown>;
 }
 
-async function initialize(server?: string): Promise<void> {
+async function initialize(server?: string, signal?: AbortSignal): Promise<void> {
   state.session = undefined;
   state.protocol = PROTOCOL;
   const id = state.nextId++;
   const response = await request({ jsonrpc: "2.0", id, method: "initialize",
-    params: { protocolVersion: PROTOCOL, capabilities: {}, clientInfo: { name: "kars-runtime-openclaw", version: "0.1.0" } } }, server);
+    params: { protocolVersion: PROTOCOL, capabilities: {}, clientInfo: { name: "kars-runtime-openclaw", version: "0.1.0" } } }, server, signal);
   const result = rpc(response, id);
   if (typeof result.protocolVersion !== "string"
     || !["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"].includes(result.protocolVersion)) {
@@ -80,12 +81,14 @@ async function initialize(server?: string): Promise<void> {
     || session.length > 1024 || /[^\x21-\x7e]/.test(session))) throw new Error("MCP session identifier is invalid");
   state.session = session;
   state.protocol = result.protocolVersion;
-  const notification = await request({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }, server);
+  const notification = await request({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }, server, signal);
   if (notification.status < 200 || notification.status >= 300) throw new Error(`MCP initialization HTTP ${notification.status}`);
   state.initialized = true;
 }
 
-export async function invokeMcp(method: "tools/list" | "tools/call", params: Record<string, unknown>, server?: string): Promise<Record<string, unknown>> {
+export async function invokeMcp(method: "tools/list" | "tools/call", params: Record<string, unknown>, server?: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
+  signal?.throwIfAborted();
+  if (server === "") server = undefined;
   if (server !== undefined && (typeof server !== "string" || !server.length || server.length > 253 || !/^[a-z0-9.-]+$/.test(server))) {
     throw new Error("Invalid MCP server scope");
   }
@@ -95,9 +98,10 @@ export async function invokeMcp(method: "tools/list" | "tools/call", params: Rec
   const run = async () => {
     try {
       if (Date.now() >= deadline) throw new Error("MCP bridge queue timed out");
-      if (!state.initialized) await initialize(server);
+      signal?.throwIfAborted();
+      if (!state.initialized) await initialize(server, signal);
       const id = state.nextId++;
-      const response = await request({ jsonrpc: "2.0", id, method, params }, server);
+      const response = await request({ jsonrpc: "2.0", id, method, params }, server, signal);
       // A failed call is never replayed. A later explicit caller may open a
       // new session after a definite transport-level session rejection.
       if (response.status === 404 || response.status === 400) state.initialized = false;
@@ -117,11 +121,11 @@ function text(value: unknown, failed = false): Result {
 export const MCP_BRIDGE_TOOLS: Tool[] = [
   {
     name: "kars_mcp_list", label: "Kars MCP Tool List",
-    description: "List qualified MCP tools mounted in this sandbox. Optional server scope narrows the catalog.",
+    description: "List qualified MCP tools mounted in this sandbox. Omit server or use an empty string for the catalog; a nonempty server scope narrows it.",
     parameters: { type: "object", properties: { server: { type: "string" } } },
-    async execute(_id, args = {}) {
+    async execute(_id, args = {}, signal) {
       try {
-        const result = await invokeMcp("tools/list", {}, args.server as string | undefined);
+        const result = await invokeMcp("tools/list", {}, args.server as string | undefined, signal);
         if (!Array.isArray(result.tools)) throw new Error("MCP catalog omitted tools");
         return text(result);
       } catch (error) { return text({ error: error instanceof Error ? error.message : "MCP discovery failed" }, true); }
@@ -129,15 +133,15 @@ export const MCP_BRIDGE_TOOLS: Tool[] = [
   },
   {
     name: "kars_mcp_call", label: "Kars MCP Tool Call",
-    description: "Invoke the exact MCP tool name returned by kars_mcp_list. Calls are never automatically replayed.",
+    description: "Invoke the exact MCP tool name returned by kars_mcp_list. Omit server or use an empty string unless narrowing to a nonempty server scope. Calls are never automatically replayed.",
     parameters: { type: "object", properties: { name: { type: "string" }, arguments: { type: "object" }, server: { type: "string" } }, required: ["name"] },
-    async execute(_id, args = {}) {
+    async execute(_id, args = {}, signal) {
       if (typeof args.name !== "string" || !args.name.trim()) return text({ error: "name is required" }, true);
       const argumentsValue = args.arguments ?? {};
       if (typeof argumentsValue !== "object" || argumentsValue === null || Array.isArray(argumentsValue)) {
         return text({ error: "arguments must be an object" }, true);
       }
-      try { return text(await invokeMcp("tools/call", { name: args.name, arguments: argumentsValue }, args.server as string | undefined)); }
+      try { return text(await invokeMcp("tools/call", { name: args.name, arguments: argumentsValue }, args.server as string | undefined, signal)); }
       catch (error) { return text({ error: error instanceof Error ? error.message : "MCP invocation failed" }, true); }
     },
   },

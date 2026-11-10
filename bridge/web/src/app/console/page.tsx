@@ -5,11 +5,12 @@
 // Sandbox phase counts, the degraded list, and substrate scope. Operator
 // truth: zeros are legitimate and useful here (operators count resources).
 
-import Link from "next/link";
+import Link from "@/components/navigation-link";
 import { HonestState } from "@/components/honest-state";
 import { Icon } from "@/components/icon";
 import { listSandboxes, getInsights, listEgress, getOrchestrator, listSreActions } from "@/lib/bff";
-import { headlampUrl } from "@/lib/config";
+import { headlampSsoEnabled, headlampUrl } from "@/lib/config";
+import { headlampLink } from "@/lib/headlamp";
 import { formatUptime } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
@@ -50,7 +51,9 @@ export default async function FleetHealth() {
   }, {});
   const degraded = sandboxes.filter((s) => s.phase === "Degraded" || s.phase === "Failed");
   const egressPending = egress?.filter((e) => e.phase === "Pending").length ?? 0;
-  const headlamp = headlampUrl();
+  const configuredHeadlamp = headlampUrl();
+  const headlamp = configuredHeadlamp && headlampSsoEnabled()
+    ? headlampLink(configuredHeadlamp, "/", true) : configuredHeadlamp;
 
   return (
     <div className="space-y-6">

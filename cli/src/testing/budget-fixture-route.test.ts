@@ -123,6 +123,34 @@ describe("budget named-provider fixture and private readiness diagnostics", () =
     expect(harness).toContain("assert(denial.matchesContract");
     expect(harness).toContain('assert.equal((await request(provider, "/count")).value.count, count)');
   });
+  it("requires the public non-retryable exhaustion contract, not a bare 400 or broker 429", () => {
+    const secret = "DO-NOT-EXPORT-PRIVATE-REFUSAL";
+    const error = { code: "inference_budget_exhausted", type: "invalid_request_error", message: secret };
+    const response = { status: 400, shouldRetry: "false", value: { error } };
+    expect(route.budgetExhaustionFact(response)).toEqual({
+      stage: "governed-budget-exhaustion", httpStatus: 400, matchesContract: true,
+    });
+    for (const invalid of [
+      undefined, { ...response, status: 429 }, { ...response, status: 503 },
+      { ...response, shouldRetry: undefined }, { ...response, shouldRetry: "true" },
+      { ...response, value: secret }, { ...response, status: secret },
+      ...[
+        { ...error, code: "inference_budget_capacity" }, { ...error, code: secret },
+        { ...error, type: "inference_budget_exhausted" }, { ...error, message: " " },
+        { ...error, message: undefined },
+      ].map(error => ({ ...response, value: { error } })),
+    ]) {
+      const fact = route.budgetExhaustionFact(invalid);
+      expect(fact.matchesContract).toBe(false);
+      expect(JSON.stringify(fact)).not.toContain(secret);
+    }
+    const harness = readFileSync(new URL("../../../tests/e2e/inference-budget-enforcement.mjs", import.meta.url), "utf8");
+    expect(harness).toContain('shouldRetry: response.headers.get("x-should-retry")');
+    expect(harness).toContain("[200, 200, 400]");
+    expect(harness).toContain("assertExhausted(results.find(result => result.status !== 200))");
+    expect(harness).toContain('assertExhausted(await request(tokenRight.url, "/v1/chat/completions", message))');
+    expect(harness).not.toContain("[200, 200, 429]");
+  });
   it("reports actual UID and live-template mismatches as booleans without workload inputs", () => {
     const router = { name: "inference-router", image: "router@sha256:fixture",
       env: [{ name: "KARS_INFERENCE_BUDGET_BINDING", value: "PRIVATE-BINDING" }], args: ["PRIVATE-ARGV"] };

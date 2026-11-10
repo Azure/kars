@@ -27,8 +27,10 @@ export function missionBeat(opts: {
   executionPhase: string | null;
   hasResult: boolean;
   blocked?: boolean;
+  executionStarted?: boolean;
 }): JourneyBeat {
   if (opts.hasResult) return "deliver";
+  if (opts.executionStarted) return "run";
   if (opts.executionPhase === "Running") return "run";
   if (opts.executionPhase === "Launching" || opts.executionPhase === "Pending") return "build";
   if (opts.launched) return "run";
@@ -37,11 +39,8 @@ export function missionBeat(opts: {
 
 /** Map a standing team's state to the current beat (teams live mostly in Run). */
 export function teamBeat(opts: { paused: boolean; everRan: boolean }): JourneyBeat {
-  // A team paused AFTER it has run is still a Run-phase unit that's simply
-  // hibernating — surface it on "run" (the caller passes `blocked` to render
-  // the distinct paused treatment) rather than rewinding it to "review", which
-  // wrongly implied a team with 20+ delivered runs was still awaiting review.
-  // Only a team paused BEFORE it ever launched legitimately sits pre-run.
+  // Scheduling pause does not suspend an active run or rewind its journey.
+  // Only a team that has never launched remains at the pre-run review beat.
   if (opts.paused) return opts.everRan ? "run" : "review";
   return opts.everRan ? "run" : "build";
 }
@@ -64,9 +63,7 @@ export function JourneyRail({
         {JOURNEY_BEATS.map((b, i) => {
           const state = i < idx ? "done" : i === idx ? "current" : "upcoming";
           const isBlocked = i === idx && blocked;
-          // Paused is a HEALTHY resting state (a hibernating standing team), not
-          // an error — render it as a muted "on hold" beat, distinct from the
-          // red `blocked` attention state.
+          // Scheduling pause is not an error and current work may still run.
           const isPaused = i === idx && paused && !isBlocked;
           return (
             <li key={b.id} className="flex min-w-0 flex-1 items-center gap-1">
@@ -113,7 +110,7 @@ export function JourneyRail({
                       {state === "current" && isBlocked
                         ? "Needs your attention"
                         : isPaused
-                          ? "Paused — resumes on Run now"
+                          ? "Scheduling paused"
                           : b.hint}
                     </span>
                   )}

@@ -20,6 +20,10 @@ function addedFieldsAbsent(before: ObjectMap, after: ObjectMap, data: unknown, p
   if (typeof data !== "object") return;
   const object = data as ObjectMap;
   for (const [name, next] of Object.entries(after.properties ?? {})) {
+    if (!Object.hasOwn(before.properties ?? {}, name) && Object.hasOwn(next as ObjectMap, "default")) {
+      schemaField(`${path}/${name}`.split("/").slice(1).join("/"));
+      throw new Error(`Target default would change existing data at ${path}/${name}; explicit data migration is required`);
+    }
     if (!Object.hasOwn(object, name)) continue;
     if (!Object.hasOwn(before.properties ?? {}, name)) {
       schemaField(`${path}/${name}`.split("/").slice(1).join("/"));
@@ -79,6 +83,11 @@ export async function qualifyMigrationData(
     bytes += Buffer.byteLength(canonicalSchema(object));
     if (bytes > 8 * 1024 * 1024) throw new Error("Migration data review exceeds its 8 MiB bound");
     addedFieldsAbsent(before, after, object, object.kind);
+    if (object.kind === "KarsMemory" && after.properties?.spec?.properties?.sharedScopes
+      && typeof object.spec?.scope === "string" && object.spec.scope.split("/").some((part: string) => part === "." || part === "..")) {
+      schemaField("spec/scope");
+      throw new Error("Existing memory scope violates the target exact-partition contract; explicit data migration is required");
+    }
     if (object.kind === "KarsSandbox" && object.spec?.credentialsRef
       && (typeof object.spec.credentialsRef.name !== "string"
         || !/^kars-credential-source-[a-z0-9][a-z0-9-]*$/.test(object.spec.credentialsRef.name))) {

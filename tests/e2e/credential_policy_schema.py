@@ -3,7 +3,9 @@
 
 """Bounded hosted Kind regression for credential authority and policy repairs.
 
-Uses disposable admin expression fixtures, not controller bearer authentication.
+Renders the supported kars release in kars-system, then scopes policy bindings to
+owned disposable namespaces without rewriting validation expressions or disabling
+Core preflight. Uses admin fixtures, not controller bearer authentication.
 Controlled Task status is NOT proof of workload quiescence. No controller, Pod,
 public Service or Ingress is installed. Gateway API rules are preserved but their
 CRDs are absent and those kinds are not exercised. Secret wire representations
@@ -34,6 +36,8 @@ POLICIES = {
     "rebind": "kars-credential-rebind-authority",
     "exposure": "kars-no-public-router-exposure",
     "authority": "kars-credential-grant-authority",
+    **{f"github-authority-{group}": f"kars-credential-github-authority-{group}"
+       for group in range(4)},
 }
 TEMPLATES = ("credential-store-admission.yaml", "credential-rebind-admission.yaml",
              "admission-no-public-router-exposure.yaml", "crd-karscredentialgrant.yaml",
@@ -125,7 +129,8 @@ def select_shipped(raw):
         validations = spec.get("validations", [])
         require(policy.get("apiVersion") == "admissionregistration.k8s.io/v1"
                 and spec.get("failurePolicy") == "Fail" and len(bindings) == 1
-                and len(validations) == {"store": 1, "rebind": 3, "exposure": 3, "authority": 4}[key]
+                and len(validations) == {"store": 1, "rebind": 3, "exposure": 3, "authority": 3,
+                                        **{f"github-authority-{group}": 8 for group in range(4)}}[key]
                 and all(isinstance(v.get("expression"), str) and v["expression"].strip()
                         and isinstance(v.get("message"), str) and v["message"]
                         and v.get("reason", "Invalid") in ("Invalid", "Forbidden")
@@ -136,9 +141,9 @@ def select_shipped(raw):
     return crds, result
 
 
-def render(root, namespace, version):
-    args = ["helm", "template", "credential-policy-proof", str(root / "deploy/helm/kars"),
-            "--namespace", namespace, "--kube-version", version]
+def render(root, version):
+    args = ["helm", "template", "kars", str(root / "deploy/helm/kars"),
+            "--namespace", "kars-system", "--kube-version", version]
     for template in TEMPLATES:
         args += ["--show-only", "templates/" + template]
     yaml = command("credential-policy-render", args, root=root)
@@ -157,16 +162,8 @@ class Fixtures(shared.Owned):
             raise Failure(case, error.code, "native-error") from None
 
     def cleanup(self):
-        # A replaced child must also protect its containing namespace/CRD from
-        # cascading deletion. The shared helper UID-fences every GET and DELETE.
-        leaves, parents = shared.Owned(self.port), shared.Owned(self.port)
-        for resource in self.resources:
-            parent = resource[0].startswith(CRDS + "/") or (
-                resource[0].startswith("/api/v1/namespaces/") and resource[0].count("/") == 4)
-            (parents if parent else leaves).resources.append(resource)
         try:
-            leaves.cleanup()
-            parents.cleanup()
+            super().cleanup()
         except shared.Failure as error:
             raise Failure("cleanup", error.code) from None
 
@@ -459,7 +456,7 @@ def prove_exposure(port, namespace, other, policy, results):
 
 def exercise(root, port, version, token, results):
     namespace, other = "kars-policy-cel-" + token, "kars-policy-cel-" + token + "-normal"
-    crds, shipped = render(root, namespace, version)
+    crds, shipped = render(root, version)
     owned = Fixtures(port)
     try:
         no_custom_controllers(port)

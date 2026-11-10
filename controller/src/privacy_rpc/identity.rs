@@ -69,12 +69,8 @@ pub(super) async fn admission(client: &Client) -> Result<(), String> {
                             .is_some_and(|v| !v.is_empty())
                     })
             })
-            || binding.spec.as_ref().is_none_or(|s| {
-                s.policy_name.as_deref() != Some(name)
-                    || s.validation_actions
-                        .as_ref()
-                        .is_none_or(|a| !a.iter().any(|v| v == "Deny"))
-            })
+            || binding.spec.policy_name != name
+            || !binding.spec.validation_actions.iter().any(|v| v == "Deny")
         {
             return Err("Privacy RPC admission is not currently enforced".into());
         }

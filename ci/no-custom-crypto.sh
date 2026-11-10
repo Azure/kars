@@ -95,6 +95,14 @@ mapfile -t changed < <(
 fail=0
 for f in "${changed[@]}"; do
   [ -z "$f" ] && continue
+  # This exact regression signs AGT proofs with ed25519-dalek, never in production.
+  if [[ "$f" == 'inference-router/src/routes/mesh_identity_tests.rs' ]]; then
+    if ! grep -Fxq '#![cfg(test)]' "$f"; then
+      echo "fail: $f must remain a test-only module" >&2
+      fail=1
+    fi
+    continue
+  fi
   # skip allowlisted paths
   skip=0
   for a in "${ALLOW_PATHS[@]}"; do

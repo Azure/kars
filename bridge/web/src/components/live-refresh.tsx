@@ -10,10 +10,15 @@
 // token telemetry, deliverable, and artifact set appear as the run lands — no
 // manual reload. `router.refresh()` re-runs the server render with fresh BFF
 // data while preserving client state. Polling stops the moment the mission is
-// no longer active or the page is hidden, so it never spins needlessly.
+// no longer active or the page is hidden. Returning to an idle tab still
+// refreshes once, since another tab or operator may have changed its state.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
+import { hasPendingNavigation } from "@/components/navigation-link";
+
+// A page can have both lifecycle acknowledgement and general activity polling.
+let refreshOwner: symbol | undefined;
 
 export function LiveRefresh({
   active,
@@ -23,38 +28,38 @@ export function LiveRefresh({
   intervalMs?: number;
 }) {
   const router = useRouter();
-  const timer = useRef<ReturnType<typeof setInterval> | null>(null);
-  // Guard against overlapping refreshes: if the BFF is slower than the interval,
-  // don't stack a second router.refresh() on top of an in-flight one (which can
-  // deliver stale-after-fresh out of order). We settle the guard after a short
-  // window that comfortably exceeds a normal server round-trip.
-  const refreshing = useRef(false);
-
+  const [refreshPending, startRefresh] = useTransition();
+  const owner = useRef(Symbol());
   useEffect(() => {
-    if (!active) return;
+    if (!refreshPending && refreshOwner === owner.current) refreshOwner = undefined;
+  });
+  useEffect(() => {
+    const token = owner.current;
+    return () => { if (refreshOwner === token) refreshOwner = undefined; };
+  }, []);
+  useEffect(() => {
+    let coolingDown = false;
+    let cooldown: ReturnType<typeof setTimeout> | undefined;
     const tick = () => {
-      if (document.visibilityState !== "visible" || refreshing.current) return;
-      refreshing.current = true;
-      router.refresh();
-      setTimeout(() => {
-        refreshing.current = false;
+      if (document.visibilityState !== "visible" || coolingDown || refreshOwner !== undefined || hasPendingNavigation()) return;
+      coolingDown = true;
+      refreshOwner = owner.current;
+      startRefresh(() => router.refresh());
+      cooldown = setTimeout(() => {
+        coolingDown = false;
       }, Math.max(1000, intervalMs - 250));
     };
-    // Refresh once immediately on mount so an operator arriving mid-run sees the
-    // current state without waiting a full interval (or hitting F5), then poll.
-    if (document.visibilityState === "visible") {
-      refreshing.current = true;
-      router.refresh();
-      setTimeout(() => {
-        refreshing.current = false;
-      }, Math.max(1000, intervalMs - 250));
-    }
-    timer.current = setInterval(tick, intervalMs);
+    if (active) tick();
+    const timer = active ? setInterval(tick, intervalMs) : undefined;
+    window.addEventListener("focus", tick);
+    document.addEventListener("visibilitychange", tick);
     return () => {
-      if (timer.current) clearInterval(timer.current);
-      refreshing.current = false;
+      if (timer !== undefined) clearInterval(timer);
+      if (cooldown !== undefined) clearTimeout(cooldown);
+      window.removeEventListener("focus", tick);
+      document.removeEventListener("visibilitychange", tick);
     };
-  }, [active, intervalMs, router]);
+  }, [active, intervalMs, router, startRefresh]);
 
   return null;
 }

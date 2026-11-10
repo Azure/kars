@@ -14,6 +14,9 @@ use crate::state::AppState;
 use super::mapping::is_task_owner;
 use super::{clean_display_name, clean_objective, map_kube_err, require_cluster};
 
+#[path = "fleet_observations.rs"]
+mod observations;
+
 /// One running agent + what it is doing now, for the lifecycle view.
 #[derive(Debug, Serialize)]
 pub struct AgentLifecycleDto {
@@ -25,18 +28,18 @@ pub struct AgentLifecycleDto {
     pub task: Option<String>,
     pub objective: Option<String>,
     pub tier: Option<i32>,
-    /// Live activity counts from the persisted trace (rounds + tool calls).
-    pub rounds: usize,
-    pub tool_calls: usize,
+    /// Observed counts only; absent activity is not a measured zero.
+    pub rounds: Option<usize>,
+    pub tool_calls: Option<usize>,
     pub last_action: Option<String>,
     /// True when the agent's sandbox pod is still running (working now) vs a
     /// recently-completed run (its ephemeral sandbox already torn down).
     pub live: bool,
-    /// Real token cost of the run (from the mission output), when known.
+    /// Root-task mission-output tokens, when known. Excludes reviewed specialist
+    /// phases; not a full-run or settled account total.
     pub tokens: Option<i64>,
-    /// The run's token budget ceiling (from the envelope), when set — so the UI
-    /// can render spend against limit ("spent / budget") rather than a bare
-    /// number. `None` for an uncapped run.
+    /// The root's declared token ceiling, when set. Comparing only root receipts
+    /// against it does not establish remaining full-run budget. `None` is uncapped.
     pub budget_tokens: Option<i64>,
     /// Run outcome: `ok` | `error` (from the mission output), when finished.
     pub status: Option<String>,
@@ -54,12 +57,18 @@ pub struct AgentLifecycleDto {
 /// Whether a `KarsTask` should surface on the "Active agents" fleet views. A
 /// surfaceable run is either a team taskforce run, a `*-run-<ts>` scheduled run,
 /// OR a launched direct mission (a one-off the user kicked off from `/new`).
+/// The recent-runs list also retains direct missions with a stopped run identity.
 /// Un-launched drafts and team structural tasks (a non-taskforce `team-role`)
 /// are NOT agents yet, so they stay out. Without the direct-mission arm the
 /// flagship "Active agents" page was empty for the single most common action —
 /// launch a mission and watch it — because a direct mission carries neither the
 /// taskforce role nor a `-run-` suffix.
-fn is_surfaceable_run(t: &KarsTask) -> bool {
+fn is_surfaceable_run(t: &KarsTask, include_stopped: bool) -> bool {
+    if t.metadata.deletion_timestamp.is_some()
+        || t.annotations().contains_key("kars.azure.com/reviewed-root")
+    {
+        return false;
+    }
     let name = t.name_any();
     let role = t
         .annotations()
@@ -68,9 +77,14 @@ fn is_surfaceable_run(t: &KarsTask) -> bool {
     if role == Some("taskforce") || name.contains("-run-") {
         return true;
     }
-    // A launched direct mission: no team structural role, and it was launched.
     let launched = t.spec.execution.as_ref().map(|e| e.launch).unwrap_or(false);
-    role.is_none() && launched
+    role.is_none()
+        && (launched
+            || (include_stopped && super::run_evidence::live::can_read_stopped_activity(t)))
+}
+
+fn root_receipt_tokens(output: &std::collections::BTreeMap<String, String>) -> Option<i64> {
+    super::run_evidence::mission_result(output).total_tokens
 }
 
 /// `GET /api/agents` — recent and live agent runs with their real work. Sources
@@ -95,7 +109,7 @@ pub async fn list_agents(
     let mut runs: Vec<&KarsTask> = all
         .items
         .iter()
-        .filter(|task| is_surfaceable_run(task) && is_task_owner(task, &principal))
+        .filter(|task| is_surfaceable_run(task, true) && is_task_owner(task, &principal))
         .collect();
     // Freshest first.
     runs.sort_by(|a, b| {
@@ -105,6 +119,7 @@ pub async fn list_agents(
     });
 
     let mut out = Vec::new();
+    let mut terminal_budget = super::reviewed_summary::SummaryBudget::new();
     for task in runs.into_iter().take(24) {
         let name = task.name_any();
         let team = task
@@ -113,84 +128,43 @@ pub async fn list_agents(
             .as_ref()
             .and_then(|l| l.get("kars.azure.com/team").cloned());
 
-        // Mission output: tokens, status, finished, round/tool rollup.
-        let output = cluster.read_mission_output(&name).await;
-        let (tokens, status, finished_at, mut rounds, mut tool_calls) = match &output {
+        let snapshot =
+            observations::read(cluster, task, &principal, Some(&mut terminal_budget)).await?;
+        let (tokens, status, finished_at, mut rounds, mut tool_calls) = match &snapshot.output {
             Some(d) => (
-                d.get("totalTokens").and_then(|v| v.parse::<i64>().ok()),
+                root_receipt_tokens(d),
                 d.get("status").cloned(),
                 d.get("finishedAt").cloned(),
-                d.get("rounds")
-                    .and_then(|v| v.parse::<usize>().ok())
-                    .unwrap_or(0),
-                d.get("toolCalls")
-                    .and_then(|v| v.parse::<usize>().ok())
-                    .unwrap_or(0),
+                d.get("rounds").and_then(|v| v.parse::<usize>().ok()),
+                d.get("toolCalls").and_then(|v| v.parse::<usize>().ok()),
             ),
-            None => (None, None, None, 0, 0),
+            None => (None, None, None, None, None),
         };
-
-        // Live iff the run's sandbox pod is running AND it hasn't delivered a
-        // terminal result yet. A DIRECT mission's sandbox lingers (Running) after
-        // it delivers, so "Running pod" alone would mislabel a finished, idle
-        // mission as live and inflate the fleet's "working now" count. A delivered
-        // (or errored) run is Recent, not Live — its outcome and telemetry show in
-        // the recent list. (Team run sandboxes tear down on delivery, so this is a
-        // no-op for them.)
-        let delivered = status.is_some();
-        let live = !delivered && cluster.running_pod_for_sandbox(&name).await.is_some();
-        // Honest pod health for a live agent (readiness/restarts/uptime/node).
-        let health = if live {
-            cluster.sandbox_pod_health(&name).await?
+        let live = !snapshot.workers.is_empty();
+        // A root coordinator without a pod must not hide its reviewed workers.
+        let health = if snapshot.workers.len() == 1 {
+            cluster
+                .sandbox_pod_health(&snapshot.workers[0].name)
+                .await?
         } else {
             None
         };
-
-        // For a live run, the trace's last tool tells "what it's doing now";
-        // also a more current round/tool count than the (post-hoc) output.
         let mut last_action = None;
-        if live {
-            // A live run has no persisted trace CM yet (it's written at delivery),
-            // so fall back to the router's live trace — otherwise a working agent
-            // reports 0 rounds / 0 tool calls / no current action.
-            let trace: Vec<serde_json::Value> = match cluster
-                .read_mission_trace(&name)
-                .await
-                .and_then(|raw| serde_json::from_str::<Vec<serde_json::Value>>(&raw).ok())
-            {
-                Some(t) if !t.is_empty() => t,
-                _ => cluster.sandbox_live_trace(&name).await,
-            };
-            if !trace.is_empty() {
-                let r = trace
+        for worker in &snapshot.workers {
+            if let Some(events) = &worker.events {
+                let counts = observations::counts(events);
+                rounds = Some(rounds.unwrap_or(0) + counts.rounds);
+                tool_calls = Some(tool_calls.unwrap_or(0) + counts.tools);
+                last_action = events
                     .iter()
-                    .filter(|e| e.get("kind").and_then(|k| k.as_str()) == Some("round"))
-                    .count();
-                let tc = trace
-                    .iter()
-                    .filter(|e| e.get("kind").and_then(|k| k.as_str()) == Some("tool"))
-                    .count();
-                if r > 0 {
-                    rounds = r;
-                }
-                if tc > 0 {
-                    tool_calls = tc;
-                }
-                last_action = trace
-                    .last()
-                    .and_then(|e| e.get("name").and_then(|n| n.as_str()).map(String::from));
+                    .rev()
+                    .find(|event| event.get("kind").and_then(|v| v.as_str()) == Some("tool_result"))
+                    .and_then(|event| event.get("name").and_then(|v| v.as_str()))
+                    .map(String::from)
+                    .or(last_action);
             }
         }
-
-        let phase = if live {
-            Some("Running".into())
-        } else if status.as_deref() == Some("ok") {
-            Some("Delivered".into())
-        } else if status.is_some() {
-            Some("Errored".into())
-        } else {
-            Some("Idle".into())
-        };
+        let phase = Some(snapshot.phase);
 
         out.push(AgentLifecycleDto {
             sandbox: name.clone(),
@@ -241,6 +215,10 @@ pub struct FleetActivityItem {
     pub seq: i64,
     /// Milliseconds the step took, when known.
     pub ms: Option<i64>,
+    pub worker: String,
+    pub role: Option<String>,
+    pub source: String,
+    pub observed_at: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -251,23 +229,18 @@ pub struct FleetTelemetryDto {
     pub teams_active: usize,
     /// Sub-agents (runs with a parent) currently live.
     pub sub_agents: usize,
-    /// Live token burn summed across working agents (from their in-flight trace).
-    pub tokens_in_flight: i64,
-    /// Tool calls summed across working agents this run.
-    pub tool_calls: i64,
-    /// Model rounds summed across working agents this run.
-    pub rounds: i64,
-    /// The most recent activity across ALL live agents, newest first — a single
-    /// chronological fleet feed of what every working agent is doing right now.
+    /// Provisional observed usage, not settled spending or complete run totals.
+    pub tokens_in_flight: Option<i64>,
+    pub tool_calls: Option<usize>,
+    pub rounds: Option<usize>,
+    /// Live workers without a currently available, validated activity snapshot.
+    pub activity_unavailable: usize,
+    /// Timestamped observations first; undated events carry no cross-run ordering claim.
     pub feed: Vec<FleetActivityItem>,
 }
 
-/// `GET /api/agents/fleet` — aggregate LIVE telemetry across every working
-/// agent, plus a single merged activity feed of what they're all doing right
-/// now. This is the "at scale" view: instead of drilling into one mission, see
-/// the whole fleet's live tool-by-tool work in one stream. Sourced from each
-/// live run's real execution trace — never fabricated; an idle fleet returns
-/// zeros and an empty feed.
+/// `GET /api/agents/fleet` — partial, revision-bound observations from current
+/// assignments, including reviewed workers whose coordinator has no sandbox.
 pub async fn fleet_telemetry(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
@@ -282,126 +255,109 @@ pub async fn fleet_telemetry(
     let runs: Vec<&KarsTask> = all
         .items
         .iter()
-        .filter(|task| is_surfaceable_run(task) && is_task_owner(task, &principal))
+        .filter(|task| is_surfaceable_run(task, false) && is_task_owner(task, &principal))
         .collect();
 
     let mut working = 0usize;
     let mut teams: std::collections::BTreeSet<String> = Default::default();
     let mut sub_agents = 0usize;
-    let mut tokens_in_flight = 0i64;
-    let mut tool_calls = 0i64;
-    let mut rounds = 0i64;
+    let mut tokens_in_flight = Some(0i64);
+    let mut tool_calls = None;
+    let mut rounds = None;
+    let mut activity_unavailable = 0;
     let mut feed: Vec<FleetActivityItem> = Vec::new();
 
     for task in runs {
         let name = task.name_any();
-        // Only agents that are actually running right now contribute trace.
-        if cluster.running_pod_for_sandbox(&name).await.is_none() {
+        let snapshot = observations::read(cluster, task, &principal, None).await?;
+        if snapshot.workers.is_empty() {
             continue;
         }
-        // A delivered direct mission keeps a lingering Running pod but is idle —
-        // its historical tokens are NOT "in flight". Skip it here so the live
-        // counters reflect only work happening now (it still shows, with its
-        // outcome, in the Recent runs list from /api/agents).
-        if cluster
-            .read_mission_output(&name)
-            .await
-            .and_then(|d| d.get("status").cloned())
-            .is_some()
-        {
-            continue;
-        }
-        working += 1;
-        for sub in cluster.sub_agent_sandbox_names("kars-system", &name).await {
-            if cluster.running_pod_for_sandbox(&sub).await.is_some() {
-                working += 1;
-                sub_agents += 1;
-            }
-        }
-        let team = task
-            .metadata
-            .labels
-            .as_ref()
-            .and_then(|l| l.get("kars.azure.com/team").cloned());
-        if let Some(t) = &team {
-            teams.insert(t.clone());
+        let team = task.labels().get("kars.azure.com/team").cloned();
+        if let Some(team) = &team {
+            teams.insert(team.clone());
         }
         let display_name = clean_display_name(&task.spec.display_name, &task.spec.objective);
-
-        // Prefer the persisted trace (delivered runs); for a LIVE run the trace
-        // CM doesn't exist yet, so fall back to the router's live trace — else
-        // every actively-working agent shows zero rounds/tokens/tools (the exact
-        // opposite of "what's happening now"). Mirrors get_task's live fallback.
-        let trace: Vec<serde_json::Value> = match cluster
-            .read_mission_trace(&name)
-            .await
-            .and_then(|raw| serde_json::from_str::<Vec<serde_json::Value>>(&raw).ok())
-        {
-            Some(t) if !t.is_empty() => t,
-            _ => cluster.sandbox_live_trace(&name).await,
-        };
-        if trace.is_empty() {
-            continue;
-        }
-
-        for e in &trace {
-            let kind = e.get("kind").and_then(|k| k.as_str()).unwrap_or("");
-            let round = e.get("round").and_then(|v| v.as_i64()).unwrap_or(0);
-            let seq = e.get("seq").and_then(|v| v.as_i64()).unwrap_or(0);
-            let ms = e.get("ms").and_then(|v| v.as_i64());
-            match kind {
-                "round" => {
-                    rounds += 1;
-                    tokens_in_flight += e.get("total_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
-                    feed.push(FleetActivityItem {
-                        agent: name.clone(),
-                        display_name: display_name.clone(),
-                        team: team.clone(),
-                        kind: "round".into(),
-                        label: e
-                            .get("finish_reason")
-                            .and_then(|v| v.as_str())
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or("model round")
-                            .to_string(),
-                        detail: None,
-                        failed: false,
-                        round,
-                        seq,
-                        ms,
-                    });
+        for worker in snapshot.workers {
+            working += 1;
+            if worker.role.is_some() || task.spec.parent_ref.is_some() {
+                sub_agents += 1;
+            }
+            let Some(events) = worker.events else {
+                activity_unavailable += 1;
+                tokens_in_flight = None;
+                continue;
+            };
+            let counts = observations::counts(&events);
+            rounds = Some(rounds.unwrap_or(0) + counts.rounds);
+            tool_calls = Some(tool_calls.unwrap_or(0) + counts.tools);
+            tokens_in_flight = tokens_in_flight
+                .zip(counts.tokens)
+                .and_then(|(total, tokens)| total.checked_add(tokens));
+            for event in events {
+                let kind = event
+                    .get("kind")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                if !matches!(kind, "round" | "tool_result") {
+                    continue;
                 }
-                "tool" => {
-                    tool_calls += 1;
-                    let failed = e.get("ok").and_then(|v| v.as_bool()) == Some(false);
-                    feed.push(FleetActivityItem {
-                        agent: name.clone(),
-                        display_name: display_name.clone(),
-                        team: team.clone(),
-                        kind: "tool".into(),
-                        label: e
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("tool")
-                            .to_string(),
-                        detail: e
-                            .get("args_preview")
-                            .and_then(|v| v.as_str())
-                            .filter(|s| !s.is_empty())
-                            .map(|s| s.chars().take(80).collect()),
-                        failed,
-                        round,
-                        seq,
-                        ms,
-                    });
-                }
-                _ => {}
+                let is_tool = kind == "tool_result";
+                feed.push(FleetActivityItem {
+                    agent: name.clone(),
+                    display_name: display_name.clone(),
+                    team: team.clone(),
+                    worker: worker.name.clone(),
+                    role: worker.role.clone(),
+                    source: event
+                        .get("source")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("unknown")
+                        .into(),
+                    observed_at: event
+                        .get("observed_at")
+                        .and_then(|value| value.as_str())
+                        .map(String::from),
+                    kind: if is_tool { "tool" } else { "round" }.into(),
+                    label: event
+                        .get(if is_tool { "name" } else { "model" })
+                        .and_then(|value| value.as_str())
+                        .unwrap_or(if is_tool { "tool" } else { "model response" })
+                        .into(),
+                    detail: None,
+                    failed: if is_tool {
+                        event.get("ok").and_then(|value| value.as_bool()) == Some(false)
+                    } else {
+                        event.get("accepted").and_then(|value| value.as_bool()) == Some(false)
+                    },
+                    round: event
+                        .get("round")
+                        .and_then(|value| value.as_i64())
+                        .unwrap_or(0),
+                    seq: event
+                        .get("seq")
+                        .and_then(|value| value.as_i64())
+                        .unwrap_or(0),
+                    ms: event.get("ms").and_then(|value| value.as_i64()),
+                });
             }
         }
     }
-
-    // Newest activity first, capped so a busy fleet stays responsive.
-    feed.sort_by(|a, b| b.round.cmp(&a.round).then(b.seq.cmp(&a.seq)));
+    if working == 0 {
+        tokens_in_flight = None;
+    }
+    feed.sort_by(|a, b| {
+        let timestamp = |event: &FleetActivityItem| {
+            event
+                .observed_at
+                .as_deref()
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        };
+        timestamp(b)
+            .cmp(&timestamp(a))
+            .then(a.worker.cmp(&b.worker))
+            .then(b.seq.cmp(&a.seq))
+    });
     feed.truncate(40);
 
     Ok(Json(FleetTelemetryDto {
@@ -411,6 +367,109 @@ pub async fn fleet_telemetry(
         tokens_in_flight,
         tool_calls,
         rounds,
+        activity_unavailable,
         feed,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{KarsTask, is_surfaceable_run, root_receipt_tokens};
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    fn direct_mission() -> serde_json::Value {
+        json!({
+            "metadata":{"name":"briefing","namespace":"kars-system","uid":"task-uid",
+                "annotations":{"kars.azure.com/run-requested":"run-1"}},
+            "spec":{"objective":"Briefing","execution":{"launch":false},
+                "envelope":{"tier":1,"delegationDepth":0,"authorityCeiling":1}},
+            "status":{"executionPhase":"Idle"}
+        })
+    }
+
+    #[test]
+    fn stopped_direct_missions_remain_recent_without_becoming_live() {
+        for completed in [false, true] {
+            let mut value = direct_mission();
+            if completed {
+                value["metadata"]["annotations"]["kars.azure.com/run-completed"] = json!("run-1");
+            }
+            let task: KarsTask = serde_json::from_value(value.clone()).unwrap();
+            assert!(is_surfaceable_run(&task, true));
+            assert!(!is_surfaceable_run(&task, false));
+            value["spec"]["execution"]["launch"] = json!(true);
+            let task = serde_json::from_value(value).unwrap();
+            assert!(is_surfaceable_run(&task, true));
+            assert!(is_surfaceable_run(&task, false));
+        }
+    }
+
+    #[test]
+    fn recent_mission_selection_still_excludes_drafts_and_structural_tasks() {
+        for (path, replacement) in [
+            (
+                "/metadata/annotations/kars.azure.com~1run-requested",
+                json!(""),
+            ),
+            (
+                "/metadata/annotations/kars.azure.com~1run-requested",
+                json!("invalid nonce"),
+            ),
+            ("/metadata/annotations", json!({})),
+            ("/spec/execution", json!(null)),
+            (
+                "/metadata/annotations",
+                json!({"kars.azure.com/run-requested":"run-1", "kars.azure.com/team-role":"principal"}),
+            ),
+            (
+                "/metadata/annotations",
+                json!({"kars.azure.com/run-requested":"run-1", "kars.azure.com/reviewed-root":"root"}),
+            ),
+        ] {
+            let mut value = direct_mission();
+            *value.pointer_mut(path).unwrap() = replacement;
+            let task = serde_json::from_value(value).unwrap();
+            assert!(!is_surfaceable_run(&task, true), "{path}");
+            assert!(!is_surfaceable_run(&task, false), "{path}");
+        }
+        let mut value = direct_mission();
+        value["metadata"]["deletionTimestamp"] = json!("2026-11-03T00:00:00Z");
+        assert!(!is_surfaceable_run(
+            &serde_json::from_value(value).unwrap(),
+            true
+        ));
+    }
+
+    #[test]
+    fn fleet_root_receipt_usage_preserves_unknown_and_measured_zero() {
+        for (tokens, known, expected) in [
+            ("0", "true", Some(0)),
+            ("993479", "true", Some(993479)),
+            ("0", "false", None),
+            ("993479", "false", None),
+            ("-1", "true", None),
+            ("9007199254740992", "true", None),
+            ("invalid", "true", None),
+        ] {
+            let output = BTreeMap::from([
+                ("totalTokens".into(), tokens.into()),
+                ("usageKnown".into(), known.into()),
+            ]);
+            assert_eq!(root_receipt_tokens(&output), expected, "{tokens}/{known}");
+        }
+        assert_eq!(root_receipt_tokens(&BTreeMap::new()), None);
+    }
+
+    #[test]
+    fn fleet_root_receipt_usage_does_not_trust_invalid_terminal_evidence() {
+        for evidence in ["{}", "not-json"] {
+            let output = BTreeMap::from([
+                ("totalTokens".into(), "993479".into()),
+                ("usageKnown".into(), "true".into()),
+                ("evidence.json".into(), evidence.into()),
+            ]);
+            assert_eq!(root_receipt_tokens(&output), None);
+        }
+    }
 }

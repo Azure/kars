@@ -23,7 +23,6 @@ pub struct Catalog {
 impl Catalog {
     pub fn validate(&self, _now: i64) -> Result<(), BudgetError> {
         if !valid_uid(&self.version)
-            || self.contracts.is_empty()
             || self.contracts.len() > 64
             || self.non_inference_egress_hosts.len() > 64
         {
@@ -143,6 +142,29 @@ mod tests {
     }
 
     #[test]
+    fn empty_contract_catalog_remains_valid_but_cannot_supply_a_bounded_quote() {
+        let mut catalog = catalog();
+        catalog.contracts.clear();
+        catalog.validate(100).unwrap();
+        assert!(
+            catalog
+                .select(
+                    "provider",
+                    "https://models.example",
+                    "model",
+                    Operation::Responses,
+                    100
+                )
+                .is_err()
+        );
+        assert_eq!(catalog.non_inference_egress_hosts, vec!["api.github.com"]);
+        catalog
+            .non_inference_egress_hosts
+            .push("https://invalid.example".into());
+        assert!(catalog.validate(100).is_err());
+    }
+
+    #[test]
     fn no_provider_model_or_operation_fallback_implicitly_acquires_a_contract() {
         let catalog = catalog();
         assert!(
@@ -206,6 +228,12 @@ mod tests {
     fn opaque_model_tunnels_are_not_non_inference_cost_exclusions() {
         let catalog = catalog();
         assert!(catalog.allows_mediated_non_inference("api.github.com", &[]));
+        assert!(catalog.requires_brokered_inference("MODELS.EXAMPLE.", &[]));
+        assert!(
+            catalog
+                .requires_brokered_inference("API.VENDOR.EXAMPLE.", &["api.vendor.example".into()])
+        );
+        assert!(!catalog.requires_brokered_inference("docs.vendor.example", &[]));
         assert!(!catalog.allows_mediated_non_inference("models.example", &[]));
         assert!(!catalog.allows_mediated_non_inference("unknown.example", &[]));
         assert!(

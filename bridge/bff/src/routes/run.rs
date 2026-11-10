@@ -45,6 +45,17 @@ pub async fn run_mission(
 
     // The task must be launched with a Running sandbox to drive a run.
     let task: KarsTask = require_owned_task(cluster, &ns, &name, &principal).await?;
+    let qualification_run = crate::routes::qualification_runs::authorize_run(&task, &principal)?;
+    if qualification_run
+        && !task
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|annotations| annotations.get("kars.azure.com/run-requested"))
+            .is_some_and(|nonce| !nonce.is_empty())
+    {
+        crate::routes::validate::require_task_checks(cluster, &task, true).await?;
+    }
 
     // Aggregate inference-budget gate (cluster + workspace + user): a run consumes
     // inference tokens, so a strict/over-buffer budget at any tier blocks it. The

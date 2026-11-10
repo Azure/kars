@@ -7,12 +7,15 @@
 
 import { PageHeader, Section, Badge } from "@/components/ui";
 import { HonestState } from "@/components/honest-state";
+import { ConsoleLoadError } from "@/components/console-load-error";
 import { Icon } from "@/components/icon";
 import { AuthorResource } from "../author-resource";
 import { InferencePolicyEditor } from "../inference-policy-editor";
 import { DeleteResource } from "../delete-resource";
 import { McpCatalog } from "../mcp-catalog";
 import { mcpStatus } from "../mcp-status";
+import { McpStatusDetails } from "../mcp-status-details";
+import { LiveRefresh } from "@/components/live-refresh";
 import { PolicyBuilder } from "../policy-builder";
 import { InferenceBudgets, InferenceBudgetEdit } from "@/components/inference-budgets";
 import { RetentionPolicyPanel } from "@/components/retention-policy";
@@ -51,21 +54,25 @@ function countBadge(n: number) {
 
 export default async function PoliciesPage() {
   const isAdmin = await canAdminister();
-  const [mcpR, toolsR, inferenceR, egressR, options] = await Promise.all([
+  const [mcpR, toolsR, inferenceR, egressR, optionsR] = await Promise.all([
     settle<McpServer>(listMcpServers()),
     settle<ToolPolicy>(listToolPolicies()),
     settle<InferencePolicy>(listInferencePolicies()),
     settle<EgressApproval>(listEgress()),
-    getOptions().catch(() => null),
+    getOptions().then(
+      (data) => ({ data, error: null }),
+      (error: unknown) => ({ data: null, error }),
+    ),
   ]);
   const mcp = mcpR.data;
   const tools = toolsR.data;
   const inference = inferenceR.data;
   const egress = egressR.data;
-  const models: ModelOption[] = options?.models ?? [];
+  const models: ModelOption[] = optionsR.data?.models ?? [];
 
   return (
     <div className="space-y-6">
+      <LiveRefresh active={mcp.length > 0} />
       <PageHeader
         eyebrow="Operator Console"
         title="Policies"
@@ -77,6 +84,7 @@ export default async function PoliciesPage() {
         action={<div className="flex items-center gap-2">{countBadge(mcp.length)}<AuthorResource kind="McpServer" /></div>}
       >
         {!mcpR.error && <div className="mb-3"><McpCatalog servers={mcp} /></div>}
+        {mcp.length > 0 && <p className="mb-3 text-xs text-foreground-muted">Service status refreshes automatically while this page is visible. You can continue working; no manual reload is needed.</p>}
         {mcpR.error ? (
           <HonestState variant="not_wired" compact title="Couldn't load MCP servers" detail="The operator API for MCP servers is unreachable — this isn't the same as none being registered." />
         ) : mcp.length === 0 ? (
@@ -99,7 +107,7 @@ export default async function PoliciesPage() {
                   </div>
                 </div>
                 {m.url && <p className="mt-1 font-mono text-xs text-foreground-muted">{m.url}</p>}
-                <p className="mt-1 text-xs text-foreground-muted">{readiness.detail}</p>
+                <McpStatusDetails server={m} />
                 {m.allowed_tools.length > 0 && (
                   <div className="mt-2 flex flex-wrap gap-1">
                     {m.allowed_tools.map((t) => (
@@ -157,12 +165,17 @@ export default async function PoliciesPage() {
         <div className="mt-5">
           <div className="flex items-center justify-between">
             <h4 className="text-xs font-semibold text-foreground-muted">Per-sandbox policies</h4>
-            <InferencePolicyEditor models={models} />
+            {optionsR.data && <InferencePolicyEditor models={models} />}
           </div>
+          {!optionsR.data && (
+            <ConsoleLoadError inline title="Model catalogue" error={optionsR.error}
+              detail="Model discovery failed; this does not mean no providers are configured. Model-route editing is unavailable until discovery recovers. Existing policies and budget controls remain available." />
+          )}
           <p className="mt-1 text-[11px] text-foreground-muted">
-            The router enforces each policy&rsquo;s per-request, daily and monthly token limits.
-            Controller-generated policies also select each mission&rsquo;s model routes; a mission&rsquo;s
-            lifetime budget is separate. Author a policy, edit its limits, or remove an authored one.
+            Daily and monthly token limits follow Core&rsquo;s calendar policy: enforce applies ceilings;
+            record-only keeps usage accounting without enforcing those ceilings. Per-request limits and
+            mission lifetime budgets are separate. Controller-generated policies also select each
+            mission&rsquo;s model routes. Author a policy, edit its limits, or remove an authored one.
           </p>
           {inferenceR.error ? (
             <HonestState variant="not_wired" compact title="Couldn't load inference policies" detail="The operator API for inference policies is unreachable." />
@@ -175,7 +188,7 @@ export default async function PoliciesPage() {
                   <tr className="border-b border-border bg-surface-muted/40 text-left text-xs text-foreground-muted">
                     <th className="px-4 py-2 font-medium">Name</th>
                     <th className="px-3 py-2 font-medium">Sandbox</th>
-                    <th className="px-3 py-2 font-medium">Daily token budget</th>
+                    <th className="px-3 py-2 font-medium">Configured daily token limit</th>
                     <th className="px-3 py-2 font-medium">Content safety</th>
                     <th className="px-4 py-2 font-medium">Phase</th>
                     <th className="px-4 py-2 font-medium"></th>
@@ -193,7 +206,7 @@ export default async function PoliciesPage() {
                       <td className="px-4 py-2 text-xs text-foreground-muted">{p.phase ?? "—"}</td>
                       <td className="px-4 py-2 text-right">
                         <div className="flex items-center justify-end gap-2">
-                          <InferencePolicyEditor initialName={p.name} initialSpec={p.spec} models={models} />
+                          {optionsR.data && <InferencePolicyEditor initialName={p.name} initialSpec={p.spec} models={models} />}
                           <DeleteResource kind="InferencePolicy" name={p.name} label="inference policy" />
                         </div>
                       </td>

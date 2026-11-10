@@ -4,20 +4,28 @@
 
 set -eu
 . /packaging/locks/inputs.lock
+sh /packaging/scripts/verify-source-toolchain.sh "$GO_VERSION" go.mod api/v2/go.mod
 export GOFLAGS=-mod=mod
 mkdir -p /out/api/v2
 
+# Use the same reviewed crypto request in both modules, including maintenance candidates.
+crypto_request=$(grep '^golang.org/x/crypto@' /packaging/locks/requests.txt)
+test "$(printf '%s\n' "$crypto_request" | wc -l)" -eq 1
 # Update the nested API as well as the application; the local replace is retained.
 (
     cd api/v2
     go mod edit -go=1.26.0 -toolchain="$GO_VERSION"
-    go get google.golang.org/grpc@v1.83.2 golang.org/x/crypto@v0.56.0
+    go get google.golang.org/grpc@v1.84.0 "$crypto_request" golang.org/x/net@v0.62.0
     go mod tidy
+    # The API imports no crypto packages: tidy drops this policy pin, so retain it
+    # after pruning rather than falling back to x/net's older module requirement.
+    go get "$crypto_request"
     go mod download
     go mod verify
     go list -m -json all > /out/api-modules.json
 )
-go mod edit -go=1.26.0 -toolchain="$GO_VERSION"
+# Keep the released root module's Go requirement; never force it downward.
+go mod edit -toolchain="$GO_VERSION"
 set --
 while IFS= read -r request; do
     test -n "$request"
@@ -51,9 +59,9 @@ done
 )
 # ACR --no-push runs can return this public artifact via their build log.
 tar --sort=name --mtime="@$SOURCE_DATE_EPOCH" --owner=0 --group=0 \
-    -C /out -cf /tmp/dex-locks.tar .
-gzip -n /tmp/dex-locks.tar
+    -C /out -cf /work/dex-locks.tar .
+gzip -n /work/dex-locks.tar
 printf '\nKARS_DEX_LOCKS_BASE64_BEGIN\n'
-base64 -w 0 /tmp/dex-locks.tar.gz
+base64 -w 0 /work/dex-locks.tar.gz
 printf '\nKARS_DEX_LOCKS_BASE64_END\n'
-sha256sum /tmp/dex-locks.tar.gz
+sha256sum /work/dex-locks.tar.gz

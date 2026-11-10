@@ -65,15 +65,20 @@ _REDACT_PATTERNS = [
 ]
 
 
+def redact_text(s: str) -> str:
+    """Reuse the maintained credential patterns before text leaves the runtime."""
+    for pat, repl in _REDACT_PATTERNS:
+        s = pat.sub(repl, s)
+    return s
+
+
 def _canonicalize(s: str) -> str:
     """Apply the canonical action-construction rules from the contract.
 
     Sequence: redact → strip newlines → utf-8-replace → truncate.
     Idempotent.
     """
-    out = s
-    for pat, repl in _REDACT_PATTERNS:
-        out = pat.sub(repl, out)
+    out = redact_text(s)
     out = out.replace("\n", " ").replace("\r", " ").replace("\0", " ")
     out = out.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
     if len(out) > _MAX_ACTION_LEN:

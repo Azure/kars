@@ -24,6 +24,18 @@ governance view computed from real runs:
 - **Budget utilization** — today's measured cluster spend vs the
   [inference-budget](inference-budgets.md) caps, with live meters.
 
+## Active agents and retained outcomes
+
+An idle sandbox is not a successful or idle run. For inactive reviewed runs without
+principal output, Active agents reads the retained, revision-bound specialist
+attempts: a recorded failure is **Errored**, uncertain or unfinished work is
+**Held**, and missing or changed evidence is **Unavailable**. Specialist completion
+alone is **Incomplete**, not delivered principal output. Explicitly stopped runs
+remain **Stopped**. These outcome reads share the existing bounded list-read
+budget, do not fetch artifact bodies, and do not count lingering pods as workers.
+Missing principal usage and finish time remain unavailable rather than being
+invented from specialist evidence.
+
 ## Agent / org graph
 
 The Activity tab renders a radial graph of a run: the principal hub, the tools it
@@ -38,9 +50,16 @@ tool-call count, and hosts reached — the "who did what".
 
 ### Delegation topology versus AgentMesh communication
 
-Console → Sandboxes shows controller-recorded sandbox ancestry. Its relationships
-are not evidence of AgentMesh sessions or messages. Agent-to-agent transport runs
-through the AgentMesh relay, proxied by each sandbox's inference router.
+Console → Sandboxes shows controller-recorded sandbox ancestry. Team attribution
+also follows the sandbox's Task ownership through reviewed phase and role Tasks
+to the labeled root Task. Each Task hop requires an unambiguous controller owner
+reference with the matching namespace, name and UID; missing, replaced, deleting
+or cyclic ancestry leaves attribution unavailable. Generated names are not parsed
+for Team or role identity.
+
+These relationships are not evidence of AgentMesh sessions or messages.
+Agent-to-agent transport runs through the AgentMesh relay, proxied by each
+sandbox's inference router.
 
 Registry identity verification, KNOCK/session acceptance, encrypted transmission,
 recipient decryption and a reply are separate observations. Neither registration
@@ -81,8 +100,13 @@ The bounded attachment is collected only after successful negotiated `text-v1`
 execution. It never displaces useful files when the artifact allowance is full.
 Runtimes without returned IDs produce no attachment; retained deliveries are not
 backfilled. The shared recorder serves multiple runtimes, but this forwarding
-integration is currently OpenClaw-specific. Existing nonempty legacy evidence
-remains visible separately.
+integration is currently OpenClaw-specific. The native OpenClaw Mission executor
+currently retains measured run summaries and correlated tool outcomes but does
+not export this detailed observation attachment. Its graph therefore labels
+absent action records **Detailed trace unavailable** and counters **Not recorded**,
+not zero rounds or tools. Recorded run totals remain separate; they are not
+expanded into invented action nodes. Existing nonempty legacy evidence remains
+visible separately.
 
 Downloads stay pinned to the selected run. Observation JSON contains selected
 metadata, not prompts, tool arguments/results, credentials, or request URLs.

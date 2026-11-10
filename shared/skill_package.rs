@@ -11,6 +11,7 @@ pub const LOCKED_DIGEST: &str = "kars.azure.com/skill-locked-digest";
 pub const LOCKED_UID: &str = "kars.azure.com/skill-locked-uid";
 pub const LOCKED_GENERATION: &str = "kars.azure.com/skill-locked-generation";
 pub const APPROVED_BY_SUB: &str = "kars.azure.com/skill-approved-by-sub";
+pub const APPROVED_BY_ROLE: &str = "kars.azure.com/skill-approved-by-role";
 pub const UPLOADED_BY_SUB: &str = "kars.azure.com/skill-uploaded-by-sub";
 pub const MAX_PACKAGE_BYTES: usize = 1024 * 1024;
 
@@ -40,9 +41,16 @@ pub fn valid_path(path: &str) -> bool {
 }
 
 pub fn validate_manifest(paths: &[String]) -> Result<(), String> {
+    validate_manifest_paths(paths.iter().map(|path| Ok(path.as_str())))
+}
+
+fn validate_manifest_paths<'a>(
+    paths: impl Iterator<Item = Result<&'a str, String>> + Clone,
+) -> Result<(), String> {
     let mut seen = BTreeSet::new();
-    for path in paths {
-        if !valid_path(path) || !seen.insert(path.as_str()) {
+    for path in paths.clone() {
+        let path = path?;
+        if !valid_path(path) || !seen.insert(path) {
             return Err(format!("Invalid or duplicate skill file path '{path}'"));
         }
     }
@@ -50,6 +58,7 @@ pub fn validate_manifest(paths: &[String]) -> Result<(), String> {
         return Err("A skill package must contain SKILL.md".into());
     }
     for path in paths {
+        let path = path?;
         for (index, _) in path.match_indices('/') {
             if seen.contains(&path[..index]) {
                 return Err(format!("Skill file '{path}' conflicts with a parent file"));
@@ -156,9 +165,13 @@ pub fn validate_spec(spec: &Value) -> Result<(), String> {
         }
     }
     if spec.get("package").and_then(Value::as_bool) == Some(true) {
-        let paths: Vec<String> = serde_json::from_value(spec["files"].clone())
-            .map_err(|_| "Skill files must be an array of relative paths")?;
-        validate_manifest(&paths)?;
+        let paths = spec["files"]
+            .as_array()
+            .ok_or("Skill files must be an array of relative paths")?;
+        validate_manifest_paths(paths.iter().map(|path| {
+            path.as_str()
+                .ok_or_else(|| "Skill files must be an array of relative paths".into())
+        }))?;
         let digest = spec["packageDigest"]
             .as_str()
             .ok_or("Skill packageDigest is missing")?;
@@ -260,9 +273,9 @@ pub fn approved_digest(object: &Value) -> Result<String, String> {
         || annotations[LOCKED_GENERATION].as_str() != Some(&generation.to_string())
         || reviewer.is_none()
         || author.is_none()
-        || reviewer == author
+        || (reviewer == author && annotations[APPROVED_BY_ROLE].as_str() != Some("admin"))
     {
-        return Err("Skill needs independent operator approval bound to its current UID, generation and content".into());
+        return Err("Skill needs operator approval (or administrator self-approval) bound to its current UID, generation and content".into());
     }
     Ok(digest)
 }
@@ -423,6 +436,58 @@ mod tests {
             )]))
             .is_err()
         );
+    }
+
+    #[test]
+    fn decoded_manifest_validates_borrowed_paths_and_rejects_invalid_shapes() {
+        for (files, valid) in [
+            (json!(["SKILL.md", "references/checklist.md"]), true),
+            (json!(["SKILL.md", "a".repeat(253)]), true),
+            (json!(["SKILL.md", "a".repeat(254)]), false),
+            (json!(["SKILL.md", "../secret"]), false),
+            (json!(["SKILL.md", "SKILL.md"]), false),
+            (json!(["SKILL.md", "refs", "refs/check.md"]), false),
+            (json!(["SKILL.md", null]), false),
+            (json!(["SKILL.md", {"path": "other.md"}]), false),
+            (json!(["SKILL.md", 1]), false),
+            (json!(["other.md"]), false),
+            (json!([]), false),
+            (json!("SKILL.md"), false),
+            (json!(null), false),
+        ] {
+            let spec = json!({
+                "summary": "Review documents", "version": "1", "boundingPolicy": "read-only",
+                "package": true, "files": files, "packageDigest": format!("sha256:{}", "a".repeat(64))
+            });
+            let before = spec.clone();
+            assert_eq!(validate_spec(&spec).is_ok(), valid, "{files}");
+            assert_eq!(spec, before);
+        }
+    }
+
+    #[test]
+    fn administrator_self_approval_requires_recorded_role_and_current_bindings() {
+        let mut object = reviewed();
+        object["metadata"]["annotations"][APPROVED_BY_SUB] = json!("author");
+        for role in ["", "operator", "user", "Admin"] {
+            object["metadata"]["annotations"][APPROVED_BY_ROLE] = json!(role);
+            assert!(approved_digest(&object).is_err(), "{role}");
+        }
+        object["metadata"]["annotations"][APPROVED_BY_ROLE] = json!("admin");
+        assert!(approved_digest(&object).is_ok());
+        for (pointer, value) in [
+            ("/metadata/uid", json!("replacement")),
+            ("/metadata/generation", json!(3)),
+            ("/status/observedGeneration", json!(1)),
+            ("/status/phase", json!("Degraded")),
+            ("/spec/summary", json!("Changed content")),
+        ] {
+            let mut bad = object.clone();
+            *bad.pointer_mut(pointer).unwrap() = value;
+            assert!(approved_digest(&bad).is_err(), "{pointer}");
+        }
+        object["metadata"]["annotations"][UPLOADED_BY_SUB] = json!("");
+        assert!(approved_digest(&object).is_err());
     }
 
     #[test]

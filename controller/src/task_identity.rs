@@ -341,7 +341,10 @@ pub async fn resolve_with_retry(
     for attempt in 1..=3 {
         match resolve(client, leaf, readiness).await {
             Err(Error::Changed) if attempt < 3 => {
-                tracing::debug!(attempt, "Task authority snapshot changed; retrying read-only inventory");
+                tracing::debug!(
+                    attempt,
+                    "Task authority snapshot changed; retrying read-only inventory"
+                );
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
             result => return result,

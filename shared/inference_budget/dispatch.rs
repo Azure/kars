@@ -6,10 +6,28 @@
 
 use crate::inference_budget_contract::{
     catalog::{Catalog, endpoint_host},
-    tariffs::{ModelContract, Operation, OutputField, Quote},
+    tariffs::{AttemptQuote, ModelContract, Operation, OutputField, Quote, RecordingRoute},
     types::*,
 };
 use serde_json::Value;
+
+impl AttemptQuote {
+    pub fn record_only(
+        provider_id: &str,
+        endpoint: &str,
+        model: &str,
+        operation: Operation,
+    ) -> Self {
+        Self::RecordOnly {
+            record_only: RecordingRoute {
+                provider_id: provider_id.into(),
+                endpoint: endpoint.into(),
+                model: model.into(),
+                operation,
+            },
+        }
+    }
+}
 
 impl OutputField {
     fn key(self) -> &'static str {
@@ -45,6 +63,18 @@ impl ModelContract {
         }
         map.insert("model".into(), self.model.clone().into());
         let key = self.output_field.key();
+        // Loopback clients cannot infer the upstream's Chat Completions field.
+        // Preserve a single explicit cap; never resolve conflicting aliases.
+        if self.operation == Operation::ChatCompletions && !map.contains_key(key) {
+            let alias = match self.output_field {
+                OutputField::Tokens => "max_completion_tokens",
+                OutputField::Completion => "max_tokens",
+                OutputField::Output => return Err(BudgetError::Contract),
+            };
+            if let Some(output) = map.remove(alias) {
+                map.insert(key.into(), output);
+            }
+        }
         for other in ["max_tokens", "max_completion_tokens", "max_output_tokens"] {
             if other != key && map.contains_key(other) {
                 return Err(BudgetError::Contract);
@@ -84,6 +114,54 @@ impl ModelContract {
             },
         ))
     }
+}
+
+pub fn normalize_record_only(
+    provider_id: &str,
+    endpoint: &str,
+    model: &str,
+    operation: Operation,
+    body: &[u8],
+    now: i64,
+) -> Result<(Vec<u8>, AttemptQuote), BudgetError> {
+    const MAX_WIRE_BYTES: usize = 1_048_576;
+    let quote = AttemptQuote::record_only(provider_id, endpoint, model, operation);
+    quote.validate(now, false)?;
+    if body.len() > MAX_WIRE_BYTES {
+        return Err(BudgetError::Contract);
+    }
+    let mut value: Value = serde_json::from_slice(body).map_err(|_| BudgetError::Contract)?;
+    validate_shape(&value, operation)?;
+    let map = value.as_object_mut().ok_or(BudgetError::Contract)?;
+    if map
+        .get("model")
+        .is_some_and(|value| value.as_str() != Some(model))
+    {
+        return Err(BudgetError::Contract);
+    }
+    map.insert("model".into(), model.into());
+    let mut output_fields = 0;
+    for key in ["max_tokens", "max_completion_tokens", "max_output_tokens"] {
+        if let Some(value) = map.get(key) {
+            output_fields += 1;
+            if !value
+                .as_u64()
+                .is_some_and(|value| value > 0 && value <= i64::MAX as u64)
+            {
+                return Err(BudgetError::Contract);
+            }
+        }
+    }
+    if output_fields > 1 {
+        return Err(BudgetError::Contract);
+    }
+    // These are caller/provider controls, not an attested spending ceiling.
+    // Preserve the selected protocol's field and never invent a maximum.
+    let bytes = serde_json::to_vec(&value).map_err(|_| BudgetError::Contract)?;
+    if bytes.len() > MAX_WIRE_BYTES {
+        return Err(BudgetError::Contract);
+    }
+    Ok((bytes, quote))
 }
 
 fn only_keys(value: &Value, keys: &[&str]) -> bool {
@@ -233,6 +311,8 @@ fn validate_shape(value: &Value, operation: Operation) -> Result<(), BudgetError
             "parallel_tool_calls",
             "text",
             "reasoning",
+            "include",
+            "prompt_cache_key",
             "store",
             "background",
             "metadata",
@@ -248,6 +328,19 @@ fn validate_shape(value: &Value, operation: Operation) -> Result<(), BudgetError
             .get("store")
             .is_some_and(|value| value.as_bool() != Some(false))
         || map.get("stream").is_some_and(|value| !value.is_boolean())
+        || map.get("include").is_some_and(|value| {
+            !value.as_array().is_some_and(|items| {
+                items.len() <= 1
+                    && items
+                        .iter()
+                        .all(|item| item.as_str() == Some("reasoning.encrypted_content"))
+            })
+        })
+        || map.get("prompt_cache_key").is_some_and(|value| {
+            !value
+                .as_str()
+                .is_some_and(|key| !key.trim().is_empty() && key.len() <= 64)
+        })
     {
         return Err(BudgetError::Contract);
     }
@@ -282,10 +375,19 @@ fn validate_shape(value: &Value, operation: Operation) -> Result<(), BudgetError
                                         && item.get("output").is_some_and(Value::is_string)
                                 }
                                 None | Some("message") => {
-                                    only_keys(item, &["type", "role", "content", "id", "status"])
-                                        && item
-                                            .get("content")
-                                            .is_some_and(|content| text_content(content, false))
+                                    only_keys(
+                                        item,
+                                        &["type", "role", "content", "id", "status", "phase"],
+                                    ) && item.get("phase").is_none_or(|phase| {
+                                        item.get("role").and_then(Value::as_str)
+                                            == Some("assistant")
+                                            && matches!(
+                                                phase.as_str(),
+                                                Some("commentary" | "final_answer")
+                                            )
+                                    }) && item
+                                        .get("content")
+                                        .is_some_and(|content| text_content(content, false))
                                 }
                                 _ => false,
                             })
@@ -324,13 +426,22 @@ impl Catalog {
         self.non_inference_egress_hosts
             .iter()
             .any(|allowed| allowed == &host)
-            && !configured_model_hosts
-                .iter()
-                .any(|model| model.eq_ignore_ascii_case(&host))
-            && !self
-                .contracts
-                .iter()
-                .any(|contract| endpoint_host(&contract.endpoint) == Some(host.as_str()))
+            && !self.requires_brokered_inference(&host, configured_model_hosts)
+    }
+
+    pub fn requires_brokered_inference(
+        &self,
+        host: &str,
+        configured_model_hosts: &[String],
+    ) -> bool {
+        let host = host.trim_end_matches('.');
+        configured_model_hosts
+            .iter()
+            .any(|model| model.trim_end_matches('.').eq_ignore_ascii_case(host))
+            || self.contracts.iter().any(|contract| {
+                endpoint_host(&contract.endpoint)
+                    .is_some_and(|model| model.trim_end_matches('.').eq_ignore_ascii_case(host))
+            })
     }
 }
 

@@ -186,6 +186,124 @@ describe("private root refusal preflight", () => {
   });
 });
 
+describe("explicit fenced Helm controller no-op", () => {
+  function fixture() {
+    const base = setup({ [`${P}root-retirement`]: '{"version":2}' });
+    const live = {
+      ...base.deployment, apiVersion: "apps/v1",
+      metadata: { ...base.deployment.metadata, labels: { "app.kubernetes.io/managed-by": "Helm" },
+        annotations: { "meta.helm.sh/release-name": "kars", "meta.helm.sh/release-namespace": "kars-system" } },
+    };
+    live.spec.template.spec.containers[0]!.image += `@sha256:${"a".repeat(64)}`;
+    const desired = structuredClone(live);
+    const calls: { args: readonly string[]; input?: string }[] = [];
+    let afterPreview = () => {};
+    const execute: RootGuardExecute = async (_file, args, options) => {
+      calls.push({ args, input: options.input });
+      if (args[0] === "get" && args[1] === "namespace") return { stdout: JSON.stringify(base.namespace) };
+      if (args[0] === "get" && args[1] === "deployment") return { stdout: JSON.stringify(live) };
+      if (args[0] === "apply" && args.includes("--dry-run=server")) {
+        const request = JSON.parse(options.input!);
+        const stdout = JSON.stringify({ ...structuredClone(live), ...request });
+        afterPreview();
+        return { stdout };
+      }
+      throw new Error("Unreviewed operation");
+    };
+    const run = (previous: unknown[] = []) =>
+      assertRenderedControllersMutable(execute, [desired], "kars-system", previous, true);
+    return { live, desired, namespace: base.namespace, execute, calls, run,
+      afterPreview(callback: () => void) { afterPreview = callback; } };
+  }
+
+  it("requires explicit Helm SSA opt-in and still refuses restart operations", async () => {
+    const f = fixture();
+    await expect(assertRenderedControllersMutable(f.execute, [f.desired], "kars-system"))
+      .rejects.toMatchObject({ reason: "protected" });
+    await expect(assertControllerMutationAllowed(f.execute)).rejects.toMatchObject({ reason: "protected" });
+    expect(f.calls.every(call => call.args[0] === "get")).toBe(true);
+  });
+
+  it("admits only a real no-op preview with a UID/RV fence and no real writes", async () => {
+    const f = fixture();
+    const historical = structuredClone(f.desired);
+    historical.spec.template.spec.containers[0]!.image = "old:latest";
+    await expect(f.run([historical])).resolves.toBeUndefined();
+    const preview = f.calls.find(call => call.args[0] === "apply")!;
+    expect(preview.args).toEqual(["apply", "--server-side", "--field-manager=helm", "--dry-run=server", "-f", "-", "-o", "json"]);
+    expect(JSON.parse(preview.input!).metadata).toMatchObject({ uid: "root-uid", resourceVersion: "1" });
+    expect(f.calls.filter(call => call.args[0] !== "get")).toEqual([preview]);
+  });
+
+  it.each(["uid", "resourceVersion"] as const)("refuses missing/stale %s before admission", async key => {
+    for (const value of ["", "changed"]) {
+      const f = fixture();
+      f.desired.metadata[key] = value;
+      await expect(f.run()).rejects.toMatchObject({ reason: "protected" });
+      expect(f.calls.every(call => call.args[0] === "get")).toBe(true);
+    }
+  });
+
+  it.each(["spec", "labels", "annotations", "owner", "mutable-image", "mutable-init"] as const)(
+    "refuses %s changes", async change => {
+      const f = fixture();
+      if (change === "spec") f.desired.spec.template.spec.containers[0]!.image = `new:latest@sha256:${"b".repeat(64)}`;
+      if (change === "labels") Object.assign(f.desired.metadata.labels, { injected: "value" });
+      if (change === "annotations") Object.assign(f.desired.metadata.annotations, { [`${P}epoch`]: "replacement" });
+      if (change === "owner") f.live.metadata.annotations["meta.helm.sh/release-name"] = "foreign";
+      if (change === "mutable-image") f.live.spec.template.spec.containers[0]!.image = "controller:latest";
+      if (change === "mutable-init") Object.assign(f.live.spec.template.spec, { initContainers: [{ name: "init", image: "init:latest" }] });
+      await expect(f.run()).rejects.toMatchObject({ reason: "protected" });
+      expect(f.calls.every(call => call.args[0] === "get" || call.args.includes("--dry-run=server"))).toBe(true);
+    });
+
+  it.each(["controller-version", "controller-uid", "namespace-evidence"] as const)(
+    "rejects concurrent %s changes after a successful preview", async change => {
+      const f = fixture();
+      f.afterPreview(() => {
+        if (change === "controller-version") f.live.metadata.resourceVersion = "2";
+        if (change === "controller-uid") f.live.metadata.uid = "replacement";
+        if (change === "namespace-evidence") f.namespace.metadata.annotations[`${P}epoch`] = "replacement";
+      });
+      await expect(f.run()).rejects.toMatchObject({ reason: "protected" });
+    });
+
+  it("refuses deletion and ambiguous duplicate targets", async () => {
+    const f = fixture();
+    await expect(assertRenderedControllersMutable(f.execute, [], "kars-system", [f.desired], true))
+      .rejects.toMatchObject({ reason: "protected" });
+    await expect(assertRenderedControllersMutable(f.execute, [f.desired, f.desired], "kars-system", [], true))
+      .rejects.toMatchObject({ reason: "protected" });
+    expect(f.calls.every(call => call.args[0] === "get")).toBe(true);
+  });
+
+  it.each(["desired", "historical"])("refuses a separately revision-bound TLS Secret in the %s release", async location => {
+    const f = fixture();
+    Object.assign(f.namespace.metadata.annotations, {
+      [`${P}budget-namespace`]: "kars-system", [`${P}budget-tls-name`]: "budget-tls", [`${P}budget-tls-version`]: "7",
+    });
+    const secret = { apiVersion: "v1", kind: "Secret", metadata: { name: "budget-tls", namespace: "kars-system" } };
+    await expect(assertRenderedControllersMutable(f.execute,
+      [f.desired, ...(location === "desired" ? [secret] : [])], "kars-system",
+      location === "historical" ? [secret] : [], true)).rejects.toMatchObject({ reason: "protected" });
+    expect(f.calls.every(call => call.args[0] === "get")).toBe(true);
+  });
+
+  it.each(["admission", "invalid-response"])("fails closed and redacts %s failures", async failure => {
+    const f = fixture();
+    const execute: RootGuardExecute = (file, args, options) => {
+      if (args[0] === "apply") {
+        if (failure === "admission") throw new Error("PRIVATE_VALUE_SENTINEL");
+        return Promise.resolve({ stdout: "PRIVATE_VALUE_SENTINEL" });
+      }
+      return f.execute(file, args, options);
+    };
+    const error = await assertRenderedControllersMutable(execute, [f.desired], "kars-system", [], true).catch(error => error);
+    expect(error).toMatchObject({ reason: "unavailable" });
+    expect(String(error)).not.toContain("PRIVATE_VALUE_SENTINEL");
+  });
+});
+
 describe("full up pre-effect root check", () => {
   it("moves existing-cluster checks before provisioning and uses the old connection arguments", async () => {
     const f = setup({ [`${P}state`]: "Qualified" });

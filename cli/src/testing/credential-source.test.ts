@@ -14,7 +14,7 @@ describe("credential source public integration", () => {
   it("renders an optional UID-pinned schema with same-target and managed-runtime admission guards", () => {
     const yaml = execFileSync("helm", [
       "template", "kars", fileURLToPath(new URL("deploy/helm/kars", root)),
-      "--show-only", "templates/crd.yaml",
+      "--namespace", "kars-system", "--show-only", "templates/crd.yaml",
     ], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 30_000 });
     const resource = parseAllDocuments(yaml).map(doc => {
       if (doc.errors.length) throw doc.errors[0];
@@ -55,7 +55,9 @@ describe("credential source public integration", () => {
     expect(code).toContain('"envFrom": inference::provider_env_from()');
     expect(code.indexOf("credential_sources::reconcile(")).toBeLessThan(code.indexOf("let runtime_spec ="));
     expect(code).toContain(".owns(");
-    expect(code.split("\n").length).toBeLessThan(3530);
+    const budget = parseAllDocuments(source("ci/loc-budget.yaml"))[0].toJSON();
+    const reconcilerBudget = budget.files.find((entry: { path: string }) => entry.path === "controller/src/reconciler/mod.rs");
+    expect(code.split("\n").length - 1).toBeLessThanOrEqual(reconcilerBudget.phase0_cap);
   });
 
   it("keeps source values off argv and binds through a real UID rather than a generated placeholder", () => {

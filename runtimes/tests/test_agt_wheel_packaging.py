@@ -198,6 +198,13 @@ class AgtWheelPackagingTests(unittest.TestCase):
         self.assertIsNotNone(packages)
         self.assertEqual(set(shlex.split(packages.group(1))), set(PACKAGES))
 
+    def test_native_builder_serializes_compilation_and_architectures(self):
+        dockerfile = (ROOT / "runtimes/Dockerfile.agt-native").read_text()
+        for setting in ("CARGO_BUILD_JOBS=1", "CARGO_INCREMENTAL=0",
+                        "CMAKE_BUILD_PARALLEL_LEVEL=1", "MAKEFLAGS=-j1"):
+            self.assertIn(setting, dockerfile)
+        self.assertRegex(dockerfile, r"RUN python /opt/build-native-agt-wheel.py amd64\s+\\\s*&& python /opt/build-native-agt-wheel.py arm64")
+
     def test_all_python_images_use_the_shared_fail_closed_installer(self):
         for runtime in ("hermes", "anthropic", "langgraph", "maf-python", "openai-agents", "pydantic-ai"):
             dockerfile = (ROOT / f"sandbox-images/{runtime}/Dockerfile").read_text()

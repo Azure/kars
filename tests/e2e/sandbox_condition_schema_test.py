@@ -11,6 +11,41 @@ import sandbox_condition_schema as probe
 
 
 class SandboxConditionSchemaTests(unittest.TestCase):
+    def test_historical_fixture_reconstruction_preserves_hashes_and_rejects_other_drift(self):
+        historical = ("Controller-generated Task/account UID binding; validated against "
+                      "live task authority before private routing")
+        builtin = ("Controller-generated Task or built-in Sandbox/account UID binding; "
+                   "validated against live source authority before private routing")
+        baseline = {"metadata": {"name": probe.NAME}, "spec": {
+            "names": {"kind": "KarsSandbox"}, "versions": [{"schema": {"openAPIV3Schema": {
+                "properties": {
+                    "spec": {"properties": {"inferenceBudgetRef": {"description": historical}}},
+                    "status": {"properties": {"conditions": {"items": {"properties": {
+                        "observedGeneration": {"type": "integer", "format": "int64"},
+                    }}}}},
+                },
+            }}}],
+        }}
+        old = copy.deepcopy(baseline)
+        del probe.condition_schema(old)["properties"]["observedGeneration"]
+        with patch.object(probe, "OLD_DIGEST", probe.spec_digest(old)), \
+                patch.object(probe, "NEW_DIGEST", probe.spec_digest(baseline)):
+            for description in (historical, builtin):
+                current = copy.deepcopy(baseline)
+                funding = current["spec"]["versions"][0]["schema"]["openAPIV3Schema"][
+                    "properties"]["spec"]["properties"]["inferenceBudgetRef"]
+                funding["description"] = description
+                untouched = copy.deepcopy(current)
+                self.assertEqual(probe.exact_schemas(current), (old, baseline))
+                self.assertEqual(current, untouched)
+                funding["description"] = "unreviewed description"
+                with self.assertRaises(probe.Failure):
+                    probe.exact_schemas(current)
+            drifted = copy.deepcopy(baseline)
+            probe.condition_schema(drifted)["properties"]["unexpected"] = {"type": "string"}
+            with self.assertRaises(probe.Failure):
+                probe.exact_schemas(drifted)
+
     def test_fixture_cannot_execute_and_does_not_assert_readiness(self):
         sandbox = probe.fixture("owned", "token")
         self.assertIs(sandbox["spec"]["suspended"], True)

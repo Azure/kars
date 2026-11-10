@@ -8,7 +8,7 @@
 // activity stream, the decisions waiting on the user, the efficiency scorecard,
 // and the Governance Receipt. No Kubernetes vocabulary surfaces.
 
-import Link from "next/link";
+import Link from "@/components/navigation-link";
 import { notFound, redirect } from "next/navigation";
 import { ExecutionExplorer } from "@/components/execution-explorer";
 import { LiveRefresh, LivePulse } from "@/components/live-refresh";
@@ -17,17 +17,18 @@ import { OrgChart } from "./org-chart";
 import { MissionMap } from "./mission-map";
 import { ReviewPanel } from "./review-panel";
 import { ReadinessPanel } from "./readiness-panel";
-import { DeployTimeline } from "./deploy-timeline";
+import { LiveDeployTimeline } from "./deploy-timeline";
 import { NetworkMode } from "./network-mode";
 import { MissionBlockers } from "./mission-blockers";
 import { MissionScorecard } from "@/components/mission-scorecard";
-import { MissionStatusBadge, missionStatus, missionBlockReason } from "@/components/mission-status";
+import { MissionQualificationRecord } from "@/components/mission-qualification";
+import { MissionStatusBadge } from "@/components/mission-status";
 import { JourneyRail, missionBeat } from "@/components/journey-rail";
 import { ReceiptPanel } from "@/components/receipt-panel";
 import { CompliancePackView } from "@/components/compliance-pack";
 import { ReceiptVerifyButton } from "@/components/receipt-verify";
-import { missionRunState } from "@/lib/mission-run-evidence";
-import { reviewedPhases } from "@/lib/team-run-evidence";
+import { missionOriginalBudget, missionPresentation } from "@/lib/mission-presentation";
+import { hasActiveReviewedPhases, reviewedPhases } from "@/lib/team-run-evidence";
 import { ReliabilityRunner } from "./reliability-runner";
 import { BudgetRecovery } from "./budget-recovery";
 import { PromoteMission } from "./promote-mission";
@@ -77,15 +78,20 @@ export default async function MissionDetail({
     task = await getTask(ns, name);
   } catch (err) {
     if (err instanceof BffError && err.code === "not_found") notFound();
-    // Any other failure (BFF unreachable, upstream error) renders an honest
-    // error state — never a raw crash overlay at the user.
+    const revisionChanged = err instanceof BffError && err.status === 409;
+    const retrying = !(err instanceof BffError) || revisionChanged || err.status === 429 || err.status >= 500;
     return (
       <div className="space-y-6">
+        <LiveRefresh active={retrying} />
         <PageHeader eyebrow="Workspace" title="Mission" />
         <HonestState
           variant="not_wired"
-          title="This mission is unavailable"
-          detail="The run environment isn't reachable right now, so this mission's details couldn't be loaded. Try again shortly."
+          title={revisionChanged ? "Mission details are updating" : "This mission is unavailable"}
+          detail={revisionChanged
+            ? "New information arrived while this page was loading. We’re checking again automatically. This does not restart your work."
+            : retrying
+              ? "We couldn’t load the mission’s details. We’re checking again automatically; no work will be restarted."
+              : "The mission’s details couldn’t be loaded. Check that you still have access, or return to your missions."}
           action={
             <Link
               href="/workspace/missions"
@@ -112,23 +118,18 @@ export default async function MissionDetail({
   );
 
   const needsYou = approvals.some((a) => a.actionable);
-  const { currentResult, realDelivery, failed, routerActivity } = missionRunState(task);
+  const { currentResult, realDelivery, failed, routerActivity, status, executionStarted, blockReason, shutdownPending } = missionPresentation(task, needsYou);
   const phases = reviewedPhases(task) ?? [];
   const displayTask = { ...task, result: currentResult };
   const blocked = currentResult?.blocked ?? null;
   const producer = currentResult?.run_evidence;
   const troubleshoot = failed ? await getTroubleshoot(ns, name).catch(() => null) : null;
-  const status = missionStatus(task.phase, task.execution_phase, {
-    delivered: realDelivery,
-    needsYou,
-    launched: task.launched,
-    failed,
-  });
   // Poll through the WHOLE live lifecycle — deploying, running, or awaiting a
   // human decision — not just "Running". Exhibit C: a mission stuck at
   // "Deploying 1/5" must update itself as the sandbox comes up, never require F5.
-  const live = status === "deploying" || status === "running" || status === "needs_you";
+  const live = status === "deploying" || status === "running" || status === "waiting" || status === "needs_you";
   const running = status === "running";
+  const observing = running || hasActiveReviewedPhases(task);
   // A newly-created draft can land here before the controller has stamped its
   // Ready condition. Keep polling admission so Launch enables automatically
   // instead of requiring the user to click around or refresh.
@@ -140,14 +141,16 @@ export default async function MissionDetail({
   // Tail while execution is changing. A delivered-but-unreviewed mission is
   // stable until the human acts; background refreshes there reset the selected
   // tab and make Activity/Artifacts feel unclickable.
-  const refreshActive = live || admissionPending;
+  const canHalt = task.launched || task.sandbox !== null;
+  const refreshActive = live || observing || admissionPending ||
+    (canHalt && status === "blocked") || status === "unavailable" || shutdownPending;
   // Drive the first run automatically once a launched mission's sandbox is up
   // and nothing has run yet — so launching a one-shot mission just starts it.
   // Gate on "no run ever requested" (not "no activity"): the agent emits startup
   // telemetry (MCP init / tool list) before any mission run, which would falsely
   // suppress the kickoff and leave the mission silently idle.
   const firstRunPending =
-    task.launched && running && currentResult == null && !task.run_requested;
+    task.launched && running && task.execution_phase === "Running" && currentResult == null && !task.run_requested;
   const budget = task.envelope.budget;
   // Which tab opens by default. A delivered/failed run opens on its outcome; a
   // freshly LAUNCHED mission drops the operator straight into the live Activity
@@ -155,7 +158,7 @@ export default async function MissionDetail({
   // un-launched draft opens on Overview to review the plan.
   const initialTab = currentResult
     ? "deliverable"
-    : task.launched && (running || status === "deploying")
+    : task.launched && (running || status === "deploying" || status === "waiting")
       ? "activity"
       : "overview";
 
@@ -214,8 +217,8 @@ export default async function MissionDetail({
             <ObjectiveBlock objective={task.objective} />
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            {(live) && <LivePulse label={status === "deploying" ? "Deploying" : status === "needs_you" ? "Waiting on you" : "Live"} />}
-            {live && <HaltButton ns={ns} task={name} />}
+            {(live) && <LivePulse label={status === "deploying" ? "Deploying" : status === "waiting" ? "Awaiting next phase" : status === "needs_you" ? "Waiting on you" : "Live"} />}
+            {canHalt && <HaltButton ns={ns} task={name} />}
             {/* While live, the animated pulse already names the phase (Deploying/
                 Live/Waiting) — a second static status badge beside it just
                 duplicates the word. Show the badge only when NOT live (delivered,
@@ -237,13 +240,16 @@ export default async function MissionDetail({
         )}
       </div>
 
+      {task.qualification_run && <MissionQualificationRecord record={task.qualification_run} compact />}
+
       {/* Journey spine — the same seven beats the compose flow showed, now
           tracking the live mission so the story reads continuously. */}
       <JourneyRail
         current={missionBeat({
           launched: task.launched,
           executionPhase: task.execution_phase,
-          hasResult: realDelivery,
+          hasResult: realDelivery && status === "done",
+          executionStarted: executionStarted || failed,
           blocked: status === "blocked",
         })}
         blocked={status === "blocked" || status === "failed"}
@@ -254,11 +260,11 @@ export default async function MissionDetail({
         <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
           <EnvelopeFact label="Autonomy" value={`Tier ${task.envelope.tier} · ${TIER_LABELS[task.envelope.tier] ?? "?"}`} />
           <EnvelopeFact
-            label="Budget"
-            value={budget?.tokens != null ? `${budget.tokens.toLocaleString()} tokens` : "No cap"}
+            label="Original inference grant"
+            value={missionOriginalBudget(budget)}
           />
           <EnvelopeFact
-            label="Connected access"
+            label="Baseline connected access"
             value={(() => {
               const ext = (task.composition?.egress ?? []).filter((e) => egressScope(e) === "external");
               const mcp = task.composition?.mcp_servers?.length ?? 0;
@@ -270,20 +276,21 @@ export default async function MissionDetail({
             <span className="text-danger">{task.status_message}</span>
           )}
         </div>
-        {/* What this autonomy level actually means for how much flies into your
-            inbox — makes the autonomy → interaction link legible (REQ17) — and
-            frames the envelope as adjustable guardrails, not a fixed cage: every
-            boundary here can be widened in-flow (raise the autonomy tier, add a
-            network host, or lift the budget in Overview), each as a governed,
-            receipted decision. */}
+        <p className="mt-2 text-xs text-foreground-muted">
+          The original grant is historical, not the effective account ceiling. Authorized top-ups
+          and unbounded allowances may change effective funding; a missing grant does not establish unlimited access.
+          Monetary caps, provider limits and authorization still apply.
+        </p>
+        {/* Reviewed authority changes do not rewrite a consumed execution. */}
         <p className="mt-2 border-t border-border/60 pt-2 text-xs text-foreground-muted">
           {AUTONOMY_INTERACTION[task.envelope.tier] ?? "Acts within its envelope; you review outcomes."}
-          {task.launched && (
+          {task.launched && !task.qualification_run && (
             <>
               {" "}
               <span className="text-foreground-muted/80">
-                These are guardrails, not a cage — raise the tier, add a network host, or lift the budget
-                anytime in Overview; each change is a governed, receipted decision.
+                Request autonomy, temporary network access, or funding changes in Overview.
+                Each follows its own approval and installation checks. A launched mission needs
+                a fresh authorized run to use a higher autonomy tier.
               </span>
             </>
           )}
@@ -293,8 +300,8 @@ export default async function MissionDetail({
       {/* Next step — ONE primary, state-driven call to action, so the mission
           reads as "here's what to do now" instead of ~18 competing buttons
           (audit f11). The detailed controls remain grouped in the tabs below. */}
-      {status !== "blocked" && (
-        <NextStep status={status} />
+      {status !== "blocked" && task.halted == null && (
+        <NextStep status={status} qualificationRun={!!task.qualification_run} />
       )}
 
       {/* Blocked banner */}
@@ -302,18 +309,19 @@ export default async function MissionDetail({
         <div role="alert" className="flex items-start gap-3 rounded-xl border border-danger/30 bg-danger/10 px-4 py-3">
           <div>
             <p className="text-sm font-medium text-danger">This mission is blocked</p>
-            <p className="mt-0.5 text-sm text-foreground-muted">{missionBlockReason(task)}</p>
+            <p className="mt-0.5 text-sm text-foreground-muted">{blockReason}</p>
           </div>
         </div>
       )}
 
-      {task.halted && (
+      {task.halted != null && (
         <div className="flex items-start gap-2 rounded-xl border border-danger/40 bg-danger/[0.06] px-4 py-3">
           <span aria-hidden className="text-danger">⏹</span>
           <div>
-            <p className="text-sm font-medium">{task.launched || realDelivery ? "Previous halt" : "Mission halted"}</p>
+            <p className="text-sm font-medium">Mission permanently halted</p>
             <p className="mt-0.5 text-xs text-foreground-muted">
-              {task.halted}{" "}This is retained halt history; current execution status is shown above.
+              {task.halted}{" "}This Mission cannot relaunch or request revisions. Review retained evidence here, or{" "}
+              <Link href="/workspace/new" className="text-signal underline">start a new Mission</Link> to continue.
               A halt record does not by itself verify runtime teardown,
               mesh removal, or retention of the deliverable, trace, and receipt.
             </p>
@@ -404,7 +412,7 @@ export default async function MissionDetail({
             label: "Overview",
             node: (
               <div className="space-y-5">
-                {task.launched && <DeployTimeline task={displayTask} />}
+                {task.launched && <LiveDeployTimeline task={displayTask} observing={observing} />}
                 {task.composition && <CompositionPanel composition={task.composition} launched={task.launched} envelopeToolPolicy={task.envelope.tool_policy} />}
                 {task.composition && (
                   <ReadinessPanel
@@ -419,8 +427,9 @@ export default async function MissionDetail({
                 {task.sandbox && (
                   <NetworkMode ns={ns} task={name} mode={task.egress_mode} />
                 )}
-                {currentResult != null && <ReliabilityRunner ns={ns} name={name} />}
-                {task.launched && <PromoteMission ns={ns} name={name} currentTier={task.envelope.tier} />}
+                {task.qualification_run && <MissionQualificationRecord record={task.qualification_run} />}
+                {currentResult != null && !task.qualification_run && <ReliabilityRunner ns={ns} name={name} />}
+                <PromoteMission ns={ns} name={name} currentTier={task.envelope.tier} halted={task.halted != null} />
                 {task.agent_identity && <AgentIdentityCard identity={task.agent_identity} />}
                 <MissionMap task={task} />
                 {/* Org chart only for a real multi-agent structure — a team run
@@ -440,7 +449,7 @@ export default async function MissionDetail({
             badge: task.activity?.length ? task.activity.filter((event) => event.kind === "tool").length : null,
             node: (
               <div className="space-y-4">
-                {task.launched && currentResult == null && <DeployTimeline task={displayTask} />}
+                {task.qualification_run && <MissionQualificationRecord record={task.qualification_run} />}
                 {currentResult && <RecordedRunPanel result={currentResult} />}
                 {task.reviewed_execution?.issue && (
                   <HonestState
@@ -450,8 +459,11 @@ export default async function MissionDetail({
                   />
                 )}
                 <ExecutionExplorer
+                  startupTask={task.launched && currentResult == null ? displayTask : null}
+                  stoppedActivity={task.stopped_activity}
                   routerActivity={routerActivity && producer ? { observations: routerActivity, producer, provisional: false } : null}
                   phases={phases}
+                  observing={observing}
                   running={running}
                   activity={task.activity}
                   telemetry={task.telemetry}
@@ -497,7 +509,7 @@ export default async function MissionDetail({
                 {failed ? (
                   <>
                     <FailureDiagnostic task={displayTask} troubleshoot={troubleshoot} />
-                    <ResultPanel result={currentResult} />
+                    <ResultPanel result={currentResult} task={task} />
                   </>
                 ) : blocked ? (
                   <section className="rounded-xl border border-warning/50 bg-warning/[0.06] p-6">
@@ -523,12 +535,12 @@ export default async function MissionDetail({
                     </details>
                   </section>
                 ) : (
-                  <ResultPanel result={currentResult} />
+                  <ResultPanel result={currentResult} task={task} />
                 )}
-                {currentRunNonce && <ReviewPanel key={currentRunNonce} task={name} assignmentNonce={currentRunNonce} eligible={realDelivery} launched={task.launched} kind={reviewKind(task.artifacts)} initial={review} sandboxLive={task.launched && task.execution_phase === "Running"} />}
+                {currentRunNonce && <ReviewPanel key={currentRunNonce} qualificationRun={!!task.qualification_run} halted={task.halted != null} task={name} assignmentNonce={currentRunNonce} eligible={realDelivery} launched={task.launched} kind={reviewKind(task.artifacts)} initial={review} sandboxLive={task.launched && task.execution_phase === "Running"} />}
               </div>
             ) : review?.redrive_pending && currentRunNonce && review.requested_revision_nonce === currentRunNonce ? (
-              <ReviewPanel key={currentRunNonce} task={name} assignmentNonce={currentRunNonce} launched={task.launched} kind={reviewKind(task.artifacts)} initial={review} />
+              <ReviewPanel key={currentRunNonce} qualificationRun={!!task.qualification_run} halted={task.halted != null} task={name} assignmentNonce={currentRunNonce} launched={task.launched} kind={reviewKind(task.artifacts)} initial={review} />
             ) : (
               <HonestState
                 variant="empty"
@@ -536,7 +548,9 @@ export default async function MissionDetail({
                 title="No deliverable for this revision yet"
                 detail={task.launched
                   ? "A new result has not been recorded for this revision. Check Activity for its execution status."
-                  : "The runtime is stopped. Review the execution checks in Overview before launching this revision."}
+                  : task.halted != null
+                    ? "This Mission is permanently halted. Start a new Mission to continue; prior evidence remains recorded."
+                    : "The runtime is stopped. Review the execution checks in Overview before launching this revision."}
               />
             ),
           },

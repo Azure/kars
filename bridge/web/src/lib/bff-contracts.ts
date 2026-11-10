@@ -42,17 +42,22 @@ export interface FoundryStatus {
   memory_store_id: string | null;
   auth: string | null;
   has_api_key: boolean;
+  connections?: FoundryConnection[] | null;
+  services_discovered_at?: string | null;
 }
 export interface FoundryCheck { label: string; status: string; detail: string }
 export interface FoundryConnection { name: string; category: string | null }
 export interface FoundryDiscovered {
   models: string[];
+  models_discovered?: boolean;
+  connections_discovered?: boolean;
+  models_catalogued?: boolean;
   connections: FoundryConnection[];
   memory_store_found: boolean | null;
 }
 export interface FoundryVerifyResult { checks: FoundryCheck[]; discovered: FoundryDiscovered }
 
-export interface CreateRole { name: string; system_prompt?: string; runtime?: string; model?: string; skills?: string[] }
+export interface CreateRole { name: string; system_prompt?: string; runtime?: string; model?: string; skills?: string[]; resources?: import("./types/teams").TeamRoleResources | null }
 
 // ─── GitHub Copilot device-flow sign-in ─────────────────────────────────────
 // Mints a Copilot-authorized token via GitHub's device flow (a stock `gh`

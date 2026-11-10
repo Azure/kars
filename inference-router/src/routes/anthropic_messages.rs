@@ -123,8 +123,8 @@ fn provider_error_code(e: &ProviderError) -> &'static str {
 
 /// Convert Anthropic Messages-shaped JSON to OpenAI chat-completions-shaped JSON.
 ///
-/// Best-effort: tolerates missing fields, returns the same body unchanged on
-/// JSON parse failure.
+/// Best-effort: tolerates missing fields. The caller retains this generated JSON
+/// for forwarding instead of serializing and parsing it again.
 pub(super) fn anthropic_to_openai(req: &Value) -> Value {
     let mut messages: Vec<Value> = Vec::new();
 
@@ -279,7 +279,7 @@ pub(super) async fn anthropic_messages(
 ) -> impl IntoResponse {
     let sandbox_name = state.sandbox_name.as_str();
 
-    let req_json: Value = match serde_json::from_slice(&body) {
+    let req_json: Value = match super::request_json::parse(&body) {
         Ok(v) => v,
         Err(e) => {
             return deny_response(
@@ -313,9 +313,31 @@ pub(super) async fn anthropic_messages(
     // loaded `InferencePolicy` (Slice 2b); env-default fallback.
     // Latency: one snapshot read per request (mirrors chat_completions).
     let policy = crate::inference_policy_loader::current_snapshot(&state.inference_policy).await;
+    if policy.content_safety.is_active() {
+        let message = super::chat_completions::content_safety_route_message("Anthropic Messages");
+        tracing::warn!(
+            target: "inference.audit",
+            sandbox = %sandbox_name,
+            inference_policy_digest = %policy.digest,
+            decision = "deny",
+            gate = "route_enforcement_gap",
+            "{message}"
+        );
+        return deny_policy(
+            StatusCode::FORBIDDEN,
+            &message,
+            "permission_error",
+            super::chat_completions::CONTENT_SAFETY_ROUTE_UNSUPPORTED,
+        );
+    }
     if let Err(msg) = state
         .budget
-        .check_budget(sandbox_name, policy.daily_tokens, policy.monthly_tokens)
+        .check_governed_budget(
+            sandbox_name,
+            policy.daily_tokens,
+            policy.monthly_tokens,
+            state.inference_budget.as_deref(),
+        )
         .await
     {
         tracing::warn!(sandbox = %sandbox_name, "Token budget exceeded (anthropic): {msg}");
@@ -434,7 +456,7 @@ pub(super) async fn anthropic_messages(
             &state,
             sandbox_name,
             headers,
-            body,
+            proxy::RequestBody::from_validated(body, req_json),
             upstream,
             guardrail_pipeline,
             policy.digest.clone(),
@@ -443,17 +465,7 @@ pub(super) async fn anthropic_messages(
     }
 
     // Translate Anthropic -> OpenAI chat completions request shape.
-    let openai_body = anthropic_to_openai(&req_json);
-    let openai_bytes: Bytes = match serde_json::to_vec(&openai_body) {
-        Ok(v) => v.into(),
-        Err(e) => {
-            return deny_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("Translation failed: {e}"),
-                "api_error",
-            );
-        }
-    };
+    let openai_body = proxy::RequestBody::from_value(anthropic_to_openai(&req_json));
 
     // Force JSON content-type on upstream call; strip Anthropic-specific
     // headers (anthropic-version, x-api-key) that Foundry would reject.
@@ -466,7 +478,7 @@ pub(super) async fn anthropic_messages(
         upstream_headers.insert(name.clone(), value.clone());
     }
 
-    let result = proxy::forward(
+    let result = proxy::forward_parsed(
         &state.auth,
         Some(&state.copilot),
         &state.client,
@@ -474,7 +486,7 @@ pub(super) async fn anthropic_messages(
         axum::http::Method::POST,
         "chat/completions",
         &upstream_headers,
-        openai_bytes,
+        openai_body,
     )
     .await;
 
@@ -759,13 +771,13 @@ async fn forward_anthropic_passthrough(
     state: &AppState,
     sandbox_name: &str,
     headers: HeaderMap,
-    body: Bytes,
+    body: proxy::RequestBody,
     upstream: crate::proxy::UpstreamConfig,
     guardrail_pipeline: Option<Arc<GuardrailPipeline>>,
     policy_digest: String,
 ) -> axum::response::Response {
-    let is_stream = serde_json::from_slice::<Value>(&body)
-        .ok()
+    let is_stream = body
+        .json()
         .and_then(|v| v.get("stream")?.as_bool())
         .unwrap_or(false);
 
@@ -782,7 +794,7 @@ async fn forward_anthropic_passthrough(
     }
 
     if is_stream {
-        match proxy::forward_stream(
+        match proxy::forward_stream_parsed(
             state.auth.clone(),
             Some(state.copilot.clone()),
             state.client.clone(),
@@ -854,7 +866,7 @@ async fn forward_anthropic_passthrough(
             }
         }
     } else {
-        match proxy::forward(
+        match proxy::forward_parsed(
             &state.auth,
             Some(&state.copilot),
             &state.client,
@@ -976,6 +988,129 @@ async fn forward_anthropic_passthrough(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn native_passthrough_preserves_stream_selection_at_request_byte_limit() {
+        use axum::{Router, http::Request};
+        use tower::ServiceExt;
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{body_partial_json, method, path},
+        };
+
+        let upstream = MockServer::start().await;
+        let completion = json!({
+            "type": "message", "content": [{"type": "text", "text": "answer"}],
+            "usage": {"input_tokens": 1, "output_tokens": 1}
+        });
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&completion))
+            .with_priority(2)
+            .expect(4)
+            .mount(&upstream)
+            .await;
+        let event = format!("event: message_stop\ndata: {completion}\n\n");
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .and(body_partial_json(json!({"stream": true})))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(event.as_bytes().to_vec(), "text/event-stream"),
+            )
+            .with_priority(1)
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        let mut config = crate::config::Config::from_env().unwrap();
+        config.default_model = "claude-test".into();
+        config.provider_override = Some("anthropic".into());
+        config.anthropic_endpoint = upstream.uri();
+        config.anthropic_api_key = Some("test-only".into());
+        config.content_safety_enabled = false;
+        config.providers.clear();
+        let mut state = super::super::model_routing::tests::test_state(config);
+        state.client = reqwest::Client::builder().no_proxy().build().unwrap();
+        *state.inference_policy.write().await =
+            Some(crate::inference_policy_loader::LoadedInferencePolicy {
+                digest: "sha256:test".into(),
+                source_path: "test-policy".into(),
+                per_request_tokens: None,
+                daily_tokens: None,
+                monthly_tokens: None,
+                content_safety: Default::default(),
+                model_preference: None,
+                provider: Some("anthropic".into()),
+                guardrails: vec![],
+                raw: json!({}),
+            });
+        let app = Router::new()
+            .merge(super::super::inference::inference_routes())
+            .with_state(state);
+        for stream in [
+            Some(json!(true)),
+            Some(json!(false)),
+            Some(json!("true")),
+            Some(Value::Null),
+            None,
+        ] {
+            let mut request = json!({
+                "model": "claude-test", "max_tokens": 32,
+                "messages": [{"role": "user", "content": "hello"}]
+            });
+            let is_stream = stream.as_ref().and_then(Value::as_bool).unwrap_or(false);
+            if let Some(stream) = stream {
+                request["stream"] = stream;
+            }
+            let mut body = serde_json::to_vec(&request).unwrap();
+            body.resize(2 * 1024 * 1024, b' ');
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post("/anthropic/v1/messages")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.clone()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.headers()["content-type"],
+                if is_stream {
+                    "text/event-stream"
+                } else {
+                    "application/json"
+                }
+            );
+            let bytes = axum::body::to_bytes(response.into_body(), 65_536)
+                .await
+                .unwrap();
+            if is_stream {
+                assert_eq!(bytes.as_ref(), event.as_bytes());
+            } else {
+                assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap(), completion);
+            }
+            let forwarded = upstream.received_requests().await.unwrap();
+            assert_eq!(
+                forwarded.last().unwrap().body_json::<Value>().unwrap(),
+                request
+            );
+            body.push(b' ');
+            let oversized = app
+                .clone()
+                .oneshot(
+                    Request::post("/anthropic/v1/messages")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        }
+        assert_eq!(upstream.received_requests().await.unwrap().len(), 5);
+    }
 
     #[test]
     fn translates_basic_text_request() {

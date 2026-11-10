@@ -13,6 +13,14 @@ Licensed under the MIT License. -->
 > order, LF-only, trailing newline*. The kind-specific rules below
 > layer on top of that.
 
+The controller's egress and tools consumers use bounded `serde-saphyr`
+parsing with duplicate-key rejection. Structural checks use JSON-compatible
+values; signed YAML bytes are never reserialized. Egress key order, scalar
+types, endpoint ordering and canonical-byte checks remain independently
+enforced. Tools profiles still retain permitted comments and cosmetic key
+ordering in their original signed bytes. Each policy artifact contains one
+YAML document; multi-document parsing is reserved for Kubernetes manifests.
+
 ## §0. Universal rules (apply to every kind)
 
 These rules hold for **every** `application/vnd.kars.*.v1+yaml` artifact.

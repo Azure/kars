@@ -72,7 +72,7 @@ pub enum Frame {
 /// error code.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParseError {
-    /// Wire bytes did not parse as JSON. Maps to JSON-RPC `-32700`.
+    /// Wire bytes exceeded parser limits or did not parse as JSON. Maps to JSON-RPC `-32700`.
     InvalidJson(String),
     /// `jsonrpc` field missing or not exactly `"2.0"`. Maps to `-32600`.
     InvalidProtocolVersion(String),
@@ -106,11 +106,17 @@ const PROTOCOL_VERSION: &str = "2.0";
 /// Returns a [`Frame`] on success, or a structured [`ParseError`] on
 /// failure. The parser:
 ///
+/// - Enforces the same `MAX_FRAME_BYTES` bound as the MCP and A2A entrypoints.
 /// - Rejects any `jsonrpc` value other than the exact string `"2.0"`.
 /// - Rejects empty batches.
 /// - Accepts batches recursively (but flat-only — JSON-RPC 2.0 forbids
 ///   nested batches; nesting is detected via inner-frame parse).
 pub fn parse_frame(bytes: &[u8]) -> Result<Frame, ParseError> {
+    if bytes.len() > super::streamable_http::MAX_FRAME_BYTES {
+        return Err(ParseError::InvalidJson(
+            "frame exceeds MAX_FRAME_BYTES".into(),
+        ));
+    }
     let v: Value =
         serde_json::from_slice(bytes).map_err(|e| ParseError::InvalidJson(e.to_string()))?;
     parse_frame_value(v)
@@ -222,6 +228,34 @@ mod tests {
             Frame::Response(r) => assert_eq!(r.error.unwrap().code, -32601),
             _ => panic!("expected Response"),
         }
+    }
+
+    #[test]
+    fn accepts_frame_at_existing_transport_limit() {
+        let mut body = br#"{"jsonrpc":"2.0","method":"tools/list","id":1}"#.to_vec();
+        body.resize(super::super::streamable_http::MAX_FRAME_BYTES, b' ');
+        assert!(matches!(parse_frame(&body), Ok(Frame::Request(_))));
+    }
+
+    #[test]
+    fn rejects_frame_above_existing_transport_limit() {
+        let mut body = br#"{"jsonrpc":"2.0","method":"tools/list","id":1}"#.to_vec();
+        body.resize(super::super::streamable_http::MAX_FRAME_BYTES + 1, b' ');
+        assert!(serde_json::from_slice::<Value>(&body).is_ok());
+        assert_eq!(
+            parse_frame(&body),
+            Err(ParseError::InvalidJson(
+                "frame exceeds MAX_FRAME_BYTES".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn retains_json_recursion_limit() {
+        let body = format!("{}0{}", "[".repeat(129), "]".repeat(129));
+        assert!(
+            matches!(parse_frame(body.as_bytes()), Err(ParseError::InvalidJson(message)) if message.contains("recursion limit exceeded"))
+        );
     }
 
     #[test]

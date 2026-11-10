@@ -41,7 +41,7 @@ export const MCP_CATALOG: McpCatalogEntry[] = [
     label: "GitHub",
     category: "Dev & code",
     icon: "🐙",
-    description: "Repositories, issues, pull requests, Actions, and code search across your GitHub org.",
+    description: "GitHub tools using this service’s own sign-in. Connecting a repository through the Kars GitHub App does not give this service access or limit which repositories it can reach. For private repository metadata, use the App connection in your mission instead.",
     url: "https://api.githubcopilot.com/mcp/",
     hosting: "hosted",
     oauth: true,
@@ -60,7 +60,7 @@ export const MCP_CATALOG: McpCatalogEntry[] = [
     url: "https://mcp.deepwiki.com/mcp",
     hosting: "hosted",
     oauth: false,
-    allowedTools: ["read_wiki_structure", "read_wiki_contents", "ask_question"],
+    allowedTools: ["read_wiki_structure", "read_wiki_contents", "ask_wiki_question"],
     docs: "https://docs.devin.ai/work-with-devin/deepwiki-mcp",
   },
   {

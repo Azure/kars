@@ -5,8 +5,8 @@
 
 // kars Bridge — workspace communication channels (agent-agnostic). Configured on
 // the Connections tab alongside GitHub: wire Telegram / Slack / Discord / WhatsApp
-// once for the whole WORKSPACE and every agent — mission or team — can report over
-// them (the controller propagates the token into each run sandbox). SECURITY:
+// once for the whole WORKSPACE (the controller propagates their configuration
+// into run sandboxes). Saved configuration does not establish delivery. SECURITY:
 // tokens are write-only — typed into a password field, sent to the BFF (stored
 // only in a K8s Secret), never shown back. The UI only knows which are enabled.
 
@@ -17,7 +17,7 @@ const CHANNELS: { id: string; label: string; glyph: "message"; token: string; hi
   { id: "telegram", label: "Telegram", glyph: "message", token: "Bot token", hint: "From @BotFather. Add chat IDs below so agents can proactively DM you updates.", extra: "Allowed chat IDs (required for agents to send you updates)" },
   { id: "slack", label: "Slack", glyph: "message", token: "Bot OAuth token", hint: "xoxb-… — inbound conversation (agents reply to your DMs)." },
   { id: "discord", label: "Discord", glyph: "message", token: "Bot token", hint: "From the Discord developer portal — inbound conversation." },
-  { id: "whatsapp", label: "WhatsApp", glyph: "message", token: "Enable", hint: "Type 'true' to enable pairing — inbound conversation." },
+  { id: "whatsapp", label: "WhatsApp", glyph: "message", token: "Enable WhatsApp", hint: "Inbound conversation. Saving enables setup only; device pairing is not completed or checked here." },
 ];
 
 export function ConnectChannels({ ns }: { ns: string }) {
@@ -96,7 +96,7 @@ export function ConnectChannels({ ns }: { ns: string }) {
                   <span className="text-sm font-medium">{ch.label}</span>
                   {on && (
                     <span className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-600">
-                      connected
+                      configured
                     </span>
                   )}
                 </div>
@@ -126,14 +126,27 @@ export function ConnectChannels({ ns }: { ns: string }) {
               </div>
               {isOpen && !on && (
                 <div className="mt-2 space-y-2">
-                  <input
-                    type="password"
-                    autoComplete="off"
-                    value={token}
-                    onChange={(e) => setToken(e.target.value)}
-                    placeholder={ch.token}
-                    className="w-full rounded-md border border-border bg-surface px-2.5 py-1.5 text-xs outline-none focus:border-signal"
-                  />
+                  {ch.id === "whatsapp" ? (
+                    <label className="flex items-center gap-2 text-xs">
+                      <input
+                        type="checkbox"
+                        checked={token === "true"}
+                        disabled={busy}
+                        onChange={(e) => setToken(e.target.checked ? "true" : "")}
+                      />
+                      {ch.token}
+                    </label>
+                  ) : (
+                    <input
+                      type="password"
+                      autoComplete="off"
+                      value={token}
+                      onChange={(e) => setToken(e.target.value)}
+                      placeholder={ch.token}
+                      aria-label={`${ch.label} ${ch.token}`}
+                      className="w-full rounded-md border border-border bg-surface px-2.5 py-1.5 text-xs outline-none focus:border-signal"
+                    />
+                  )}
                   {ch.extra && (
                     <input
                       type="text"
@@ -162,9 +175,10 @@ export function ConnectChannels({ ns }: { ns: string }) {
       </div>
       {error && <p className="mt-2 text-xs text-rose-600">{error}</p>}
       <p className="mt-3 text-[11px] text-foreground-muted">
-        Agent-agnostic: a channel wired here reaches every mission and team in this workspace — the
-        controller injects the token into each run sandbox, and the agent&rsquo;s harness wires up the
-        channel from it. No agent ever holds the token beyond its sandbox.
+        These settings are shared with mission and team sandboxes in this workspace; teams can
+        override them. Configured means settings are saved, not that a message has been delivered.
+        Tokens are stored in Kubernetes Secrets, supplied to the runtime inside its sandbox, and
+        never displayed back here.
       </p>
     </div>
   );

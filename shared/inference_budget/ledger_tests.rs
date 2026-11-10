@@ -7,6 +7,17 @@ use crate::inference_budget_contract::tariffs::{
 };
 use serde_json::json;
 
+#[path = "ledger_bridge_renewal_tests.rs"]
+mod bridge_renewal_tests;
+#[path = "ledger_memory_tests.rs"]
+mod memory_tests;
+#[path = "ledger_record_only_tests.rs"]
+mod record_only_tests;
+#[path = "ledger_topup_tests.rs"]
+mod topup_tests;
+#[path = "ledger_unbounded_tests.rs"]
+mod unbounded_tests;
+
 #[test]
 fn integer_range_validation_applies_even_when_attempt_map_is_empty() {
     let mut ledger = ledger(100);
@@ -103,7 +114,7 @@ fn request(task: &str, pod: &str, sequence: u64) -> ReserveRequest {
         identity: identity(task, pod),
         sequence,
         wire_digest: digest(),
-        quote,
+        quote: quote.into(),
     }
 }
 
@@ -127,6 +138,164 @@ fn usage() -> Usage {
         cache_creation_input_tokens: 0,
         reasoning_output_tokens: 0,
     }
+}
+
+fn builtin_ledger(name: &str) -> (Ledger, ReserveRequest, BuiltinFunding) {
+    let mut root = ledger(100).root;
+    root.kind = RootKind::KarsSandbox;
+    root.resource = resource(name, "builtin-uid");
+    let grant = BuiltinFunding {
+        root: root.clone(),
+        limits: Limits {
+            tokens: Some(65),
+            usd_micros: None,
+        },
+        expires_at: "1970-01-01T00:08:20Z".into(),
+        unbounded_tokens: false,
+    };
+    let authority = TaskAuthority {
+        task: root.resource.clone(),
+        parent_uid: None,
+        root_task_uid: root.resource.uid.clone(),
+        authorization_digest: digest(),
+        effective_authorization: serde_json::to_value(&grant).unwrap(),
+        limits: grant.limits,
+    };
+    let ledger = Ledger::new("account-uid".into(), root, grant.limits)
+        .unwrap()
+        .register_task(authority)
+        .unwrap()
+        .next;
+    let mut request = request("builtin-uid", "a", 1);
+    request.identity.sandbox = grant.root.resource.clone();
+    let ledger = ledger
+        .register_session(request.identity.clone())
+        .unwrap()
+        .next;
+    (ledger, request, grant)
+}
+
+#[test]
+fn builtin_lifetime_charges_uncertainty_and_parallel_reservations_survive_restart() {
+    for name in ["sre", "bridge-orchestrator"] {
+        let (ledger, mut request, _) = builtin_ledger(name);
+        let ledger = ledger
+            .reserve(&request, 100)
+            .unwrap()
+            .next
+            .begin_dispatch(&command(&request), 101)
+            .unwrap()
+            .next
+            .settle(&Settlement {
+                attempt: command(&request),
+                usage: Some(usage()),
+            })
+            .unwrap()
+            .next;
+        assert_eq!(ledger.meters.settled.tokens, 8);
+        request.sequence = 2;
+        let ledger = ledger
+            .reserve(&request, 102)
+            .unwrap()
+            .next
+            .begin_dispatch(&command(&request), 103)
+            .unwrap()
+            .next
+            .settle(&Settlement {
+                attempt: command(&request),
+                usage: None,
+            })
+            .unwrap()
+            .next;
+        assert_eq!(ledger.meters.uncertain.tokens, 30);
+        let ledger: Ledger = serde_json::from_slice(&serde_json::to_vec(&ledger).unwrap()).unwrap();
+        ledger.validate().unwrap();
+        request.sequence = 3;
+        assert!(matches!(
+            ledger.reserve(&request, 104),
+            Err(BudgetError::Exhausted)
+        ));
+        assert_eq!(ledger.meters.total().unwrap().tokens, 38);
+
+        let (ledger, a, _) = builtin_ledger(name);
+        let mut b = a.clone();
+        b.identity.pod_uid = "b".into();
+        b.identity.pod_name = "pod-b".into();
+        let ledger = ledger
+            .register_session(b.identity.clone())
+            .unwrap()
+            .next
+            .reserve(&a, 100)
+            .unwrap()
+            .next;
+        let ledger: Ledger = serde_json::from_slice(&serde_json::to_vec(&ledger).unwrap()).unwrap();
+        let ledger = ledger.reserve(&b, 101).unwrap().next;
+        assert_eq!(ledger.meters.reserved.tokens, 60);
+        let mut c = b.clone();
+        c.sequence = 2;
+        assert!(matches!(
+            ledger.reserve(&c, 102),
+            Err(BudgetError::Exhausted)
+        ));
+    }
+}
+
+#[test]
+fn builtin_expiry_denies_new_reservation_and_delayed_send_but_not_settlement() {
+    let (ledger, request, grant) = builtin_ledger("sre");
+    assert!(grant.validate(499).is_ok());
+    assert_eq!(grant.validate(500), Err(BudgetError::Expired));
+    assert!(matches!(
+        ledger.reserve(&request, 500),
+        Err(BudgetError::Expired)
+    ));
+    let ledger = ledger.reserve(&request, 499).unwrap().next;
+    assert!(matches!(
+        ledger.begin_dispatch(&command(&request), 500),
+        Err(BudgetError::Expired)
+    ));
+    let ledger = ledger.begin_dispatch(&command(&request), 499).unwrap().next;
+    let closed = ledger.close_account().unwrap().next;
+    let settled = closed
+        .settle(&Settlement {
+            attempt: command(&request),
+            usage: None,
+        })
+        .unwrap()
+        .next;
+    assert_eq!(settled.meters.uncertain.tokens, 30);
+}
+
+#[test]
+fn builtin_root_rejects_fake_tasks_children_and_changed_contract() {
+    let (ledger, request, _) = builtin_ledger("bridge-orchestrator");
+    assert!(
+        ledger
+            .register_task(task("synthetic-task", None, 50))
+            .is_err()
+    );
+    assert!(
+        ledger
+            .register_task(task("child", Some("builtin-uid"), 50))
+            .is_err()
+    );
+    let mut corrupt = ledger.clone();
+    corrupt
+        .nodes
+        .get_mut("builtin-uid")
+        .unwrap()
+        .authority
+        .effective_authorization["root"]["resource"]["uid"] = json!("replacement");
+    assert!(corrupt.validate().is_err());
+    let mut stale = request.clone();
+    let AttemptQuote::Bounded(quote) = &mut stale.quote else {
+        panic!("bounded fixture")
+    };
+    quote.contract.valid_until = "1970-01-01T00:01:00Z".into();
+    assert!(ledger.reserve(&stale, 100).is_err());
+    let mut identity = request.identity;
+    identity.task_uid = "invented-task".into();
+    assert!(ledger.register_session(identity).is_err());
 }
 
 #[test]
@@ -191,6 +360,166 @@ fn uncertain_tombstones_retain_contracts_and_freeze_on_late_over_bound_usage() {
     assert_eq!(settled.next.phase, AccountPhase::Frozen);
     assert_eq!(settled.next.meters.uncertain.tokens, 30);
     assert_eq!(settled.next.sessions["pod-a"].next_sequence, 2);
+}
+
+#[test]
+fn closed_sessions_compact_settled_tails_without_erasing_uncertainty() {
+    let mut ledger = ledger(100_000);
+    ledger.limits.usd_micros = None;
+    ledger
+        .nodes
+        .get_mut("root")
+        .unwrap()
+        .authority
+        .limits
+        .usd_micros = None;
+    for pod in ["pod-a", "pod-b", "pod-c", "pod-d"] {
+        ledger = ledger.register_session(identity("root", pod)).unwrap().next;
+        for sequence in 1..=MAX_REPLAY_WINDOW {
+            let request = request("root", pod, sequence);
+            ledger = ledger.reserve(&request, 100).unwrap().next;
+            ledger = ledger.begin_dispatch(&command(&request), 101).unwrap().next;
+            ledger = ledger
+                .settle(&Settlement {
+                    attempt: command(&request),
+                    usage: (sequence > 6).then(usage),
+                })
+                .unwrap()
+                .next;
+        }
+    }
+    // Reproduce a persisted pre-compaction ledger: closed sessions with early
+    // uncertainty pinning all 232 settled rows at the 256-attempt bound.
+    for session in ledger.sessions.values_mut() {
+        session.closed = true;
+    }
+    ledger = ledger
+        .register_session(identity("root", "new-pod"))
+        .unwrap()
+        .next;
+    ledger.validate().unwrap();
+    assert_eq!(ledger.attempts.len(), MAX_ATTEMPTS);
+    let next_request = request("root", "new-pod", 1);
+    assert!(matches!(
+        ledger.reserve(&next_request, 200),
+        Err(BudgetError::Capacity)
+    ));
+    let tombstones: BTreeMap<_, _> = ledger
+        .attempts
+        .iter()
+        .filter(|(_, attempt)| attempt.phase == AttemptPhase::Uncertain)
+        .map(|(key, attempt)| (key.clone(), attempt.clone()))
+        .collect();
+    assert_eq!(tombstones.len(), 24);
+    let compacted = ledger.commit_uncertain_before(200).unwrap();
+    assert!(compacted.changed);
+    assert_eq!(compacted.value, 0);
+    let compacted = compacted.next;
+    assert_eq!(compacted.attempts, tombstones);
+    assert_eq!(compacted.meters, ledger.meters);
+    assert_eq!(compacted.nodes, ledger.nodes);
+    assert_eq!(compacted.limits, ledger.limits);
+    assert_eq!(compacted.account_uid, ledger.account_uid);
+    assert_eq!(compacted.root, ledger.root);
+    for (pod, session) in &ledger.sessions {
+        let retained = &compacted.sessions[pod];
+        assert_eq!(retained.identity, session.identity);
+        assert_eq!(retained.closed, session.closed);
+        assert_eq!(retained.next_sequence, session.next_sequence);
+        assert_eq!(
+            retained.closed_through,
+            if session.closed { MAX_REPLAY_WINDOW } else { 0 }
+        );
+    }
+    let serialized = serde_json::to_vec(&compacted).unwrap();
+    let restored: Ledger = serde_json::from_slice(&serialized).unwrap();
+    restored.validate().unwrap();
+    assert_eq!(restored, compacted);
+    assert!(!restored.expire_undispatched(200).unwrap().changed);
+    let reserved = restored.reserve(&next_request, 200).unwrap().next;
+    assert_eq!(reserved.meters.settled, ledger.meters.settled);
+    assert_eq!(reserved.meters.uncertain, ledger.meters.uncertain);
+    assert_eq!(reserved.meters.reserved.tokens, 30);
+    assert!(
+        restored
+            .register_session(identity("root", "pod-a"))
+            .is_err()
+    );
+    for sequence in [1, 7, MAX_REPLAY_WINDOW] {
+        assert!(
+            restored
+                .reserve(&request("root", "pod-a", sequence), 200)
+                .is_err()
+        );
+    }
+    let late = Settlement {
+        attempt: command(&request("root", "pod-a", 1)),
+        usage: Some(usage()),
+    };
+    let result = restored.settle(&late).unwrap();
+    assert!(!result.changed);
+    assert!(result.value.uncertain);
+    assert_eq!(
+        result.value.charged,
+        Some(tombstones[&late.attempt.key.storage_key()].charged)
+    );
+    let settled_replay = restored
+        .settle(&Settlement {
+            attempt: command(&request("root", "pod-a", 7)),
+            usage: Some(usage()),
+        })
+        .unwrap();
+    assert!(!settled_replay.changed);
+    assert_eq!(settled_replay.next.meters, ledger.meters);
+    let mut forged = late.clone();
+    forged.attempt.wire_digest = format!("sha256:{}", "b".repeat(64));
+    assert!(restored.settle(&forged).is_err());
+    let breach = restored
+        .settle(&Settlement {
+            usage: Some(Usage {
+                output_tokens: 21,
+                ..usage()
+            }),
+            ..late
+        })
+        .unwrap();
+    assert!(breach.value.breach && breach.value.uncertain);
+    assert_eq!(breach.next.phase, AccountPhase::Frozen);
+    assert_eq!(breach.next.meters, ledger.meters);
+    assert!(
+        breach.next.attempts[&command(&request("root", "pod-a", 1)).key.storage_key()]
+            .observed_breach
+            .is_some()
+    );
+}
+
+#[test]
+fn closed_session_tombstones_keep_validation_and_dispatch_fences() {
+    let request = request("root", "pod-a", 1);
+    let mut ledger = ledger(100)
+        .register_session(request.identity.clone())
+        .unwrap()
+        .next;
+    ledger = ledger.reserve(&request, 100).unwrap().next;
+    ledger = ledger.begin_dispatch(&command(&request), 101).unwrap().next;
+    ledger = ledger.close_session("pod-a").unwrap().next;
+    let key = command(&request).key.storage_key();
+    assert_eq!(ledger.sessions["pod-a"].closed_through, 1);
+    assert_eq!(ledger.attempts[&key].phase, AttemptPhase::Uncertain);
+    assert!(ledger.begin_dispatch(&command(&request), 102).is_err());
+    for corrupt in ["reopen", "ordinary-row", "zero-sequence"] {
+        let mut changed = ledger.clone();
+        match corrupt {
+            "reopen" => changed.sessions.get_mut("pod-a").unwrap().closed = false,
+            "ordinary-row" => changed.attempts.get_mut(&key).unwrap().phase = AttemptPhase::Settled,
+            _ => {
+                let mut attempt = changed.attempts.remove(&key).unwrap();
+                attempt.key.sequence = 0;
+                changed.attempts.insert(attempt.key.storage_key(), attempt);
+            }
+        }
+        assert!(changed.validate().is_err(), "{corrupt}");
+    }
 }
 
 #[test]

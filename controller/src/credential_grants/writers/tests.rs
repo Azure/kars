@@ -185,9 +185,24 @@ async fn credential_writer_absence_does_not_revoke_current_delivery_authority() 
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn credential_writer_consumer_drift_withholds_authority_without_resetting_grant() {
-    let (_server, client, state, mut grant) = fixture().await;
+    let (_server, client, state, grant) = fixture().await;
+    eprintln!(
+        "native-writer-regression: grant-future-bytes={} writer-future-bytes={}",
+        std::mem::size_of_val(&super::super::reconcile(&client, &grant)),
+        std::mem::size_of_val(&authority(&client, &grant, &[])),
+    );
+    tokio::spawn(exercise_consumer_drift(client, state, grant))
+        .await
+        .unwrap();
+}
+
+async fn exercise_consumer_drift(
+    client: Client,
+    state: Arc<Mutex<State>>,
+    mut grant: KarsCredentialGrant,
+) {
     let path = "/apis/apps/v1/namespaces/bridge/deployments/bff";
     let template = json!({"metadata":{"labels":{}},"spec":{
         "containers":[{"name":"bff","image":"reviewed"}]
@@ -220,7 +235,9 @@ async fn credential_writer_consumer_drift_withholds_authority_without_resetting_
             .objects
             .insert(GRANT.into(), serde_json::to_value(&grant).unwrap());
     }
+    eprintln!("native-writer-regression: qualified-reconcile-poll");
     reconcile(&client, &grant).await.unwrap();
+    eprintln!("native-writer-regression: qualified-verification-poll");
     verify(&client, &grant).await.unwrap();
     {
         let mut state = state.lock().unwrap();
@@ -228,7 +245,9 @@ async fn credential_writer_consumer_drift_withholds_authority_without_resetting_
             "changed".into();
         state.calls.clear();
     }
+    eprintln!("native-writer-regression: drift-revocation-poll");
     let (active, error) = authority(&client, &grant, &[]).await;
+    eprintln!("native-writer-regression: drift-revocation-returned");
     assert!(active.spec.writers.is_empty());
     assert!(
         error

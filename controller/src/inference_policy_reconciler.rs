@@ -133,6 +133,10 @@ async fn reconcile(policy: Arc<InferencePolicy>, ctx: Arc<Ctx>) -> Result<Action
         return Ok(Action::requeue(Duration::from_secs(1)));
     }
 
+    if crate::inference_policy_defaults::reconcile(&ctx.client, &policy).await? {
+        return Ok(Action::requeue(Duration::from_secs(1)));
+    }
+
     let prior_conditions = policy
         .status
         .as_ref()
@@ -289,27 +293,37 @@ async fn reconcile(policy: Arc<InferencePolicy>, ctx: Arc<Ctx>) -> Result<Action
         );
     }
 
-    let status_patch = json!({
-        "apiVersion": "kars.azure.com/v1alpha1",
-        "kind": "InferencePolicy",
-        "status": InferencePolicyStatus {
-            phase: Some(phase.into()),
-            observed_generation,
-            conditions: Some(new_conditions),
-            profile_config_map_ref: Some(LocalObjectRef { name: cm_name.clone() }),
-            version_hash: Some(v_hash),
-            last_compiled_at: Some(rfc3339_now()),
-            compiled_digest: Some(compiled_digest),
-            loaded_digest,
-            bundle_ref_digest: bundle_ref_digest.clone(),
-        }
-    });
-    api.patch_status(
-        &name,
-        &PatchParams::apply(FIELD_MANAGER).force(),
-        &Patch::Apply(status_patch),
-    )
-    .await?;
+    let mut next_status = InferencePolicyStatus {
+        phase: Some(phase.into()),
+        observed_generation,
+        conditions: Some(new_conditions),
+        profile_config_map_ref: Some(LocalObjectRef {
+            name: cm_name.clone(),
+        }),
+        version_hash: Some(v_hash),
+        last_compiled_at: policy
+            .status
+            .as_ref()
+            .and_then(|s| s.last_compiled_at.clone()),
+        compiled_digest: Some(compiled_digest),
+        loaded_digest,
+        bundle_ref_digest: bundle_ref_digest.clone(),
+    };
+    // A timestamp-only status write triggers the same controller's watch again.
+    if next_status.last_compiled_at.is_none() || policy.status.as_ref() != Some(&next_status) {
+        next_status.last_compiled_at = Some(rfc3339_now());
+        let status_patch = json!({
+            "apiVersion": "kars.azure.com/v1alpha1",
+            "kind": "InferencePolicy",
+            "status": next_status,
+        });
+        api.patch_status(
+            &name,
+            &PatchParams::apply(FIELD_MANAGER).force(),
+            &Patch::Apply(status_patch),
+        )
+        .await?;
+    }
 
     if degraded.is_some() {
         Ok(Action::requeue(REQUEUE_FAIL))
@@ -872,8 +886,32 @@ pub async fn run(client: Client) -> Result<()> {
     // Only handles the explicit `spec.inferenceRef.name` direction;
     // pure label-selector-only policies (no sandboxName + no
     // inferenceRef from sandbox) still rely on the periodic resync.
-    let sandboxes: Api<crate::crd::KarsSandbox> = Api::all(client);
-    Controller::new(policies, crate::watch_config::bounded())
+    let sandboxes: Api<crate::crd::KarsSandbox> = Api::all(client.clone());
+    let defaults = Api::<k8s_openapi::api::core::v1::Secret>::namespaced(
+        client,
+        crate::inference_policy_defaults::NAMESPACE,
+    );
+    let controller = Controller::new(policies, crate::watch_config::bounded());
+    let store = controller.store();
+    controller
+        .watches(
+            defaults,
+            crate::watch_config::bounded().fields(&format!(
+                "metadata.name={}",
+                crate::inference_policy_defaults::REGISTRY
+            )),
+            move |_| {
+                store
+                    .state()
+                    .iter()
+                    .filter(|policy| crate::inference_policy_defaults::inherits(policy))
+                    .map(|policy| {
+                        ObjectRef::<InferencePolicy>::new(&policy.name_any())
+                            .within(crate::inference_policy_defaults::NAMESPACE)
+                    })
+                    .collect::<Vec<_>>()
+            },
+        )
         .watches(
             sandboxes,
             crate::watch_config::bounded(),

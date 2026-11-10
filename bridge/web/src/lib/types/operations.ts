@@ -220,8 +220,8 @@ export interface AgentLifecycle {
   task: string | null;
   objective: string | null;
   tier: number | null;
-  rounds: number;
-  tool_calls: number;
+  rounds: number | null;
+  tool_calls: number | null;
   last_action: string | null;
   live: boolean;
   tokens: number | null;
@@ -249,6 +249,8 @@ export interface PodHealth {
 export interface DatapathWitnessSandbox {
   namespace: string;
   sandbox: string;
+  sandbox_uid?: string | null;
+  declaration_diagnostic?: "baseline_unavailable" | "declaration_invalid";
   declared_hosts: string[];
   observed_dns: string[];
   observed_connects: number;
@@ -266,6 +268,8 @@ export interface DatapathWitness {
   /** Optional for rolling upgrades from older BFFs. Missing means unknown. */
   state?: "missing" | "pending" | "disabled" | "stale" | "invalid" | "unavailable" | "observed" | "empty" | "legacy";
   requested_enabled?: boolean | null;
+  /** Validated intent, not coverage. Absent on legacy selected-scope servers. */
+  scope?: "all" | "selected" | null;
   owner_release?: "kars" | "kars-datapath-witness" | null;
   settings_state?: "known" | "missing" | "invalid" | "unavailable";
   installation_state?: "unknown";
@@ -290,15 +294,20 @@ export interface FleetActivityItem {
   round: number;
   seq: number;
   ms: number | null;
+  worker?: string;
+  role?: string | null;
+  source?: string;
+  observed_at?: string | null;
 }
-/** Fleet-wide live telemetry — aggregate metrics + merged activity feed. */
+/** Fleet-wide live telemetry — provisional, partial observations, not settled accounting. */
 export interface FleetTelemetry {
   working: number;
   teams_active: number;
   sub_agents: number;
-  tokens_in_flight: number;
-  tool_calls: number;
-  rounds: number;
+  tokens_in_flight: number | null;
+  tool_calls: number | null;
+  rounds: number | null;
+  activity_unavailable?: number;
   feed: FleetActivityItem[];
 }
 

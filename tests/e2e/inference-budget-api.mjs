@@ -45,7 +45,8 @@ const version = JSON.parse(kubectl(["get", "--raw", "/version"]));
 assert.match(version.gitVersion, /^v1\.31\./, "Use the same pinned Kind v0.24/v1.31 apiserver as the supported harness");
 create({ apiVersion: "v1", kind: "Namespace", metadata: { name: namespace } });
 
-const rendered = execFileSync("helm", ["template", "budget-api", "deploy/helm/kars", "--namespace", namespace], {
+// Render the supported Core release identity; only cluster-scoped CRDs are selected below.
+const rendered = execFileSync("helm", ["template", "kars", "deploy/helm/kars", "--namespace", "kars-system"], {
   cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 30_000,
 });
 const crdNames = [

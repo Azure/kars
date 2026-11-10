@@ -154,6 +154,23 @@ impl WorkloadIdentityAuth {
         }
     }
 
+    /// Pair Azure credentials with their wire header, including Foundry project APIs.
+    pub async fn get_auth_header(
+        &self,
+        resource: &str,
+    ) -> Result<(reqwest::header::HeaderName, reqwest::header::HeaderValue)> {
+        let token = self.get_token(resource).await?;
+        let (name, value) = if self.is_api_key_mode() {
+            (reqwest::header::HeaderName::from_static("api-key"), token)
+        } else {
+            (reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
+        };
+        let mut value = reqwest::header::HeaderValue::from_str(&value)
+            .context("Azure credential is not a valid HTTP header value")?;
+        value.set_sensitive(true);
+        Ok((name, value))
+    }
+
     /// Returns true if using API key auth (dev mode), false if Workload Identity.
     pub fn is_api_key_mode(&self) -> bool {
         // Sidecar mode is neither api-key nor pure WI; report as
@@ -269,31 +286,10 @@ impl WorkloadIdentityAuth {
         let client_id = std::env::var("IMDS_CLIENT_ID")
             .or_else(|_| std::env::var("AZURE_CLIENT_ID"))
             .unwrap_or_default();
-        // AZURE_IMDS_ENDPOINT override exists solely for integration tests (fake IMDS server
-        // on loopback). See note on AZURE_AD_ENDPOINT above — pod-env threat model applies.
+        // The override is restricted to literal loopback origins for fake IMDS tests.
         let imds_endpoint = std::env::var("AZURE_IMDS_ENDPOINT")
             .unwrap_or_else(|_| "http://169.254.169.254".to_string());
-        let mut url = format!(
-            "{imds_endpoint}/metadata/identity/oauth2/token?api-version=2018-02-01&resource={resource}"
-        );
-        if !client_id.is_empty() {
-            url.push_str(&format!("&client_id={client_id}"));
-        }
-
-        let resp = self
-            .client
-            .get(&url)
-            .header("Metadata", "true")
-            .timeout(std::time::Duration::from_secs(5))
-            .send()
-            .await
-            .context("IMDS request failed")?;
-
-        let body: serde_json::Value = resp.json().await?;
-        let access_token = body["access_token"]
-            .as_str()
-            .context("No access_token in IMDS response")?
-            .to_string();
+        let access_token = request_imds_token(&imds_endpoint, resource, &client_id).await?;
 
         // Cache it (keyed by resource scope)
         let mut cache = self.token_cache.write().await;
@@ -310,9 +306,179 @@ impl WorkloadIdentityAuth {
     }
 }
 
+/// Azure IMDS only serves HTTP on the fixed link-local address. Test overrides
+/// may use literal loopback IPs, never DNS names or arbitrary network origins.
+fn imds_token_url(endpoint: &str, resource: &str, client_id: &str) -> Result<reqwest::Url> {
+    let mut url = reqwest::Url::parse(endpoint).context("Invalid IMDS endpoint")?;
+    let address = url.host_str().and_then(|host| {
+        host.trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .ok()
+    });
+    let allowed_address = address.is_some_and(|address| {
+        address.is_loopback()
+            || (address == std::net::IpAddr::V4(std::net::Ipv4Addr::new(169, 254, 169, 254))
+                && url.port_or_known_default() == Some(80))
+    });
+    if url.scheme() != "http"
+        || !allowed_address
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        anyhow::bail!(
+            "IMDS endpoint must be the Azure link-local origin or a literal loopback test origin"
+        );
+    }
+    url.set_path("/metadata/identity/oauth2/token");
+    {
+        let mut query = url.query_pairs_mut();
+        query.append_pair("api-version", "2018-02-01");
+        query.append_pair("resource", resource);
+        if !client_id.is_empty() {
+            query.append_pair("client_id", client_id);
+        }
+    }
+    Ok(url)
+}
+
+async fn request_imds_token(endpoint: &str, resource: &str, client_id: &str) -> Result<String> {
+    let url = imds_token_url(endpoint, resource, client_id)?;
+    // IMDS must never leave the local host through an HTTP proxy or redirect.
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .context("IMDS client initialization failed")?;
+    let response = client
+        .get(url)
+        .header("Metadata", "true")
+        .send()
+        .await
+        .context("IMDS request failed")?;
+    if !response.status().is_success() {
+        anyhow::bail!(
+            "IMDS returned an unsuccessful status: {}",
+            response.status()
+        );
+    }
+    let body: serde_json::Value = response.json().await?;
+    Ok(body["access_token"]
+        .as_str()
+        .context("No access_token in IMDS response")?
+        .to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn imds_url_accepts_only_fixed_metadata_or_literal_loopback_origins() {
+        for endpoint in [
+            "http://169.254.169.254",
+            "http://169.254.169.254:80/",
+            "http://127.0.0.1:12345",
+            "http://[::1]:12345/",
+        ] {
+            let url = imds_token_url(endpoint, "https://ai.azure.com", "").unwrap();
+            assert_eq!(url.path(), "/metadata/identity/oauth2/token");
+            assert_eq!(url.query_pairs().count(), 2);
+        }
+        for endpoint in [
+            "https://169.254.169.254",
+            "http://169.254.169.254:8080",
+            "http://169.254.169.253",
+            "http://localhost:12345",
+            "http://metadata.example",
+            "http://127.0.0.1.example",
+            "http://10.0.0.1",
+            "http://[::ffff:169.254.169.254]",
+            "http://user:password@127.0.0.1",
+            "http://127.0.0.1/metadata",
+            "http://127.0.0.1?resource=other",
+            "http://127.0.0.1#fragment",
+            "file:///metadata",
+            "not a URL",
+        ] {
+            assert!(
+                imds_token_url(endpoint, "resource", "client").is_err(),
+                "{endpoint}"
+            );
+        }
+    }
+
+    #[test]
+    fn imds_query_values_cannot_inject_identity_or_resource_parameters() {
+        let resource = "https://ai.azure.com/a?x=1&client_id=other#fragment";
+        let client_id = "client&resource=other+with space";
+        let url = imds_token_url("http://169.254.169.254", resource, client_id).unwrap();
+        let query: Vec<_> = url.query_pairs().collect();
+        assert_eq!(query.len(), 3);
+        assert_eq!(query[0].0, "api-version");
+        assert_eq!(query[0].1, "2018-02-01");
+        assert_eq!(query[1].0, "resource");
+        assert_eq!(query[1].1, resource);
+        assert_eq!(query[2].0, "client_id");
+        assert_eq!(query[2].1, client_id);
+        assert!(url.fragment().is_none());
+    }
+
+    #[tokio::test]
+    async fn imds_transport_preserves_metadata_and_rejects_redirects_and_error_tokens() {
+        use axum::{extract::Request, http::StatusCode, response::IntoResponse};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        for status in [StatusCode::OK, StatusCode::FOUND, StatusCode::BAD_REQUEST] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let observed = calls.clone();
+            let router = axum::Router::new().fallback(move |request: Request| {
+                let calls = observed.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(request.uri().path(), "/metadata/identity/oauth2/token");
+                    assert_eq!(request.headers()["Metadata"], "true");
+                    let parsed =
+                        reqwest::Url::parse(&format!("http://127.0.0.1{}", request.uri())).unwrap();
+                    let query: HashMap<_, _> = parsed.query_pairs().into_owned().collect();
+                    assert_eq!(query.len(), 3);
+                    assert_eq!(query["api-version"], "2018-02-01");
+                    assert_eq!(
+                        query["resource"],
+                        "https://ai.azure.com/?x=1&client_id=other"
+                    );
+                    assert_eq!(query["client_id"], "client&resource=other");
+                    (
+                        status,
+                        [("location", "/unexpected")],
+                        axum::Json(serde_json::json!({"access_token": "fake-imds-token"})),
+                    )
+                        .into_response()
+                }
+            });
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            let result = request_imds_token(
+                &endpoint,
+                "https://ai.azure.com/?x=1&client_id=other",
+                "client&resource=other",
+            )
+            .await;
+            server.abort();
+            if status == StatusCode::OK {
+                assert_eq!(result.unwrap(), "fake-imds-token");
+            } else {
+                assert!(result.is_err(), "{status}");
+            }
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+        }
+    }
 
     fn make_auth(api_key: Option<&str>) -> WorkloadIdentityAuth {
         WorkloadIdentityAuth {
@@ -348,6 +514,71 @@ mod tests {
     fn test_is_api_key_mode_without_key() {
         let auth = make_auth(None);
         assert!(!auth.is_api_key_mode());
+    }
+
+    #[tokio::test]
+    async fn azure_auth_header_uses_api_key_for_project_and_inference_audiences() {
+        let auth = make_auth(Some("test-resource-key"));
+        for audience in [
+            "https://ai.azure.com",
+            "https://cognitiveservices.azure.com",
+        ] {
+            let (name, value) = auth.get_auth_header(audience).await.unwrap();
+            assert_eq!(name, "api-key");
+            assert_eq!(value, "test-resource-key");
+            assert!(value.is_sensitive());
+        }
+    }
+
+    #[tokio::test]
+    async fn azure_auth_header_preserves_identity_tokens_and_audiences() {
+        let auth = make_auth(None);
+        for (audience, token) in [
+            ("https://ai.azure.com", "project-token"),
+            ("https://cognitiveservices.azure.com", "inference-token"),
+        ] {
+            insert_cached_token(
+                &mut *auth.token_cache.write().await,
+                audience,
+                token,
+                std::time::Duration::from_secs(3600),
+            );
+            let (name, value) = auth.get_auth_header(audience).await.unwrap();
+            assert_eq!(name, reqwest::header::AUTHORIZATION);
+            assert_eq!(value.to_str().unwrap(), format!("Bearer {token}"));
+            assert!(value.is_sensitive());
+        }
+    }
+
+    #[tokio::test]
+    async fn azure_auth_header_rejects_invalid_key_without_panicking() {
+        let auth = make_auth(Some("invalid\r\nkey"));
+        let error = auth
+            .get_auth_header("https://ai.azure.com")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("not a valid HTTP header"));
+        assert!(!format!("{error:#}").contains("invalid\r\nkey"));
+    }
+
+    #[tokio::test]
+    async fn azure_auth_header_never_falls_back_from_entra_to_api_key() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::any())
+            .respond_with(wiremock::ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let auth = WorkloadIdentityAuth::for_test(
+            Some("must-not-be-used"),
+            Some(crate::sidecar_client::SidecarClient::for_test(server.uri())),
+        );
+        assert!(!auth.is_api_key_mode());
+        let error = auth
+            .get_auth_header("https://ai.azure.com")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("refusing to fall back"));
     }
 
     #[tokio::test]

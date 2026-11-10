@@ -8,6 +8,7 @@
 
 import { PageHeader, Stat, Badge } from "@/components/ui";
 import { HonestState } from "@/components/honest-state";
+import { LiveRefresh } from "@/components/live-refresh";
 import { listEvals, listSandboxes } from "@/lib/bff";
 import type { Eval } from "@/lib/types";
 import { NewEvalForm } from "./new-eval-form";
@@ -96,14 +97,14 @@ function EvalCard({ e }: { e: Eval }) {
             )}{" "}
             Last run {ago(e.last_run_at)}.
           </p>
-          <EvalDetail name={e.name} />
+          <EvalDetail name={e.name} version={e.last_run_at} />
         </>
       ) : (
         <>
           <p className="mt-4 text-xs text-foreground-muted">
             No completed run yet — the corpus replay is pending or in flight.
           </p>
-          <EvalDetail name={e.name} />
+          <EvalDetail name={e.name} version={e.last_run_at} />
         </>
       )}
     </li>
@@ -116,7 +117,7 @@ export default async function EvalsPage() {
   const sandboxError = sandboxResult.status === "rejected";
   const evals: Eval[] = evalResult.status === "fulfilled" ? evalResult.value : [];
   const sandboxes = sandboxResult.status === "fulfilled" ? sandboxResult.value
-      .filter((s) => s.phase === "Running" || s.phase === "Ready")
+      .filter((s) => (s.phase === "Running" || s.phase === "Ready") && s.executing !== false)
       .map((s) => ({ name: s.name, runtime: s.runtime })) : [];
 
   const withResult = evals.filter((e) => e.last_result);
@@ -125,6 +126,7 @@ export default async function EvalsPage() {
 
   return (
     <div className="space-y-6">
+      <LiveRefresh active intervalMs={5000} />
       <PageHeader
         eyebrow="Operator Console"
         title="Safety evals"

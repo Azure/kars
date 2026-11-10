@@ -84,6 +84,36 @@ def test_real_http_negotiation_scope_headers_and_one_session(server):
     assert headers["X-Kars-Mcp-Server"] == "everything"
 
 
+@pytest.mark.parametrize("args", [{}, {"server": ""}])
+def test_optional_list_scope_uses_catalogue_without_invocation(server, args):
+    result = json.loads(mcp_bridge._list_tools(args))
+    assert result == {"tools": [{"name": "everything.echo"}]}
+    assert [body["method"] for body, _ in server["calls"]] == [
+        "initialize", "notifications/initialized", "tools/list"]
+    assert server["calls"][-1][0]["params"] == {}
+    assert all("X-Kars-Mcp-Server" not in headers for _, headers in server["calls"])
+
+
+@pytest.mark.parametrize("scope", [None, ""])
+def test_optional_call_scope_preserves_exact_tool_and_single_invocation(server, scope):
+    args = {"name": "everything.echo", "arguments": {"text": "public documentation"}}
+    if scope is not None:
+        args["server"] = scope
+    assert json.loads(mcp_bridge._call_tool(args)) == server["result"]
+    assert [body["method"] for body, _ in server["calls"]] == [
+        "initialize", "notifications/initialized", "tools/call"]
+    assert server["calls"][-1][0]["params"] == {
+        "name": "everything.echo", "arguments": {"text": "public documentation"}}
+    assert all("X-Kars-Mcp-Server" not in headers for _, headers in server["calls"])
+
+
+@pytest.mark.parametrize("scope", [False, [], " ", "../other", "a" * 254])
+def test_malformed_scope_is_not_normalized(server, scope):
+    assert json.loads(mcp_bridge._list_tools({"server": scope}))["isError"] is True
+    assert json.loads(mcp_bridge._call_tool({"name": "everything.echo", "server": scope}))["isError"] is True
+    assert server["calls"] == []
+
+
 def test_accepted_session_error_never_replays_or_copies_error_body(server):
     server["error"] = {"code": -32000, "message": "session expired PRIVATE_SENTINEL"}
     result = json.loads(mcp_bridge._call_tool({"name": "everything.echo"}))

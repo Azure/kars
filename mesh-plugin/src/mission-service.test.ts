@@ -78,11 +78,12 @@ function harness(withEntra = false) {
   const isCurrent = vi.spyOn(KubernetesMissionStore.prototype, "isCurrent").mockImplementation(async function (this: KubernetesMissionStore) {
     return withEntra ? Reflect.get(this, "dispatchCurrent")() : true;
   });
+  const recover = vi.spyOn(KubernetesMissionStore.prototype, "recoverInterrupted").mockResolvedValue(false);
   const dispatch = vi.spyOn(MissionDispatcher.prototype, "dispatch").mockResolvedValue("already-claimed");
   const service = new MissionDispatchService(api, { ...config, ...(withEntra ? { entra } : {}) }, deps);
   let running: Promise<void> | undefined;
   let failure: unknown;
-  return { service, deps, mesh, close, order, pending, resolveCandidate, isCurrent, dispatch, abort, api, tokens, drainInbox, wsFactory,
+  return { service, deps, mesh, close, order, pending, resolveCandidate, isCurrent, recover, dispatch, abort, api, tokens, drainInbox, wsFactory,
     auth: () => auth?.(), admitted: () => discoveryGate!(),
     knock: (from = candidate.agentDid) => knock(from, {}),
     disconnectEvent: () => { connected = false; disconnected.forEach(handler => handler("server")); },
@@ -95,6 +96,38 @@ function harness(withEntra = false) {
   };
 }
 afterEach(() => vi.restoreAllMocks());
+
+describe("interrupted mission service recovery", () => {
+  it("holds interrupted work only after acquiring writer custody, without dispatch or peer admission", async () => {
+    const h = harness();
+    h.tasks();
+    h.recover.mockImplementation(async () => { h.order.push("recover"); return true; });
+    h.start();
+    try {
+      await until(() => expect(h.deps.warn).toHaveBeenCalledWith("run-interrupted"));
+      expect(h.order.indexOf("writer")).toBeLessThan(h.order.indexOf("recover"));
+      expect(h.order.indexOf("custody")).toBeLessThan(h.order.indexOf("recover"));
+      expect(h.close).not.toHaveBeenCalled();
+      expect(h.recover).toHaveBeenCalledWith(candidate, expect.any(String));
+      expect(h.dispatch).not.toHaveBeenCalled();
+      expect(await h.knock()).toEqual({ accept: false });
+    } finally { await h.stop(); }
+    expect(h.failure()).toBeUndefined();
+    expect(h.close).toHaveBeenCalledOnce();
+  });
+
+  it("does not dispatch after a failed recovery write", async () => {
+    const h = harness();
+    h.tasks();
+    h.recover.mockRejectedValue(new Error("CAS conflict"));
+    h.start();
+    try {
+      await until(() => expect(h.deps.warn).toHaveBeenCalledWith("candidate-unavailable"));
+      expect(h.dispatch).not.toHaveBeenCalled();
+      expect(h.deps.warn).not.toHaveBeenCalledWith("run-interrupted");
+    } finally { await h.stop(); }
+  });
+});
 
 describe("mission dispatcher Entra lifecycle", () => {
   it("withholds readiness, discovery and admission until the pinned registry identity is verified", async () => {
@@ -368,19 +401,63 @@ describe("mission dispatcher service lifecycle", () => {
     expect(h.deps.warn).toHaveBeenCalledWith("discovery-unavailable");
     expect(JSON.stringify(h.deps.warn.mock.calls)).not.toContain("private response");
   });
-  it("isolates candidate failures and dispatches candidates serially", async () => {
-    const h = harness(); const delivery = deferred<"already-claimed">();
+  it("dispatches independent peers concurrently, isolates failures and drains both without redispatch", async () => {
+    const h = harness(); const first = deferred<"succeeded">(); const second = deferred<"succeeded">();
+    const other = { ...candidate, taskName: "second", taskUid: "second-uid", agentDid: `did:mesh:${"c".repeat(32)}` };
     h.pending.mockImplementation(async function* () {
       yield { namespace: candidate.namespace, taskName: "invalid" };
-      yield { namespace: candidate.namespace, taskName: "first" };
-      yield { namespace: candidate.namespace, taskName: "second" };
+      yield candidate; yield other; yield candidate;
     });
-    h.resolveCandidate.mockRejectedValueOnce(new Error("Bad candidate"));
-    h.dispatch.mockReturnValueOnce(delivery.promise); h.start();
-    await until(() => expect(h.dispatch).toHaveBeenCalledOnce());
-    expect(h.resolveCandidate).toHaveBeenCalledTimes(2);
-    delivery.resolve("already-claimed"); await until(() => expect(h.dispatch).toHaveBeenCalledTimes(2)); await h.stop();
+    h.resolveCandidate.mockImplementation(async reference => {
+      if (reference.taskName === "invalid") throw new Error("Bad candidate");
+      return reference.taskName === other.taskName ? other : candidate;
+    });
+    h.dispatch.mockImplementation(value => value.agentDid === other.agentDid ? second.promise : first.promise);
+    h.start();
+    try {
+      await until(() => expect(h.dispatch).toHaveBeenCalledTimes(2));
+      expect(await h.knock()).toEqual({ accept: true });
+      expect(await h.knock(other.agentDid)).toEqual({ accept: true });
+      expect(await h.knock("unrelated-peer")).toEqual({ accept: false });
+      h.isCurrent.mockResolvedValueOnce(false);
+      expect(await h.knock(other.agentDid)).toEqual({ accept: false });
+      expect(await h.knock()).toEqual({ accept: true });
+      await until(() => expect(h.pending.mock.calls.length).toBeGreaterThan(1));
+      expect(h.dispatch).toHaveBeenCalledTimes(2);
+      h.abort.abort(); first.resolve("succeeded");
+      await until(() => expect(Reflect.get(h.service, "active").size).toBe(1));
+      expect(await h.knock()).toEqual({ accept: false });
+      expect(await h.knock(other.agentDid)).toEqual({ accept: true });
+      expect(h.mesh.disconnect).not.toHaveBeenCalled(); expect(h.close).not.toHaveBeenCalled();
+      second.reject(new Error("Private delivery failure"));
+    } finally { first.resolve("succeeded"); second.resolve("succeeded"); await h.stop(); }
+    expect(h.failure()).toBeUndefined(); expect(h.dispatch).toHaveBeenCalledTimes(2);
+    expect(h.mesh.disconnect).toHaveBeenCalledOnce(); expect(h.close).toHaveBeenCalledOnce();
     expect(h.deps.warn).toHaveBeenCalledWith("candidate-unavailable");
+    expect(JSON.stringify(h.deps.warn.mock.calls)).not.toContain("Private delivery failure");
+  });
+  it("bounds active deliveries to eight and fills a freed slot without waiting for the others", async () => {
+    const h = harness();
+    const candidates = Array.from({ length: 9 }, (_, index) => ({ ...candidate,
+      taskName: `task-${index}`, taskUid: `uid-${index}`, agentDid: `peer-${index}` }));
+    const deliveries = candidates.map(() => deferred<"succeeded">());
+    h.pending.mockImplementation(async function* () { yield* candidates; });
+    h.resolveCandidate.mockImplementation(async reference => candidates.find(value => value.taskName === reference.taskName)!);
+    h.dispatch.mockImplementation(value => deliveries[candidates.indexOf(value)].promise);
+    h.start();
+    try {
+      await until(() => expect(h.dispatch).toHaveBeenCalledTimes(8));
+      await until(() => expect(h.pending.mock.calls.length).toBeGreaterThan(1));
+      expect(h.dispatch).toHaveBeenCalledTimes(8);
+      // A completed Task disappears from discovery just as its retained completion does in Kubernetes.
+      h.pending.mockImplementation(async function* () { yield* candidates.slice(1); });
+      deliveries[0].resolve("succeeded");
+      await until(() => expect(h.dispatch).toHaveBeenCalledTimes(9));
+      expect(h.dispatch.mock.calls.map(([value]) => value.taskUid)).toEqual(candidates.map(value => value.taskUid));
+      expect(await h.knock(candidates[8].agentDid)).toEqual({ accept: true });
+      h.abort.abort(); expect(h.close).not.toHaveBeenCalled();
+    } finally { for (const delivery of deliveries) delivery.resolve("succeeded"); await h.stop(); }
+    expect(h.failure()).toBeUndefined(); expect(h.close).toHaveBeenCalledOnce();
   });
   it("retains the writer when socket retirement cannot be proven", async () => {
     const h = harness(); vi.mocked(h.mesh.disconnect).mockRejectedValue(new Error("Socket still alive"));

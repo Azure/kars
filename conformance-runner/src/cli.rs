@@ -46,6 +46,13 @@ pub struct Cli {
     #[arg(long, value_name = "UID", requires = "forward_proxy_pod")]
     pub forward_proxy_pod_uid: Option<String>,
 
+    /// Bound memory store for MemoryRead scenarios. Must be a 1–63 character
+    /// lowercase DNS label (alphanumeric endpoints, hyphens allowed inside).
+    /// Missing or invalid values make MemoryRead inconclusive; other scenarios
+    /// do not require a store.
+    #[arg(long, value_name = "STORE")]
+    pub memory_store: Option<String>,
+
     /// Path to write the [`crate::report::RunReport`] JSON to.
     /// `/dev/stdout` emits exactly one report directly to stdout.
     #[arg(long, value_name = "FILE")]
@@ -157,6 +164,7 @@ mod tests {
             forward_proxy: None,
             forward_proxy_pod: None,
             forward_proxy_pod_uid: None,
+            memory_store: None,
             output: PathBuf::from("/tmp/out.json"),
             timeout_ms: 2500,
             auth_header: None,

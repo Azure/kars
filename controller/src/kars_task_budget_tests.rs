@@ -251,6 +251,99 @@ async fn budget_pending_parent_preserves_funded_child_but_pause_and_uid_revocati
     assert_eq!(revoked.lock().unwrap().deletes, 1);
 }
 
+#[derive(Clone)]
+struct ChangingInventory {
+    api: ApiServer,
+    reads: Arc<std::sync::atomic::AtomicUsize>,
+    writes: Arc<std::sync::atomic::AtomicUsize>,
+}
+impl Respond for ChangingInventory {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        use std::sync::atomic::Ordering;
+        if request.method != "GET" {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+        }
+        if request.method == "GET" && request.url.path().ends_with("/karstasks/task") {
+            let mut task = self.api.0.lock().unwrap().task.clone();
+            task.metadata.resource_version =
+                Some((self.reads.fetch_add(1, Ordering::SeqCst) + 2).to_string());
+            return ResponseTemplate::new(200).set_body_json(task);
+        }
+        self.api.respond(request)
+    }
+}
+
+#[tokio::test]
+async fn contended_inventory_requeues_without_revoking_or_granting_task_authority() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    for state in ["accepted", "new", "changed-authorization"] {
+        let mut task = fixture("task", None, true, true);
+        match state {
+            "new" => task.status = None,
+            "changed-authorization" => {
+                task.metadata.generation = Some(2);
+                task.spec.envelope.budget.as_mut().unwrap().tokens = Some(29);
+            }
+            _ => {}
+        }
+        let prior_status = serde_json::to_value(&task.status).unwrap();
+        let server = MockServer::start().await;
+        let objects = Arc::new(Mutex::new(Objects {
+            task: task.clone(),
+            parent: None,
+            sandbox: true,
+            deletes: 0,
+        }));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let writes = Arc::new(AtomicUsize::new(0));
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ChangingInventory {
+                api: ApiServer(objects.clone()),
+                reads: reads.clone(),
+                writes: writes.clone(),
+            })
+            .mount(&server)
+            .await;
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
+        let result = reconcile(
+            Arc::new(task),
+            Arc::new(Ctx {
+                client,
+                signer: crate::providers::signing::ReceiptSigner::from_bytes(&[7; 32]),
+            }),
+        )
+        .await;
+        assert!(
+            matches!(
+                result,
+                Err(ReconcileError::InferenceBudget(
+                    crate::inference_budget::store::StoreError::Contention
+                ))
+            ),
+            "{state}: {result:?}"
+        );
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            6,
+            "three complete read attempts"
+        );
+        assert_eq!(
+            writes.load(Ordering::SeqCst),
+            0,
+            "{state}: no status, runtime or accounting writes"
+        );
+        let objects = objects.lock().unwrap();
+        assert_eq!(
+            serde_json::to_value(&objects.task.status).unwrap(),
+            prior_status
+        );
+        assert_eq!(task_is_ready(&objects.task), state == "accepted");
+        assert!(objects.sandbox);
+        assert_eq!(objects.deletes, 0);
+    }
+}
+
 #[tokio::test]
 async fn a_pinned_account_cannot_escape_by_removing_governed_scope() {
     let mut task = fixture("task", None, true, false);

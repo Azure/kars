@@ -55,6 +55,16 @@ export function unsupportedOperationFact(response) {
     matchesContract: httpStatus === 503 && coded };
 }
 
+export function budgetExhaustionFact(response) {
+  const httpStatus = Number.isInteger(response?.status) && response.status >= 100 && response.status <= 599
+    ? response.status : 0;
+  const error = response?.value?.error;
+  return { stage: "governed-budget-exhaustion", httpStatus,
+    matchesContract: httpStatus === 400 && response.shouldRetry === "false"
+      && error?.code === "inference_budget_exhausted" && error.type === "invalid_request_error"
+      && typeof error.message === "string" && error.message.trim().length > 0 };
+}
+
 const STAGES = {
   kars_inference_router: {
     readiness: ["router-binding", "router-guardrails", "router-provider", "router-candidate",

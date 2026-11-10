@@ -695,6 +695,86 @@ async fn admission_projection_is_stable_on_ack_but_changes_for_new_run_authority
 }
 
 #[tokio::test]
+async fn completed_runs_preserve_workload_and_binding_for_both_runtimes() {
+    for hermes in [false, true] {
+        let f = if hermes {
+            Fixture::hermes().await
+        } else {
+            Fixture::new().await
+        };
+        let prepared = f.applied().await;
+        publish(&f.client, &prepared).await.unwrap();
+        let binding: Value = f.get(BINDING);
+        let deployment: Deployment = f.get(DEPLOYMENT);
+        let writes = f.writes("/");
+        let mut task: KarsTask = f.get(TASK);
+        task.metadata.resource_version = Some("completed-version".into());
+        task.metadata.annotations.as_mut().unwrap().insert(
+            "kars.azure.com/run-completed".into(),
+            "preserved-run".into(),
+        );
+        f.set(TASK, &task);
+        let sandbox: KarsSandbox = f.get(SANDBOX);
+        assert!(terminal_run(&f.client, &sandbox).await.unwrap());
+        let mut desired = deployment.clone();
+        assert!(matches!(
+            prepare_with(&f.client, &sandbox, &mut desired, &config()).await,
+            Err(Error::Completed)
+        ));
+        assert_eq!(desired, deployment);
+        // A completion racing a prepared publication must not overwrite custody.
+        assert!(publish(&f.client, &prepared).await.is_err());
+        assert_eq!(f.get::<Value>(BINDING), binding);
+        assert_eq!(f.get::<Deployment>(DEPLOYMENT), deployment);
+        assert_eq!(f.writes("/"), writes);
+        assert!(!executable(&task, &sandbox));
+        task.metadata
+            .annotations
+            .as_mut()
+            .unwrap()
+            .insert("kars.azure.com/run-requested".into(), "next-run".into());
+        f.set(TASK, &task);
+        assert!(!terminal_run(&f.client, &sandbox).await.unwrap());
+        assert!(executable(&task, &sandbox));
+    }
+}
+
+#[tokio::test]
+async fn terminal_run_requires_an_exact_live_owner_and_nonempty_matching_nonce() {
+    let f = Fixture::new().await;
+    let sandbox: KarsSandbox = f.get(SANDBOX);
+    for (requested, completed, terminal) in [
+        (None, None, false),
+        (Some(""), Some(""), false),
+        (Some("run"), None, false),
+        (None, Some("run"), false),
+        (Some("run"), Some("older-run"), false),
+        (Some("run"), Some("run"), true),
+    ] {
+        let mut task: KarsTask = f.get(TASK);
+        let annotations = task.metadata.annotations.as_mut().unwrap();
+        for (key, value) in [("run-requested", requested), ("run-completed", completed)] {
+            let key = format!("kars.azure.com/{key}");
+            if let Some(value) = value {
+                annotations.insert(key, value.into());
+            } else {
+                annotations.remove(&key);
+            }
+        }
+        f.set(TASK, &task);
+        assert_eq!(terminal_run(&f.client, &sandbox).await.unwrap(), terminal);
+    }
+    let mut task: KarsTask = f.get(TASK);
+    task.metadata.uid = Some("replacement-task".into());
+    f.set(TASK, &task);
+    assert!(terminal_run(&f.client, &sandbox).await.is_err());
+    let mut unowned = sandbox;
+    unowned.metadata.owner_references = None;
+    assert!(!terminal_run(&f.client, &unowned).await.unwrap());
+    assert_eq!(f.writes("/"), 0);
+}
+
+#[tokio::test]
 async fn binding_rejects_a_ready_workload_with_a_different_installed_admission() {
     let f = Fixture::new().await;
     let prepared = f.applied().await;

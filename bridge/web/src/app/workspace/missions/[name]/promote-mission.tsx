@@ -4,8 +4,8 @@
 "use client";
 
 // Per-mission autonomy promotion (§12). Requests a higher tier; the controller
-// opens a human approval and only widens the envelope once approved — this
-// never grants authority directly. Mirrors the standing-team promote control.
+// opens a human approval and can widen only an unconsumed task. Existing runs
+// retain their authority. Mirrors the standing-team promote control.
 
 import { useActionState } from "react";
 import { promoteMissionAction, type ReplicateState } from "./run-actions";
@@ -13,10 +13,10 @@ import { promoteMissionAction, type ReplicateState } from "./run-actions";
 const init: ReplicateState = { error: null, ok: null };
 const TIERS: Record<number, string> = { 1: "Manual", 2: "Shared", 3: "Conditional", 4: "Supervised", 5: "Full" };
 
-export function PromoteMission({ ns, name, currentTier }: { ns: string; name: string; currentTier: number }) {
+export function PromoteMission({ ns, name, currentTier, halted = false }: { ns: string; name: string; currentTier: number; halted?: boolean }) {
   const [state, action, pending] = useActionState(promoteMissionAction, init);
   const next = Math.min(currentTier + 1, 5);
-  if (currentTier >= 5 && !state.ok) return null;
+  if (halted || (currentTier >= 5 && !state.ok)) return null;
   if (state.ok) {
     return <div className="rounded-lg border border-signal/30 bg-signal/5 px-3 py-2 text-xs">{state.ok}</div>;
   }
@@ -26,7 +26,7 @@ export function PromoteMission({ ns, name, currentTier }: { ns: string; name: st
       <input type="hidden" name="name" value={name} />
       <div>
         <p className="text-xs font-semibold">Request more autonomy</p>
-        <p className="mt-0.5 text-[11px] text-foreground-muted">Currently Tier {currentTier} ({TIERS[currentTier] ?? "?"}). A promotion opens a human approval — it never widens authority directly.</p>
+        <p className="mt-0.5 text-[11px] text-foreground-muted">Currently Tier {currentTier} ({TIERS[currentTier] ?? "?"}). Request independent approval before the first launch. Approval can update an unconsumed mission; existing runs retain their authority and need a fresh authorized run.</p>
       </div>
       <div className="flex items-center gap-2">
         <label className="text-[11px] text-foreground-muted">

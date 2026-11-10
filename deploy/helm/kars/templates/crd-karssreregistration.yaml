@@ -76,6 +76,44 @@ spec:
                   properties:
                     name: {type: string, enum: [kars-sre]}
                     uid: {type: string, minLength: 1}
+                firstInstallFunding:
+                  type: object
+                  required: [intent, grant]
+                  properties:
+                    intent:
+                      type: object
+                      required: [name, uid, digest]
+                      properties:
+                        name: {type: string, enum: [kars-sre-first-install]}
+                        uid: {type: string, minLength: 1, maxLength: 128}
+                        digest: {type: string, pattern: '^[a-f0-9]{64}$'}
+                    grant:
+                      type: object
+                      required: [root, limits]
+                      x-kubernetes-validations:
+                        - rule: "has(self.unboundedTokens) ? self.unboundedTokens && !has(self.limits.tokens) && !has(self.expiresAt) : has(self.limits.tokens) && has(self.expiresAt)"
+                          message: "Choose explicit unbounded tokens without expiry, or finite tokens with expiry"
+                      properties:
+                        unboundedTokens: {type: boolean}
+                        root:
+                          type: object
+                          required: [kind, resource, workspaceUid, clusterUid]
+                          properties:
+                            kind: {type: string, enum: [KarsSandbox]}
+                            workspaceUid: {type: string, minLength: 1, maxLength: 128}
+                            clusterUid: {type: string, minLength: 1, maxLength: 128}
+                            resource:
+                              type: object
+                              required: [namespace, name, uid]
+                              properties:
+                                namespace: {type: string, minLength: 1, maxLength: 63}
+                                name: {type: string, enum: [sre]}
+                                uid: {type: string, minLength: 1, maxLength: 128}
+                        limits:
+                          type: object
+                          properties:
+                            tokens: {type: integer, format: int64, minimum: 1, maximum: 9007199254740991}
+                        expiresAt: {type: string, format: date-time}
                 legacyConsumer:
                   type: object
                   required: [namespace, name, uid, resourceVersion]

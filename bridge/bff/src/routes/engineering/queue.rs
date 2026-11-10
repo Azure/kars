@@ -156,6 +156,12 @@ pub(super) async fn merge_into_backlog(
         true,
         |existing| {
             let (merged, added) = merge_discovered_tasks(existing.clone(), discovered.clone());
+            for item in &merged {
+                if item.status == "pending" && !existing.iter().any(|old| old == item) {
+                    crate::routes::teams::validate_work_intent(team, item)
+                        .map_err(|error| work::Error::Invalid(error.to_string()))?;
+                }
+            }
             *existing = merged;
             Ok(added)
         },

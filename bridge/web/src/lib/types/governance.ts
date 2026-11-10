@@ -113,9 +113,7 @@ export interface ComplianceControl {
   receipt_class: string;
   status: string;
   evidence: string;
-  /** True for the `regulatory` claim class — a named V0 limitation (external
-   *  transparency anchor lands in V1), so it reads PARTIAL on every receipt
-   *  this product issues today, not a gap specific to this task. */
+  /** Advisory claims are displayed separately without changing their recorded status. */
   advisory?: boolean;
 }
 
@@ -132,9 +130,11 @@ export interface CompliancePack {
   issued_at: string | null;
   verify_command: string;
   controls: ComplianceControl[];
+  /** Legacy count of mapped PASS claims, not satisfied obligations. */
   satisfied: number;
+  /** Legacy aggregate; presentation derives counts from controls instead. */
   partial: number;
-  /** Count of `advisory` controls — excluded from `partial`. */
+  /** Count of advisory mappings, regardless of their recorded status. */
   advisory?: number;
 }
 

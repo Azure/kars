@@ -8,9 +8,10 @@
 // no way to reach the rest). Rendering matches the server-side list it replaced.
 
 import { useState } from "react";
-import Link from "next/link";
+import Link from "@/components/navigation-link";
 import type { LedgerEvent } from "@/lib/types";
 import { toPlainPreview } from "@/components/deliverable-view";
+import { formatEvidenceTime } from "@/lib/format";
 
 const PAGE = 30;
 
@@ -39,9 +40,9 @@ export function TeamLedger({ team, ledger }: { team: string; ledger: LedgerEvent
                       : "bg-foreground-muted"
               }`}
             />
-            <span className="w-32 shrink-0 text-foreground-muted">
-              {new Date(e.at).toLocaleString()}
-            </span>
+            <time className="w-40 shrink-0 text-foreground-muted" dateTime={e.at} title={e.at}>
+              {formatEvidenceTime(e.at)}
+            </time>
             <span className="w-20 shrink-0 font-medium capitalize">
               {e.kind.replace("_", " ")}
             </span>
@@ -55,7 +56,7 @@ export function TeamLedger({ team, ledger }: { team: string; ledger: LedgerEvent
               )}
             </span>
             {e.tokens != null && (
-              <span className="shrink-0 text-foreground-muted">{e.tokens.toLocaleString()}t</span>
+              <span className="shrink-0 text-foreground-muted">{e.tokens.toLocaleString("en-US")}t</span>
             )}
           </li>
         ))}

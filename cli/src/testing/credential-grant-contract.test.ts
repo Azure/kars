@@ -19,6 +19,35 @@ const specSchema=(name:string)=>resource("CustomResourceDefinition",`${name}.kar
 const source=(path:string)=>readFileSync(new URL(path,root),"utf8");
 
 describe("governed credential public contract",()=>{
+  it("allows only the installed dispatcher to record current-run receipts without credential authority",()=>{
+    const policy=resource("ValidatingAdmissionPolicy","kars-credential-consumer-karstasks");
+    const variables=Object.fromEntries(policy.spec.variables.map((v:{name:string;expression:string})=>[v.name,v.expression]));
+    expect(variables.receiptKeys).toBe("['kars.azure.com/run-ack', 'kars.azure.com/run-completed']");
+    const expression=variables.deliveryReceipt.replace(/\s+/g," ").trim();
+    for(const guard of [
+      "oldObject != null && request.operation == 'UPDATE'",
+      "request.userInfo.username == 'system:serviceaccount:kars-system:kars-mission-dispatcher'",
+      "object.spec == oldObject.spec",
+      "object.?status.orValue({}) == oldObject.?status.orValue({})",
+      "object.metadata.?labels.orValue({}) == oldObject.metadata.?labels.orValue({})",
+      "object.metadata.?ownerReferences.orValue([]) == oldObject.metadata.?ownerReferences.orValue([])",
+      "object.metadata.?finalizers.orValue([]) == oldObject.metadata.?finalizers.orValue([])",
+      "variables.oldAnnotations.all(key, key in variables.receiptKeys || (key in variables.newAnnotations && variables.newAnnotations[key] == variables.oldAnnotations[key]))",
+      "variables.newAnnotations.all(key, key in variables.receiptKeys || (key in variables.oldAnnotations && variables.newAnnotations[key] == variables.oldAnnotations[key]))",
+      "(key in variables.oldAnnotations) == (key in variables.newAnnotations)",
+      "variables.oldAnnotations[?key].orValue('') == variables.newAnnotations[?key].orValue('')",
+      "variables.oldAnnotations[?'kars.azure.com/run-requested'].orValue('') != ''",
+      "variables.newAnnotations[key] == variables.oldAnnotations['kars.azure.com/run-requested']",
+    ]) expect(expression).toContain(guard);
+    expect(policy.spec.validations[0].expression).toContain("variables.deliveryReceipt ||");
+    expect(JSON.stringify(policy.spec.validations.slice(1))).not.toContain("deliveryReceipt");
+    for(const kind of ["karssandboxes","karsteams"]){
+      expect(JSON.stringify(resource("ValidatingAdmissionPolicy",`kars-credential-consumer-${kind}`).spec))
+        .not.toContain("deliveryReceipt");
+    }
+    expect(source("deploy/helm/kars/templates/mission-dispatcher.yaml"))
+      .not.toMatch(/use-agent-credentials|project-credentials/);
+  });
   it("keeps credential writer match expressions within the native CEL authorization cost limit",()=>{
     const auth=(verb:string)=>`authorizer.group('kars.azure.com').resource('karscredentialgrants').namespace(request.namespace) .name('workspace').check('${verb}').allowed()`;
     const prefix="(object != null && (object.metadata.name.startsWith('kars-credential-input-') || object.metadata.name.startsWith('kars-credential-bundle-'))) || (oldObject != null && (oldObject.metadata.name.startsWith('kars-credential-input-') || oldObject.metadata.name.startsWith('kars-credential-bundle-')))";
@@ -267,6 +296,33 @@ describe("governed credential public contract",()=>{
       const policy=resource("ValidatingAdmissionPolicy",`kars-credential-consumer-${kind}`);
       expect(JSON.stringify(policy.spec)).toContain("kars.azure.com/github-grant-uid");
     }
+  });
+
+  it("authorizes every GitHub entry within per-expression and per-binding CEL budgets",()=>{
+    const bound=specSchema("karscredentialgrants").properties.githubConnections.maxItems;
+    expect(bound).toBe(32);
+    const covered:number[]=[];
+    for(let group=0;group<4;group++){
+      const name=`kars-credential-github-authority-${group}`;
+      const policy=resource("ValidatingAdmissionPolicy",name);
+      expect(policy.spec.failurePolicy).toBe("Fail");
+      const authority=resource("ValidatingAdmissionPolicy","kars-credential-grant-authority").spec.matchConstraints;
+      expect(policy.spec.matchConstraints).toEqual({...authority,matchPolicy:"Equivalent",namespaceSelector:{},objectSelector:{},
+        resourceRules:authority.resourceRules.map((rule:Record<string,unknown>)=>({...rule,scope:"*"}))});
+      expect(policy.spec.validations).toHaveLength(8);
+      expect(resource("ValidatingAdmissionPolicyBinding",name).spec).toEqual({policyName:name,validationActions:["Deny","Audit"]});
+      for(let offset=0;offset<8;offset++){
+        const index=group*8+offset;
+        const validation=policy.spec.validations[offset];
+        const expression=validation.expression.replace(/\s+/g," ").trim();
+        expect(expression).toBe(`object == null || request.?subResource.orValue('') == 'status' || object.spec.?githubConnections.orValue([]).size() <= ${index} || (authorizer.group('').resource('secrets').namespace(request.namespace) .name(object.spec.githubConnections[${index}].appSecret.name).check('get').allowed() && authorizer.group('').resource('configmaps').namespace(request.namespace) .name(object.spec.githubConnections[${index}].connection.name).check('get').allowed())`);
+        expect(validation.reason).toBe("Forbidden");
+        expect((expression.match(/\.check\(/g)??[]).length).toBe(2);
+        covered.push(index);
+      }
+    }
+    expect(covered).toEqual(Array.from({length:bound},(_,i)=>i));
+    expect(JSON.stringify(resource("ValidatingAdmissionPolicy","kars-credential-grant-authority").spec)).not.toContain("githubConnections");
   });
 
   it("allows controller metadata finalization but not grant spec authorship",()=>{

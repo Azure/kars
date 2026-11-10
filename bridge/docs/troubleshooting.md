@@ -34,6 +34,29 @@ parameters and stack traces from both the response and the web failure marker.
 Use the request timestamp to correlate BFF/Dex logs and Kubernetes events;
 do not enable logging of cookies, login codes or signed principal tokens.
 
+## Console evidence availability
+
+Console and Workspace links track Next's pending navigation state: automatic
+polling and focus refreshes yield until navigation finishes or is cancelled.
+Pending links dim and announce "Opening page..." without disabling navigation.
+Both sidebars fetch destinations on demand, rather than speculatively rendering
+all live-data pages while another navigation is in flight.
+The loading state is not a healthy-cluster verdict or an empty result.
+
+Troubleshooting reports unavailable diagnostics separately from system wiring.
+Available wiring alone does not imply an "All clear" diagnosis. The stage count
+and "Live" badges describe wiring or inventory evidence, not a successful
+end-to-end test. Confirm model calls, tool use and useful output through the
+specific run's activity and deliverables; installed resources and Ready pods
+cannot establish those outcomes. Insights keeps
+independently measured run outcomes when artifact evidence is unavailable, but
+shows unknown values rather than zero counts when neither source can establish
+an outcome. Budget-utilization failures are reported separately.
+
+These pages refresh every eight seconds while visible, including after failed
+reads. Refresh the page after restoring backend access to retry immediately;
+an unavailable panel is not evidence of a healthy cluster or an empty workload.
+
 ## Fleet utilization
 
 Fleet resource samples come from the Kubernetes Metrics API, separately from
@@ -124,8 +147,10 @@ readiness, restart count, node and uptime. The newest non-terminating pod is use
 including Pending pods, init-container failures and scheduling failures.
 
 Router candidates are pod-readiness observations, not successful inference
-probes or independent capacity guarantees. The composer can use another ready
-sandbox router when the standing orchestrator is absent. A configured direct
+probes or independent capacity guarantees. Native composition uses only the
+standing orchestrator's ready routers in its reconciled runtime namespace. If
+that actor is absent or warming, composition does not borrow a customer's Mission
+or Team router, spending account, or governance policy. A configured direct
 endpoint is likewise not evidence that its credentials or model calls work;
 health polling does not invoke models or tools. During a rolling BFF upgrade,
 new detail fields remain unknown until the backend supplies them.

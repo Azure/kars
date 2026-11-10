@@ -1,95 +1,58 @@
 ---
 name: foundry-memory
-description: Persistent long-term memory via Foundry Memory Store APIs. User preferences and chat summaries survive pod restarts — no Foundry hosted agent needed.
-metadata: {"openclaw": {"requires": {"env": ["FOUNDRY_PROJECT_ENDPOINT"]}, "primaryEnv": "FOUNDRY_PROJECT_ENDPOINT"}}
+description: Governed persistent memory through the Kars router: configured Foundry or Bridge-owned private lexical memory. No runtime-local fallback.
 ---
 <!-- Copyright (c) Microsoft Corporation.
 Licensed under the MIT License. -->
 
+# Governed persistent memory
 
-# Foundry Memory — Memory Store APIs
+Use the `foundry_memory` tool (platform name `foundry.memory`) for persistent
+preferences, decisions and context. The compatibility name does not mean a
+Foundry project must be configured. In reviewed Teams/Missions, the phase must
+have the native `memory` capability. No external MCP server or network capability
+is needed just for memory.
 
-You have access to persistent long-term memory via Azure AI Foundry Memory Store. Memory survives pod restarts, upgrades, and session boundaries. The system uses embedding models for semantic search and chat models to extract/consolidate memories automatically.
-
-## Memory Persistence — How It Works
-
-Memories are stored server-side in Foundry's managed Memory Store (not in the pod). They persist across pod restarts, upgrades, and session boundaries.
-
-**Scope** is the key to persistence. Always use `$SANDBOX_NAME` (environment variable) as the scope. This is the agent's stable identity — the CRD name (e.g., `my-agent`) — and never changes even when pods restart.
-
-```bash
-# Read the stable scope from environment
-SCOPE=$(printenv SANDBOX_NAME)
-# Use it in all memory operations
-```
-
-For per-user memory within an agent, use a composite scope like `${SANDBOX_NAME}-${user_id}`.
-
-## Why use this instead of local files
-
-Local files in `/sandbox/` are ephemeral. Foundry Memory Store is managed, uses vector search (text-embedding-3-small), and supports:
-- **User profile memory**: preferences, name, restrictions
-- **Chat summary memory**: distilled summaries of past conversations
-
-## Endpoint
-
-All requests: `http://localhost:8443` with `?api-version=2025-11-15-preview`. Auth is automatic.
+The router selects a configured/discovered Foundry project; without one and
+without an explicit binding, it uses Bridge-owned private built-in memory.
+The selected inference model/provider does not select memory. Never switch to
+local files after an authorization failure, outage or storage-capacity error.
 
 ## Operations
 
-### Create a memory store
+- Search: `{"operation":"search","text":"coffee preference","top_k":10}`.
+- Static recall: `{"operation":"search","top_k":20}`.
+- Update: `{"operation":"update","text":"The user prefers dark roast coffee."}`.
 
-```bash
-curl -s -X POST 'http://localhost:8443/memory_stores?api-version=2025-11-15-preview' \
-  -H 'Content-Type: application/json' \
-  -d '{"name":"agent-memory","description":"Agent persistent memory","definition":{"kind":"default","chat_model":"gpt-4.1","embedding_model":"text-embedding-3-small","options":{"user_profile_enabled":true,"chat_summary_enabled":true}}}'
-```
+Omit `scope` or use null. The router derives the authorized private scope. Do not
+invent a mission scope, use `$SANDBOX_NAME`, or construct a per-user partition.
+An explicit scope must match the private scope or an explicitly granted Foundry
+shared scope. Do not create arbitrary stores or issue raw memory REST requests.
+Reviewed native memory permits search/update, not deletion.
 
-### Store memories from conversation
+Results identify `backend`. Foundry can return queued/in_progress updates; these
+are not proof of persistence. `completed` means acknowledged storage, not human
+approval of knowledge. Read back when persistence matters. Do not blindly replay
+an update after timeout or a denied status poll: its outcome may be unknown.
 
-```bash
-curl -s -X POST 'http://localhost:8443/memory_stores/agent-memory:update_memories?api-version=2025-11-15-preview' \
-  -H 'Content-Type: application/json' \
-  -d '{"items":[{"role":"user","content":"I prefer dark roast coffee and code in Rust","type":"message"},{"role":"assistant","content":"Noted!","type":"message"}],"scope":"$SANDBOX_NAME","update_delay":0}'
-```
+Built-in memory returns `retrieval: "lexical"`: it matches words, not semantic
+embeddings. Submit concise explicit facts and query matching words. It stores
+exact submitted text, deduplicates identical updates, and does not automatically
+extract facts. Limits are 512 records, 16 KiB per text, 900 KiB serialized per
+private store; reaching capacity preserves existing records rather than evicting.
+It invokes no model and does not fabricate inference usage.
 
-Returns `{"update_id": "...", "status": "queued"}`. The system asynchronously extracts memories using the chat model.
+## Lifetime and privacy
 
-### Search memories (with semantic embedding)
+Storage is outside the runtime pod. Built-in reviewed Team memory belongs to the
+exact Team UID and role; synthesis is separate. Standalone Mission memory belongs
+to the root Task UID and role. It survives pod replacement and phases/retries;
+Team roles retain it across runs. Deleting the owner deletes its private memory.
+Other roles cannot read it unless facts are deliberately handed off through the
+approved workflow. Existing Foundry bindings/scopes retain their own semantics.
+Private memories are not automatically shared or promoted into Team commons,
+approved knowledge or deliverables.
 
-```bash
-curl -s -X POST 'http://localhost:8443/memory_stores/agent-memory:search_memories?api-version=2025-11-15-preview' \
-  -H 'Content-Type: application/json' \
-  -d '{"scope":"$SANDBOX_NAME","items":[{"role":"user","content":"What coffee does the user like?","type":"message"}],"options":{"max_memories":10}}'
-```
-
-Returns `memories[]` array with content, kind (user_profile/chat_summary), and usage (embedding_tokens).
-
-### List all memories for scope (no embedding)
-
-```bash
-curl -s -X POST 'http://localhost:8443/memory_stores/agent-memory:search_memories?api-version=2025-11-15-preview' \
-  -H 'Content-Type: application/json' \
-  -d '{"scope":"$SANDBOX_NAME","options":{"max_memories":50}}'
-```
-
-### Delete memories for a scope
-
-```bash
-curl -s -X POST 'http://localhost:8443/memory_stores/agent-memory:delete_scope?api-version=2025-11-15-preview' \
-  -H 'Content-Type: application/json' \
-  -d '{"scope":"$SANDBOX_NAME"}'
-```
-
-## When to use
-
-- User says "remember this", "save this for later"
-- Start of session: search memories for the user to personalize
-- After meaningful conversation: store key facts via update_memories
-- User asks "what do you know about me"
-
-## When NOT to use
-
-- For searching documents (use foundry-knowledge skill)
-- For temporary scratch data (use local files)
-- For real-time web info (use foundry-web-search skill)
+Use document search for source material, normal handoff files for outputs and
+web tools for fresh external information. Do not mistake lexical recall for
+semantic retrieval or private memory for reviewed evidence.

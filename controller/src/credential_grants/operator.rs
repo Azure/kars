@@ -64,7 +64,8 @@ pub(super) async fn reconcile(
             &namespace,
             governed_services::credentials::OBSERVER_TLS,
         )
-        .await?;
+        .await
+        .map_err(|error| error.to_string())?;
         let tls = if let Some(existing) = existing_tls.filter(|value| {
             value["identity"] == identity
                 && value["serverName"] == server_name
@@ -80,14 +81,17 @@ pub(super) async fn reconcile(
         };
         let tls_configuration =
             serde_json::to_string(&tls).map_err(|_| "Observation TLS serialization failed")?;
-        governed_services::credentials::ensure_for(
+        tracing::info!(target: "kars_controller::credential_grants", stage = "observer-tls-ensure", phase = "before", "Credential grant lifecycle stage");
+        let result = governed_services::credentials::ensure_for(
             client,
             &sandbox,
             &namespace,
             governed_services::credentials::OBSERVER_TLS,
             Some(&tls_configuration),
         )
-        .await?;
+        .await;
+        tracing::info!(target: "kars_controller::credential_grants", stage = "observer-tls-ensure", phase = "returned", "Credential grant lifecycle stage");
+        result?;
         let mut recipients = Vec::new();
         for writer in &grant.spec.writers {
             let ns = Api::<Namespace>::all(client.clone())
@@ -136,14 +140,17 @@ pub(super) async fn reconcile(
         }
         let configuration = serde_json::to_string(&binding)
             .map_err(|_| "Observation binding serialization failed")?;
-        let credential = governed_services::credentials::ensure_for(
+        tracing::info!(target: "kars_controller::credential_grants", stage = "observer-ensure", phase = "before", "Credential grant lifecycle stage");
+        let result = governed_services::credentials::ensure_for(
             client,
             &sandbox,
             &namespace,
             governed_services::credentials::OBSERVER,
             Some(&configuration),
         )
-        .await?;
+        .await;
+        tracing::info!(target: "kars_controller::credential_grants", stage = "observer-ensure", phase = "returned", "Credential grant lifecycle stage");
+        let credential = result?;
         if credential.epoch != epoch {
             return Err("Observation privacy changed during issuance".into());
         }
@@ -316,11 +323,18 @@ async fn retire(
     sandbox: &KarsSandbox,
     namespace: &Namespace,
 ) -> Result<(), String> {
-    for purpose in [
-        governed_services::credentials::OBSERVER,
-        governed_services::credentials::OBSERVER_TLS,
+    for (purpose, stage) in [
+        (governed_services::credentials::OBSERVER, "observer-retire"),
+        (
+            governed_services::credentials::OBSERVER_TLS,
+            "observer-tls-retire",
+        ),
     ] {
-        governed_services::credentials::retire_for(client, sandbox, namespace, purpose).await?;
+        tracing::info!(target: "kars_controller::credential_grants", stage, phase = "before", "Credential grant lifecycle stage");
+        let result =
+            governed_services::credentials::retire_for(client, sandbox, namespace, purpose).await;
+        tracing::info!(target: "kars_controller::credential_grants", stage, phase = "returned", "Credential grant lifecycle stage");
+        result?;
     }
     Ok(())
 }

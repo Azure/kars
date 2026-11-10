@@ -122,8 +122,8 @@ for (const component of ["web", "teams-gateway"]) {
 
 test("web: preserve the complete standalone trace, static assets, and native optional dependencies", () => {
   const { build, runtime } = dockerfile("web");
-  assert.match(build, /^RUN npm ci$/m);
-  assert.match(build, /^RUN npm run build$/m);
+  assert.match(build, /^RUN --mount=type=secret,id=npmrc,target=\/root\/\.npmrc npm ci$/m);
+  assert.match(build, /^RUN --network=none npm run build$/m);
   const copy = runtime.filter(line => /^COPY /i.test(line)).join("\n");
   assert.match(copy, /--from=build (?:--chown=\S+ )?\/app\/\.next\/standalone \.\/$/m);
   assert.match(copy, /--from=build (?:--chown=\S+ )?\/app\/\.next\/static \.\/\.next\/static$/m);

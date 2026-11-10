@@ -349,6 +349,60 @@ describe("late runtime authority across selected writer retirement", () => {
     await expect(observeWriterSettlement(f.execute, review.spec.privateActivation, settlement)).resolves.toBe(true);
   });
 
+  it.each([false, true])("observes the Task-fenced projection refill before a separate resume, revision published=%s", async revisionPublished => {
+    const { f, review, settlement } = await quiesced();
+    await observeWriterSettlement(f.execute, review.spec.privateActivation, settlement);
+    const withdrawnStatus = structuredClone(f.task.status);
+    f.restore();
+    const readyStatus = structuredClone(f.task.status);
+    f.task.status = withdrawnStatus;
+    f.deployment.spec.replicas = 0;
+    f.deployment.status.availableReplicas = 0;
+    f.deployment.status.updatedReplicas = 0;
+    if (!revisionPublished) f.deployment.metadata.annotations[REVISION] = "1";
+    await expect(observeWriterSettlement(f.execute, review.spec.privateActivation, settlement)).resolves.toBe(false);
+    expect(settlement.runtimes[0]!.restored).toBeUndefined();
+
+    f.task.status = readyStatus;
+    f.task.metadata.resourceVersion = String(Number(f.task.metadata.resourceVersion) + 1);
+    f.deployment.spec.replicas = 1;
+    f.deployment.metadata.generation++;
+    f.deployment.metadata.resourceVersion = String(Number(f.deployment.metadata.resourceVersion) + 1);
+    f.deployment.metadata.annotations[REVISION] = "2";
+    f.deployment.status = { observedGeneration: f.deployment.metadata.generation, availableReplicas: 1, updatedReplicas: 1 };
+    await expect(observeWriterSettlement(f.execute, review.spec.privateActivation, settlement)).resolves.toBe(true);
+    expect(f.calls.every(args => args[0] === "get")).toBe(true);
+    expect(f.grant().spec.writers).toEqual([]);
+    expect(f.namespace.metadata.annotations[`${P}root-retirement`]).toBeUndefined();
+  });
+
+  it("accepts an exact separate refill/resume already completed between observations", async () => {
+    const { f, review, settlement } = await quiesced();
+    await observeWriterSettlement(f.execute, review.spec.privateActivation, settlement);
+    f.restore();
+    f.deployment.metadata.generation++;
+    f.deployment.status.observedGeneration = f.deployment.metadata.generation;
+    await expect(observeWriterSettlement(f.execute, review.spec.privateActivation, settlement)).resolves.toBe(true);
+    expect(f.calls.every(args => args[0] === "get")).toBe(true);
+  });
+
+  it.each(["refill-generation", "resume-generation", "template", "rollout-revision"])("rejects unreviewed split restoration drift: %s", async fault => {
+    const { f, review, settlement } = await quiesced();
+    await observeWriterSettlement(f.execute, review.spec.privateActivation, settlement);
+    f.restore();
+    f.deployment.metadata.generation++;
+    if (fault === "refill-generation") f.deployment.spec.replicas = 0;
+    if (fault === "resume-generation") f.deployment.metadata.generation++;
+    if (fault === "template") f.deployment.spec.template.spec.containers[0].image = "unreviewed:latest";
+    if (fault === "rollout-revision") f.deployment.metadata.annotations[REVISION] = "3";
+    f.deployment.status.observedGeneration = f.deployment.metadata.generation;
+    await expect(observeWriterSettlement(f.execute, review.spec.privateActivation, settlement))
+      .rejects.toThrow("Unreviewed template or controller pause/restore generation changed");
+    expect(settlement.runtimes[0]!.restored).toBeUndefined();
+    expect(f.calls.every(args => args[0] === "get")).toBe(true);
+    expect(f.namespace.metadata.annotations[`${P}root-retirement`]).toBeUndefined();
+  });
+
   it("keeps the original deadline and publishes no activation if the rollout revision never advances", async () => {
     const { f, review, settlement } = await quiesced();
     await observeWriterSettlement(f.execute, review.spec.privateActivation, settlement);

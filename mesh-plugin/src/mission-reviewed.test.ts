@@ -8,12 +8,13 @@ import { KubernetesError, type KubernetesJson } from "./kubernetes-json.js";
 import { reviewedMission, type ReviewedTask } from "./mission-reviewed.js";
 import { readRetainedMissionInputs } from "./mission-input-custody.js";
 import { missionObjective } from "./mission-store.js";
-import { missionContract, parseMissionMessage, type MissionContract } from "./mission-protocol.js";
-import { missionResultMaps, unpackMissionAttempt, type MissionConfigMap } from "./mission-record.js";
-import { missionContentDigest } from "./mission-dispatcher.js";
+import { MAX_MISSION_ARTIFACT_BYTES, missionContract, parseMissionMessage, type MissionAssignment, type MissionContract, type MissionReply } from "./mission-protocol.js";
+import { missionRecordOwner, missionResultMaps, packMissionAttempt, unpackMissionAttempt, type MissionConfigMap } from "./mission-record.js";
+import { missionAttemptName, missionContentDigest, type MissionAttempt, type MissionCandidate } from "./mission-dispatcher.js";
+import { MAX_MISSION_INPUT_BYTES, missionInputs, type MissionInput, type MissionInputReference } from "./mission-inputs.js";
 
 interface Resource { metadata: ReviewedTask["metadata"]; data?: Record<string,string>; immutable?: boolean }
-interface Grant { contract: MissionContract; inputs: Array<{name:string; source: {namespace:string;taskName:string;taskUid:string;runNonce:string};sha256:string}>; authority: Record<string,string> }
+interface Grant { contract: MissionContract; inputs: MissionInputReference[]; authority: Record<string,string> }
 interface ReviewedFixture {
   resources: Record<string,Resource>; phaseName: string; phaseGrant: Grant; synthesisGrant: Grant;
 }
@@ -43,6 +44,31 @@ function setup() {
   };
   return {resources,reads,api,task,readInputs,authorize,statePath,mutateState};
 }
+
+  it("derives v5 peer locators independently for new sealed runs and keeps legacy grants unchanged", async () => {
+    const h = setup();
+    expect((await h.authorize(fixture.phaseName, structuredClone(fixture.phaseGrant)))?.contract.version).toBe(4);
+    h.mutateState(state => { state.schema = "kars.reviewed-run/v2"; });
+    const state = JSON.parse(h.resources[h.statePath].data!["state.json"]);
+    const grant = structuredClone(fixture.phaseGrant);
+    const stateName = grant.authority.stateName;
+    const peers = { rootUid: state.rootUid, stateName, slot: grant.authority.slot,
+      peers: state.plan.roles.flatMap((role: any, r: number) => role.phases.map((phase: any, p: number) => ({
+        role: role.name, phase: phase.name, slot: `r${r}-p${p}`, agentName: `rp-${stateName.slice(14,34)}-r${r}-p${p}`,
+      }))) };
+    grant.contract = missionContract(grant.contract.reviewedPhase, undefined, grant.contract.requiredOutputs, peers);
+    expect(await h.authorize(fixture.phaseName, grant)).toEqual({ contract: grant.contract });
+    for (const changed of [ { ...peers, rootUid: "different-root" }, { ...peers, slot: "synthesis" },
+      { ...peers, peers: [] }, { ...peers, peers: peers.peers.map((p: any) => ({ ...p, role: "different-role" })) },
+      { ...peers, peers: peers.peers.map((p: any) => ({ ...p, phase: "different-phase" })) } ]) {
+      const altered = structuredClone(grant);
+      altered.contract.peerContext = changed;
+      await expect(h.authorize(fixture.phaseName, altered)).rejects.toThrow();
+    }
+    await expect(h.authorize(fixture.phaseName, structuredClone(fixture.phaseGrant))).rejects.toThrow();
+    h.mutateState(state => { state.schema = "kars.reviewed-run/v1"; });
+    await expect(h.authorize(fixture.phaseName, grant)).rejects.toThrow();
+  });
 
 function revisionFixture(characters: number, teamRuntime?: string) {
   const h = setup();
@@ -144,38 +170,396 @@ function revisionFixture(characters: number, teamRuntime?: string) {
     expect(h.phase.spec.execution?.runtime).toBeUndefined();
     expect(await h.authorize(h.phase.metadata.name,h.grant)).toEqual({contract:h.grant.contract});
   });
-  it("delivers exact sealed Team memory after the source Task has been collected",async()=>{
+  it.each(["memory", "revision"])("delivers exact sealed Team %s after the source Task has been collected",async kind=>{
     const h=revisionFixture(4096,runtime);
     const root=h.resources[taskPath("report")] as ReviewedTask;
     const content="# Prior clinic decision\r\nKeep the complete evidence — 日本語 🌍\n";
-    const input={name:"memory-0-document-0.md",source:{
+    const input={name:kind === "revision" ? "revision-0" : "memory-0-document-0.md",source:{
       namespace:"default",taskName:"collected-run",taskUid:"collected-uid",
       sandboxUid:"old-sandbox",podUid:"old-pod",runNonce:"old-run",assignmentId:"old-assignment",
       agentDid:`did:mesh:${"a".repeat(32)}`,artifactName:"decision-log.md",
     },sha256:missionContentDigest(content),content};
     const raw=JSON.stringify([input]);
-    root.metadata.annotations!["kars.azure.com/reviewed-team-memory"]=raw;
+    const key=`kars.azure.com/reviewed-team-${kind}`;
+    root.metadata.annotations![key]=raw;
     const map=h.resources[`/api/v1/namespaces/default/configmaps/${h.grant.authority.stateName}`];
-    const state=JSON.parse(map.data!["state.json"]); state.teamMemory=raw; map.data!["state.json"]=JSON.stringify(state);
+    const state=JSON.parse(map.data!["state.json"]); state[kind === "revision" ? "teamRevision" : "teamMemory"]=raw; map.data!["state.json"]=JSON.stringify(state);
     h.grant.inputs=[{name:input.name,source:input.source,sha256:input.sha256}];
     h.grant.contract=missionContract(h.grant.contract.reviewedPhase,[input],h.grant.contract.requiredOutputs);
     const result=await h.authorize(h.phase.metadata.name,h.grant);
     expect(result?.inputArtifacts).toEqual([input]);
     expect(h.readInputs).not.toHaveBeenCalled();
     expect(h.reads).not.toContain(taskPath("collected-run"));
-    const proofDirectory = process.env.KARS_REVIEWED_MEMORY_FIXTURE_DIR;
+    const proofDirectory = kind === "memory" ? process.env.KARS_REVIEWED_MEMORY_FIXTURE_DIR : process.env.KARS_REVIEWED_REVISION_FIXTURE_DIR;
     if (proofDirectory) {
       mkdirSync(proofDirectory, {recursive:true});
-      writeFileSync(join(proofDirectory, `memory-${runtime}.json`), JSON.stringify({
+      writeFileSync(join(proofDirectory, `${kind}-${runtime}.json`), JSON.stringify({
         resources:h.resources, phaseName:h.phase.metadata.name, grant:h.grant,
         expected:result, rootPath:taskPath("report"),
       }), {flag:"wx"});
     }
-    root.metadata.annotations!["kars.azure.com/reviewed-team-memory"]=JSON.stringify([{...input,content:"changed",sha256:missionContentDigest("changed")}]);
-    await expect(h.authorize(h.phase.metadata.name,h.grant)).rejects.toThrow("memory binding changed");
-    root.metadata.annotations!["kars.azure.com/reviewed-team-memory"]=raw;
+    root.metadata.annotations![key]=JSON.stringify([{...input,content:"changed",sha256:missionContentDigest("changed")}]);
+    await expect(h.authorize(h.phase.metadata.name,h.grant)).rejects.toThrow(`${kind} binding changed`);
+    root.metadata.annotations![key]=raw;
     h.grant.inputs[0].sha256=missionContentDigest("substituted reference");
     await expect(h.authorize(h.phase.metadata.name,h.grant)).rejects.toThrow("sealed run");
+  });
+  function sealedRevision(count = 4) {
+    const h = revisionFixture(4096,runtime);
+    const root = h.resources[taskPath("report")] as ReviewedTask;
+    const map = h.resources[`/api/v1/namespaces/default/configmaps/${h.grant.authority.stateName}`];
+    const inputs: MissionInput[] = Array.from({length:count},(_,index) => {
+      const content = `Retained document ${index} — 日本語\r\n${"evidence ".repeat(1024)}`;
+      return {name:`revision-${index}`,content,sha256:missionContentDigest(content),source:{
+        namespace:"default",taskName:"collected-run",taskUid:"collected-uid",sandboxUid:"old-sandbox",
+        podUid:"old-pod",runNonce:"old-run",assignmentId:"old-assignment",
+        agentDid:`did:mesh:${"a".repeat(32)}`,artifactName:`document-${index}.md`,
+      }};
+    });
+    const seal = () => {
+      const raw = JSON.stringify(inputs);
+      root.metadata.annotations!["kars.azure.com/reviewed-team-revision"] = raw;
+      const state = JSON.parse(map.data!["state.json"]); state.teamRevision = raw; map.data!["state.json"] = JSON.stringify(state);
+    };
+    seal();
+    h.grant.inputs = inputs.map(({content: _content,...ref}) => ref);
+    h.grant.contract = missionContract(h.grant.contract.reviewedPhase,inputs,h.grant.contract.requiredOutputs);
+    return {...h,root,map,inputs,seal};
+  }
+  function referencedRevision() {
+    const h = revisionFixture(4096,runtime);
+    const root = h.resources[taskPath("report")] as ReviewedTask;
+    const map = h.resources[`/api/v1/namespaces/default/configmaps/${h.grant.authority.stateName}`];
+    // Exact observed UTF-8 and JSON-escaping sizes, without retained source bodies.
+    const groups: [string,number,number][][] = [
+      [["benchmarks.json",6196,715],["test_server.py",14522,290],["app.js",5685,52],["index.html",3615,71],
+        ["server.py",45629,1679],["README.md",12109,83],["execution-report.md",9141,68],["execution-results.json",9500,637]],
+      [["benchmark-evidence.json",15944,1534],["benchmark-handoff.md",8654,71],["handoff.md",8654,71]],
+      [["lifecycle-evidence.json",10911,1193],["lifecycle-handoff.md",6554,41],["handoff.md",6554,41]],
+      [["README.md",2264,41],["server.py",45629,1679],["test_server.py",14522,290],["benchmarks.json",6196,715],
+        ["index.html",3615,71],["app.js",5685,52],["handoff.md",4201,46]],
+      [["kars-python-executions.json",11018,803],["qa_bootstrap.py",1031,21],["qa_integration.py",6672,92],
+        ["qa_live.py",2080,35],["execution-results.json",4430,331],["execution-report.md",6387,40],["handoff.md",3899,28]],
+    ];
+    const inputs: MissionInput[] = [];
+    const sources: {attempt: MissionAttempt; record: MissionConfigMap; artifacts: MissionConfigMap; output: MissionConfigMap}[] = [];
+    groups.forEach((files,group) => {
+      const candidate: MissionCandidate = {namespace:"default",taskName:`retained-producer-${group}`,taskUid:`producer-${group}-uid`,
+        sandboxUid:`sandbox-${group}`,podUid:`pod-${group}`,runNonce:`run-${group}`,agentDid:`did:mesh:${"a".repeat(32)}`,
+        dispatcherDid:`did:mesh:${"b".repeat(32)}`,agentName:`Prior producer ${group}`,content:"Retain useful source documents.",
+        ...(runtime === "Hermes" ? {runtime:"Hermes" as const} : {})};
+      const contract = missionContract();
+      const assignment: MissionAssignment = {...contract,type:"mission:assign",taskName:candidate.taskName,taskUid:candidate.taskUid,
+        sandboxUid:candidate.sandboxUid,podUid:candidate.podUid,runNonce:candidate.runNonce,agentDid:candidate.agentDid,
+        dispatcherDid:candidate.dispatcherDid,bootId:`boot-${group}`,assignmentId:`assignment-${group}`,artifactFormat:"text-v1",content:candidate.content};
+      const artifacts: Record<string,string> = {};
+      if (group > 0) files.sort(([a],[b])=>a<b?-1:a>b?1:0);
+      files.forEach(([artifactName,bytes,escaped],index) => {
+        const content = "\n".repeat(escaped) + "x".repeat(bytes-escaped);
+        artifacts[artifactName] = content;
+        inputs.push({name:group === 0 ? `revision-${index}` : artifactName === "handoff.md" ? `revision-unaccepted-r${group-1}-p0.md`
+          : `revision-unaccepted-r${group-1}-p0--${index}-${artifactName}`,content,sha256:missionContentDigest(content),source:{
+          namespace:candidate.namespace,taskName:candidate.taskName,taskUid:candidate.taskUid,sandboxUid:candidate.sandboxUid,
+          podUid:candidate.podUid,runNonce:candidate.runNonce,assignmentId:assignment.assignmentId,agentDid:candidate.agentDid,artifactName}});
+      });
+      const evidence = {model:"reviewed-model",rounds:1,usage:{promptTokens:3,completionTokens:2,totalTokens:5}};
+      const reply: MissionReply = {...assignment,type:"mission:reply",status:"succeeded",output:"Retained exports attached.",artifacts,evidence};
+      const stamp = "2026-11-03T01:00:00.000Z";
+      const attempt: MissionAttempt = {version:1,candidate,assignment,contentDigest:missionContentDigest(candidate.content),ownerSession:"dispatcher-session",
+        startedAt:stamp,updatedAt:stamp,phase:"succeeded",events:[{at:stamp,status:"succeeded",evidence}],reply};
+      const record: MissionConfigMap = {apiVersion:"v1",kind:"ConfigMap",metadata:{namespace:"default",name:missionAttemptName(candidate),
+        uid:`record-${group}`,resourceVersion:"1",ownerReferences:[missionRecordOwner(candidate)]},data:{"attempt.json":packMissionAttempt(attempt)}};
+      const expected = missionResultMaps(attempt);
+      const output = {...expected.output,immutable:true,metadata:{...expected.output.metadata,uid:`output-${group}`,resourceVersion:"1"}};
+      const retainedArtifacts = {...expected.artifacts,immutable:true,metadata:{...expected.artifacts.metadata,uid:`artifacts-${group}`,resourceVersion:"1"}};
+      for (const cm of [record,output,retainedArtifacts]) h.resources[`/api/v1/namespaces/default/configmaps/${cm.metadata.name}`] = cm;
+      const sourceTask = {apiVersion:"kars.azure.com/v1alpha1",kind:"KarsTask",metadata:{name:candidate.taskName,namespace:"default",uid:candidate.taskUid,resourceVersion:"1"}};
+      h.resources[taskPath(candidate.taskName)] = sourceTask;
+      sources.push({attempt,record,output,artifacts:retainedArtifacts});
+    });
+    const refs = inputs.map(({content:_content,...reference})=>reference);
+    const manifest: {schema: string; inputs: MissionInputReference[]; diagnosticRoles?: Array<{name: string; phases: string[]}>} = {schema:"kars.team-revision-inputs/v1",inputs:refs};
+    const seal = () => {
+      const raw = JSON.stringify(manifest);
+      root.metadata.annotations!["kars.azure.com/reviewed-team-revision"] = raw;
+      const state = JSON.parse(map.data!["state.json"]); state.teamRevision = raw; map.data!["state.json"] = JSON.stringify(state);
+    };
+    seal();
+    h.grant.inputs = structuredClone(refs);
+    h.grant.contract = missionContract(h.grant.contract.reviewedPhase,inputs,h.grant.contract.requiredOutputs);
+    return {...h,root,map,inputs,manifest,seal,sources};
+  }
+  function routedRevision(group: number) {
+    const h = referencedRevision();
+    const state = JSON.parse(h.map.data!["state.json"]);
+    h.manifest.diagnosticRoles = Array.from({length:4},(_,i)=>({
+      name:i === group-1 ? state.plan.roles[0].name : `historical-role-${i}`,
+      phases:[state.plan.roles[0].phases[0].name],
+    }));
+    h.seal();
+    const original = h.sources[group].attempt;
+    const candidate: MissionCandidate = {...original.candidate,taskName:h.phase.metadata.name,taskUid:h.phase.metadata.uid!,
+      runNonce:h.phase.metadata.annotations!["kars.azure.com/run-requested"],content:h.complete,
+      reviewedPhase:h.grant.contract.reviewedPhase,requiredOutputs:["handoff.md"],inputArtifacts:missionInputs(h.inputs)};
+    const contract = missionContract(candidate.reviewedPhase,candidate.inputArtifacts,["handoff.md"]);
+    const assignment: MissionAssignment = {...original.assignment,...contract,taskName:candidate.taskName,taskUid:candidate.taskUid,
+      runNonce:candidate.runNonce,content:candidate.content,inputArtifacts:candidate.inputArtifacts};
+    const evidence = {...original.reply!.evidence!,phase:{name:contract.reviewedPhase!.name,
+      minToolCalls:contract.reviewedPhase!.minToolCalls,maxToolCalls:contract.reviewedPhase!.maxToolCalls,
+      attemptedToolCalls:1,successfulToolCalls:1}};
+    const {inputArtifacts:_inputs,content:_content,...replyTarget} = assignment;
+    const reply: MissionReply = {...replyTarget,type:"mission:reply",status:"succeeded",output:"Fresh specialist exports.",
+      artifacts:structuredClone(original.reply!.artifacts),evidence};
+    const attempt: MissionAttempt = {...original,candidate,assignment,reply,contentDigest:missionContentDigest(candidate.content),
+      events:[{at:original.updatedAt,status:"succeeded",evidence}]};
+    const record: MissionConfigMap = {apiVersion:"v1",kind:"ConfigMap",metadata:{namespace:"default",name:missionAttemptName(candidate),
+      uid:"current-record",resourceVersion:"1",ownerReferences:[missionRecordOwner(candidate)]},data:{"attempt.json":packMissionAttempt(attempt)}};
+    const maps = missionResultMaps(attempt);
+    const output = {...maps.output,immutable:true,metadata:{...maps.output.metadata,uid:"current-output",resourceVersion:"1"}};
+    const artifacts = {...maps.artifacts,immutable:true,metadata:{...maps.artifacts.metadata,uid:"current-artifacts",resourceVersion:"1"}};
+    for (const cm of [record,output,artifacts]) h.resources[`/api/v1/namespaces/default/configmaps/${cm.metadata.name}`] = cm;
+    h.phase.metadata.annotations!["kars.azure.com/run-completed"] = candidate.runNonce;
+    const fresh: MissionInput[] = Object.entries(reply.artifacts!).sort(([a],[b])=>a<b?-1:a>b?1:0).map(([name,content],index)=>({
+      name:name === "handoff.md" ? "r0-p0.md" : `r0-p0--${index}-${name}`,content,sha256:missionContentDigest(content),
+      source:{namespace:"default",taskName:candidate.taskName,taskUid:candidate.taskUid,sandboxUid:candidate.sandboxUid,
+        podUid:candidate.podUid,runNonce:candidate.runNonce,assignmentId:assignment.assignmentId,agentDid:candidate.agentDid,artifactName:name},
+    }));
+    const selected = missionInputs([...h.inputs.filter(input=>!input.name.startsWith(`revision-unaccepted-r${group-1}-p0`)),...fresh]);
+    const grant = structuredClone(fixture.synthesisGrant);
+    grant.authority.stateName = h.grant.authority.stateName;
+    grant.inputs = selected.map(({content:_content,...ref})=>ref);
+    grant.contract = missionContract(grant.contract.reviewedPhase,selected,grant.contract.requiredOutputs);
+    return {...h,grant,fresh,selected,current:{attempt,record,output,artifacts}};
+  }
+  it.each([1,2,3,4])("routes current role %i exports without losing historical delivery or provenance",async group=>{
+    const h = routedRevision(group);
+    const before = structuredClone(h.resources);
+    const result = await h.authorize("report",h.grant);
+    expect(result?.inputArtifacts).toEqual(h.selected);
+    expect(result?.inputArtifacts).toHaveLength(28);
+    for (const prior of h.inputs.slice(0,8)) expect(result?.inputArtifacts).toContainEqual(prior);
+    expect(h.readInputs).toHaveBeenCalledTimes(2);
+    expect(h.readInputs.mock.calls.map(([refs])=>(refs as unknown[]).length)).toEqual([28,h.fresh.length]);
+    expect(h.manifest.inputs).toHaveLength(28);
+    expect(h.resources).toEqual(before);
+    expect(Buffer.byteLength(JSON.stringify(h.selected))).toBeLessThan(384*1024);
+    if (group === 4) expect(h.fresh.find(input=>input.source.artifactName === "kars-python-executions.json")!.name).toMatch(/^r0-p0--/);
+  });
+  it.each(["missing-shadowed-record","shadowed-bytes","wrong-role","wrong-phase","missing-current-file","stale-pin",
+    "routing-null","routing-duplicate","routing-coordinate","assembled-bytes"])("rejects %s during routed revision admission",async mutation=>{
+    const h = routedRevision(3);
+    if (mutation === "missing-shadowed-record") delete h.resources[`/api/v1/namespaces/default/configmaps/${h.sources[3].record.metadata.name}`];
+    if (mutation === "shadowed-bytes") h.sources[3].artifacts.data["server.py"] = "changed historical bytes";
+    if (mutation === "wrong-role") h.manifest.diagnosticRoles![2].name = "different-role";
+    if (mutation === "wrong-phase") h.manifest.diagnosticRoles![2].phases[0] = "different-phase";
+    if (mutation === "missing-current-file") delete h.current.artifacts.data["server.py"];
+    if (mutation === "stale-pin") h.grant.inputs.find(input=>input.name.startsWith("r0-p0--"))!.sha256 = missionContentDigest("different");
+    if (mutation === "routing-null") Object.assign(h.manifest,{diagnosticRoles:null});
+    if (mutation === "routing-duplicate") h.manifest.diagnosticRoles![0].name = h.manifest.diagnosticRoles![1].name;
+    if (mutation === "routing-coordinate") h.manifest.diagnosticRoles![0].phases.push("later-phase");
+    if (mutation === "assembled-bytes") {
+      const memory = [0,1].map(i=>{const content="x".repeat(65536);return {...h.inputs[0],name:`memory-${i}.md`,content,sha256:missionContentDigest(content)};});
+      const raw = JSON.stringify(memory); h.root.metadata.annotations!["kars.azure.com/reviewed-team-memory"] = raw;
+      const state = JSON.parse(h.map.data!["state.json"]); state.teamMemory = raw; h.map.data!["state.json"] = JSON.stringify(state);
+      h.grant.inputs = [...memory.map(({content:_content,...ref})=>ref),...h.grant.inputs].sort((a,b)=>a.name<b.name?-1:a.name>b.name?1:0);
+    }
+    h.seal();
+    await expect(h.authorize("report",h.grant)).rejects.toThrow();
+    if (["missing-shadowed-record","shadowed-bytes","missing-current-file","stale-pin","assembled-bytes"].includes(mutation)) {
+      expect(h.readInputs).toHaveBeenCalled();
+      expect(h.readInputs.mock.calls[0][0]).toHaveLength(28);
+    }
+  });
+  it("resolves all 28 historical documents through retained custody without the inline revision ceiling",async()=>{
+    const h = referencedRevision();
+    expect(h.inputs).toHaveLength(28);
+    expect(h.inputs.reduce((bytes,input)=>bytes+Buffer.byteLength(input.content),0)).toBe(281297);
+    expect(Buffer.byteLength(JSON.stringify(h.inputs))).toBeGreaterThan(192*1024);
+    expect(Buffer.byteLength(JSON.stringify(h.inputs))).toBeLessThan(384*1024);
+    expect(Buffer.byteLength(JSON.stringify(h.manifest))).toBeLessThan(192*1024);
+    expect(JSON.stringify(h.manifest)).not.toContain('"content"');
+    const before = structuredClone(h.resources);
+    const result = await h.authorize(h.phase.metadata.name,h.grant);
+    expect(result?.inputArtifacts).toEqual(missionInputs(h.inputs));
+    expect(h.readInputs).toHaveBeenCalledTimes(1);
+    expect(h.readInputs.mock.calls[0][0]).toHaveLength(28);
+    expect(h.resources).toEqual(before);
+    expect(result?.inputArtifacts?.filter(input=>input.source.artifactName === "server.py")).toHaveLength(2);
+    expect(result?.inputArtifacts?.find(input=>input.source.artifactName === "kars-python-executions.json")?.name).toMatch(/^revision-unaccepted-r3-p0--/);
+    const proofDirectory = process.env.KARS_REVIEWED_REFERENCED_REVISION_FIXTURE_DIR;
+    if (proofDirectory) {
+      mkdirSync(proofDirectory, {recursive:true});
+      writeFileSync(join(proofDirectory, `referenced-revision-${runtime}.json`), JSON.stringify({
+        resources:h.resources, phaseName:h.phase.metadata.name, grant:h.grant, expected:result,
+      }), {flag:"wx"});
+    }
+  });
+  it.each(["schema","extra-field","inline-content","empty","duplicate","alias","producer","namespace","missing-pin","changed-pin","state","annotation-bytes","count"])("rejects %s reference manifests before custody reads",async mutation=>{
+    const h = referencedRevision();
+    if (mutation === "schema") h.manifest.schema = "unknown";
+    if (mutation === "extra-field") Object.assign(h.manifest,{accepted:true});
+    if (mutation === "inline-content") Object.assign(h.manifest.inputs[0],{content:"injected"});
+    if (mutation === "empty") h.manifest.inputs = [];
+    if (mutation === "duplicate") h.manifest.inputs[9].name = h.manifest.inputs[8].name;
+    if (mutation === "alias") h.manifest.inputs[8].name = "revision-unaccepted-r0-p0--";
+    if (mutation === "producer") h.manifest.inputs[9].source.podUid = "replacement-pod";
+    if (mutation === "namespace") h.manifest.inputs[8].source.namespace = "other";
+    if (mutation === "missing-pin") h.grant.inputs.pop();
+    if (mutation === "changed-pin") h.grant.inputs[8].sha256 = missionContentDigest("different");
+    if (mutation === "annotation-bytes") h.manifest.schema = "x".repeat(192*1024);
+    if (mutation === "count") h.manifest.inputs = Array.from({length:153},(_,i)=>({...h.manifest.inputs[8],name:`revision-unaccepted-r${i}-p0.md`}));
+    h.seal();
+    if (mutation === "state") { const state = JSON.parse(h.map.data!["state.json"]); delete state.teamRevision; h.map.data!["state.json"] = JSON.stringify(state); }
+    await expect(h.authorize(h.phase.metadata.name,h.grant)).rejects.toThrow();
+    expect(h.readInputs).not.toHaveBeenCalled();
+  });
+  it.each(["missing-task","task-uid","record-owner","record","output","artifact","file-bytes","serialized-bytes","assembled-bytes"])("rejects %s in resolved historical documents rather than truncating",async mutation=>{
+    const h = referencedRevision();
+    const source = h.sources[1];
+    const input = h.inputs[8];
+    if (mutation === "missing-task") delete h.resources[taskPath(input.source.taskName)];
+    if (mutation === "task-uid") h.resources[taskPath(input.source.taskName)].metadata.uid = "replacement";
+    if (mutation === "record-owner") source.record.metadata.ownerReferences![0].uid = "replacement";
+    if (mutation === "record") source.record.data["attempt.json"] = "{}";
+    if (mutation === "output") source.output.data.output = "changed";
+    if (mutation === "artifact") source.artifacts.data[input.source.artifactName] = "changed";
+    if (mutation === "file-bytes" || mutation === "serialized-bytes") {
+      for (const [index,document] of h.inputs.entries()) {
+        if (mutation === "file-bytes" && index !== 8) continue;
+        document.content = mutation === "file-bytes" ? "x".repeat(65537) : '"'.repeat(7800);
+        document.sha256 = missionContentDigest(document.content);
+        h.manifest.inputs[index].sha256 = document.sha256; h.grant.inputs[index].sha256 = document.sha256;
+        h.sources.find(s=>s.attempt.candidate.taskName === document.source.taskName)!.attempt.reply!.artifacts![document.source.artifactName] = document.content;
+      }
+      if (mutation === "serialized-bytes") {
+        expect(Buffer.byteLength(JSON.stringify(h.inputs))).toBeGreaterThan(MAX_MISSION_INPUT_BYTES);
+        for (const producer of h.sources) {
+          expect(Buffer.byteLength(JSON.stringify(producer.attempt.reply!.artifacts))).toBeLessThanOrEqual(MAX_MISSION_ARTIFACT_BYTES);
+        }
+      }
+      for (const producer of h.sources) {
+        producer.record.data["attempt.json"] = packMissionAttempt(producer.attempt);
+        const canonical = missionResultMaps(producer.attempt);
+        producer.artifacts.data = canonical.artifacts.data; producer.output.data = canonical.output.data;
+      }
+      h.seal();
+    }
+    if (mutation === "assembled-bytes") {
+      const memory = [0,1].map(i=>{const content="x".repeat(65536);return {...h.inputs[0],name:`memory-${i}.md`,content,sha256:missionContentDigest(content)};});
+      const raw = JSON.stringify(memory); h.root.metadata.annotations!["kars.azure.com/reviewed-team-memory"] = raw;
+      const state = JSON.parse(h.map.data!["state.json"]); state.teamMemory = raw; h.map.data!["state.json"] = JSON.stringify(state);
+      h.grant.inputs.push(...memory.map(({content:_content,...ref})=>ref));
+    }
+    await expect(h.authorize(h.phase.metadata.name,h.grant)).rejects.toThrow();
+    expect(h.readInputs).toHaveBeenCalledTimes(1);
+  });
+  it("keeps the sealed revision limited to one producer's sixteen documents",async()=>{
+    const h = sealedRevision(17);
+    await expect(h.authorize(h.phase.metadata.name,h.grant)).rejects.toThrow("excessive inline revision documents");
+    expect(h.readInputs).not.toHaveBeenCalled();
+  });
+  it("admits the full 143430-byte approved bundle with current peer context and unchanged limits",async()=>{
+    const h = sealedRevision(7);
+    const sizes = [29571,13205,19474,43332,17511,5728,4869];
+    h.inputs.forEach((input,index) => {
+      input.name = `memory-0-document-${index}.md`;
+      input.content = "x".repeat(sizes[index]);
+      input.sha256 = missionContentDigest(input.content);
+    });
+    h.inputs[0].content += "x".repeat(143430 - Buffer.byteLength(JSON.stringify(h.inputs)));
+    h.inputs[0].sha256 = missionContentDigest(h.inputs[0].content);
+    const raw = JSON.stringify(h.inputs);
+    expect(Buffer.byteLength(raw)).toBe(143430);
+    delete h.root.metadata.annotations!["kars.azure.com/reviewed-team-revision"];
+    h.root.metadata.annotations!["kars.azure.com/reviewed-team-memory"] = raw;
+    const state = JSON.parse(h.map.data!["state.json"]);
+    delete state.teamRevision;
+    state.teamMemory = raw;
+    state.schema = "kars.reviewed-run/v2";
+    h.map.data!["state.json"] = JSON.stringify(state);
+    const peers = {rootUid:state.rootUid,stateName:h.grant.authority.stateName,slot:h.grant.authority.slot,
+      peers:state.plan.roles.flatMap((role:any,r:number)=>role.phases.map((phase:any,p:number)=>({
+        role:role.name,phase:phase.name,slot:`r${r}-p${p}`,agentName:`rp-${h.grant.authority.stateName.slice(14,34)}-r${r}-p${p}`,
+      })))};
+    h.grant.inputs = h.inputs.map(({content: _content,...ref}) => ref);
+    h.grant.contract = missionContract(h.grant.contract.reviewedPhase,h.inputs,h.grant.contract.requiredOutputs,peers);
+    const expected = {contract:h.grant.contract,inputArtifacts:missionInputs(h.inputs)};
+    expect(await h.authorize(h.phase.metadata.name,h.grant)).toEqual(expected);
+    expect(h.readInputs).not.toHaveBeenCalled();
+    if (process.env.KARS_REVIEWED_MEMORY_FIXTURE_DIR) {
+      writeFileSync(join(process.env.KARS_REVIEWED_MEMORY_FIXTURE_DIR, `memory-large-${runtime}.json`), JSON.stringify({
+        resources:h.resources,phaseName:h.phase.metadata.name,grant:h.grant,expected,rootPath:taskPath("report"),
+      }), {flag:"wx"});
+    }
+    const oversized = raw + " ".repeat(192 * 1024 - Buffer.byteLength(raw) + 1);
+    h.root.metadata.annotations!["kars.azure.com/reviewed-team-memory"] = oversized;
+    state.teamMemory = oversized;
+    h.map.data!["state.json"] = JSON.stringify(state);
+    await expect(h.authorize(h.phase.metadata.name,h.grant)).rejects.toThrow();
+  });
+  it.each([4,16])("retains every byte and source binding of %i sealed revision files, including numeric aliases",async count=>{
+    const h = sealedRevision(count);
+    expect((await h.authorize(h.phase.metadata.name,h.grant))?.inputArtifacts).toEqual(missionInputs(h.inputs));
+    expect(h.readInputs).not.toHaveBeenCalled();
+    expect(h.reads).not.toContain(taskPath("collected-run"));
+  });
+  it("binds retained revisions to current v5 peer context without allowing downgrade",async()=>{
+    const h = sealedRevision();
+    const state = JSON.parse(h.map.data!["state.json"]);
+    state.schema = "kars.reviewed-run/v2";
+    h.map.data!["state.json"] = JSON.stringify(state);
+    const legacy = structuredClone(h.grant);
+    const peers = {rootUid:state.rootUid,stateName:h.grant.authority.stateName,slot:h.grant.authority.slot,
+      peers:state.plan.roles.flatMap((role:any,r:number)=>role.phases.map((phase:any,p:number)=>({
+        role:role.name,phase:phase.name,slot:`r${r}-p${p}`,agentName:`rp-${h.grant.authority.stateName.slice(14,34)}-r${r}-p${p}`,
+      })))};
+    h.grant.contract = missionContract(h.grant.contract.reviewedPhase,h.inputs,h.grant.contract.requiredOutputs,peers);
+    const expected = {contract:h.grant.contract,inputArtifacts:missionInputs(h.inputs)};
+    expect(await h.authorize(h.phase.metadata.name,h.grant)).toEqual(expected);
+    if (process.env.KARS_REVIEWED_REVISION_FIXTURE_DIR) {
+      mkdirSync(process.env.KARS_REVIEWED_REVISION_FIXTURE_DIR, {recursive:true});
+      writeFileSync(join(process.env.KARS_REVIEWED_REVISION_FIXTURE_DIR, `revision-v5-${runtime}.json`), JSON.stringify({
+        resources:h.resources,phaseName:h.phase.metadata.name,grant:h.grant,expected,rootPath:taskPath("report"),
+      }), {flag:"wx"});
+    }
+    await expect(h.authorize(h.phase.metadata.name,legacy)).rejects.toThrow("requirements differ");
+  });
+  it("combines retained memory and revision inputs without confusing their custody",async()=>{
+    const h = sealedRevision();
+    const memory = {...h.inputs[0],name:"memory-0-document-0.md",source:{...h.inputs[0].source,taskUid:"another-memory-run"}};
+    const raw = JSON.stringify([memory]);
+    h.root.metadata.annotations!["kars.azure.com/reviewed-team-memory"] = raw;
+    const state = JSON.parse(h.map.data!["state.json"]); state.teamMemory = raw; h.map.data!["state.json"] = JSON.stringify(state);
+    const inputs = [memory,...h.inputs];
+    h.grant.inputs = inputs.map(({content: _content,...ref}) => ref);
+    h.grant.contract = missionContract(h.grant.contract.reviewedPhase,inputs,h.grant.contract.requiredOutputs);
+    expect((await h.authorize(h.phase.metadata.name,h.grant))?.inputArtifacts).toEqual(missionInputs(inputs));
+    expect(h.readInputs).not.toHaveBeenCalled();
+  });
+  it.each(["alias","order","namespace","producer","hash","empty","file-size","total-size","count","missing-pin","extra-pin","changed-pin","owner","state"])("rejects %s revision corruption before dependency reads",async mutation=>{
+    const h = sealedRevision();
+    if (mutation === "alias") h.inputs[0].name = "revision-unbound";
+    if (mutation === "order") h.inputs.reverse();
+    if (mutation === "namespace") h.inputs.forEach(input => { input.source.namespace = "other-tenant"; });
+    if (mutation === "producer") h.inputs[1].source.assignmentId = "different-assignment";
+    if (mutation === "hash") h.inputs[0].sha256 = missionContentDigest("substituted");
+    if (["empty","file-size","total-size"].includes(mutation)) {
+      for (const input of h.inputs) {
+        input.content = mutation === "empty" ? "" : "x".repeat(mutation === "file-size" ? 65537 : 65536);
+        input.sha256 = missionContentDigest(input.content);
+      }
+    }
+    if (mutation === "count") h.inputs.push(...Array.from({length:13},(_,index)=>({...h.inputs[0],name:`revision-${index+4}`})));
+    h.seal();
+    if (mutation === "missing-pin") h.grant.inputs.pop();
+    if (mutation === "extra-pin") h.grant.inputs.push({...h.grant.inputs[0],name:"revision-4"});
+    if (mutation === "changed-pin") h.grant.inputs[0].sha256 = missionContentDigest("different pin");
+    if (mutation === "owner") delete h.root.metadata.ownerReferences;
+    if (mutation === "state") {
+      const state = JSON.parse(h.map.data!["state.json"]); delete state.teamRevision; h.map.data!["state.json"] = JSON.stringify(state);
+    }
+    await expect(h.authorize(h.phase.metadata.name,h.grant)).rejects.toThrow();
+    expect(h.readInputs).not.toHaveBeenCalled();
   });
   it.each(["state","root","missing","owner","phase-runtime","phase-policy","phase-budget"])("rejects changed Team %s authority",async field=>{
     const h=revisionFixture(4096,runtime==="OpenClaw" ? "Hermes" : "OpenClaw");
@@ -195,16 +579,219 @@ function revisionFixture(characters: number, teamRuntime?: string) {
     expect(h.readInputs).not.toHaveBeenCalled();
   });
 
-  it("admits the exact controller phase and synthesizes only its immutable named handoff",async()=>{
+  function nativePlan() {
+    const h=setup();
+    const state=JSON.parse(h.resources[h.statePath].data!["state.json"]);
+    state.plan.roles[0].phases[0].executionMode="native";
+    state.plan.roles[0].phases[0].capabilities=["filesystem-write","network"];
+    state.plan.synthesis.executionMode="native";
+    state.plan.deliverables[0].mediaType="text/csv";
+    const seal=()=>{
+      const sorted=(value:unknown):unknown=>Array.isArray(value) ? value.map(sorted)
+        : value !== null && typeof value === "object" ? Object.fromEntries(Object.entries(value).sort(([a],[b])=>a < b ? -1 : a > b ? 1 : 0).map(([k,v])=>[k,sorted(v)])) : value;
+      state.planDigest=missionContentDigest(JSON.stringify(sorted(state.plan)));
+      (h.resources[taskPath("report")] as ReviewedTask).spec.blueprint!.executionPlan=structuredClone(state.plan);
+      h.resources[h.statePath].data!["state.json"]=JSON.stringify(state);
+    };
+    seal();
+    const grant=structuredClone(fixture.phaseGrant);
+    grant.contract=missionContract(state.plan.roles[0].phases[0],undefined,grant.contract.requiredOutputs);
+    return {...h,state,seal,grant};
+  }
+
+  function singleAgentPlan() {
+    const h=nativePlan();
+    h.state.plan.roles=[];
+    h.state.children={};
+    h.state.plan.synthesis.capabilities=["filesystem-write","network"];
+    const root=h.resources[taskPath("report")] as ReviewedTask;
+    root.spec.envelope!.delegationDepth=0;
+    h.seal();
+    const grant=structuredClone(fixture.synthesisGrant);
+    grant.inputs=[];
+    grant.contract=missionContract({name:"synthesis",...h.state.plan.synthesis,minToolCalls:0,freshContext:true},undefined,grant.contract.requiredOutputs);
+    return {...h,grant};
+  }
+
+  it("admits an explicitly reviewed native single agent without children or delegation authority",async()=>{
+    const h=singleAgentPlan();
+    expect(await h.authorize("report",h.grant)).toEqual({contract:h.grant.contract});
+    expect(h.readInputs).not.toHaveBeenCalled();
+    expect(h.reads.filter(path=>path.includes("/karstasks/")).every(path=>path===taskPath("report"))).toBe(true);
+    h.grant.contract=missionContract({...h.grant.contract.reviewedPhase!,capabilities:["filesystem-read","filesystem-write","network"]},undefined,h.grant.contract.requiredOutputs);
+    await expect(h.authorize("report",h.grant)).rejects.toThrow("requirements differ");
+  });
+
+  it.each(["legacy","parallel","zero-bound","missing-write","unsupported","child-reservation"])("rejects single-agent %s without inventing authority",async fault=>{
+    const h=singleAgentPlan();
+    if(fault==="legacy") delete h.state.plan.synthesis.executionMode;
+    if(fault==="parallel") h.state.plan.maxParallel=2;
+    if(fault==="zero-bound") h.state.plan.synthesis.maxToolCalls=0;
+    if(fault==="missing-write") h.state.plan.synthesis.capabilities=["network"];
+    if(fault==="unsupported") h.state.plan.synthesis.capabilities.push("shell");
+    if(fault==="child-reservation") h.state.children.r0={name:"unreviewed"};
+    h.seal();
+    await expect(h.authorize("report",h.grant)).rejects.toThrow();
+    expect(h.readInputs).not.toHaveBeenCalled();
+  });
+
+  it("retains explicit github-pr in single-agent synthesis but never grants it to decomposed synthesis",async()=>{
+    const h=singleAgentPlan();
+    h.state.plan.synthesis.capabilities.push("github-pr");
+    h.seal();
+    h.grant.contract=missionContract({name:"synthesis",...h.state.plan.synthesis,minToolCalls:0,freshContext:true},undefined,h.grant.contract.requiredOutputs);
+    expect(await h.authorize("report",h.grant)).toEqual({contract:h.grant.contract});
+    const decomposed=nativePlan();
+    decomposed.state.plan.synthesis.capabilities.push("github-pr");
+    decomposed.seal();
+    await expect(decomposed.authorize(fixture.phaseName,decomposed.grant)).rejects.toThrow("unsupported synthesis");
+  });
+
+  it("admits explicitly reviewed github-pr in a member phase and rejects an unbound grant",async()=>{
+    const h=nativePlan();
+    h.state.plan.roles[0].phases[0].capabilities.push("github-pr");
+    h.seal();
+    await expect(h.authorize(fixture.phaseName,h.grant)).rejects.toThrow("requirements differ");
+    h.grant.contract=missionContract(h.state.plan.roles[0].phases[0],undefined,h.grant.contract.requiredOutputs);
+    expect(await h.authorize(fixture.phaseName,h.grant)).toEqual({contract:h.grant.contract});
+  });
+
+  it("admits native research without unused read permission and preserves exact native authority",async()=>{
+    const h=nativePlan();
+    expect(await h.authorize(fixture.phaseName,h.grant)).toEqual({contract:h.grant.contract});
+    expect(h.readInputs).not.toHaveBeenCalled();
+    const changed={...h.grant.contract.reviewedPhase!,capabilities:["filesystem-read","filesystem-write","network"]};
+    h.grant.contract=missionContract(changed,undefined,h.grant.contract.requiredOutputs);
+    await expect(h.authorize(fixture.phaseName,h.grant)).rejects.toThrow("requirements differ");
+  });
+
+  it("admits native synthesis with controller-supported CSV metadata and immutable prior handoffs",async()=>{
+    const h=nativePlan();
+    const retained=JSON.parse(fixture.resources[h.statePath].data!["state.json"]);
+    h.state.plan.roles=retained.plan.roles;
+    h.seal();
+    const inputs=await h.readInputs(fixture.synthesisGrant.inputs);
+    const grant=structuredClone(fixture.synthesisGrant);
+    grant.contract=missionContract({...grant.contract.reviewedPhase!,executionMode:"native"},inputs,grant.contract.requiredOutputs);
+    const result=await h.authorize("report",grant);
+    expect(result?.contract).toEqual(grant.contract);
+    expect(result?.inputArtifacts).toEqual(inputs);
+    expect(result?.contract.reviewedPhase?.executionMode).toBe("native");
+  });
+
+  it("admits the first native role when the sealed synthesis includes governed memory",async()=>{
+    const h=nativePlan();
+    h.state.plan.synthesis.capabilities.push("memory");
+    h.seal();
+    expect(await h.authorize(fixture.phaseName,h.grant)).toEqual({contract:h.grant.contract});
+    expect(h.readInputs).not.toHaveBeenCalled();
+  });
+
+  it("preserves explicitly reviewed native synthesis memory and rejects unbound capability changes",async()=>{
+    const h=nativePlan();
+    h.state.plan.roles=JSON.parse(fixture.resources[h.statePath].data!["state.json"]).plan.roles;
+    h.state.plan.synthesis.capabilities.push("memory");
+    h.seal();
+    const inputs=await h.readInputs(fixture.synthesisGrant.inputs);
+    const grant=structuredClone(fixture.synthesisGrant);
+    grant.contract=missionContract({name:"synthesis",...h.state.plan.synthesis,minToolCalls:0,freshContext:true},inputs,grant.contract.requiredOutputs);
+    const result=await h.authorize("report",grant);
+    expect(result?.contract).toEqual(grant.contract);
+    expect(result?.inputArtifacts).toEqual(inputs);
+    grant.contract=missionContract({...grant.contract.reviewedPhase!,capabilities:["filesystem-read","filesystem-write"]},inputs,grant.contract.requiredOutputs);
+    await expect(h.authorize("report",grant)).rejects.toThrow("requirements differ");
+  });
+
+  it.each(["legacy-memory","network","missing-read","missing-write","duplicate-memory"])("rejects unsupported Team synthesis %s",async fault=>{
+    const h=nativePlan();
+    h.state.plan.synthesis.capabilities.push("memory");
+    if(fault==="legacy-memory") delete h.state.plan.synthesis.executionMode;
+    if(fault==="network") h.state.plan.synthesis.capabilities.push("network");
+    if(fault==="missing-read") h.state.plan.synthesis.capabilities=["filesystem-write","memory"];
+    if(fault==="missing-write") h.state.plan.synthesis.capabilities=["filesystem-read","memory"];
+    if(fault==="duplicate-memory") h.state.plan.synthesis.capabilities.push("memory");
+    h.seal();
+    await expect(h.authorize(fixture.phaseName,h.grant)).rejects.toThrow();
+    expect(h.readInputs).not.toHaveBeenCalled();
+  });
+
+  it.each(["missing-write","dependent-read","later-read","synthesis-read","synthesis-write","unknown-mode","unknown-media"])("rejects native plan with %s without widening authority",async fault=>{
+    const h=nativePlan();
+    const phase=h.state.plan.roles[0].phases[0];
+    if(fault==="missing-write") phase.capabilities=["network"];
+    if(fault==="dependent-read") {
+      h.state.plan.roles.push({...structuredClone(h.state.plan.roles[0]),name:"dependent",dependsOn:[h.state.plan.roles[0].name]});
+    }
+    if(fault==="later-read") h.state.plan.roles[0].phases.push({...structuredClone(phase),name:"later"});
+    if(fault==="synthesis-read") h.state.plan.synthesis.capabilities=["filesystem-write","network"];
+    if(fault==="synthesis-write") h.state.plan.synthesis.capabilities=["filesystem-read","network"];
+    if(fault==="unknown-mode") h.state.plan.synthesis.executionMode="other";
+    if(fault==="unknown-media") h.state.plan.deliverables[0].mediaType="application/octet-stream";
+    h.seal();
+    await expect(h.authorize(fixture.phaseName,h.grant)).rejects.toThrow();
+    expect(h.readInputs).not.toHaveBeenCalled();
+  });
+
+  it("retains exact required fetch authority through sealed plan admission",async()=>{
+    const h=setup();
+    const root=h.resources[taskPath("report")] as ReviewedTask;
+    const state=JSON.parse(h.resources[h.statePath].data!["state.json"]);
+    const phase=state.plan.roles[0].phases[0];
+    phase.capabilities.push("network");
+    phase.requiredToolCalls=[{name:"http_fetch",arguments:{method:"GET",url:"https://www.example.com/pricing"}}];
+    const sorted=(value: unknown): unknown => Array.isArray(value) ? value.map(sorted)
+      : value !== null && typeof value === "object" ? Object.fromEntries(Object.entries(value).sort(([a],[b])=>a < b ? -1 : a > b ? 1 : 0).map(([k,v])=>[k,sorted(v)])) : value;
+    state.planDigest=missionContentDigest(JSON.stringify(sorted(state.plan)));
+    root.spec.blueprint!.executionPlan=structuredClone(state.plan);
+    h.resources[h.statePath].data!["state.json"]=JSON.stringify(state);
+    const grant=structuredClone(fixture.phaseGrant);
+    grant.contract=missionContract(phase,undefined,grant.contract.requiredOutputs);
+    expect(await h.authorize(fixture.phaseName,grant)).toEqual({contract:grant.contract});
+    const changed=structuredClone(phase);
+    changed.requiredToolCalls[0].arguments.url="https://www.example.com/unreviewed";
+    grant.contract=missionContract(changed,undefined,grant.contract.requiredOutputs);
+    await expect(h.authorize(fixture.phaseName,grant)).rejects.toThrow("requirements differ");
+    delete phase.requiredToolCalls;
+    phase.capabilities=phase.capabilities.filter((c:string)=>c!=="network");
+    grant.contract=missionContract(phase,undefined,grant.contract.requiredOutputs);
+    await expect(h.authorize(fixture.phaseName,grant)).rejects.toThrow("requirements differ");
+  });
+
+  it("admits actual Rust-projected draft files, handoff and truncated aliases with exact immutable custody",async()=>{
     const h=setup();
     expect(await h.authorize(fixture.phaseName,fixture.phaseGrant)).toEqual({contract:fixture.phaseGrant.contract});
     expect(h.readInputs).not.toHaveBeenCalled();
     const result=await h.authorize();
     expect(result?.contract).toEqual(fixture.synthesisGrant.contract);
-    expect(result?.inputArtifacts).toHaveLength(1);
-    expect(result?.inputArtifacts?.[0].content).toBe("Reviewed handoff — 日本語");
+    expect(result?.inputArtifacts).toHaveLength(4);
+    expect(result?.inputArtifacts?.find(input=>input.name==="r0-p0.md")?.content).toBe("Reviewed handoff — 日本語");
+    expect(result?.inputArtifacts?.find(input=>input.source.artifactName==="station-plan.csv")?.content).toBe('station,jobs,notes\n1,14,"quoted, note"\n');
+    expect(result?.inputArtifacts?.find(input=>input.source.artifactName.length===128)?.name).toHaveLength(128);
     expect(result?.contract.requiredOutputs).toEqual(["report.md"]);
     expect(missionContract(result?.contract.reviewedPhase,result?.inputArtifacts,result?.contract.requiredOutputs)).toEqual(result?.contract);
+  });
+  it("retains compatibility with a previously projected handoff-only grant",async()=>{
+    const h=setup(); const g=structuredClone(fixture.synthesisGrant);
+    g.inputs=g.inputs.filter(input=>input.source.artifactName==="handoff.md");
+    const inputs=await h.readInputs(g.inputs);
+    g.contract=missionContract(g.contract.reviewedPhase,inputs,g.contract.requiredOutputs);
+    expect((await h.authorize("report",g))?.inputArtifacts).toEqual(inputs);
+  });
+  it.each(["taskUid","taskName","namespace","runNonce","sandboxUid","podUid","assignmentId","agentDid","alias","duplicate","missing-handoff","generated"])("rejects exported-document %s substitution before custody",async fault=>{
+    const h=setup(); const g=structuredClone(fixture.synthesisGrant);
+    const document=g.inputs.find(input=>input.source.artifactName==="station-plan.csv")!;
+    if(fault==="alias") document.name="unreviewed.csv";
+    else if(fault==="duplicate") g.inputs.push({...structuredClone(document),name:"duplicate.csv"});
+    else if(fault==="missing-handoff") g.inputs=g.inputs.filter(input=>input.source.artifactName!=="handoff.md");
+    else if(fault==="generated") document.source.artifactName="response.md";
+    else (document.source as unknown as Record<string,string>)[fault]="unreviewed";
+    await expect(h.authorize("report",g)).rejects.toThrow();
+    expect(h.readInputs).not.toHaveBeenCalled();
+  });
+  it("rejects exported bytes that differ from the controller-pinned digest",async()=>{
+    const h=setup(); const g=structuredClone(fixture.synthesisGrant);
+    g.inputs.find(input=>input.source.artifactName==="station-plan.csv")!.sha256=missionContentDigest("substituted CSV");
+    await expect(h.authorize("report",g)).rejects.toThrow();
   });
   it("round-trips actual Rust durable evidence through strict SDK parsing and projections",()=>{
     const record=Object.values(fixture.resources).find(r=>r.data?.["attempt.json"]) as MissionConfigMap;

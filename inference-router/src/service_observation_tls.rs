@@ -61,9 +61,17 @@ pub async fn start(state: AppState) -> Result<Option<tokio::task::JoinHandle<()>
             state.clone(),
             crate::routes::observation_purpose_boundary,
         ))
-        .layer(axum::middleware::map_request(socket_peer))
         .with_state(state);
-    Ok(Some(tokio::spawn(async move {
+    Ok(Some(serve(listener, router, "observation")))
+}
+
+pub(crate) fn serve(
+    listener: crate::sre_proxy::Listener,
+    router: axum::Router,
+    purpose: &'static str,
+) -> tokio::task::JoinHandle<()> {
+    let router = router.layer(axum::middleware::map_request(socket_peer));
+    tokio::spawn(async move {
         if axum::serve(
             listener,
             router.into_make_service_with_connect_info::<Peer>(),
@@ -71,8 +79,8 @@ pub async fn start(state: AppState) -> Result<Option<tokio::task::JoinHandle<()>
         .await
         .is_err()
         {
-            tracing::error!("Private observation listener stopped");
+            tracing::error!(purpose, "Private TLS listener stopped");
             std::process::exit(1);
         }
-    })))
+    })
 }

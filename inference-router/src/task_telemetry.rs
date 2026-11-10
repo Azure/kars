@@ -2,8 +2,9 @@
 // Licensed under the MIT License.
 
 //! Bounded router observations, not a durable execution or budget ledger.
-//! No prompts, raw tool arguments/results, URLs, headers or credentials are retained.
-//! Runtime completion reports retain only bounded, typed operation metadata.
+//! No prompts, raw results, authentication headers or credentials are retained.
+//! Model tool arguments have bounded, redacted previews; completion reports keep
+//! typed operation metadata. Neither is independent execution evidence.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -15,9 +16,12 @@ use std::{
 
 pub mod mcp;
 pub mod observe;
+pub mod operation;
 pub mod parse;
+pub mod preview;
 
 const MAX_EVENTS: usize = 1024;
+pub const MAX_OBSERVATION_ROUNDS: usize = 130; // Native 128-tool allowance plus two response rounds.
 const MAX_PENDING: usize = 256;
 const TOOL_TTL: Duration = Duration::from_secs(20 * 60);
 
@@ -33,6 +37,12 @@ pub enum ToolSummary {
         bytes: u64,
         #[serde(skip_serializing_if = "Option::is_none")]
         artifact_name: Option<String>,
+    },
+    PythonExecution {
+        receipt_sha256: String,
+        bytes: u64,
+        exit_code: Option<i32>,
+        reason: String,
     },
     Failure {
         reason: ToolFailure,
@@ -57,8 +67,10 @@ impl ToolSummary {
                 returned_bytes,
                 truncated,
             } => {
-                ok && matches!(name, "file_read" | "kars_mission_read")
-                    && *bytes <= 9_007_199_254_740_991
+                ok && matches!(
+                    name,
+                    "file_read" | "kars_mission_read" | "read_file" | "kars_mission_file_read"
+                ) && *bytes <= 9_007_199_254_740_991
                     && *returned_bytes <= 16 * 1024 * 1024
                     && returned_bytes <= bytes
                     && *truncated == (returned_bytes < bytes)
@@ -67,8 +79,10 @@ impl ToolSummary {
                 bytes,
                 artifact_name,
             } => {
-                ok && matches!(name, "file_write" | "kars_mission_write")
-                    && *bytes <= 16 * 1024 * 1024
+                ok && matches!(
+                    name,
+                    "file_write" | "kars_mission_write" | "write_file" | "kars_mission_file_write"
+                ) && *bytes <= 16 * 1024 * 1024
                     && artifact_name.as_ref().is_none_or(|name| {
                         !name.is_empty()
                             && name.len() <= 128
@@ -78,7 +92,64 @@ impl ToolSummary {
                             && !name.starts_with('.')
                     })
             }
+            Self::PythonExecution {
+                receipt_sha256,
+                bytes,
+                exit_code,
+                reason,
+            } => {
+                matches!(name, "python_execute" | "kars_mission_python_execute")
+                    && receipt_sha256.len() == 71
+                    && receipt_sha256.starts_with("sha256:")
+                    && receipt_sha256[7..]
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                    && *bytes > 0
+                    && *bytes <= 65536
+                    && matches!(
+                        reason.as_str(),
+                        "exited"
+                            | "timeout"
+                            | "cancelled"
+                            | "output_limit"
+                            | "process_limit"
+                            | "launch_failed"
+                            | "cleanup_failed"
+                    )
+                    && ok == (reason == "exited" && *exit_code == Some(0))
+            }
             Self::Failure { .. } => !ok,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ToolSummary;
+
+    #[test]
+    fn python_execution_summary_retains_exact_failure_reasons_and_success() {
+        for name in ["python_execute", "kars_mission_python_execute"] {
+            for (reason, exit_code, ok) in [
+                ("exited", Some(0), true),
+                ("exited", Some(7), false),
+                ("timeout", Some(-9), false),
+                ("cancelled", Some(-9), false),
+                ("output_limit", Some(-9), false),
+                ("process_limit", Some(-9), false),
+                ("launch_failed", None, false),
+                ("cleanup_failed", Some(0), false),
+            ] {
+                let summary = ToolSummary::PythonExecution {
+                    receipt_sha256: format!("sha256:{}", "a".repeat(64)),
+                    bytes: 512,
+                    exit_code,
+                    reason: reason.into(),
+                };
+                assert!(summary.valid(name, ok), "{name} {reason}");
+                assert!(!summary.valid(name, !ok), "{name} {reason}");
+                assert!(!summary.valid("file_write", ok));
+            }
         }
     }
 }
@@ -101,6 +172,7 @@ struct Inner {
     seq: u64,
     round: u64,
     dropped: u64,
+    preview_bytes: usize,
     events: VecDeque<Value>,
     model_tools: HashMap<String, Pending>,
     seen_model: HashSet<String>,
@@ -120,6 +192,7 @@ impl TaskTelemetry {
                 seq: 0,
                 round: 0,
                 dropped: 0,
+                preview_bytes: 0,
                 events: VecDeque::new(),
                 model_tools: HashMap::new(),
                 seen_model: HashSet::new(),
@@ -138,8 +211,21 @@ impl TaskTelemetry {
         inner.seen_harness.clear();
         inner.round = 0;
         inner.dropped = 0;
+        inner.preview_bytes = 0;
     }
     fn push(inner: &mut Inner, mut event: Value) {
+        if let Some(preview) = event.get_mut("argument_preview") {
+            let size = preview.to_string().len();
+            if inner.preview_bytes.saturating_add(size) > 64 * 1024 {
+                *preview = json!(preview::ToolPreview {
+                    text: "[Argument preview omitted: recorder preview budget exhausted]".into(),
+                    truncated: true,
+                    redacted: false,
+                });
+            } else {
+                inner.preview_bytes += size;
+            }
+        }
         inner.seq = inner.seq.saturating_add(1);
         event["seq"] = json!(inner.seq);
         event["scope_id"] = json!(inner.scope);
@@ -181,7 +267,11 @@ impl TaskTelemetry {
     /// Select returned response IDs, never a sandbox-wide time window. These
     /// observations are not authenticated assignment or tool-success evidence.
     pub fn selected_snapshot(&self, scope: &str, rounds: &[u64]) -> Option<Value> {
-        if rounds.is_empty() || rounds.len() > 32 || rounds.contains(&0) {
+        if rounds.is_empty()
+            || rounds.len() > MAX_OBSERVATION_ROUNDS
+            || rounds.contains(&0)
+            || rounds.windows(2).any(|pair| pair[0] >= pair[1])
+        {
             return None;
         }
         let inner = self.inner.lock().ok()?;
@@ -196,10 +286,32 @@ impl TaskTelemetry {
                     .as_u64()
                     .is_some_and(|round| rounds.contains(&round))
                     && match event["kind"].as_str() {
-                        Some("round" | "tool_proposed") => true,
-                        Some("tool_result") => event["reported_in_round"]
-                            .as_u64()
-                            .is_some_and(|round| rounds.contains(&round)),
+                        Some("round" | "tool_proposed" | "router_operation") => true,
+                        Some("tool_result") => match event.get("reported_in_round") {
+                            Some(round) => {
+                                round.as_u64().is_some_and(|round| rounds.contains(&round))
+                            }
+                            None => {
+                                event["source"] == "harness-reported"
+                                && inner.events.iter().any(|proposal| {
+                                    proposal["kind"] == "tool_proposed"
+                                        && proposal["seq"].as_u64() < event["seq"].as_u64()
+                                        && proposal["round"] == event["round"]
+                                        && proposal["call_id"] == event["call_id"]
+                                        && proposal["name"] == event["name"]
+                                })
+                                // Prefer the later conversation report, including contradictions,
+                                // without dropping immediate outcomes from large or final requests.
+                                && !inner.events.iter().any(|report| {
+                                    report["kind"] == "tool_result"
+                                        && report["round"] == event["round"]
+                                        && report["call_id"] == event["call_id"]
+                                        && report["name"] == event["name"]
+                                        && report["reported_in_round"].as_u64()
+                                            .is_some_and(|round| rounds.contains(&round))
+                                })
+                            }
+                        },
                         _ => false,
                     }
             })
@@ -215,9 +327,9 @@ impl TaskTelemetry {
             .collect::<Vec<_>>();
         Some(json!({
             "scope_id": scope, "rounds": rounds, "missing_rounds": missing,
-            "dropped_events": inner.dropped, "truncated": selected.len() > 256,
+            "dropped_events": inner.dropped, "truncated": selected.len() > MAX_EVENTS,
             "coverage": "returned-responses-only", "durable": false,
-            "events": selected.into_iter().take(256).collect::<Vec<_>>(),
+            "events": selected.into_iter().take(MAX_EVENTS).collect::<Vec<_>>(),
         }))
     }
     pub fn begin(
@@ -271,6 +383,7 @@ impl TaskTelemetry {
         round: u64,
         event: Value,
         tools: Vec<(String, String)>,
+        mut argument_previews: HashMap<String, preview::ToolPreview>,
     ) {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if inner.scope != scope {
@@ -278,11 +391,12 @@ impl TaskTelemetry {
         }
         Self::push(&mut inner, event);
         for (id, name) in tools {
-            Self::push(
-                &mut inner,
-                json!({"kind":"tool_proposed", "round":round, "call_id":id,
-                "name":name, "ok":null, "source":"model-proposed"}),
-            );
+            let mut proposal = json!({"kind":"tool_proposed", "round":round, "call_id":id,
+                "name":name, "ok":null, "source":"model-proposed"});
+            if let Some(preview) = argument_previews.remove(&id) {
+                proposal["argument_preview"] = json!(preview);
+            }
+            Self::push(&mut inner, proposal);
             if !id.is_empty()
                 && inner.seen_model.len() < MAX_PENDING
                 && inner.seen_model.insert(id.clone())

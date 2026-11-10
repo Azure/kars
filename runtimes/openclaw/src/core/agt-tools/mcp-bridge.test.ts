@@ -22,7 +22,7 @@ vi.mock("node:http", async () => {
 });
 import { invokeMcp, MCP_BRIDGE_TOOLS, registerMcpBridgeTools, resetMcpBridgeForTests } from "./mcp-bridge.js";
 import { getTaskTools } from "../agt-task-tools.js";
-import { executeTaskWithEvidence } from "../agt-task-loop.js";
+import { executeLegacyTaskForTest as executeTaskWithEvidence } from "../agt-task-loop.test-support.js";
 
 const deps = { meshClient: () => null, isInterruptRequested: () => false,
   interruptReason: () => "", setInterrupt: () => {} };
@@ -95,6 +95,14 @@ describe("real HTTP MCP bridge", () => {
     vi.stubEnv("KARS_ROUTER_URL", `http://127.0.0.1:${target.port}`);
     vi.stubEnv("OPENCLAW_MODEL", "gpt-5.4-mini");
   });
+  it("does not initialize or invoke after the native assignment is aborted", async () => {
+    const controller = new AbortController();
+    controller.abort(new Error("Assignment retired"));
+    const result = await MCP_BRIDGE_TOOLS[1].execute("native-call", { name: "everything.echo", arguments: {} }, controller.signal);
+    expect(result.isError).toBe(true);
+    expect(calls).toEqual([]);
+  });
+
   afterEach(async () => {
     vi.unstubAllEnvs();
     await new Promise<void>(resolve => server.close(() => resolve()));
@@ -217,6 +225,32 @@ describe("real HTTP MCP bridge", () => {
     rawResponse = { method: "tools/list", status: 200, body: "PRIVATE_SENTINEL" };
     await expect(invokeMcp("tools/list", {}))
       .rejects.toMatchObject({ message: "MCP router response is not valid JSON" });
+  });
+
+  it.each([{}, { server: "" }])("lists the catalogue for optional scope %j without invoking any tool", async args => {
+    const result = await MCP_BRIDGE_TOOLS[0].execute("list", args);
+    expect(result.isError).toBeUndefined();
+    expect(JSON.parse(result.content[0].text)).toEqual({ tools: [{ name: "everything.echo" }] });
+    expect(calls.map(call => call.body.method)).toEqual(["initialize", "notifications/initialized", "tools/list"]);
+    expect(calls.at(-1)?.body.params).toEqual({});
+    expect(calls.every(call => call.headers["x-kars-mcp-server"] === undefined)).toBe(true);
+  });
+
+  it.each([undefined, ""])("calls the exact tool once for optional scope %j", async serverScope => {
+    const output = await MCP_BRIDGE_TOOLS[1].execute("call", {
+      name: "everything.echo", arguments: { text: "public documentation" }, server: serverScope,
+    });
+    expect(output.isError).toBeUndefined();
+    expect(JSON.parse(output.content[0].text)).toEqual(result);
+    expect(calls.map(call => call.body.method)).toEqual(["initialize", "notifications/initialized", "tools/call"]);
+    expect(calls.at(-1)?.body.params).toEqual({ name: "everything.echo", arguments: { text: "public documentation" } });
+    expect(calls.every(call => call.headers["x-kars-mcp-server"] === undefined)).toBe(true);
+  });
+
+  it.each([null, false, " ", "a".repeat(254)])("rejects malformed scope %j without normalization", async serverScope => {
+    expect((await MCP_BRIDGE_TOOLS[0].execute("list", { server: serverScope })).isError).toBe(true);
+    expect((await MCP_BRIDGE_TOOLS[1].execute("call", { name: "everything.echo", server: serverScope })).isError).toBe(true);
+    expect(calls).toHaveLength(0);
   });
 
   it("rejects non-string or malformed scopes before any request", async () => {

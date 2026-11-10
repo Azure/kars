@@ -43,6 +43,9 @@ struct State {
     calls: Vec<(String, String, Value)>,
     pods: Vec<Value>,
     create_deployment_on_post: bool,
+    strategy_conflict: bool,
+    hold_after_strategy: bool,
+    drift_sandbox_on_deployment_read: bool,
 }
 
 fn merge(value: &mut Value, patch: &Value) {
@@ -165,6 +168,12 @@ async fn fixture() -> (
         let mut s=captured.lock().unwrap();let path=r.url.path();let body:Value=r.body_json().unwrap_or(Value::Null);
         s.calls.push((r.method.to_string(),path.into(),body.clone()));
         if r.method=="GET" {
+            if path==DEPLOYMENT && s.drift_sandbox_on_deployment_read {
+                s.drift_sandbox_on_deployment_read=false;
+                let sandbox=s.objects.get_mut(SANDBOX).unwrap();
+                let version=sandbox["metadata"]["resourceVersion"].as_str().unwrap().parse::<u64>().unwrap()+1;
+                sandbox["metadata"]["resourceVersion"]=version.to_string().into();
+            }
             if path=="/api/v1/namespaces/kars-run/pods" {return ResponseTemplate::new(200).set_body_json(json!({
                 "apiVersion":"v1","kind":"PodList","metadata":{},"items":s.pods}));}
             if let Some(value)=s.objects.get(path){return ResponseTemplate::new(200).set_body_json(value);}
@@ -208,9 +217,23 @@ async fn fixture() -> (
                 return ResponseTemplate::new(409).set_body_json(json!({
                     "apiVersion":"v1","kind":"Status","status":"Failure","code":409,"reason":"Conflict"}));
             }
+            let strategy_transition=key==DEPLOYMENT && body["spec"]["strategy"]["type"]=="Recreate"
+                && body["spec"].as_object().is_some_and(|spec|spec.len()==1);
+            if strategy_transition && s.strategy_conflict {
+                return ResponseTemplate::new(409).set_body_json(json!({
+                    "apiVersion":"v1","kind":"Status","status":"Failure","code":409,"reason":"Conflict"}));
+            }
             let original=value.clone();
             let version=value["metadata"]["resourceVersion"].as_str().unwrap().parse::<u64>().unwrap()+1;
             let prior=value["spec"].clone();merge(&mut value,&body);
+            if key==DEPLOYMENT && value["spec"]["strategy"]["type"]=="Recreate"
+                && !value["spec"]["strategy"]["rollingUpdate"].is_null() {
+                return ResponseTemplate::new(422).set_body_json(json!({
+                    "apiVersion":"v1","kind":"Status","status":"Failure","code":422,"reason":"Invalid"}));
+            }
+            if strategy_transition && s.hold_after_strategy {
+                s.objects.get_mut(SANDBOX).unwrap()["metadata"]["annotations"][HOLD]=json!("task-uid");
+            }
             if value==original {return ResponseTemplate::new(200).set_body_json(original);}
             if !prior.is_null() && value["spec"]!=prior {value["metadata"]["generation"]=(value["metadata"]["generation"].as_i64().unwrap_or(1)+1).into();}
             value["metadata"]["resourceVersion"]=version.to_string().into();
@@ -232,10 +255,22 @@ fn current(state: &Arc<Mutex<State>>) -> KarsTask {
     serde_json::from_value(state.lock().unwrap().objects[TASK].clone()).unwrap()
 }
 
-#[tokio::test]
-async fn credential_rebind_full_task_reconcile_preserves_uids_data_and_regenerates_authority_before_resume()
- {
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn credential_rebind_full_reconcile_preserves_authority_before_resume() {
+    tokio::spawn(full_task_credential_rebind()).await.unwrap();
+}
+
+async fn full_task_credential_rebind() {
     let (_server, ctx, state, team) = fixture().await;
+    let task = current(&state);
+    let future = super::super::reconcile(Arc::new(task.clone()), ctx.clone());
+    let size = std::mem::size_of_val(&future);
+    assert!(size <= 1024, "Task entry future embeds {size} bytes");
+    drop(future);
+    let future = resume(&ctx.client, &task);
+    let size = std::mem::size_of_val(&future);
+    assert!(size <= 1024, "credential resume future embeds {size} bytes");
+    drop(future);
     let api = Api::<KarsTask>::namespaced(ctx.client.clone(), "work");
     let original = current(&state);
     super::super::reconcile_receipt(
@@ -377,6 +412,76 @@ async fn credential_rebind_full_task_reconcile_preserves_uids_data_and_regenerat
             serde_json::from_value(s.objects[DEPLOYMENT].clone()).unwrap(),
         )
     };
+    // Keep successful projection as the control, then poll the actual parent Sandbox
+    // reconciler through namespace ownership and stale-RV cleanup on this worker.
+    let projection = "/api/v1/namespaces/kars-run/secrets/run-credential-projection";
+    eprintln!("native-rebind-regression: resumed-projection");
+    crate::reconciler::credential_sources::reconcile(
+        &ctx.client,
+        &sandbox,
+        Some(&namespace),
+        "openclaw-sandbox:latest",
+    )
+    .await
+    .unwrap();
+    assert!(
+        state.lock().unwrap().objects[projection]["data"]
+            .get("SLACK_BOT_TOKEN")
+            .is_some()
+    );
+    state.lock().unwrap().drift_sandbox_on_deployment_read = true;
+    eprintln!("native-rebind-regression: projection-rv-drift-cleanup");
+    let parent_call_start = state.lock().unwrap().calls.len();
+    crate::reconciler::namespace_ownership::finalization_tests::reconcile_rebind_projection_failure(
+        ctx.client.clone(),
+        sandbox.clone(),
+    )
+    .await;
+    {
+        let s = state.lock().unwrap();
+        let calls = &s.calls[parent_call_start..];
+        assert_eq!((&calls[0].0[..], &calls[0].1[..]), ("GET", SANDBOX));
+        assert_eq!((&calls[1].0[..], &calls[1].1[..]), ("GET", RUNTIME));
+        assert!(
+            s.objects[SANDBOX]["metadata"]["finalizers"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(crate::reconciler::namespace_ownership::FINALIZER))
+        );
+        assert!(!s.drift_sandbox_on_deployment_read);
+        assert!(
+            calls
+                .iter()
+                .any(|(method, path, _)| method == "PATCH" && path == &format!("{SANDBOX}/status"))
+        );
+        assert!(calls.iter().all(|(method, _, _)| method != "DELETE"));
+        assert_eq!(s.objects[DEPLOYMENT]["spec"]["replicas"], 0);
+        assert!(
+            s.objects[projection]["data"]
+                .as_object()
+                .is_none_or(|data| data.is_empty())
+        );
+    }
+    let sandbox: crate::crd::KarsSandbox =
+        serde_json::from_value(state.lock().unwrap().objects[SANDBOX].clone()).unwrap();
+    eprintln!("native-rebind-regression: projection-retry");
+    crate::reconciler::credential_sources::reconcile(
+        &ctx.client,
+        &sandbox,
+        Some(&namespace),
+        "openclaw-sandbox:latest",
+    )
+    .await
+    .unwrap();
+    {
+        let s = state.lock().unwrap();
+        let data = s.objects[projection]["data"].as_object().unwrap();
+        assert_eq!(data.len(), 1);
+        assert!(data.contains_key("SLACK_BOT_TOKEN"));
+        assert_eq!(s.objects[SANDBOX]["metadata"]["uid"], "sandbox-uid");
+        assert_eq!(s.objects[RUNTIME]["metadata"]["uid"], "runtime-uid");
+    }
+    eprintln!("native-rebind-regression: projection-complete");
     deployment.spec.as_mut().unwrap().replicas = Some(1);
     let identity =
         crate::reconciler::governed_services::identity_read_only(&ctx.client, &sandbox, &namespace)

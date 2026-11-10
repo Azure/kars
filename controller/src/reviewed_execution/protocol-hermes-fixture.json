@@ -48,9 +48,54 @@
       "requiredOutputs": [
         "report.md"
       ],
-      "inputDigest": "sha256:c9bea3b573aa2a48915c080be3ab2558413cec8de7cee72286fe47747e84b968"
+      "inputDigest": "sha256:43b79becd91f4bcfe0b90ce1b1df3056b68fa71fd1d5dae8886a268f310dc18e"
     },
     "inputs": [
+      {
+        "name": "r0-p0--0-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source": {
+          "namespace": "default",
+          "taskName": "rp-76c1a1776bc0b6286449-r0-p0",
+          "taskUid": "uid-rp-76c1a1776bc0b6286449-r0-p0",
+          "sandboxUid": "sandbox-uid",
+          "podUid": "pod-uid",
+          "runNonce": "plan-76c1a1776bc0b6286449d0f8bcda866e94818b87-r0-p0",
+          "assignmentId": "assignment-1",
+          "agentDid": "did:mesh:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "artifactName": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.md"
+        },
+        "sha256": "sha256:0f8229283f425d436463957359c16b48185fcc9609df5a53c6e2dcde7757b6c3"
+      },
+      {
+        "name": "r0-p0--1-capacity-plan.md",
+        "source": {
+          "namespace": "default",
+          "taskName": "rp-76c1a1776bc0b6286449-r0-p0",
+          "taskUid": "uid-rp-76c1a1776bc0b6286449-r0-p0",
+          "sandboxUid": "sandbox-uid",
+          "podUid": "pod-uid",
+          "runNonce": "plan-76c1a1776bc0b6286449d0f8bcda866e94818b87-r0-p0",
+          "assignmentId": "assignment-1",
+          "agentDid": "did:mesh:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "artifactName": "capacity-plan.md"
+        },
+        "sha256": "sha256:67bf4ed803ad010beeafb3b39f61cff0bcb9cbed3d0b7f8514d5120e4a1358d6"
+      },
+      {
+        "name": "r0-p0--3-station-plan.csv",
+        "source": {
+          "namespace": "default",
+          "taskName": "rp-76c1a1776bc0b6286449-r0-p0",
+          "taskUid": "uid-rp-76c1a1776bc0b6286449-r0-p0",
+          "sandboxUid": "sandbox-uid",
+          "podUid": "pod-uid",
+          "runNonce": "plan-76c1a1776bc0b6286449d0f8bcda866e94818b87-r0-p0",
+          "assignmentId": "assignment-1",
+          "agentDid": "did:mesh:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "artifactName": "station-plan.csv"
+        },
+        "sha256": "sha256:acb132fcc035d12a6e3d177e96ef8f863e284b549c8d6306fa51ce84b43356e4"
+      },
       {
         "name": "r0-p0.md",
         "source": {
@@ -80,8 +125,11 @@
       "apiVersion": "v1",
       "kind": "ConfigMap",
       "data": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.md": "Long filename retains source identity",
+        "capacity-plan.md": "Original draft — 日本語",
         "handoff.md": "Reviewed handoff — 日本語",
-        "response.md": "Completed measured work"
+        "response.md": "Completed measured work",
+        "station-plan.csv": "station,jobs,notes\n1,14,\"quoted, note\"\n"
       },
       "immutable": true,
       "metadata": {
@@ -114,7 +162,7 @@
       "apiVersion": "v1",
       "kind": "ConfigMap",
       "data": {
-        "attempt.json": "{\"version\":1,\"phase\":\"succeeded\",\"ownerSession\":\"dispatcher-1\",\"candidate\":{\"namespace\":\"default\",\"taskName\":\"rp-76c1a1776bc0b6286449-r0-p0\",\"taskUid\":\"uid-rp-76c1a1776bc0b6286449-r0-p0\",\"runNonce\":\"plan-76c1a1776bc0b6286449d0f8bcda866e94818b87-r0-p0\",\"sandboxUid\":\"sandbox-uid\",\"podUid\":\"pod-uid\",\"agentDid\":\"did:mesh:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"dispatcherDid\":\"did:mesh:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"agentName\":\"writer / draft\",\"content\":\"Prepare the reviewed report\\n\\nRole: Draft a useful report\\n\\nPhase: Write the reviewed handoff.md document\",\"reviewedPhase\":{\"name\":\"draft\",\"objective\":\"Write the reviewed handoff.md document\",\"capabilities\":[\"filesystem-read\",\"filesystem-write\"],\"requiredToolCalls\":[],\"minToolCalls\":1,\"maxToolCalls\":4,\"freshContext\":true},\"requiredOutputs\":[\"handoff.md\"],\"runtime\":\"Hermes\"},\"assignment\":{\"reviewedPhase\":{\"name\":\"draft\",\"objective\":\"Write the reviewed handoff.md document\",\"capabilities\":[\"filesystem-read\",\"filesystem-write\"],\"requiredToolCalls\":[],\"minToolCalls\":1,\"maxToolCalls\":4,\"freshContext\":true},\"taskName\":\"rp-76c1a1776bc0b6286449-r0-p0\",\"taskUid\":\"uid-rp-76c1a1776bc0b6286449-r0-p0\",\"runNonce\":\"plan-76c1a1776bc0b6286449d0f8bcda866e94818b87-r0-p0\",\"sandboxUid\":\"sandbox-uid\",\"podUid\":\"pod-uid\",\"agentDid\":\"did:mesh:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"dispatcherDid\":\"did:mesh:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"requiredOutputs\":[\"handoff.md\"],\"content\":\"Prepare the reviewed report\\n\\nRole: Draft a useful report\\n\\nPhase: Write the reviewed handoff.md document\",\"version\":4,\"phaseDigest\":\"sha256:12c36b29b1f7f4d367409d50fdc573ba89478373779540033dc7c1802b46d4b6\",\"type\":\"mission:assign\",\"assignmentId\":\"assignment-1\",\"bootId\":\"boot-1\",\"artifactFormat\":\"text-v1\"},\"contentDigest\":\"sha256:a5ea751d2880c8df53868b28f1b23d2c35eac5b7130745d07a43d4ea993d4fcb\",\"startedAt\":\"2026-10-02T20:00:00.000Z\",\"updatedAt\":\"2026-10-02T20:00:00.000Z\",\"reply\":{\"reviewedPhase\":{\"name\":\"draft\",\"objective\":\"Write the reviewed handoff.md document\",\"capabilities\":[\"filesystem-read\",\"filesystem-write\"],\"requiredToolCalls\":[],\"minToolCalls\":1,\"maxToolCalls\":4,\"freshContext\":true},\"taskName\":\"rp-76c1a1776bc0b6286449-r0-p0\",\"taskUid\":\"uid-rp-76c1a1776bc0b6286449-r0-p0\",\"runNonce\":\"plan-76c1a1776bc0b6286449d0f8bcda866e94818b87-r0-p0\",\"sandboxUid\":\"sandbox-uid\",\"podUid\":\"pod-uid\",\"agentDid\":\"did:mesh:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"dispatcherDid\":\"did:mesh:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"requiredOutputs\":[\"handoff.md\"],\"artifactFormat\":\"text-v1\",\"version\":4,\"phaseDigest\":\"sha256:12c36b29b1f7f4d367409d50fdc573ba89478373779540033dc7c1802b46d4b6\",\"type\":\"mission:reply\",\"assignmentId\":\"assignment-1\",\"bootId\":\"boot-1\",\"status\":\"succeeded\",\"output\":\"Completed measured work\",\"artifacts\":{\"handoff.md\":\"Reviewed handoff — 日本語\"},\"evidence\":{\"model\":\"fixture-model\",\"rounds\":1,\"usage\":{\"promptTokens\":20,\"completionTokens\":30,\"totalTokens\":50},\"phase\":{\"name\":\"draft\",\"minToolCalls\":1,\"maxToolCalls\":4,\"attemptedToolCalls\":1,\"successfulToolCalls\":1}}},\"events\":[{\"at\":\"2026-10-02T20:00:00.000Z\",\"status\":\"succeeded\",\"evidence\":{\"model\":\"fixture-model\",\"rounds\":1,\"usage\":{\"promptTokens\":20,\"completionTokens\":30,\"totalTokens\":50},\"phase\":{\"name\":\"draft\",\"minToolCalls\":1,\"maxToolCalls\":4,\"attemptedToolCalls\":1,\"successfulToolCalls\":1}}}]}"
+        "attempt.json": "{\"version\":1,\"phase\":\"succeeded\",\"ownerSession\":\"dispatcher-1\",\"candidate\":{\"namespace\":\"default\",\"taskName\":\"rp-76c1a1776bc0b6286449-r0-p0\",\"taskUid\":\"uid-rp-76c1a1776bc0b6286449-r0-p0\",\"runNonce\":\"plan-76c1a1776bc0b6286449d0f8bcda866e94818b87-r0-p0\",\"sandboxUid\":\"sandbox-uid\",\"podUid\":\"pod-uid\",\"agentDid\":\"did:mesh:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"dispatcherDid\":\"did:mesh:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"agentName\":\"writer / draft\",\"content\":\"Prepare the reviewed report\\n\\nRole: Draft a useful report\\n\\nPhase: Write the reviewed handoff.md document\",\"reviewedPhase\":{\"name\":\"draft\",\"objective\":\"Write the reviewed handoff.md document\",\"capabilities\":[\"filesystem-read\",\"filesystem-write\"],\"requiredToolCalls\":[],\"minToolCalls\":1,\"maxToolCalls\":4,\"freshContext\":true},\"requiredOutputs\":[\"handoff.md\"],\"runtime\":\"Hermes\"},\"assignment\":{\"reviewedPhase\":{\"name\":\"draft\",\"objective\":\"Write the reviewed handoff.md document\",\"capabilities\":[\"filesystem-read\",\"filesystem-write\"],\"requiredToolCalls\":[],\"minToolCalls\":1,\"maxToolCalls\":4,\"freshContext\":true},\"taskName\":\"rp-76c1a1776bc0b6286449-r0-p0\",\"taskUid\":\"uid-rp-76c1a1776bc0b6286449-r0-p0\",\"runNonce\":\"plan-76c1a1776bc0b6286449d0f8bcda866e94818b87-r0-p0\",\"sandboxUid\":\"sandbox-uid\",\"podUid\":\"pod-uid\",\"agentDid\":\"did:mesh:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"dispatcherDid\":\"did:mesh:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"requiredOutputs\":[\"handoff.md\"],\"content\":\"Prepare the reviewed report\\n\\nRole: Draft a useful report\\n\\nPhase: Write the reviewed handoff.md document\",\"version\":4,\"phaseDigest\":\"sha256:12c36b29b1f7f4d367409d50fdc573ba89478373779540033dc7c1802b46d4b6\",\"type\":\"mission:assign\",\"assignmentId\":\"assignment-1\",\"bootId\":\"boot-1\",\"artifactFormat\":\"text-v1\"},\"contentDigest\":\"sha256:a5ea751d2880c8df53868b28f1b23d2c35eac5b7130745d07a43d4ea993d4fcb\",\"startedAt\":\"2026-10-02T20:00:00.000Z\",\"updatedAt\":\"2026-10-02T20:00:00.000Z\",\"reply\":{\"reviewedPhase\":{\"name\":\"draft\",\"objective\":\"Write the reviewed handoff.md document\",\"capabilities\":[\"filesystem-read\",\"filesystem-write\"],\"requiredToolCalls\":[],\"minToolCalls\":1,\"maxToolCalls\":4,\"freshContext\":true},\"taskName\":\"rp-76c1a1776bc0b6286449-r0-p0\",\"taskUid\":\"uid-rp-76c1a1776bc0b6286449-r0-p0\",\"runNonce\":\"plan-76c1a1776bc0b6286449d0f8bcda866e94818b87-r0-p0\",\"sandboxUid\":\"sandbox-uid\",\"podUid\":\"pod-uid\",\"agentDid\":\"did:mesh:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"dispatcherDid\":\"did:mesh:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"requiredOutputs\":[\"handoff.md\"],\"artifactFormat\":\"text-v1\",\"version\":4,\"phaseDigest\":\"sha256:12c36b29b1f7f4d367409d50fdc573ba89478373779540033dc7c1802b46d4b6\",\"type\":\"mission:reply\",\"assignmentId\":\"assignment-1\",\"bootId\":\"boot-1\",\"status\":\"succeeded\",\"output\":\"Completed measured work\",\"artifacts\":{\"handoff.md\":\"Reviewed handoff — 日本語\",\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.md\":\"Long filename retains source identity\",\"capacity-plan.md\":\"Original draft — 日本語\",\"station-plan.csv\":\"station,jobs,notes\\n1,14,\\\"quoted, note\\\"\\n\"},\"evidence\":{\"model\":\"fixture-model\",\"rounds\":1,\"usage\":{\"promptTokens\":20,\"completionTokens\":30,\"totalTokens\":50},\"phase\":{\"name\":\"draft\",\"minToolCalls\":1,\"maxToolCalls\":4,\"attemptedToolCalls\":1,\"successfulToolCalls\":1}}},\"events\":[{\"at\":\"2026-10-02T20:00:00.000Z\",\"status\":\"succeeded\",\"evidence\":{\"model\":\"fixture-model\",\"rounds\":1,\"usage\":{\"promptTokens\":20,\"completionTokens\":30,\"totalTokens\":50},\"phase\":{\"name\":\"draft\",\"minToolCalls\":1,\"maxToolCalls\":4,\"attemptedToolCalls\":1,\"successfulToolCalls\":1}}}]}"
       },
       "metadata": {
         "name": "kars-mission-attempt-ba4347937bb9a7c2497557c3a8349984b27eba7a",
@@ -138,12 +186,12 @@
       "data": {
         "agentDid": "did:mesh:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "agentName": "writer / draft",
-        "artifactCount": "2",
+        "artifactCount": "5",
         "assignmentId": "assignment-1",
         "assignmentNonce": "plan-76c1a1776bc0b6286449d0f8bcda866e94818b87-r0-p0",
         "dispatcherDid": "did:mesh:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         "error": "",
-        "evidence.json": "{\"reviewedPhase\":{\"name\":\"draft\",\"objective\":\"Write the reviewed handoff.md document\",\"capabilities\":[\"filesystem-read\",\"filesystem-write\"],\"requiredToolCalls\":[],\"minToolCalls\":1,\"maxToolCalls\":4,\"freshContext\":true},\"taskName\":\"rp-76c1a1776bc0b6286449-r0-p0\",\"taskUid\":\"uid-rp-76c1a1776bc0b6286449-r0-p0\",\"runNonce\":\"plan-76c1a1776bc0b6286449d0f8bcda866e94818b87-r0-p0\",\"sandboxUid\":\"sandbox-uid\",\"podUid\":\"pod-uid\",\"agentDid\":\"did:mesh:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"dispatcherDid\":\"did:mesh:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"requiredOutputs\":[\"handoff.md\"],\"artifactFormat\":\"text-v1\",\"version\":4,\"phaseDigest\":\"sha256:12c36b29b1f7f4d367409d50fdc573ba89478373779540033dc7c1802b46d4b6\",\"type\":\"mission:reply\",\"assignmentId\":\"assignment-1\",\"bootId\":\"boot-1\",\"status\":\"succeeded\",\"output\":\"Completed measured work\",\"artifacts\":{\"handoff.md\":\"Reviewed handoff — 日本語\"},\"evidence\":{\"model\":\"fixture-model\",\"rounds\":1,\"usage\":{\"promptTokens\":20,\"completionTokens\":30,\"totalTokens\":50},\"phase\":{\"name\":\"draft\",\"minToolCalls\":1,\"maxToolCalls\":4,\"attemptedToolCalls\":1,\"successfulToolCalls\":1}}}",
+        "evidence.json": "{\"reviewedPhase\":{\"name\":\"draft\",\"objective\":\"Write the reviewed handoff.md document\",\"capabilities\":[\"filesystem-read\",\"filesystem-write\"],\"requiredToolCalls\":[],\"minToolCalls\":1,\"maxToolCalls\":4,\"freshContext\":true},\"taskName\":\"rp-76c1a1776bc0b6286449-r0-p0\",\"taskUid\":\"uid-rp-76c1a1776bc0b6286449-r0-p0\",\"runNonce\":\"plan-76c1a1776bc0b6286449d0f8bcda866e94818b87-r0-p0\",\"sandboxUid\":\"sandbox-uid\",\"podUid\":\"pod-uid\",\"agentDid\":\"did:mesh:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"dispatcherDid\":\"did:mesh:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"requiredOutputs\":[\"handoff.md\"],\"artifactFormat\":\"text-v1\",\"version\":4,\"phaseDigest\":\"sha256:12c36b29b1f7f4d367409d50fdc573ba89478373779540033dc7c1802b46d4b6\",\"type\":\"mission:reply\",\"assignmentId\":\"assignment-1\",\"bootId\":\"boot-1\",\"status\":\"succeeded\",\"output\":\"Completed measured work\",\"artifacts\":{\"handoff.md\":\"Reviewed handoff — 日本語\",\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.md\":\"Long filename retains source identity\",\"capacity-plan.md\":\"Original draft — 日本語\",\"station-plan.csv\":\"station,jobs,notes\\n1,14,\\\"quoted, note\\\"\\n\"},\"evidence\":{\"model\":\"fixture-model\",\"rounds\":1,\"usage\":{\"promptTokens\":20,\"completionTokens\":30,\"totalTokens\":50},\"phase\":{\"name\":\"draft\",\"minToolCalls\":1,\"maxToolCalls\":4,\"attemptedToolCalls\":1,\"successfulToolCalls\":1}}}",
         "finishedAt": "2026-10-02T20:00:00.000Z",
         "model": "fixture-model",
         "output": "Completed measured work",

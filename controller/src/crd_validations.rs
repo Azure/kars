@@ -381,8 +381,10 @@ pub fn inference_policy_crd() -> CustomResourceDefinition {
 ///   scope would cross-contaminate every sandbox bound to the same
 ///   store, and an out-of-charset value (most commonly a colon, e.g.
 ///   `agent:foo`) is rejected by the data plane with HTTP 400. The
-///   router sanitizes defensively at call time, but rejecting at
-///   admission gives the operator an immediate, legible error.
+///   router rejects invalid scopes without normalizing them. Dot path
+///   segments (`.` / `..`) are forbidden, including in shared grants.
+/// - `sharedScopes` permits at most 64 distinct exact additional scopes,
+///   none equal to the bound scope; omission means private memory.
 /// - `retentionDays > 0` when present. Zero would request immediate
 ///   deletion, which is what `delete_scope` is for.
 #[must_use]
@@ -403,8 +405,8 @@ pub fn kars_memory_validations() -> Vec<ValidationRule> {
             ..ValidationRule::default()
         },
         ValidationRule {
-            rule: "has(self.bundleRef) || (has(self.scope) && size(self.scope) > 0 && size(self.scope) <= 256 && self.scope.matches('^[A-Za-z0-9_./%+@-]+$'))".into(),
-            message: Some("spec.scope must be 1-256 characters using only letters, digits, and _ - . % + @ / (colons are rejected by the Foundry Memory Store) when spec.bundleRef is not set".into()),
+            rule: "has(self.bundleRef) || (has(self.scope) && size(self.scope) > 0 && size(self.scope) <= 256 && self.scope.matches('^[A-Za-z0-9_./%+@-]+$') && !self.scope.matches('(^|/)[.]{1,2}(/|$)'))".into(),
+            message: Some("spec.scope must be 1-256 characters using only letters, digits, and _ - . % + @ / with no . or .. path segments when spec.bundleRef is not set".into()),
             reason: Some("FieldValueInvalid".into()),
             ..ValidationRule::default()
         },
@@ -416,14 +418,17 @@ pub fn kars_memory_validations() -> Vec<ValidationRule> {
             reason: Some("FieldValueInvalid".into()),
             ..ValidationRule::default()
         },
-        // Slice 1c.4 mutex: bundleRef is mutually exclusive with the
-        // inline content fields (storeName, scope, retentionDays,
-        // deleteOnSandboxDelete, displayName). sandboxRef stays in
-        // the CR in either branch.
         ValidationRule {
-            rule: "!has(self.bundleRef) || (!has(self.storeName) && !has(self.scope) && !has(self.retentionDays) && !has(self.deleteOnSandboxDelete) && !has(self.displayName))".into(),
+            rule: "!has(self.sharedScopes) || (size(self.sharedScopes) <= 64 && self.sharedScopes.all(s, size(s) > 0 && size(s) <= 256 && s.matches('^[A-Za-z0-9_./%+@-]+$') && !s.matches('(^|/)[.]{1,2}(/|$)') && (!has(self.scope) || s != self.scope) && self.sharedScopes.filter(t, t == s).size() == 1))".into(),
+            message: Some("spec.sharedScopes must contain at most 64 distinct valid exact scopes other than spec.scope".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        // The bundle owns all content, including explicit sharing grants.
+        ValidationRule {
+            rule: "!has(self.bundleRef) || (!has(self.storeName) && !has(self.scope) && !has(self.sharedScopes) && !has(self.retentionDays) && !has(self.deleteOnSandboxDelete) && !has(self.displayName))".into(),
             message: Some(
-                "spec.bundleRef is mutually exclusive with spec.storeName, spec.scope, spec.retentionDays, spec.deleteOnSandboxDelete, and spec.displayName".into(),
+                "spec.bundleRef is mutually exclusive with spec.storeName, spec.scope, spec.sharedScopes, spec.retentionDays, spec.deleteOnSandboxDelete, and spec.displayName".into(),
             ),
             reason: Some("FieldValueInvalid".into()),
             ..ValidationRule::default()
@@ -433,11 +438,38 @@ pub fn kars_memory_validations() -> Vec<ValidationRule> {
 
 /// `KarsMemory` CRD with [`kars_memory_validations`] injected.
 ///
-/// Panics only if kube-rs ever produces a CRD whose `spec` is missing.
+/// Panics if kube-rs produces a CRD without `spec.sharedScopes` as an array.
 #[must_use]
 pub fn kars_memory_crd() -> CustomResourceDefinition {
-    inject_spec_validations(KarsMemory::crd(), kars_memory_validations())
-        .expect("kube-rs derive must produce a spec property on KarsMemory")
+    let mut crd = inject_spec_validations(KarsMemory::crd(), kars_memory_validations())
+        .expect("kube-rs derive must produce a spec property on KarsMemory");
+    let properties = crd.spec.versions[0]
+        .schema
+        .as_mut()
+        .unwrap()
+        .open_api_v3_schema
+        .as_mut()
+        .unwrap()
+        .properties
+        .as_mut()
+        .unwrap()
+        .get_mut("spec")
+        .unwrap()
+        .properties
+        .as_mut()
+        .unwrap();
+    // Bound CEL's per-item regex and distinctness validation cost.
+    let items = properties
+        .get_mut("sharedScopes")
+        .unwrap()
+        .items
+        .as_mut()
+        .unwrap();
+    let k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::JSONSchemaPropsOrArray::Schema(item) = items else {
+        panic!("sharedScopes must be an array of strings");
+    };
+    item.max_length = Some(256);
+    crd
 }
 
 /// `KarsEval.spec` CEL rules. Slice 6.3 of `crd-well-oiled-machine`.
@@ -821,6 +853,12 @@ pub fn kars_approval_validations() -> Vec<ValidationRule> {
             ..ValidationRule::default()
         },
         ValidationRule {
+            rule: "(!has(self.requestedBy) && !has(oldSelf.requestedBy)) || (has(self.requestedBy) && has(oldSelf.requestedBy) && self.requestedBy == oldSelf.requestedBy)".into(),
+            message: Some("spec.requestedBy is immutable".into()),
+            reason: Some("FieldValueForbidden".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
             rule: "!has(oldSelf.decision) || (has(self.decision) && self.decision == oldSelf.decision)".into(),
             message: Some("spec.decision is immutable once recorded".into()),
             reason: Some("FieldValueForbidden".into()),
@@ -849,7 +887,7 @@ pub fn kars_approval_crd() -> CustomResourceDefinition {
         .open_api_v3_schema
         .as_mut()
         .unwrap();
-    schema
+    let properties = schema
         .properties
         .as_mut()
         .unwrap()
@@ -857,7 +895,8 @@ pub fn kars_approval_crd() -> CustomResourceDefinition {
         .unwrap()
         .properties
         .as_mut()
-        .unwrap()
+        .unwrap();
+    properties
         .get_mut("taskRef")
         .unwrap()
         .properties
@@ -866,6 +905,17 @@ pub fn kars_approval_crd() -> CustomResourceDefinition {
         .get_mut("name")
         .unwrap()
         .max_length = Some(253);
+    let roles = properties
+        .get_mut("decision")
+        .unwrap()
+        .properties
+        .as_mut()
+        .unwrap()
+        .get_mut("deciderRoles")
+        .unwrap();
+    if let Some(k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::JSONSchemaPropsOrArray::Schema(items)) = roles.items.as_mut() {
+        items.max_length = Some(320);
+    }
     crd
 }
 
@@ -1224,12 +1274,12 @@ mod tests {
 
     #[test]
     fn mcp_server_crd_is_serde_round_trippable() {
-        // Round-trip through serde_yaml as `kubectl apply` would. A
+        // Round-trip through YAML as `kubectl apply` would. A
         // malformed CRD (e.g. `enum` set on a non-string node) would
         // fail to serialize. ValidationRule is part of the public
         // schema and must survive.
         let crd = mcp_server_crd();
-        let y = serde_yaml::to_string(&crd).expect("serializes");
+        let y = serde_saphyr::to_string(&crd).expect("serializes");
         assert!(y.contains("x-kubernetes-validations"));
         assert!(y.contains("productionMode"));
     }
@@ -1237,7 +1287,7 @@ mod tests {
     #[test]
     fn tool_policy_crd_is_serde_round_trippable() {
         let crd = tool_policy_crd();
-        let y = serde_yaml::to_string(&crd).expect("serializes");
+        let y = serde_saphyr::to_string(&crd).expect("serializes");
         assert!(y.contains("x-kubernetes-validations"));
         assert!(y.contains("sandboxMatchLabels"));
     }
@@ -1288,7 +1338,7 @@ mod tests {
     #[test]
     fn a2a_agent_crd_is_serde_round_trippable() {
         let crd = a2a_agent_crd();
-        let y = serde_yaml::to_string(&crd).expect("serializes");
+        let y = serde_saphyr::to_string(&crd).expect("serializes");
         assert!(y.contains("x-kubernetes-validations"));
         assert!(y.contains("signingKeys"));
     }
@@ -1343,7 +1393,7 @@ mod tests {
     #[test]
     fn inference_policy_crd_is_serde_round_trippable() {
         let crd = inference_policy_crd();
-        let y = serde_yaml::to_string(&crd).expect("serializes");
+        let y = serde_saphyr::to_string(&crd).expect("serializes");
         assert!(y.contains("x-kubernetes-validations"));
         assert!(y.contains("monthlyTokens"));
     }
@@ -1400,9 +1450,41 @@ mod tests {
     }
 
     #[test]
+    fn kars_memory_shared_grants_have_bounded_schema_and_exact_validation() {
+        let crd = serde_json::to_value(kars_memory_crd()).unwrap();
+        let props = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["properties"];
+        assert_eq!(props["storeName"]["maxLength"], 63);
+        assert_eq!(props["scope"]["maxLength"], 256);
+        assert_eq!(props["sharedScopes"]["maxItems"], 64);
+        assert_eq!(props["sharedScopes"]["items"]["maxLength"], 256);
+        assert_eq!(props["sharedScopes"]["items"]["type"], "string");
+        let rules = kars_memory_validations();
+        let grants = rules
+            .iter()
+            .find(|r| r.rule.contains("self.sharedScopes.all"))
+            .unwrap();
+        for invariant in [
+            "<= 64",
+            "<= 256",
+            "s != self.scope",
+            "filter(t, t == s).size() == 1",
+            "(^|/)[.]{1,2}(/|$)",
+        ] {
+            assert!(grants.rule.contains(invariant), "{invariant}");
+        }
+        assert!(
+            rules
+                .iter()
+                .any(|r| r.rule.starts_with("!has(self.bundleRef)")
+                    && r.rule.contains("!has(self.sharedScopes)"))
+        );
+    }
+
+    #[test]
     fn kars_memory_crd_is_serde_round_trippable() {
         let crd = kars_memory_crd();
-        let y = serde_yaml::to_string(&crd).expect("serializes");
+        let y = serde_saphyr::to_string(&crd).expect("serializes");
         assert!(y.contains("x-kubernetes-validations"));
         assert!(y.contains("storeName"));
         assert!(y.contains("scope"));
@@ -1462,7 +1544,7 @@ mod tests {
     #[test]
     fn kars_eval_crd_is_serde_round_trippable() {
         let crd = kars_eval_crd();
-        let y = serde_yaml::to_string(&crd).expect("serializes");
+        let y = serde_saphyr::to_string(&crd).expect("serializes");
         assert!(y.contains("x-kubernetes-validations"));
         assert!(y.contains("targetSandboxRef"));
         assert!(y.contains("corpus"));
@@ -1538,7 +1620,7 @@ mod tests {
     #[test]
     fn egress_approval_crd_is_serde_round_trippable() {
         let crd = egress_approval_crd();
-        let y = serde_yaml::to_string(&crd).expect("serializes");
+        let y = serde_saphyr::to_string(&crd).expect("serializes");
         assert!(y.contains("x-kubernetes-validations"));
         assert!(y.contains("sandbox"));
         assert!(y.contains("hosts"));

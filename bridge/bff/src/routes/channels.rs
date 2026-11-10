@@ -64,6 +64,20 @@ pub struct TeamsChannelCredentials {
     pub entra_role_map: String,
 }
 
+// A decoded JSON string cannot exceed the enclosing Json extractor's default 2 MiB limit.
+const MAX_ENTRA_ROLE_MAP_BYTES: usize = 2 * 1024 * 1024;
+
+fn parse_entra_role_map(input: &str) -> AppResult<serde_json::Value> {
+    let input: &str = input.trim();
+    if input.len() > MAX_ENTRA_ROLE_MAP_BYTES {
+        return Err(AppError::BadRequest(
+            "entra_role_map must be valid JSON".into(),
+        ));
+    }
+    serde_json::from_str::<serde_json::Value>(input)
+        .map_err(|_| AppError::BadRequest("entra_role_map must be valid JSON".into()))
+}
+
 /// `GET /api/namespaces/:ns/channels` — which workspace channels are enabled.
 pub async fn get_channels(
     State(state): State<AppState>,
@@ -127,8 +141,7 @@ pub async fn set_channel(
         // Server-side validation of the role map: reject operator/admin grants by
         // non-admin principals, and reject unknown role values entirely.
         const VALID_ROLES: &[&str] = &["user", "operator", "admin", "auditor"];
-        let role_map: serde_json::Value = serde_json::from_str(teams.entra_role_map.trim())
-            .map_err(|_| AppError::BadRequest("entra_role_map must be valid JSON".into()))?;
+        let role_map = parse_entra_role_map(&teams.entra_role_map)?;
         let entries = role_map
             .as_array()
             .ok_or_else(|| AppError::BadRequest("entra_role_map must be a JSON array".into()))?;
@@ -290,4 +303,93 @@ pub async fn delete_channel(
         enabled,
         statuses: Vec::new(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        Router,
+        body::Body,
+        http::{Request, StatusCode},
+        routing::post,
+    };
+    use serde_json::{Value, json};
+    use tower::ServiceExt;
+
+    #[test]
+    fn role_map_parser_preserves_json_and_trimming_semantics() {
+        for input in [
+            "\u{2003}[{\"name\":\"\\u00e9\",\"roles\":[\"admin\"]}]\u{2003}",
+            "null",
+            "{}",
+            "[]",
+            "123",
+        ] {
+            assert_eq!(
+                parse_entra_role_map(input).unwrap(),
+                serde_json::from_str::<Value>(input.trim()).unwrap()
+            );
+        }
+        let deep = format!("{}0{}", "[".repeat(129), "]".repeat(129));
+        for input in ["", "private-invalid-json", "{}{}", deep.as_str()] {
+            let error = parse_entra_role_map(input).unwrap_err();
+            assert!(matches!(error, AppError::BadRequest(message)
+                if message == "entra_role_map must be valid JSON"));
+        }
+    }
+
+    #[test]
+    fn role_map_parser_checks_bytes_before_deserialization() {
+        for (size, accepted) in [
+            (MAX_ENTRA_ROLE_MAP_BYTES, true),
+            (MAX_ENTRA_ROLE_MAP_BYTES + 1, false),
+        ] {
+            let input = format!("[\"{}\"]", "x".repeat(size - 4));
+            assert_eq!(input.len(), size);
+            assert!(serde_json::from_str::<Value>(&input).is_ok());
+            assert_eq!(parse_entra_role_map(&input).is_ok(), accepted);
+        }
+    }
+
+    #[tokio::test]
+    async fn role_map_parser_accepts_nested_map_at_axum_json_request_limit() {
+        async fn handler(Json(request): Json<SetChannelRequest>) -> StatusCode {
+            let teams = request.teams.unwrap();
+            let value = parse_entra_role_map(&teams.entra_role_map).unwrap();
+            assert_eq!(value[0]["roles"], json!(["admin"]));
+            assert!(!value[0]["name"].as_str().unwrap().is_empty());
+            StatusCode::NO_CONTENT
+        }
+        let mut role_map = json!([{
+            "entra_subject": "entra", "bridge_subject": "bridge", "name": "", "roles": ["admin"]
+        }]);
+        let mut request = json!({
+            "channel": "teams",
+            "teams": {
+                "client_id": "client", "tenant_id": "tenant", "client_secret": "test-only",
+                "entra_role_map": role_map.to_string()
+            }
+        });
+        let overhead = serde_json::to_vec(&request).unwrap().len();
+        role_map[0]["name"] = "x".repeat(MAX_ENTRA_ROLE_MAP_BYTES - overhead).into();
+        request["teams"]["entra_role_map"] = role_map.to_string().into();
+        let mut body = serde_json::to_vec(&request).unwrap();
+        assert_eq!(body.len(), MAX_ENTRA_ROLE_MAP_BYTES);
+        let app = Router::new().route("/", post(handler));
+        for expected in [StatusCode::NO_CONTENT, StatusCode::PAYLOAD_TOO_LARGE] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post("/")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.clone()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+            body.push(b' ');
+        }
+    }
 }

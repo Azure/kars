@@ -6,7 +6,7 @@ import type { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
-  generate: vi.fn(), transport: vi.fn(), binding: vi.fn(), mission: vi.fn(),
+  generate: vi.fn(), transport: vi.fn(), binding: vi.fn(), mission: vi.fn(), capture: vi.fn(),
   frames: [] as any[], missionOptions: undefined as any,
 }));
 vi.mock("@kars/mesh", () => ({ generateIdentity: mocks.generate, createMeshTransport: mocks.transport }));
@@ -19,6 +19,7 @@ vi.mock("./core/foundry-discovery.js", () => ({ discoverFoundryProject: async ()
 vi.mock("./core/mission-receiver.js", () => ({ MissionReceiver: class {
   constructor(options: any) { mocks.missionOptions = options; }
   handle(...args: any[]) { return mocks.mission(...args); }
+  capturePeerIngress() { return mocks.capture(); }
 } }));
 
 const did = `did:mesh:${"a".repeat(32)}`;
@@ -29,6 +30,7 @@ const symbolNames = ["agt-mesh-client", "agt-identity", "agt-init-lock", "agt-in
 let server: ReturnType<typeof createServer>;
 let raw: any;
 let messages: Array<(...args: any[]) => any>;
+let captures: Array<(() => unknown) | undefined>;
 let disconnects: Array<() => void>;
 let logs: string[];
 let exit: ReturnType<typeof vi.spyOn>;
@@ -61,7 +63,7 @@ beforeEach(async () => {
   vi.spyOn(global, "setInterval").mockImplementation(((...args: Parameters<typeof interval>) => {
     const timer = interval(...args); timers.add(timer); return timer;
   }) as typeof interval);
-  requests = []; messages = []; disconnects = []; logs = []; mocks.frames.length = 0;
+  requests = []; messages = []; captures = []; disconnects = []; logs = []; mocks.frames.length = 0;
   mintStatus = 200;
   mintBody = { access_token: "secret-fresh-token", token_type: "Bearer", expires_in: 3000 };
   verifyBody = { did, tier: "verified", verified_app_id: "app", verified_tenant_id: "tenant" };
@@ -73,7 +75,7 @@ beforeEach(async () => {
     isConnected: false, currentDid: did,
     connect: vi.fn(), disconnect: vi.fn(async () => { raw.isConnected = false; }),
     send: vi.fn(), drainInbox: vi.fn(), enableKnockEnforcement: vi.fn(),
-    onMessage: (callback: any) => messages.push(callback),
+    onMessage: (callback: any, capture?: () => unknown) => { messages.push(callback); captures.push(capture); },
     onDisconnect: (callback: any) => disconnects.push(callback),
     onKnock: vi.fn(), onError: vi.fn(), onE2EVerified: vi.fn(),
   };
@@ -127,6 +129,29 @@ async function initialized() { await owner[Symbol.for("agt-init-promise")]; }
 function publicClient() { return owner[Symbol.for("agt-mesh-client")]; }
 
 describe("OpenClaw required Entra plugin wiring", () => {
+  it("wires live peer ingress into the existing inbox, excludes protocols, and retires stale singleton capture", async () => {
+    vi.stubEnv("MESH_AUTH_BACKEND", "");
+    vi.stubEnv("AGT_SKIP_ENTRA", "1");
+    const tag = vi.fn(); mocks.capture.mockReturnValue(tag);
+    await register(); await initialized();
+    expect(captures[0]).toBeTypeOf("function");
+    const ingress = captures[0]!();
+    const { waitForInbox } = await import("./index.js");
+    const wake = waitForInbox(1000);
+    await messages[0](did, { type: "message", content: "ordinary", from_agent: "peer" }, "encrypted", ingress);
+    await expect(wake).resolves.toBe(true);
+    expect(tag).toHaveBeenCalledWith(expect.objectContaining({ from_amid: did, content: "ordinary" }));
+    await messages[0](did, { type: "mission:probe" }, "encrypted", ingress);
+    await messages[0](did, { type: "message", content: '{"type":"mission:assign"}', from_agent: "peer" }, "encrypted", ingress);
+    await messages[0](did, { type: "message", content: "plaintext", from_agent: "peer" }, "plaintext", ingress);
+    expect(tag).toHaveBeenCalledOnce();
+    const previous = publicClient();
+    owner[Symbol.for("agt-mesh-client")] = {};
+    expect(() => captures[0]!()).toThrow("singleton authority changed");
+    await messages[0](did, { type: "message", content: "delayed", from_agent: "peer" }, "encrypted", ingress);
+    expect(tag).toHaveBeenCalledOnce();
+    owner[Symbol.for("agt-mesh-client")] = previous;
+  });
   it("keeps the singleton candidate and mission handler private until current-token verification", async () => {
     holdVerify = true;
     await register();

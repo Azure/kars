@@ -45,7 +45,7 @@ describe("permanent core and Bridge CI boundary", () => {
       step.run === "python3 ci/bridge_component_results.py")).toBe(true);
   });
 
-  it("builds core Rust and CLI and exercises core Kind with Bridge physically absent", () => {
+  it("builds standalone Core without Bridge runtime sources, allowing only CLI chart and raw RBAC fixtures", () => {
     const core = workflow("ci.yml");
     for (const name of ["build-rust", "cli-build", "e2e-kind"]) {
       const steps = jobSteps(core, name);
@@ -53,10 +53,22 @@ describe("permanent core and Bridge CI boundary", () => {
       expect(checkout, name).toBeDefined();
       const options = mapping(checkout?.with);
       expect(options["sparse-checkout-cone-mode"], name).toBe(false);
-      expect(String(options["sparse-checkout"]).trim().split("\n"), name).toEqual(["/*", "!/bridge/"]);
-      const guard = steps.find(step => step.name === "Require standalone core checkout");
-      expect(guard?.run, name).toContain("test ! -e bridge");
-      expect(guard?.["working-directory"], name).toBe(".");
+      const patterns = String(options["sparse-checkout"]).trim().split("\n");
+      if (name === "build-rust") {
+        expect(patterns, name).toEqual(["/*", "!/bridge/"]);
+        const guard = steps.find(step => step.name === "Require standalone core checkout");
+        expect(guard?.run, name).toContain("test ! -e bridge");
+        expect(guard?.["working-directory"], name).toBe(".");
+      } else {
+        expect(patterns, name).toEqual([
+          "/*", "!/bridge/*", "/bridge/deploy/", "!/bridge/deploy/*", "/bridge/deploy/rbac.yaml",
+          "/bridge/deploy/helm/", "!/bridge/deploy/helm/*", "/bridge/deploy/helm/kars-bridge/",
+        ]);
+        const guard = steps.find(step => step.name === "Require CLI charts without Bridge runtime sources");
+        expect(guard?.run, name).toContain("test -f bridge/deploy/helm/kars-bridge/Chart.yaml");
+        for (const component of ["bff", "web"]) expect(guard?.run, name).toContain(`test ! -e bridge/${component}`);
+        expect(guard?.["working-directory"], name).toBe(".");
+      }
     }
     expect(jobSteps(core, "cli-build").some(step => step.run === "npm ci")).toBe(true);
     expect(jobSteps(core, "changes").some(step => String(step.run)

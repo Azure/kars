@@ -5,6 +5,7 @@
 
 mod backend;
 mod policy;
+mod reports;
 #[cfg(test)]
 mod tests;
 
@@ -126,6 +127,9 @@ async fn forward(
             StatusCode::UNAUTHORIZED,
             "An SRE proxy credential is required",
         );
+    }
+    if uri.path() == crate::sre_report::PATH {
+        return reports::publish(&proxy, method, uri, headers, body).await;
     }
     let route = match policy::route(&method, &uri) {
         Ok(route) => route,

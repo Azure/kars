@@ -6,7 +6,6 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-{{- include "kars-bridge.privateConsumerGuard" (dict "root" . "name" "kars-bridge-teams-gateway") }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -90,6 +89,7 @@ subjects:
     name: kars-bridge-teams-gateway
     namespace: {{ include "kars-bridge.namespace" . }}
 ---
+{{- define "kars-bridge.teamsDeployment" -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -194,6 +194,8 @@ spec:
       {{- with .Values.affinity }}
       affinity: {{- toYaml . | nindent 8 }}
       {{- end }}
+{{- end }}
+{{ include "kars-bridge.privateConsumerGuard" (dict "root" . "desired" (include "kars-bridge.teamsDeployment" . | fromYaml) "fence" (.Values.teamsGateway.privateContinuity | default dict)) }}
 ---
 apiVersion: v1
 kind: Service

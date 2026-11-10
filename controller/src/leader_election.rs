@@ -46,7 +46,7 @@
 //! [`acquire_and_hold`] just dispatches on the result. All branches of
 //! the decision are unit-tested below.
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, ensure};
 use chrono::{DateTime, Utc};
 use k8s_openapi::api::coordination::v1::{Lease, LeaseSpec};
 use kube::{
@@ -56,9 +56,10 @@ use kube::{
 use serde_json::json;
 use std::time::Duration;
 use tokio::sync::oneshot;
+use tokio::time::{Instant, sleep_until, timeout_at};
 
 /// Default lease validity window. A lease is considered expired if its
-/// `renewTime + leaseDurationSeconds < now`.
+/// `renewTime + leaseDurationSeconds <= now`.
 pub const DEFAULT_LEASE_DURATION_SECS: i32 = 15;
 /// Default renewal period for the holder. Should be well under
 /// `DEFAULT_LEASE_DURATION_SECS` so a single failed PATCH does not lose
@@ -149,18 +150,15 @@ pub fn evaluate_lease(
         Some(t) => {
             let renew_secs = t.0.as_second();
             let now_secs = now.timestamp();
-            now_secs - renew_secs > i64::from(duration_secs)
+            now_secs - renew_secs >= i64::from(duration_secs)
         }
         None => true,
     };
 
-    if holder == our_identity {
-        // Whether expired or not, we still own it; just refresh.
-        // (If we were preempted by another replica between the prior
-        // renew and now, the next PATCH will simply overwrite.)
-        LeaseAction::Renew
-    } else if expired {
+    if expired {
         LeaseAction::Acquire
+    } else if holder == our_identity {
+        LeaseAction::Renew
     } else {
         LeaseAction::Yield(holder.to_string())
     }
@@ -183,66 +181,113 @@ pub async fn acquire_and_hold(
     ready: oneshot::Sender<()>,
 ) -> Result<()> {
     let leases: Api<Lease> = Api::namespaced(client.clone(), &cfg.namespace);
+    let period = Duration::from_secs(cfg.renew_period_secs);
+    let validity = Duration::from_secs(u64::try_from(cfg.lease_duration_secs)?);
+    let renew_window = validity
+        .checked_sub(period)
+        .filter(|window| !window.is_zero() && !period.is_zero())
+        .context("leader-election: renewal period must be positive and below lease validity")?;
     let mut ready = Some(ready);
     let mut held = false;
+    let mut held_uid = None;
+    let mut renew_deadline = None;
     loop {
-        let now = Utc::now();
-        let existing = match leases.get(&cfg.lease_name).await {
-            Ok(l) => Some(l),
-            Err(kube::Error::Api(ae)) if ae.code == 404 => None,
+        // Stop before another replica may acquire; a hung API request must not
+        // leave the old reconciler bundle running past its lease.
+        let deadline = renew_deadline.unwrap_or_else(|| Instant::now() + renew_window);
+        ensure!(
+            Instant::now() < deadline,
+            "leader-election: renewal deadline exceeded"
+        );
+        let fetched = timeout_at(deadline, async {
+            match leases.get(&cfg.lease_name).await {
+                Ok(lease) => Ok(Some(lease)),
+                Err(kube::Error::Api(error)) if error.code == 404 => Ok(None),
+                Err(error) => Err(anyhow!(error)),
+            }
+        })
+        .await
+        .context("leader-election: lease GET deadline exceeded")
+        .and_then(|result| result);
+        let existing = match fetched {
+            Ok(lease) => lease,
             Err(e) if !held => {
                 tracing::warn!(
                     error = %e,
                     "leader-election: transient API error while polling lease; backing off",
                 );
-                tokio::time::sleep(Duration::from_secs(cfg.renew_period_secs)).await;
+                tokio::time::sleep(period).await;
                 continue;
             }
             Err(e) => {
-                return Err(anyhow!(e)).context("leader-election: lease GET failed while holder");
+                return Err(e).context("leader-election: lease GET failed while holder");
             }
         };
 
         let action = evaluate_lease(
             existing.as_ref().and_then(|l| l.spec.as_ref()),
             &cfg.identity,
-            now,
+            Utc::now(),
         );
+        if held {
+            ensure!(
+                Instant::now() < deadline
+                    && action == LeaseAction::Renew
+                    && existing
+                        .as_ref()
+                        .and_then(|lease| lease.metadata.uid.as_ref())
+                        == held_uid.as_ref(),
+                "leader-election: controller lease expired, disappeared, changed owner or was replaced"
+            );
+        }
         match action {
-            LeaseAction::Acquire => {
-                if let Err(e) = patch_or_create_lease(&leases, &cfg, now, existing.is_none()).await
-                {
-                    tracing::warn!(error = %e, "leader-election: lease acquire failed; will retry");
-                    tokio::time::sleep(Duration::from_secs(cfg.renew_period_secs)).await;
-                    continue;
-                }
-                held = true;
-                if let Some(tx) = ready.take() {
-                    let _ = tx.send(());
-                    tracing::info!(
-                        lease = %cfg.lease_name,
-                        identity = %cfg.identity,
-                        namespace = %cfg.namespace,
-                        "leader-election: acquired controller lease",
-                    );
-                }
-            }
-            LeaseAction::Renew => {
-                if let Err(e) = patch_or_create_lease(&leases, &cfg, now, false).await {
-                    if held {
-                        return Err(anyhow!(e)).context(
-                            "leader-election: lease renew PATCH failed; aborting to force pod restart",
-                        );
+            LeaseAction::Acquire | LeaseAction::Renew => {
+                let started = Instant::now();
+                let written = timeout_at(
+                    deadline,
+                    patch_or_create_lease(&leases, &cfg, Utc::now(), existing.as_ref()),
+                )
+                .await
+                .context("leader-election: lease write deadline exceeded")
+                .and_then(|result| result);
+                let lease = match written {
+                    Ok(lease) => lease,
+                    Err(error) if !held => {
+                        tracing::warn!(%error, "leader-election: lease acquisition failed; will retry");
+                        tokio::time::sleep(period).await;
+                        continue;
                     }
-                    tracing::warn!(error = %e, "leader-election: lease renew failed (not yet held); will retry");
-                }
+                    Err(error) => {
+                        return Err(error).context("leader-election: lease renewal failed");
+                    }
+                };
+                ensure!(
+                    Instant::now() < deadline,
+                    "leader-election: lease write completed too late"
+                );
+                held_uid = Some(
+                    lease
+                        .metadata
+                        .uid
+                        .filter(|uid| !uid.is_empty())
+                        .context("leader-election: written lease has no UID")?,
+                );
+                ensure!(
+                    lease
+                        .spec
+                        .as_ref()
+                        .and_then(|spec| spec.holder_identity.as_deref())
+                        == Some(cfg.identity.as_str()),
+                    "leader-election: written lease has a different owner"
+                );
+                renew_deadline = Some(started + renew_window);
                 held = true;
                 if let Some(tx) = ready.take() {
                     let _ = tx.send(());
                     tracing::info!(
                         lease = %cfg.lease_name,
                         identity = %cfg.identity,
-                        "leader-election: re-acquired controller lease (existing holder=us)",
+                        "leader-election: acquired controller lease",
                     );
                 }
             }
@@ -251,23 +296,22 @@ pub async fn acquire_and_hold(
                     current_holder = %holder,
                     "leader-election: another replica holds the controller lease; waiting",
                 );
-                held = false;
             }
         }
-        tokio::time::sleep(Duration::from_secs(cfg.renew_period_secs)).await;
+        let next_poll = Instant::now() + period;
+        sleep_until(renew_deadline.map_or(next_poll, |deadline| next_poll.min(deadline))).await;
     }
 }
 
-/// Acquire (CREATE) or renew (PATCH) the lease. `create` is true when
-/// the prior GET 404'd; otherwise we strategic-merge-patch the spec.
+/// Create an absent lease or conditionally update the exact observed lease.
 async fn patch_or_create_lease(
     leases: &Api<Lease>,
     cfg: &LeaderElectionConfig,
     now: DateTime<Utc>,
-    create: bool,
-) -> Result<()> {
+    observed: Option<&Lease>,
+) -> Result<Lease> {
     let now_rfc3339 = now.format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string();
-    if create {
+    if observed.is_none() {
         let lease: Lease = serde_json::from_value(json!({
             "apiVersion": "coordination.k8s.io/v1",
             "kind": "Lease",
@@ -285,10 +329,23 @@ async fn patch_or_create_lease(
         leases
             .create(&PostParams::default(), &lease)
             .await
-            .map(|_| ())
             .map_err(|e| anyhow!(e))
     } else {
+        let observed = observed.context("leader-election: missing observed lease")?;
+        let uid = observed
+            .metadata
+            .uid
+            .as_deref()
+            .filter(|uid| !uid.is_empty())
+            .context("leader-election: observed lease has no UID")?;
+        let version = observed
+            .metadata
+            .resource_version
+            .as_deref()
+            .filter(|rv| !rv.is_empty())
+            .context("leader-election: observed lease has no resourceVersion")?;
         let patch = json!({
+            "metadata": {"uid": uid, "resourceVersion": version},
             "spec": {
                 "holderIdentity": cfg.identity,
                 "leaseDurationSeconds": cfg.lease_duration_secs,
@@ -302,7 +359,6 @@ async fn patch_or_create_lease(
                 &Patch::Merge(patch),
             )
             .await
-            .map(|_| ())
             .map_err(|e| anyhow!(e))
     }
 }
@@ -342,11 +398,22 @@ mod tests {
     }
 
     #[test]
-    fn we_hold_expired_lease_still_renew() {
-        // Even when the renewTime drifted, our identity wins — we
-        // simply re-extend. Reconcilers stay running.
+    fn our_expired_lease_requires_fresh_acquisition() {
         let spec = spec_with("us", 60, 15);
-        assert_eq!(evaluate_lease(Some(&spec), "us", now()), LeaseAction::Renew);
+        assert_eq!(
+            evaluate_lease(Some(&spec), "us", now()),
+            LeaseAction::Acquire
+        );
+    }
+
+    #[test]
+    fn lease_expires_at_its_validity_boundary() {
+        for holder in ["us", "them"] {
+            assert_eq!(
+                evaluate_lease(Some(&spec_with(holder, 15, 15)), "us", now()),
+                LeaseAction::Acquire
+            );
+        }
     }
 
     #[test]
@@ -399,3 +466,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "leader_election_io_tests.rs"]
+mod io_tests;

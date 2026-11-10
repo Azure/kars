@@ -58,11 +58,35 @@ export function AuditReceiptRow({
   const [open, setOpen] = useState(false);
   const [receipt, setReceipt] = useState<Receipt | null>(null);
   const [compliance, setCompliance] = useState<CompliancePack | null>(null);
+  const [complianceError, setComplianceError] = useState<string | null>(null);
+  const [complianceLoading, setComplianceLoading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [verifying, setVerifying] = useState(false);
   const [result, setResult] = useState<VerifyResult | null>(null);
   const [verifyError, setVerifyError] = useState<string | null>(null);
+
+  async function loadCompliance() {
+    setComplianceLoading(true);
+    setComplianceError(null);
+    try {
+      const response = await fetch(
+        `/api/namespaces/${encodeURIComponent(ns)}/tasks/${encodeURIComponent(task)}/compliance`,
+        { headers: { accept: "application/json" } },
+      );
+      if (!response.ok) {
+        setComplianceError(response.status === 404
+          ? "No compliance mapping is available for this receipt."
+          : "Compliance mapping couldn't be loaded. Receipt verification remains available.");
+        return;
+      }
+      setCompliance(await response.json());
+    } catch {
+      setComplianceError("Compliance mapping couldn't be loaded. Receipt verification remains available.");
+    } finally {
+      setComplianceLoading(false);
+    }
+  }
 
   // Lazy-load the full receipt (claims + signature material) only when the row
   // is first expanded — so the audit page doesn't N+1-fetch every receipt into a
@@ -81,6 +105,7 @@ export function AuditReceiptRow({
         );
         if (res.status === 404) {
           setReceipt(null);
+          return;
         } else if (!res.ok) {
           throw new Error(`load failed: ${res.status}`);
         } else {
@@ -89,15 +114,7 @@ export function AuditReceiptRow({
         // Also pull the compliance evidence pack (EU AI Act / NIST AI RMF)
         // derived from this same signed receipt — so the auditor sees the
         // regulatory conformance mapping without leaving the auditor surface.
-        try {
-          const cres = await fetch(
-            `/api/namespaces/${encodeURIComponent(ns)}/tasks/${encodeURIComponent(task)}/compliance`,
-            { headers: { accept: "application/json" } },
-          );
-          if (cres.ok) setCompliance(await cres.json());
-        } catch {
-          /* compliance is best-effort; the receipt still renders */
-        }
+        await loadCompliance();
       } catch {
         setLoadError("This receipt's full attestation couldn't be loaded.");
       } finally {
@@ -139,6 +156,7 @@ export function AuditReceiptRow({
     none: { cls: "border-border bg-surface-muted text-foreground-muted", label: "No claims" },
   };
   const verdict = VERDICT[effectiveVerdict] ?? VERDICT.none;
+  const controlsId = `receipt-controls-${encodeURIComponent(ns)}:${encodeURIComponent(task)}`;
 
   return (
     <li className="border-b border-border last:border-0">
@@ -150,9 +168,9 @@ export function AuditReceiptRow({
         <span className="w-12 shrink-0 font-mono text-xs tabular-nums text-foreground-muted">{summarySeq ?? "—"}</span>
         <span className="min-w-0 flex-1 truncate font-mono text-sm font-medium">{summaryTask}</span>
         {summaryCreated && (
-          <span className="hidden shrink-0 text-xs text-foreground-muted sm:inline" title={summaryCreated}>
-            {new Date(summaryCreated).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
-          </span>
+          <time className="hidden shrink-0 text-xs text-foreground-muted sm:inline" dateTime={summaryCreated} title={summaryCreated}>
+            {new Date(summaryCreated).toLocaleDateString("en-GB", { month: "short", day: "numeric", timeZone: "UTC" })} UTC
+          </time>
         )}
         <span className={`shrink-0 rounded-full border px-2.5 py-0.5 text-xs font-medium ${verdict.cls}`}>{verdict.label}</span>
         <span className="shrink-0 text-foreground-muted transition" style={{ transform: open ? "rotate(180deg)" : "none" }} aria-hidden>⌄</span>
@@ -181,11 +199,18 @@ export function AuditReceiptRow({
                           <span className={`shrink-0 rounded border px-1.5 py-0.5 font-mono text-[11px] font-medium ${t.cls}`}>{t.label}</span>
                         </div>
                         <p className="mt-1 text-xs leading-relaxed text-foreground-muted">{c.detail}</p>
+                        {c.class.toLowerCase() === "completeness" && (
+                          <a href={`#${controlsId}`} className="mt-2 inline-block text-xs text-signal underline">
+                            Inspect effective-control evidence and limitations
+                          </a>
+                        )}
                       </li>
                     );
                   })}
                 </ul>
               </div>
+
+              <ReceiptControlEvidence result={result} id={controlsId} />
 
               {/* Provenance facts. */}
               <dl className="grid gap-x-6 gap-y-2 text-xs sm:grid-cols-2">
@@ -283,6 +308,18 @@ export function AuditReceiptRow({
                     <EvidencePanel result={result} task={receipt.task} />
                   </div>
                 )}
+                {complianceLoading && (
+                  <p role="status" className="mt-3 text-xs text-foreground-muted">Loading compliance mapping…</p>
+                )}
+                {complianceError && (
+                  <div role="alert" className="mt-3 text-xs text-foreground-muted">
+                    <p>{complianceError}</p>
+                    <button type="button" onClick={loadCompliance} disabled={complianceLoading}
+                      className="mt-2 rounded border border-border px-2 py-1 hover:bg-surface-muted disabled:opacity-50">
+                      {complianceLoading ? "Retrying…" : "Retry compliance mapping"}
+                    </button>
+                  </div>
+                )}
                 {compliance && <CompliancePackView pack={compliance} />}
               </div>
             </>
@@ -290,6 +327,74 @@ export function AuditReceiptRow({
         </div>
       )}
     </li>
+  );
+}
+
+const FLOOR_CONTROLS = [
+  { key: "taskNamespaceFloorVap", label: "Task-namespace CREATE floor", needed: "Task-bound namespace labels, applicable CREATE policy contents and Deny binding, including break-glass exclusions." },
+  { key: "execBanVap", label: "Agent exec/attach ban", needed: "Applicable CONNECT policy and Deny binding for the actual agent container and namespace, including exclusions; sibling-container access is not covered." },
+  { key: "postureLockVap", label: "Posture downgrade lock", needed: "Applicable UPDATE policy contents and Deny binding for this pod and namespace; a downgrade lock alone does not prove CREATE-time posture." },
+  { key: "defaultDenyEgress", label: "Default-deny egress", needed: "NetworkPolicy contents and selectors in the actual sandbox namespace, all additive allow policies, and a separate datapath witness for runtime enforcement." },
+  { key: "floorEnforced", label: "Collector floor rollup", needed: "All four supporting control observations bound to this task at receipt issuance; the rollup is not a fifth independent control." },
+] as const;
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown> : undefined;
+}
+
+export function ReceiptControlEvidence({ result, id }: { result: VerifyResult | null; id: string }) {
+  const predicate = record(record(result?.evidence?.signed_statement)?.predicate);
+  const source = predicate?.completeness;
+  const controls = record(source);
+  const contradictoryRollup = controls?.floorEnforced === true
+    && FLOOR_CONTROLS.slice(0, 4).some(({ key }) => controls[key] !== true);
+
+  return (
+    <section id={id} aria-label="Effective-control evidence" className="scroll-mt-4 rounded-lg border border-border bg-surface p-3 text-xs">
+      <h3 className="font-semibold">Effective-control evidence</h3>
+      <p className="mt-1 text-foreground-muted">
+        False means NOT VERIFIED by the collector, not that enforcement is absent.
+        The current collector does not establish effective policy applicability; policy names alone are insufficient.
+        These are issuance-time assertions, not a live posture check. Signature verification does not prove enforcement.
+      </p>
+      {!result ? (
+        <p className="mt-2 text-foreground-muted">Use Verify now below to load the retained signed statement. No control evidence has been loaded yet.</p>
+      ) : (
+        <>
+          <p className="mt-2 text-foreground-muted">
+            {result.verified ? "Receipt cryptographic checks passed; control assertions are not independently verified."
+              : "Receipt cryptographic checks did not pass. Treat the displayed control assertions as unverified."}
+          </p>
+          {contradictoryRollup && <p role="alert" className="mt-2 text-warning">Inconsistent recorded rollup: not all four supporting flags are true. Do not treat the floor as verified.</p>}
+          <ul className="mt-3 divide-y divide-border">
+            {FLOOR_CONTROLS.map(({ key, label, needed }) => {
+              const value = controls?.[key];
+              const status = value === false ? "NOT VERIFIED (recorded false)"
+                : value === true ? "RECORDED TRUE — not independently verified"
+                  : value === undefined ? "UNKNOWN — field missing" : "UNKNOWN — invalid field";
+              return (
+                <li key={key} className="py-2">
+                  <p className="font-medium">{label}</p>
+                  <p className="mt-1 text-warning">{status}</p>
+                  {source !== undefined && (
+                    <a href={`#${id}-source`} className="mt-1 inline-block break-all font-mono text-signal underline">
+                      /predicate/completeness/{key}
+                    </a>
+                  )}
+                  <p className="mt-1 text-foreground-muted">Evidence needed: {needed}</p>
+                </li>
+              );
+            })}
+          </ul>
+          <div id={`${id}-source`} className="mt-3 scroll-mt-4">
+            <p className="font-semibold">Signed source: /predicate/completeness</p>
+            <p className="mt-1 text-foreground-muted">Decoded content from the verification response, not original signed bytes. Inspect the full statement and signature material in Evidence below.</p>
+            <pre className="mt-2 max-h-56 overflow-auto rounded border border-border bg-surface-muted/30 p-2 font-mono text-[10px]">{source === undefined ? "Completeness evidence is missing from the retained statement." : JSON.stringify(source, null, 2)}</pre>
+          </div>
+        </>
+      )}
+    </section>
   );
 }
 
@@ -322,11 +427,15 @@ function EvidencePanel({ result, task }: { result: VerifyResult; task: string })
         {statementStr && (
           <div>
             <div className="mb-1 flex items-center justify-between">
-              <p className="text-[11px] font-semibold">Signed statement (the exact bytes the signature covers)</p>
+              <p className="text-[11px] font-semibold">Signed statement (decoded, formatted JSON)</p>
               <button type="button" onClick={download} className="rounded border border-border px-2 py-0.5 text-[10px] font-medium hover:bg-surface">
                 Download JSON
               </button>
             </div>
+            <p className="mb-2 text-[11px] text-foreground-muted">
+              This display and download preserve the JSON content, not the original signed bytes.
+              Verify now checks the retained DSSE payload and signature.
+            </p>
             <pre className="max-h-56 overflow-auto rounded border border-border bg-surface px-2.5 py-2 font-mono text-[10px] leading-relaxed">{statementStr}</pre>
           </div>
         )}

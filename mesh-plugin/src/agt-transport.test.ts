@@ -57,6 +57,190 @@ const identity: IMeshIdentity = {
   signingPublicKey: new Uint8Array(32),
 };
 
+describe("scoped sends through the installed SDK registry and socket hooks", () => {
+  const peer = `did:mesh:${"b".repeat(32)}`;
+  let transport: AgtTransport;
+  let frames: any[];
+  let prekey: (init?: RequestInit) => Promise<Response>;
+  let prekeyCalls: number;
+  let response: () => Response;
+  let onFrame: (frame: any) => void;
+  let receive: (frame: unknown) => void;
+  const operation = (assertCurrent = () => {}, signal = new AbortController().signal) => ({
+    signal, assertCurrent, deadline: Date.now() + 5000,
+  });
+
+  beforeEach(async () => {
+    const sdk = await import("@microsoft/agent-governance-sdk");
+    const { ed25519 } = await import("@noble/curves/ed25519.js");
+    __setAgtSdkForTesting(sdk as never);
+    const seed = new Uint8Array(32).fill(7);
+    const keys = new sdk.X3DHKeyManager(seed, ed25519.getPublicKey(seed));
+    keys.generateSignedPreKey();
+    const bundle = keys.getPublicBundle();
+    const b64 = (bytes: Uint8Array) => Buffer.from(bytes).toString("base64url");
+    response = () => Response.json({ identity_key: b64(bundle.identityKey), identity_key_ed: b64(bundle.identityKeyEd),
+      signed_pre_key: { public_key: b64(bundle.signedPreKey), signature: b64(bundle.signedPreKeySignature), key_id: bundle.signedPreKeyId } });
+    frames = []; prekeyCalls = 0; onFrame = () => {};
+    prekey = async () => response();
+    vi.stubGlobal("fetch", vi.fn(async (input, init) => {
+      if (String(input).endsWith("/prekeys") && init?.method === "GET") { prekeyCalls++; return prekey(init); }
+      return Response.json({ did: `did:mesh:${"a".repeat(32)}` });
+    }));
+    const socket = { readyState: 1, onopen: null as any, onclose: null as any, onmessage: null as any, onerror: null as any,
+      send: (data: unknown) => { const frame = JSON.parse(String(data)); frames.push(frame); onFrame(frame); },
+      close: () => { socket.readyState = 3; socket.onclose?.({ code: 1000 }); } };
+    transport = new AgtTransport({ relayUrl: "ws://relay.invalid", registryUrl: "http://registry.invalid",
+      identity: { agentId: `did:mesh:${"a".repeat(32)}`, signingPrivateKey: seed, signingPublicKey: ed25519.getPublicKey(seed) },
+      wsFactory: () => { queueMicrotask(() => socket.onopen?.({})); return socket; } });
+    await transport.connect();
+    receive = frame => socket.onmessage?.({ data: JSON.stringify(frame) });
+    frames = [];
+  });
+  afterEach(async () => { await transport?.disconnect(); vi.unstubAllGlobals(); vi.useRealTimers(); });
+
+  it("preserves socket-arrival custody through SDK KNOCK waits and excludes replay", async () => {
+    await transport.send(peer, {}, operation());
+    const client = (transport as any).client;
+    // Only decryption bytes are controlled; actual SDK frame dispatch, pending-KNOCK await and callbacks run.
+    client.getSession(peer).channel.receive = () => Buffer.from('{"content":"answer"}');
+    client.knockAccepted.delete(peer);
+    const pending = { resolve: vi.fn() }; client.knockPending.set(peer, pending);
+    let owner = "old-assignment";
+    const seen = vi.fn();
+    transport.onMessage(seen, () => owner);
+    const frame = { v: 1, type: "message", from: peer, id: "old", header: { dh: "AA==", pn: 0, n: 0 }, ciphertext: "AA==" };
+    receive(frame);
+    expect(seen).not.toHaveBeenCalled();
+    owner = "new-assignment";
+    pending.resolve(true);
+    await vi.waitFor(() => expect(seen).toHaveBeenCalledOnce());
+    expect(seen.mock.calls[0][3]).toBe("old-assignment");
+    client.knockPending.delete(peer); client.knockAccepted.add(peer);
+    receive({ type: "pending_messages", messages: [{ ...frame, id: "replayed" }] });
+    await vi.waitFor(() => expect(seen).toHaveBeenCalledTimes(2));
+    expect(seen.mock.calls[1][3]).toBeUndefined();
+    receive({ ...frame, id: "new" });
+    await vi.waitFor(() => expect(seen).toHaveBeenCalledTimes(3));
+    expect(seen.mock.calls[2][3]).toBe("new-assignment");
+  });
+
+  it("reports possibly issued socket failures without retry and discards the advanced ratchet", async () => {
+    onFrame = frame => { if (frame.type === "message") throw new Error("queued then failed"); };
+    await expect(transport.send(peer, {}, operation())).rejects.toThrow("must not be replayed");
+    expect(frames.map(frame => frame.type)).toEqual(["knock", "message"]);
+    expect(prekeyCalls).toBe(1);
+    expect((transport as any).client.getSession(peer)).toBeUndefined();
+  });
+
+  it("a cancelled same-peer invocation does not close a session used by another scoped invocation", async () => {
+    let release!: (response: Response) => void;
+    prekey = () => new Promise(resolve => { release = resolve; });
+    const abort = new AbortController();
+    const pending = transport.send(peer, {}, operation(() => {}, abort.signal));
+    const failed = expect(pending).rejects.toThrow();
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    prekey = async () => response();
+    await transport.send(peer, { winner: true }, operation());
+    const session = (transport as any).client.getSession(peer);
+    abort.abort(); release(response()); await failed;
+    expect((transport as any).client.getSession(peer)).toBe(session);
+    expect(session.messageCount).toBe(1);
+    expect(frames.map(frame => frame.type)).toEqual(["knock", "message"]);
+    await transport.send(peer, { next: true }, operation());
+    expect(prekeyCalls).toBe(2);
+  });
+
+  it("does not close a session advanced by an independent send before failed-send cleanup", async () => {
+    await transport.send(peer, {}, operation());
+    const client = (transport as any).client;
+    const session = client.getSession(peer);
+    let writes = 0;
+    onFrame = frame => { if (frame.type === "message" && ++writes === 1) throw new Error("first write failed"); };
+    const failed = expect(transport.send(peer, { failed: true }, operation())).rejects.toThrow("must not be replayed");
+    const successful = transport.send(peer, { independent: true }, operation());
+    await Promise.all([failed, successful]);
+    expect(client.getSession(peer) === session).toBe(true);
+    expect(session.messageCount).toBe(2);
+    await transport.send(peer, { next: true }, operation());
+    expect(prekeyCalls).toBe(1);
+  });
+
+  it("executes actual prekey, KNOCK and encrypted MESSAGE once", async () => {
+    await transport.send(peer, { content: "ordinary" }, operation());
+    expect(frames.map(frame => frame.type)).toEqual(["knock", "message"]);
+    expect(frames[1].ciphertext).toBeTypeOf("string");
+    expect(prekeyCalls).toBe(1);
+    await transport.send(peer, { content: "second" }, operation());
+    expect(prekeyCalls).toBe(1);
+  });
+
+  it.each(["abort", "revoke", "deadline"])("vetoes late prekeys on %s without KNOCK, and leaves unrelated sends live", async reason => {
+    let release!: (value: Response) => void;
+    let requestSignal: AbortSignal | undefined;
+    prekey = init => { requestSignal = init?.signal as AbortSignal; return new Promise(resolve => { release = resolve; }); };
+    const abort = new AbortController();
+    let current = true;
+    const op = operation(() => { if (!current) throw new Error("revoked"); }, abort.signal);
+    if (reason === "deadline") op.deadline = Date.now() + 20;
+    const pending = transport.send(peer, {}, op);
+    const checked = expect(pending).rejects.toThrow();
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    if (reason === "abort") abort.abort();
+    if (reason === "revoke") current = false;
+    if (reason === "deadline") await new Promise(resolve => setTimeout(resolve, 25));
+    if (reason !== "revoke") expect(requestSignal?.aborted).toBe(true);
+    const other = `did:mesh:${"c".repeat(32)}`;
+    prekey = async () => response();
+    await transport.send(other, { unrelated: true });
+    release(response());
+    await checked;
+    expect(frames.filter(frame => frame.to === peer)).toEqual([]);
+    expect(frames.filter(frame => frame.to === other).map(frame => frame.type)).toEqual(["knock", "message"]);
+    expect((transport as any).client.getSession(peer)).toBeUndefined();
+    expect(prekeyCalls).toBe(2);
+  });
+
+  it.each(["http", "oversize", "network"])("does not replay the OPK-consuming request after %s failure", async failure => {
+    prekey = async () => {
+      if (failure === "network") throw new Error("connection lost");
+      return failure === "http" ? new Response("failed", { status: 503 }) : new Response("x".repeat(65537));
+    };
+    await expect(transport.send(peer, {}, operation())).rejects.toThrow();
+    expect(prekeyCalls).toBe(1);
+    expect(frames).toEqual([]);
+  });
+
+  it("checks before encryption and closes only the vetoed ratchet session", async () => {
+    await transport.send(peer, {}, operation());
+    const client = (transport as any).client;
+    const channel = client.getSession(peer).channel;
+    const send = channel.send.bind(channel);
+    let current = true;
+    channel.send = (...args: any[]) => { const value = send(...args); current = false; return value; };
+    frames = [];
+    await expect(transport.send(peer, {}, operation(() => { if (!current) throw new Error("revoked at socket"); }))).rejects.toThrow("revoked");
+    expect(frames).toEqual([]);
+    expect(client.getSession(peer)).toBeUndefined();
+    current = false;
+    await expect(transport.send(peer, {}, operation(() => { if (!current) throw new Error("stale before encryption"); }))).rejects.toThrow("stale");
+    expect(prekeyCalls).toBe(1);
+  });
+
+  it("cleans an unused KNOCK session on revocation but cannot recall an issued frame", async () => {
+    let current = true;
+    onFrame = frame => { if (frame.type === "knock") current = false; };
+    await expect(transport.send(peer, {}, operation(() => { if (!current) throw new Error("revoked"); }))).rejects.toThrow("revoked");
+    expect(frames.map(frame => frame.type)).toEqual(["knock"]);
+    expect((transport as any).client.getSession(peer)).toBeUndefined();
+    current = true; frames = [];
+    onFrame = frame => { if (frame.type === "message") current = false; };
+    await expect(transport.send(peer, {}, operation(() => { if (!current) throw new Error("revoked"); }))).rejects.toThrow("must not be replayed");
+    expect(frames.map(frame => frame.type)).toEqual(["knock", "message"]);
+    expect((transport as any).client.getSession(peer).messageCount).toBe(1);
+  });
+});
+
 describe("AgtTransport", () => {
   let fakeClient: FakeClient;
   let MeshClient: Mock;

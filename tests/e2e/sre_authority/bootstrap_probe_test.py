@@ -4,11 +4,13 @@
 import copy
 import json
 from pathlib import Path
+import shutil
+import subprocess
 import unittest
 from unittest.mock import patch
 
 from sre_authority.bootstrap_diagnostics import api_result, collect, control_plane_status, exception_summary, failure_facts, firewall_summary, object_status, policy_status, probe_command_result, public_stack_facts, router_log_summary, router_readiness_facts
-from sre_authority.bootstrap_probe import builtin_documents, converted_objects, exercise, preserved_json_candidate, safe_controller
+from sre_authority.bootstrap_probe import PATHS, builtin_documents, converted_objects, exercise, safe_controller
 
 POLICIES = {"kars-sre-private-mounts": {"spec": {"validations": [
     {"message": "Private SRE material requires authority"}]}}}
@@ -236,10 +238,18 @@ COMMIT
     def test_chart_selection_never_executes_other_workloads_or_loads_secret_data(self):
         rendered = "---\nkind: Secret\nmetadata:\n  name: private\nstringData:\n  token: do-not-publish\n"
         rendered += "---\nkind: Job\nmetadata:\n  name: execute\n---\nkind: ValidatingAdmissionPolicy\nmetadata:\n  name: public\n"
+        rendered += "---\nkind: Namespace\nmetadata:\n  name: kars-monitoring\n"
         result = builtin_documents(rendered)
+        self.assertIn("kind: Namespace", result)
         self.assertNotIn("do-not-publish", result)
         self.assertNotIn("kind: Job", result)
         self.assertIn("kind: ValidatingAdmissionPolicy", result)
+
+    def test_chart_namespaces_precede_namespaced_prerequisites(self):
+        order = list(PATHS)
+        for kind in ("ServiceAccount", "Role", "RoleBinding", "Deployment"):
+            self.assertLess(order.index("Namespace"), order.index(kind))
+        self.assertEqual(PATHS["Namespace"], "/api/v1/namespaces")
 
     def test_kubectl_multiple_json_objects_and_list_are_both_parsed(self):
         first = {"kind": "ServiceAccount", "metadata": {"name": "kars-controller"}}
@@ -249,24 +259,36 @@ COMMIT
         with self.assertRaises(RuntimeError):
             converted_objects(json.dumps({"kind": "Secret", "data": "do-not-publish"}))
 
-    def test_candidate_changes_only_known_public_json_params_representation(self):
-        params = {"type": "object", "additionalProperties": True, "description": "public"}
-        action = {"kind": "CustomResourceDefinition", "metadata": {"name": "karssreactions.kars.azure.com"},
-            "spec": {"versions": [{"schema": {"openAPIV3Schema": {"properties": {"spec": {"properties": {
-                "action": {"properties": {"params": params}}, "approval": {"type": "object"}
-            }}}}}}]}}
-        policy = {"kind": "ValidatingAdmissionPolicy", "metadata": {"name": "kars-sre-pending-proposals"},
-                  "spec": {"validations": [{"expression": "object.spec.approval.state == 'Pending'"}]}}
-        source = [action, policy]
-        before = copy.deepcopy(source)
-        changed = preserved_json_candidate(source)
-        self.assertEqual(source, before)
-        self.assertEqual(changed[1], policy)
-        actual = changed[0]["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]["properties"]["action"]["properties"]["params"]
-        self.assertEqual(actual, {"type": "object", "x-kubernetes-preserve-unknown-fields": True, "description": "public"})
-        params["additionalProperties"] = {"type": "string"}
-        with self.assertRaises(RuntimeError):
-            preserved_json_candidate(source)
+    @unittest.skipUnless(shutil.which("helm"), "Helm is required for cold chart rendering")
+    def test_shipped_schema_preserves_json_and_sre_inventory_matches_all_rendered_policies(self):
+        from sre_authority.common import POLICIES as expected
+        root = Path(__file__).resolve().parents[3]
+        rendered = subprocess.run([
+            "helm", "template", "kars", str(root / "deploy/helm/kars"),
+            "--namespace", "kars-system", "--kube-version", "1.31.0",
+            "--set", "sre.enabled=false", "--set", "sre.authorityStage=true",
+        ], cwd=root, capture_output=True, text=True, check=True, timeout=30)
+        converted = subprocess.run([
+            "node", "-e", "const fs = require('node:fs'); const yaml = require('./cli/node_modules/yaml'); "
+            "console.log(JSON.stringify(yaml.parseAllDocuments(fs.readFileSync(0, 'utf8'))"
+            ".map(d => d.toJS()).filter(Boolean)));",
+        ], cwd=root, input=rendered.stdout, capture_output=True, text=True, check=True, timeout=30)
+        objects = json.loads(converted.stdout)
+        actions = [obj for obj in objects if obj["kind"] == "CustomResourceDefinition"
+                   and obj["metadata"]["name"] == "karssreactions.kars.azure.com"]
+        self.assertEqual(len(actions), 1)
+        params = actions[0]["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]["properties"]["action"]["properties"]["params"]
+        self.assertEqual(params["type"], "object")
+        self.assertIs(params["x-kubernetes-preserve-unknown-fields"], True)
+        self.assertNotIn("additionalProperties", params)
+        self.assertEqual({obj["metadata"]["name"] for obj in objects
+                          if obj["kind"] == "ValidatingAdmissionPolicy"
+                          and obj["metadata"]["name"].startswith("kars-sre-")},
+                         {"kars-sre-" + name for name in expected})
+        self.assertIn("report-authority", expected)
+        workflow = (root / ".github/workflows/ci.yml").read_text()
+        self.assertNotIn("--json-params-candidate", workflow)
+        self.assertIn("sre_authority.bootstrap_probe --retirement-bind-proof", workflow)
 
     def test_arbitrary_failure_is_not_security_proof_in_candidate_cases(self):
         from sre_authority.bootstrap_cases import admission_cases
@@ -432,13 +454,18 @@ COMMIT
         self.assertFalse(result["allPoliciesObservedBeforeCreate"])
         self.assertEqual(result["readiness"], "not-claimed")
 
-    def test_failure_diagnostics_precede_teardown_without_pod_spec_or_log_dump(self):
+    def test_failure_diagnostics_precede_cleanup_without_pod_spec_or_log_dump(self):
         source = (Path(__file__).resolve().parents[1] / "run.sh").read_text()
         install = source.split("install_crds() {", 1)[1].split("\nteardown()", 1)[0]
-        self.assertIn("sre_authority.bootstrap_probe --diagnostics-only", install)
-        self.assertNotIn("kubectl describe pod", install)
-        self.assertNotIn("kubectl logs", install)
+        teardown = source.split("teardown() {", 1)[1].split("\n}", 1)[0]
+        collector = "sre_authority.bootstrap_probe --diagnostics-only"
+        self.assertEqual(source.count(collector), 1)
+        self.assertIn(collector, teardown)
+        self.assertLess(teardown.index(collector), teardown.index("sre_authority_cleanup"))
+        self.assertNotIn("kubectl describe pod", install + teardown)
+        self.assertNotIn("kubectl logs", install + teardown)
         self.assertIn("return 1", install)
+        self.assertIn('return "$result"', teardown)
 
 
 class PrivateConsumptionDiagnosticTests(unittest.TestCase):

@@ -1,11 +1,25 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 **
 !LICENSE
 !sandbox-images/headlamp/Dockerfile
 !sandbox-images/headlamp/Dockerfile.dockerignore
 !sandbox-images/headlamp/build-backend.sh
+!sandbox-images/headlamp/patch-backend.go
+!sandbox-images/headlamp/patch-backend_test.go
+!sandbox-images/headlamp/static-cache.go
+!sandbox-images/headlamp/static-cache_test.go
+!sandbox-images/headlamp/oidc-navigation.go
+!sandbox-images/headlamp/oidc-navigation_test.go
 !sandbox-images/headlamp/build-frontend.mjs
 !tools/headlamp-plugin/package.json
 !tools/headlamp-plugin/package-lock.json
+!tools/headlamp-plugin/patch-build-tool.mjs
+!tools/headlamp-plugin/checker
+!tools/headlamp-plugin/checker/fork-ts-checker-webpack-plugin-8.0.0-kars.tgz
+!tools/headlamp-plugin/build-tool
+!tools/headlamp-plugin/build-tool/headlamp-plugin-0.13.1-kars.tgz
 !tools/headlamp-plugin/tsconfig.json
 !tools/headlamp-plugin/src
 !tools/headlamp-plugin/src/**

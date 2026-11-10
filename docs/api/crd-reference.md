@@ -20,7 +20,7 @@ kars exposes its API through **fifteen** CustomResourceDefinitions in the `kars.
 | `karsevals.kars.azure.com` | `KarsEval` | `ceval` | Namespaced | `spec.corpus.bundleRef` (signed OCI eval-corpus bundle, mutex with `corpus.builtin`) | Reproducible evaluation run. |
 | `trustgraphs.kars.azure.com` | `TrustGraph` | `tg` | Cluster | Inline `spec.edges[].signature` (Ed25519 per edge, domain-separated payload) | Cross-namespace / cross-cluster mesh trust topology. |
 | `egressapprovals.kars.azure.com` | `EgressApproval` | `eappr` | Namespaced | None on the CR itself (it's a sibling overlay); the sandbox's signed `allowlistRef` is the cryptographic baseline | Ephemeral, TTL-bounded extra egress hosts (overlay on baseline allowlist). |
-| `karssreactions.kars.azure.com` | `KarsSREAction` | `sreaction` | Namespaced | None on the CR; execution is gated by `spec.approval.state` + a one-shot minted writer token | An approval-gated, TTL-bounded cluster remediation the SRE operator proposes. |
+| `karssreactions.kars.azure.com` | `KarsSREAction` | `sreaction` | Namespaced | None on the CR; execution is gated by `spec.approval.state` + a durable attempt claim and isolated short-lived writer token | An approval-gated, TTL-bounded cluster remediation the SRE operator proposes. |
 | `karstasks.kars.azure.com` | `KarsTask` | `ctask` | Namespaced | Envelope digest attested by a receipt | A governed task, optionally launched as an owned sandbox. |
 | `karsapprovals.kars.azure.com` | `KarsApproval` | `cappr` | Namespaced | Immutable bound decisions enter receipts | A human decision on a task's current authority. |
 | `karsreceipts.kars.azure.com` | `KarsReceipt` | `crcpt` | Namespaced | DSSE/Ed25519 signed predicate | Independently verifiable governance facts, not proof of complete runtime enforcement. |
@@ -52,6 +52,14 @@ governance `Ready`. `execution.launch` is a separate opt-in:
   by the exact task UID can be updated or deleted, with UID/resourceVersion
   concurrency checks. Cleanup remains `Stopping` and retries API errors or
   resources awaiting finalization, even if the task's sandbox status reference is lost.
+- Bridge keeps refreshing after Stop is acknowledged until execution is `Idle` and
+  the sandbox reference is absent; Launch remains disabled during that cleanup.
+  For the same unfinished revision, retained Activity can show custody-validated
+  prior observations after ordinary Stop or permanent Halt, including a dispatch
+  left uncertain by teardown. This does not clear uncertainty, create a terminal
+  result, preserve provisional file bytes, or establish a resumable process checkpoint.
+  Direct Missions with a retained run identity remain eligible for the Active agents
+  page's recent-runs list after cleanup; they are not counted as live workers.
 
 `status.envelopeDigest` is the **task authorization digest**, not merely the
 envelope lattice identifier. `KarsTask::envelope_digest()` (or
@@ -77,12 +85,27 @@ available for lattice/team uses, **not** task approval authorization.
 Reference names are bound; this digest does not attest mutable referenced resource
 contents or container images. Those require separate policy/runtime evidence.
 
-### Reviewed execution: fresh filesystem subset
+### Reviewed execution: native phases and governed capabilities
 
 `blueprint.executionPlan` retains the reviewed `kars.execution-plan/v1` graph in
-Task authorization. Active execution currently supports **OpenClaw only**, with
-at least two delegation levels and `envelope.budget.scope: GovernedInference`.
-This is a locally tested implementation, **not installed Kind/AKS qualification**.
+Task authorization. The execution contract supports **OpenClaw and Hermes** with
+`envelope.budget.scope: GovernedInference`. Decomposed Tasks require at least two
+delegation levels. Single-agent native Missions use `roles: []`, `maxParallel: 1`
+and an explicitly native `synthesis` containing the principal's objective,
+permissions and positive tool-call bound; they need no delegation depth or child
+Tasks. Task and Team CRD schemas admit an empty role list while retaining the
+eight-role ceiling and requiring at least one phase for each delegated role;
+activation still requires the explicit native single-agent contract above.
+Schema preparation permits reduced array minima, increased array/safe-integer
+maxima and string enum supersets without changing retained objects. This includes
+the native tool-call ceiling and the additive `github-pr` capability. Other
+constraints, types, defaults and validation rules must remain compatible.
+Restoring an old minimum, a lower maximum or a narrower enum is rejected by the
+same rollback compatibility check.
+Named deliverables require filesystem-write. The principal may use network
+for router-governed HTTPS and MCP, and filesystem-read for inputs or skills.
+This is explicit reviewed authority, not an implicit upgrade of null legacy plans.
+Native-mode integration is under validation, **not installed Kind/AKS qualification**.
 Existing Team admission, reservations, credentials, approvals, and revocation
 remain prerequisites; this scheduler is not an alternative Team launch API.
 
@@ -94,13 +117,67 @@ launch check; they are not silently rewritten or granted more capabilities.
 Launch displays safe structured validation reasons. Malformed reviewed JSON is
 rejected before creation rather than replaced with controller defaults.
 
-- Each role has 1–8 ordered phases with `freshContext: true`, exactly
-  `filesystem-read` and `filesystem-write`, no required external tool calls, and
-  a positive `maxToolCalls` (at most 32). The receiver enforces each phase's
-  minimum/maximum measured tool calls through the existing filesystem task loop.
-  Synthesis uses the same capability pair and a positive tool-call maximum.
+- New phases and synthesis explicitly use `executionMode: native` (Bridge JSON:
+  `execution_mode`). The field is bound into phase and authorization digests;
+  explicit null or unsupported values reject. Omission retains the historical
+  contract and its canonical bytes, not an implicit native upgrade. Retained
+  results remain readable. Historical tool-bearing OpenClaw assignments require
+  native re-review; pinned native hooks cannot preserve their old batch admission.
+- Each role has 1–8 ordered phases with `freshContext: true` and a positive
+  `maxToolCalls` (at most 32). Native agents choose tools, ordering, source URLs,
+  and recovery within granted capabilities; the composer normally proposes
+  `minToolCalls: 0` and `requiredToolCalls: []`. Explicit minima and exact required
+  calls remain signed completion obligations, not a prescribed script or the
+  complete list of permitted URLs. Network access remains router-governed by
+  signed egress, destination checks, policy, and finite budgets.
+- Native typed phases support bounded filesystem reads/writes, public HTTPS GET
+  and native MCP discovery/calls through the router under the network capability.
+  MCP still requires a selected server, bound resource, tool policy and applicable
+  scoped credentials; network alone does not grant arbitrary servers. They do
+  not grant standalone shell or binary document extraction. Retained handoffs require filesystem-write; supplied
+  inputs require filesystem-read and a positive tool-call maximum. This also
+  applies to retained files attached by Team review feedback. The controller
+  rejects an unreadable input contract before projection with
+  `ReviewedInputCapabilityRequired`; review the phase capabilities and start a
+  fresh run instead of relaunching the rejected identity. A current phase execution
+  hold is also surfaced on the root run as `ReviewedPhaseHeld`, including the role,
+  phase, task and actionable reason, rather than leaving the run at Launching.
+  Independent roles can still progress while that hold is reported. Stale phase
+  observations do not override current execution. Synthesis uses the
+  necessary file capabilities and a positive tool-call maximum. Cross-phase conversation reuse is not
+  implemented: continuity comes from retained inputs, not an ongoing session.
   Role, phase, and synthesis objectives require at least 20 trimmed UTF-8 bytes
   and at most 1,200 bytes before trimming.
+- Explicit `python-execute` allows an OpenClaw or Hermes native phase to run
+  supplied Python application code and tests. It also requires explicitly selected
+  `filesystem-read`, `filesystem-write`, and `network`; the Team editor never adds
+  these permissions silently. To add a tester, pause the Team, use **Org & access →
+  Edit org → Add member**, make it depend on the application builder, and select
+  Python execution plus each required permission. Save the org before resuming.
+  The code runs as the existing agent in its Task sandbox, not a separate security
+  boundary. The fixed interpreter uses digest-checked retained inputs or files
+  written by that invocation; there is no runtime package installation. Network
+  access remains router-governed. `HTTPS_PROXY` does **not** enable opaque HTTPS
+  CONNECT tunnels under governed inference. Applications collecting HTTPS text
+  must use the existing mediated endpoint: POST JSON
+  `{"url":"https://approved-host/path","method":"GET"}` to
+  `http://127.0.0.1:8443/egress/fetch` inside the Task sandbox. Check both the router
+  HTTP result and the returned upstream `status`, `headers`, `body`, `truncated`
+  and `observed_at`; reject truncated source bodies. The router retains egress,
+  inference and TLS checks without exposing provider credentials. Its text body
+  is not a lossless binary/ZIP transport. Do not disable TLS or bypass the router.
+  Fetching with a separate agent tool does not prove the application's collector
+  works. Limits include a 1–60 second wall timeout,
+  30 CPU seconds and 512 MiB address space per process, and 2,048 retained bytes
+  per output stream; overflow stops the invocation. More than 64 observed
+  invocation processes also stops execution, while the existing Pod PID cgroup
+  remains the hard process bound. Kars does not impose a shared-UID process quota
+  that would count unrelated sandboxes. Descendants are cleaned up.
+  Kars retains actual exit status, stdout/stderr, and failure/cleanup results in
+  reserved `kars-python-executions.json`; agents must not fabricate this file.
+  Generated workspace files are not automatically exported. A successful fixture
+  test does not prove live collection, and this is not a continuously hosted app.
+  Installed execution acceptance remains required before claiming qualification.
 - The controller reserves an inactive, named role Task and fresh phase children
   using the existing Task materializer. Exact parent authority, owner UID,
   reserved child UID/spec, plan digest, Task generation, and run nonce bind their
@@ -108,13 +185,79 @@ rejected before creation rather than replaced with controller defaults.
   accepted work. A revision gets a new bound graph; old assignments cannot
   authorize new synthesis, and already accepted non-replayable work is not
   resent or forcibly interrupted.
+- A reviewed Team work item returned for changes supplies the rejected run's declared
+  deliverables as immutable revision inputs, separately from approved Team memory.
+  Admission verifies the original Team/work binding, Task UID, run nonce, reviewed
+  output digest, and retained document custody. Failed or cancelled retries do not
+  discard that rejected delivery; a later successful delivery supersedes it. The
+  latest failed retry can additionally supply all completed specialists' final-phase
+  exports when its failed synthesis receipt proves the exact retained inputs. These
+  are **diagnostic, unaccepted** inputs, not a successful root delivery or approved
+  memory. Rejected deliverables retain `revision-N` aliases; diagnostics use distinct
+  `revision-unaccepted-rR-pP` source aliases, preserving original filenames, exact
+  bytes, hashes and producer identities even when roles export the same filename.
+  Retained `kars-python-executions.json` receipts stay prior-phase diagnostics under
+  those aliases, never this run's automatic evidence; runtime-owned export names
+  remain reserved and must not be used as source-copy destinations.
+  A verified failure before synthesis contributes no partial final-phase export set
+  and leaves the earlier rejected source intact. Missing or changed custody or
+  incomplete synthesis evidence blocks admission instead of silently reverting to
+  stale bytes. Diagnostic-bearing revisions seal content-free source/hash references
+  in the existing revision annotation (still at most 192 KiB), then resolve all bytes
+  through retained Team/work, graph and canonical receipt custody for each fresh grant.
+  Referenced producers and their retained evidence must remain available; no source
+  collection fallback silently removes inputs. Rejected-delivery-only revisions keep
+  the existing inline format and its 16-document / 192-KiB limits.
+  Staged admission and recovery count both sealed formats together with Team memory
+  before checking reviewed filesystem-read permissions. A reserved but unlaunched
+  Task resumes with its original request and UID; counting manifest references does
+  not admit the Task, hydrate content, or bypass later custody verification.
+  The manifest also binds original diagnostic role and phase names to the retained
+  source plan. Each step mounts all rejected delivery files, plus historical diagnostics
+  not superseded by an independently verified **current dependency export with the same
+  role name, phase name and original filename**. This is working-set selection, not
+  replacement of retained bytes or acceptance: current files keep their own producer
+  aliases, and all historical references, bytes and failure records remain retained.
+  All historical custody is checked even for diagnostics not mounted at that step.
+  Different roles, phases or filenames never supersede one another; old manifests
+  without routing metadata keep all their historical inputs.
+  The complete historical set and each assembled revision/memory/dependency working
+  set remain bounded to 152 documents / 384 KiB of serialized UTF-8 JSON, at most
+  64 KiB per file, in both native runtimes. These existing transport/record and native
+  filesystem bounds are separate from token funding; they are not increased.
+  Offline measurement of the observed 28-document package, with a same-byte-shape
+  current package and distinct same-length producer identities, gives 308,474 bytes
+  for each research step, 308,354 for the builder, 308,334 for QA, and 308,074 for
+  synthesis (28 documents each). Appending everything would require 397,381 bytes
+  at QA and 501,883 at synthesis. This is an offline size calculation, not live
+  acceptance or a promise about future generated outputs. Genuinely new/unmatched
+  exports exceeding the aggregate bound still fail closed without truncation or
+  arbitrary eviction. Historical receipts remain unaccepted.
+  Both OpenClaw and Hermes require reviewed filesystem-read admission, including
+  when diagnostics are the only retained inputs, and apply feedback within current
+  role boundaries; prior work grants no additional permissions.
 - Every phase must explicitly export useful UTF-8 **`handoff.md`**. Later phases
-  read their predecessor; a role's first phase reads the final handoffs of its
-  declared dependencies. Synthesis reads all roles' final handoffs. Graph
-  membership and current review authority are verified independently of immutable
-  output custody; a valid artifact hash alone grants no input permission.
-- `maxParallel` limits admitted unfinished roles. The mesh service currently
-  dispatches sequentially, so this is an **upper bound**, not a throughput promise.
+  receive their predecessor's handoff **and named exported files**; a role's first
+  phase receives those documents from the final phases of its declared dependencies.
+  Synthesis receives all roles' final-phase documents, so reviewers and final writers
+  can inspect the actual Markdown, CSV, and other exports rather than summaries alone.
+  Input aliases are phase-qualified; original filenames, exact bytes, SHA256, and
+  producer identities remain pinned in their source records. Generated response and
+  router-observation records are not work inputs. Combined assignment inputs retain
+  the 384-KiB serialized byte limit and allow up to 152 files: eight final-phase
+  producers with at most 16 exports each, eight memory files, and 16 revision files.
+  Each file remains bounded to 64 KiB; sealed memory/revision annotations retain
+  their independent 192-KiB limit. A single producer's 16-file limit does not cap
+  the entire graph's inputs, and file contents are never truncated. Graph membership and
+  current review authority are verified independently of immutable output custody;
+  a valid artifact hash alone grants no input permission. Dispatcher admission verifies
+  every exported file against the same successful producer as its required handoff,
+  including the phase-qualified alias; additional files do not authorize new dependencies.
+- `maxParallel` limits admitted unfinished roles. Each reconciliation advances all
+  eligible independent roles up to that bound, refreshing reservations and capacity
+  after mutations. Phase reservation and activation remain separate steps; an
+  unready parent does not delay other ready, independent roles. Admission is an
+  **upper bound**, not a guarantee of simultaneous native execution or throughput.
   Failed, ambiguous, incomplete, or stale children never unlock synthesis.
 - Optional role `budgetTokens` narrows the existing governed role subtree cap
   and must be an exact positive wire integer (at most 9,007,199,254,740,991);
@@ -123,8 +266,9 @@ rejected before creation rather than replaced with controller defaults.
   wire-integer bound. Revisions do not reset aggregate charges.
 - Synthesis must explicitly export every typed `deliverables[].name`; names are
   not inferred from prose. Deliverables are bounded safe filenames (0–16), with
-  absent media type or `text/plain`, `text/markdown`, or `application/json`.
-  These labels do not validate document semantics or JSON schema. Missing/blank
+  absent media type or `text/plain`, `text/markdown`, `text/csv`, or `application/json`.
+  CSV uses the same byte-preserving UTF-8 export and download path; no converter is required.
+  These labels do not validate document semantics, CSV structure, or JSON schema. Missing/blank
   required outputs fail execution; scratch files and old/different exports do not
   satisfy a requirement. Existing retry-aware export and immutable publication
   checks remain in force.
@@ -350,6 +494,11 @@ Two CRDs carry their cryptographic material inline rather than via OCI:
 Both inline paths avoid OCI for the same operational reason: the material is small, sandbox-scoped, and benefits from being editable in the YAML you already have under review. The OCI/cosign path exists for bundles where the *content* is large, evolves on its own schedule, and is worth pinning by immutable digest (the policy kinds above).
 
 ### Hot-reload, never-trust-bytes-twice
+
+Updates to a compiled InferencePolicy profile requeue all sandboxes in the source
+namespace that reference that policy, refreshing their runtime-namespace mirrors.
+Mirrored ConfigMaps do not trigger this watch, avoiding reconciliation feedback.
+This speeds propagation without weakening the all-consumer router-echo gate.
 
 The router watches its mounted ConfigMaps. When the controller updates the projection (because you bumped a `bundleRef` to a new digest, or because the cluster's `SignerPolicy` changed and an old bundle stopped passing verification), the router re-canonicalises the new bytes locally and POSTs the freshly-loaded digest back to the controller. The controller flips `Ready` only on a match. There is no "trust on first load" — the router re-validates on every reload.
 
@@ -679,7 +828,7 @@ spec:
 | `spec.tokenBudget.perRequestTokens` | Chat Completions rejects an explicitly requested output maximum above this cap before forwarding. This is not a total input-plus-output reservation; see scope below. |
 | `spec.tokenBudget.dailyTokens` / `monthlyTokens` | UTC-calendar usage thresholds checked before supported inference calls. CEL enforces `monthlyTokens ≥ dailyTokens`. These are separate from a Mission's lifetime `GovernedInference` budget. |
 | `spec.contentSafety` | Per-category severity floors (`Safe` \| `Low` \| `Medium` \| `High`). The router parses Foundry `prompt_filter_results` inline; there is **no** separate Content Safety call. |
-| `spec.contentSafety.requirePromptShields` | Fail-closed if Prompt Shields are advertised by the deployment but the response lacks the corresponding annotations. |
+| `spec.contentSafety.requirePromptShields` | Native Chat Completions fails closed unless every prompt-filter result carries a `jailbreak` or `indirect_attack` annotation with boolean `detected` and `filtered` fields. Empty results, unrelated severity categories, and malformed annotations do not prove that Prompt Shields ran. The same validation applies to provider error annotations and streaming responses. An active content-safety floor is rejected with HTTP 403 `content_safety_route_unsupported` on Responses, Anthropic Messages, other unenforced generation routes, and Chat-to-Responses translation. No unsupported route silently drops the floor; policies without a floor retain their existing routing. |
 | `spec.bundleRef` | Signed OCI artifact alternative to inline `tokenBudget` / `contentSafety` / `modelPreference` / `provider` / `guardrails` / `displayName`. `appliesTo` always comes from the CR. |
 
 > **Provider + guardrail enforcement scope today.** `spec.provider` routing and `spec.guardrails[]` scanning are wired on `/v1/chat/completions` and the Anthropic Messages routes (`/anthropic/v1/messages`, `/v1/messages`). Every other inference-bearing route, `/v1/completions`, `/v1/responses`, `/v1/embeddings`, image generation, and the Foundry proxy families that serve model output (`/agents*`, `/openai/responses*`, `/openai/conversations*`), does **not** implement either; rather than silently bypass the policy, they **fail closed** (501 for a non-Azure `spec.provider`, 403 when guardrails are declared). A plain Azure policy with no guardrails uses those routes exactly as before. The Foundry proxy guard is default-deny: only an explicit exempt set of canonical management/storage APIs (memory stores, knowledge bases, evaluations, files, vector stores, containers, and similar) bypasses it, because those surfaces are not general-purpose inference channels; every other or unknown Foundry path fails closed. Foundry proxy paths are canonicalized before routing: benign empty segments (`//`, trailing `/`) are collapsed, while dot segments (`.`/`..`, literal or percent-encoded), encoded slash/backslash forms, and malformed escapes are rejected outright (400 `invalid_path`) so a request cannot normalize into a different upstream route than the one classified. Guardrail output scanning covers assistant message text; tool-call arguments and provider extended-"thinking" deltas are not yet scanned. These gaps are on the roadmap.
@@ -691,6 +840,8 @@ When an inline policy's `modelPreference` is absent, a sandbox inherits the conf
 ---
 
 ## `KarsMemory` — memory store binding
+
+`KarsMemory` is an optional **explicit Foundry binding**, not a prerequisite for memory. Unbound sandboxes use a configured/discovered Foundry project when available, otherwise Bridge-owned private lexical memory. Inference provider choice does not select memory. Missing/invalid explicit bindings never fall back. See [backend selection, privacy and lifecycle](../memory.md).
 
 Binds a sandbox to a Foundry Memory Store. The reconciler compiles the binding into `/etc/kars/memory/binding.json`, the router loads it and echoes its digest back, and the controller marks the CR `Ready` only when those digests match — the same `Ready ⇔ router echo` invariant used by every other policy CRD.
 
@@ -704,7 +855,8 @@ spec:
   sandboxRef:
     name: my-agent                                        # required: sibling KarsSandbox
   storeName: episodic                                     # required (unless bundleRef)
-  scope: "agent_my-agent"                                 # optional; default `agent_<sandboxName>`; charset: letters/digits/_-.%+@/ (no colons)
+  scope: "agent_my-agent"                                 # required (unless bundleRef); exact private partition
+  sharedScopes: []                                        # private by default; e.g. ["team_beta"] explicitly grants sharing
   retentionDays: 30                                       # optional; > 0 when set
   deleteOnSandboxDelete: true                             # default true
 ```
@@ -712,11 +864,20 @@ spec:
 | Field | Notes |
 |---|---|
 | `spec.sandboxRef.name` | Required. Sibling `KarsSandbox` name; same namespace. |
-| `spec.storeName` | Required when `bundleRef` is absent. DNS-label-style. |
-| `spec.scope` | Foundry Memory Store partition key. Defaults to `agent:<sandboxName>` if absent. |
+| `spec.storeName` | Required when `bundleRef` is absent. DNS label, 1–63 lowercase alphanumeric/dash characters; starts and ends alphanumeric. |
+| `spec.scope` | Required when `bundleRef` is absent. Exact bound partition: 1–256 ASCII characters from `A-Za-z0-9_./%+@-`; no `.` or `..` path segments. No default for an incomplete binding. |
+| `spec.sharedScopes[]` | Optional, at most 64 distinct additional exact partitions in the same store, excluding `scope`; same character/length/path rules. Omitted or `[]` means private. Grants permit **search, update, and delete_scope**, not just read access. |
 | `spec.retentionDays` | Optional retention floor; runtime applies a `delete_scope` sweep past this age. |
 | `spec.deleteOnSandboxDelete` | When `true` (default), runtime calls `delete_scope` on this scope when the sandbox or CR is deleted. |
-| `spec.bundleRef` | Signed OCI artifact alternative to inline content (mutex with `storeName` / `scope` / `retentionDays` / `deleteOnSandboxDelete` / `displayName`). `sandboxRef` is always CR-owned. |
+| `spec.bundleRef` | Signed OCI artifact alternative to inline content (mutex with `storeName` / `scope` / `sharedScopes` / `retentionDays` / `deleteOnSandboxDelete` / `displayName`, including an inline empty grants list). The signed bundle must supply valid `storeName` **and** `scope`; partial/metadata-only bundles are rejected. `sandboxRef` is always CR-owned. |
+
+**Sharing is explicit authority.** Only authorize additional partitions deliberately through the binding or its verified signed bundle. Grants are case-sensitive exact strings: no normalization, aliases, wildcards, or prefix inheritance. Granting `team_beta` does not grant `team_beta/child`. A shared grant authorizes access within the bound store, not to other stores or store-wide administration. The compiler always emits `sharedScopes` (an empty list for private memory); changing grants changes the binding digest the router must echo.
+
+**Fail closed.** Whenever `KarsSandbox.spec.memoryRef` is present, the controller sets `MEMORY_BINDING_REQUIRED=true` on the router even if the referenced ConfigMap is missing and no mount can be injected. Missing or malformed required bindings must block memory operations, not silently select a convention-based store/scope. Invalid or missing required reloads revoke previously loaded grants. More than one JSON binding file is ambiguous and rejected, rather than selecting one lexicographically. A malformed loaded binding must never be treated as an absent binding to recover fallback access. OpenClaw and Hermes use the same router authorization path.
+
+**Direct REST access.** The same bound-store and exact-scope checks apply to direct Memory Store REST calls as to MCP memory tools. The router permits bound-store metadata/create and authorized `search`, `update`, and `delete_scope`; store listing, whole-store deletion, and unscoped routes are denied.
+
+**Asynchronous update polling limitation.** Status polling is authorized only for an accepted update ID this router observed for an authorized scope, and the router rechecks the current grants on every poll. The per-router application-state cache holds at most **4,096 update IDs for one hour** and is lost on router restart; eviction, expiry, restart, or an unknown ID causes polling to be denied. A denied poll does not prove that the original update failed. **Do not resubmit/replay the update POST to recover a polling ID**: the original update may already have succeeded. No polling ID authorizes another scope.
 
 > **Provisioning split.** The CRD reconciler compiles the binding into
 > `/etc/kars/memory/binding.json` and confirms the router loaded it
@@ -888,7 +1049,7 @@ CLI: `kars egress allow-extra <sandbox> --host … --reason … --ttl PT4H` to g
 
 ## `KarsSREAction` — approval-gated SRE remediation
 
-Namespaced. This is the **write surface** of the [autonomous SRE operator](../runbooks/sre.md). The SRE agent runs read-only by default; when it wants to *change* the cluster it does not call `kubectl` from inside its own process — it **proposes** a `KarsSREAction` (created with `approval.state: Pending`) carrying a diagnosis, a rationale, and one typed action from a closed set. The controller executes the action **only** after a human (or policy) flips `approval.state` to `Approved`, and then only through a **short-lived, single-use writer token**: it mints a `TokenRequest` for a dedicated writer ServiceAccount, binds it with a one-shot `ClusterRoleBinding` scoped to exactly that action, runs the action, and revokes the binding immediately afterwards. The agent's own ServiceAccount never holds write permissions.
+Namespaced. This is the **write surface** of the [autonomous SRE operator](../runbooks/sre.md). The SRE agent runs read-only by default; when it wants to *change* the cluster it does not call `kubectl` from inside its own process — it **proposes** a `KarsSREAction` (created with `approval.state: Pending`) carrying a diagnosis, a rationale, and one typed action from a closed set. The controller executes the action **only** after a human (or policy) flips `approval.state` to `Approved`, and then only through an **isolated short-lived writer token**: it mints a 600-second `TokenRequest` for a per-action ServiceAccount, grants exact named-resource verbs through a namespaced Role/RoleBinding, dry-runs and executes with UID/resourceVersion fences, and durably retries authority cleanup. Tokens are SA-lifetime-bound, not SRE-Pod-bound or inherently single-use; the persisted execution claim prevents replay of the consumed action attempt. The agent's own ServiceAccount never holds write permissions.
 
 Conventionally these CRs live in the SRE sandbox's own namespace (`kars-sre`) so list/watch from the agent's ServiceAccount is naturally scoped, but the controller accepts whatever namespace the operator configures.
 
@@ -932,7 +1093,15 @@ status:
                                        # (or Rejected / Expired)
   observedGeneration: 2
   appliedAt: "2026-06-25T10:14:52Z"    # set on transition into Applied
-  writerCrbName: kars-sre-writer-...   # one-shot ClusterRoleBinding, cleaned up post-exec
+  execution:                        # persistent attempt; no credentials
+    startedAt: "2026-10-25T06:00:00Z"
+    deadline: "2026-10-25T06:02:00Z"
+    namespace: target-namespace
+    namespaceUid: target-namespace-uid
+    authorityName: sre-action-<full-action-uid>
+    targetUid: target-resource-uid
+    cleanupPending: false           # only after authority confirmed absent
+  # writerCrbName is retained only for unresolved legacy binding detection.
   conditions:
     - type: Approved                   # True iff spec.approval.state=Approved
       status: "True"

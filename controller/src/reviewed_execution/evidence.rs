@@ -3,6 +3,14 @@
 
 use super::*;
 
+const ROUTER_OBSERVATIONS_ARTIFACT: &str = "kars-router-observations.json";
+const MAX_ACTIVITY_BYTES: usize = 384 * 1024;
+pub(super) const MAX_BASE_BYTES: usize = super::MAX_INPUT_BYTES;
+
+#[cfg(test)]
+#[path = "evidence_tests.rs"]
+mod tests;
+
 // Mission publication owns evidence without the controller's GC-blocking flag.
 pub(super) fn owned(map: &ConfigMap, task: &KarsTask) -> Result<()> {
     live(&map.metadata)?;
@@ -29,12 +37,33 @@ fn number(value: &Value, field: &str) -> Result<u64> {
         .filter(|n| *n <= 9_007_199_254_740_991)
         .ok_or_else(|| anyhow::anyhow!("invalid measured {field}"))
 }
+fn completed_required(phase: &Value) -> Result<u64> {
+    if phase.get("completedRequiredToolCalls").is_none() {
+        Ok(0)
+    } else {
+        number(phase, "completedRequiredToolCalls")
+    }
+}
+fn required_progress(previous: &Value, current: &Value) -> Result<()> {
+    ensure!(
+        completed_required(current)? >= completed_required(previous)?,
+        "required tool evidence regressed"
+    );
+    Ok(())
+}
 fn measured(value: &Value, phase: &ExecutionPhase, success: bool) -> Result<()> {
     text(value, "model")?;
     let rounds = number(value, "rounds")?;
     let p = &value["phase"];
     let attempted = number(p, "attemptedToolCalls")?;
     let successful = number(p, "successfulToolCalls")?;
+    let completed = completed_required(p)?;
+    ensure!(
+        completed <= phase.required_tool_calls.len() as u64
+            && completed <= successful
+            && (!success || completed == phase.required_tool_calls.len() as u64),
+        "required tool evidence does not satisfy the reviewed contract"
+    );
     ensure!(
         p["name"] == phase.name
             && p["minToolCalls"] == phase.min_tool_calls
@@ -65,8 +94,13 @@ fn time(value: &Value, field: &str) -> Result<chrono::DateTime<chrono::FixedOffs
     Ok(chrono::DateTime::parse_from_rfc3339(text(value, field)?)?)
 }
 
-pub(super) fn success(record: &Value, task: &KarsTask, phase: &ExecutionPhase) -> Result<()> {
-    success_with_outputs(record, task, phase, vec![HANDOFF.into()])
+pub(super) fn success(
+    record: &Value,
+    task: &KarsTask,
+    phase: &ExecutionPhase,
+    peers: Option<&Value>,
+) -> Result<()> {
+    success_with_outputs(record, task, phase, vec![HANDOFF.into()], peers)
 }
 
 pub(super) fn success_with_outputs(
@@ -74,18 +108,62 @@ pub(super) fn success_with_outputs(
     task: &KarsTask,
     phase: &ExecutionPhase,
     required: Vec<String>,
+    peers: Option<&Value>,
 ) -> Result<()> {
+    terminal(record, task, phase, required, true, peers)
+}
+
+pub(super) fn failure_with_outputs(
+    record: &Value,
+    task: &KarsTask,
+    phase: &ExecutionPhase,
+    required: Vec<String>,
+    peers: Option<&Value>,
+) -> Result<()> {
+    terminal(record, task, phase, required, false, peers)
+}
+
+fn terminal(
+    record: &Value,
+    task: &KarsTask,
+    phase: &ExecutionPhase,
+    required: Vec<String>,
+    success: bool,
+    peers: Option<&Value>,
+) -> Result<()> {
+    let terminal_status = text(record, "phase")?;
+    ensure!(
+        if success {
+            terminal_status == "succeeded"
+        } else {
+            matches!(terminal_status, "failed" | "rejected")
+        },
+        "mission is not a verified terminal outcome"
+    );
     let c = &record["candidate"];
     let a = &record["assignment"];
     let reply = &record["reply"];
+    // Activity has its own allowance; it must not enlarge ordinary mission payloads.
+    let mut base = reply.clone();
+    let fields = base
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("missing mission reply"))?;
+    fields.remove("routerObservations");
+    if let Some(artifacts) = fields.get_mut("artifacts").and_then(Value::as_object_mut) {
+        artifacts.remove(ROUTER_OBSERVATIONS_ARTIFACT);
+    }
+    ensure!(
+        serde_json::to_vec(reply)?.len() <= MAX_BASE_BYTES + MAX_ACTIVITY_BYTES
+            && serde_json::to_vec(&base)?.len() <= MAX_BASE_BYTES,
+        "mission reply exceeds wire bounds"
+    );
     let nonce = ann(task, RUN).ok_or_else(|| anyhow::anyhow!("missing phase nonce"))?;
     let content = crate::mission_delivery::admission::objective(task, nonce)?;
     ensure!(
         record["version"] == 1
-            && record["phase"] == "succeeded"
             && a["type"] == "mission:assign"
             && reply["type"] == "mission:reply"
-            && reply["status"] == "succeeded"
+            && reply["status"] == terminal_status
             && c["taskUid"] == json!(task.uid())
             && c["taskName"] == task.name_any()
             && c["namespace"] == json!(task.namespace())
@@ -145,7 +223,8 @@ pub(super) fn success_with_outputs(
     ensure!(
         (c["runtime"] == runtime || (runtime == "OpenClaw" && c.get("runtime").is_none()))
             && a["artifactFormat"] == "text-v1"
-            && reply["artifactFormat"] == "text-v1"
+            && (reply["artifactFormat"] == "text-v1"
+                || (!success && reply.get("artifactFormat").is_none()))
             && activity_matches,
         "phase runtime or evidence negotiation mismatch"
     );
@@ -158,13 +237,14 @@ pub(super) fn success_with_outputs(
         c.get("inputArtifacts") == a.get("inputArtifacts"),
         "assignment inputs changed"
     );
-    let expected = contract(phase, &inputs, required.clone())?;
+    let expected = peer_contract(phase, &inputs, required.clone(), peers)?;
     for field in [
         "version",
         "reviewedPhase",
         "phaseDigest",
         "inputDigest",
         "requiredOutputs",
+        "peerContext",
     ] {
         ensure!(
             a.get(field) == expected.get(field) && reply.get(field) == expected.get(field),
@@ -173,33 +253,72 @@ pub(super) fn success_with_outputs(
     }
     ensure!(
         c["reviewedPhase"] == expected["reviewedPhase"]
-            && c["requiredOutputs"] == expected["requiredOutputs"],
+            && c["requiredOutputs"] == expected["requiredOutputs"]
+            && c.get("peerContext") == expected.get("peerContext"),
         "candidate contract mismatch"
     );
-    text(reply, "output")?;
-    measured(&reply["evidence"], phase, true)?;
-    let artifacts = reply["artifacts"]
-        .as_object()
-        .ok_or_else(|| anyhow::anyhow!("missing explicit artifacts"))?;
-    ensure!(
-        artifacts.len() <= 16
-            && serde_json::to_vec(artifacts)?.len() <= 128 * 1024
-            && artifacts.iter().all(|(name, value)| !name.is_empty()
-                && name.len() <= 128
-                && name.as_bytes()[0].is_ascii_alphanumeric()
-                && !matches!(name.as_str(), "response.md" | "constructor" | "prototype")
-                && name
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-                && value
-                    .as_str()
-                    .is_some_and(|s| !s.trim().is_empty() && s.len() <= 65536))
-            && required.iter().all(|name| artifacts.contains_key(name)),
-        "invalid artifacts or missing reviewed required output"
-    );
+    if !reply["evidence"].is_null() || success {
+        measured(&reply["evidence"], phase, success)?;
+    }
+    if success {
+        text(reply, "output")?;
+        let artifacts = reply["artifacts"]
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("missing explicit artifacts"))?;
+        let ordinary: serde_json::Map<String, Value> = artifacts
+            .iter()
+            .filter(|(name, _)| name.as_str() != ROUTER_OBSERVATIONS_ARTIFACT)
+            .map(|(name, content)| (name.clone(), content.clone()))
+            .collect();
+        if let Some(activity) = artifacts.get(ROUTER_OBSERVATIONS_ARTIFACT) {
+            ensure!(
+                serde_json::to_vec(&json!({(ROUTER_OBSERVATIONS_ARTIFACT): activity}))?.len()
+                    <= MAX_ACTIVITY_BYTES,
+                "router observations artifact exceeds activity bound"
+            );
+        }
+        ensure!(
+            artifacts.len() <= 16
+                && serde_json::to_vec(&ordinary)?.len() <= 128 * 1024
+                && artifacts.iter().all(|(name, value)| !name.is_empty()
+                    && name.len() <= 128
+                    && name.as_bytes()[0].is_ascii_alphanumeric()
+                    && !matches!(name.as_str(), "response.md" | "constructor" | "prototype")
+                    && name
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+                    && value.as_str().is_some_and(|s| !s.trim().is_empty()
+                        && (name == ROUTER_OBSERVATIONS_ARTIFACT || s.len() <= 65536)))
+                && required.iter().all(|name| artifacts.contains_key(name)),
+            "invalid artifacts or missing reviewed required output"
+        );
+    } else {
+        ensure!(
+            (reply.get("artifacts").is_none()
+                || (terminal_status == "failed"
+                    && phase.execution_mode.as_deref() == Some("native")
+                    && phase.capabilities.iter().any(|c| c == "python-execute")
+                    && reply["artifacts"]
+                        .as_object()
+                        .is_some_and(|files| files.len() == 1
+                            && files
+                                .get("kars-python-executions.json")
+                                .and_then(Value::as_str)
+                                .is_some_and(|s| !s.trim().is_empty() && s.len() <= 65536))))
+                && reply.get("output").is_none_or(Value::is_string)
+                && reply.get("error").is_none_or(Value::is_string),
+            "failed terminal must not publish successful artifacts"
+        );
+    }
+    let event_limit = if phase.execution_mode.as_deref() == Some("native") {
+        let tools = u64::try_from(phase.max_tool_calls)?;
+        128.max(2 * 8.max(tools + 2) + 3 * tools + 2)
+    } else {
+        128
+    };
     let events = record["events"]
         .as_array()
-        .filter(|v| !v.is_empty() && v.len() <= 128)
+        .filter(|v| !v.is_empty() && v.len() as u64 <= event_limit)
         .ok_or_else(|| anyhow::anyhow!("missing bounded event journal"))?;
     let mut prior_time = time(record, "startedAt")?;
     let end = time(record, "updatedAt")?;
@@ -211,15 +330,17 @@ pub(super) fn success_with_outputs(
         ensure!(
             at >= prior_time
                 && at <= end
-                && matches!(status, "accepted" | "running" | "succeeded")
+                && (matches!(status, "accepted" | "running") || status == terminal_status)
                 && (!running || status != "accepted")
-                && (status != "succeeded" || i == events.len() - 1),
+                && (status != "rejected" || i == 0)
+                && (status != terminal_status || i == events.len() - 1),
             "invalid mission event ordering"
         );
-        if status != "accepted" || !event["evidence"].is_null() {
+        if matches!(status, "running" | "succeeded") || !event["evidence"].is_null() {
             measured(&event["evidence"], phase, status == "succeeded")?;
         }
         if let Some(prior) = previous {
+            required_progress(&prior["phase"], &event["evidence"]["phase"])?;
             ensure!(
                 event["evidence"]["model"] == prior["model"]
                     && number(&event["evidence"], "rounds")? >= number(prior, "rounds")?,
@@ -254,7 +375,7 @@ pub(super) fn success_with_outputs(
         prior_time = at;
     }
     ensure!(
-        events.last().unwrap()["status"] == "succeeded"
+        events.last().unwrap()["status"] == terminal_status
             && events.last().unwrap()["evidence"] == reply["evidence"],
         "terminal journal differs from reply"
     );
@@ -311,10 +432,8 @@ pub(super) fn projection(record: &Value, output: &ConfigMap, artifacts: &ConfigM
         ("assignmentNonce", &c["runNonce"]),
         ("assignmentId", &a["assignmentId"]),
         ("runtimeBootId", &a["bootId"]),
-        ("output", &reply["output"]),
         ("startedAt", &record["startedAt"]),
         ("finishedAt", &record["updatedAt"]),
-        ("model", &reply["evidence"]["model"]),
     ] {
         expected.insert(
             field.into(),
@@ -324,17 +443,75 @@ pub(super) fn projection(record: &Value, output: &ConfigMap, artifacts: &ConfigM
                 .into(),
         );
     }
-    expected.insert("status".into(), "ok".into());
-    expected.insert("error".into(), reply["error"].as_str().unwrap_or("").into());
+    let success = reply["status"] == "succeeded";
     expected.insert(
-        "totalTokens".into(),
-        number(&reply["evidence"]["usage"], "totalTokens")?.to_string(),
+        "status".into(),
+        if success {
+            "ok"
+        } else {
+            text(reply, "status")?
+        }
+        .into(),
     );
-    expected.insert("usageKnown".into(), "true".into());
-    let mut files: BTreeMap<String, String> = serde_json::from_value(reply["artifacts"].clone())?;
-    files
-        .entry("response.md".into())
-        .or_insert_with(|| reply["output"].as_str().unwrap().into());
+    expected.insert(
+        "output".into(),
+        if success {
+            text(reply, "output")?
+        } else if reply["status"] == "failed" {
+            reply["output"].as_str().unwrap_or("")
+        } else {
+            ""
+        }
+        .into(),
+    );
+    expected.insert(
+        "model".into(),
+        reply["evidence"]["model"].as_str().unwrap_or("").into(),
+    );
+    expected.insert(
+        "error".into(),
+        if success {
+            ""
+        } else {
+            reply["error"].as_str().unwrap_or("")
+        }
+        .into(),
+    );
+    let usage_known = !reply["evidence"]["usage"].is_null();
+    if usage_known {
+        expected.insert(
+            "totalTokens".into(),
+            number(&reply["evidence"]["usage"], "totalTokens")?.to_string(),
+        );
+    }
+    expected.insert("usageKnown".into(), usage_known.to_string());
+    let mut files: BTreeMap<String, String> =
+        if success || (reply["status"] == "failed" && reply.get("artifacts").is_some()) {
+            serde_json::from_value(reply["artifacts"].clone())?
+        } else {
+            BTreeMap::new()
+        };
+    if success {
+        files
+            .entry("response.md".into())
+            .or_insert_with(|| reply["output"].as_str().unwrap().into());
+    } else if let Some(observations) = reply.get("routerObservations") {
+        let encoded = observations
+            .as_str()
+            .filter(|value| value.len() <= MAX_ACTIVITY_BYTES)
+            .ok_or_else(|| anyhow::anyhow!("invalid failed router observations"))?;
+        let report: Value = serde_json::from_str(encoded)?;
+        ensure!(
+            reply["status"] == "failed"
+                && reply["activityFormat"] == "router-observations-v1"
+                && report["version"] == 1
+                && report["source"] == "runtime-forwarded-router-observations"
+                && report["rounds"].is_array()
+                && matches!(report["state"].as_str(), Some("observed" | "unavailable")),
+            "invalid failed router observations"
+        );
+        files.insert(ROUTER_OBSERVATIONS_ARTIFACT.into(), encoded.into());
+    }
     expected.insert("artifactCount".into(), files.len().to_string());
     let mut actual = output
         .data
@@ -346,7 +523,10 @@ pub(super) fn projection(record: &Value, output: &ConfigMap, artifacts: &ConfigM
     ensure!(
         serde_json::from_str::<Value>(&encoded)? == *reply
             && expected == actual
-            && artifacts.data.as_ref() == Some(&files),
+            && artifacts
+                .data
+                .as_ref()
+                .map_or_else(|| files.is_empty(), |actual| actual == &files),
         "canonical projection differs from durable terminal"
     );
     Ok(())

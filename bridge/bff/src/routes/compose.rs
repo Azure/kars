@@ -21,6 +21,7 @@
 //   not set the endpoint reports `available: false` and the UI falls back to the
 //   manual composer — never a fabricated package.
 
+mod budgets;
 mod client;
 mod egress;
 mod execution;
@@ -30,7 +31,9 @@ mod mission_proposal;
 mod models;
 mod prompts;
 mod routing;
+mod spending;
 mod team;
+mod team_profiles;
 mod team_proposal;
 mod team_qualification;
 
@@ -51,6 +54,25 @@ pub use team::{
     ComposeTeamMilestone, ComposeTeamProposal, ComposeTeamRequest, ComposeTeamResponse,
     ComposeTeamRole, compose_team,
 };
+
+fn proposal_review_rationale(
+    rationale: Option<String>,
+    readiness: Result<(), String>,
+) -> Option<String> {
+    match readiness {
+        Ok(()) => rationale,
+        Err(error) => Some(
+            format!(
+                "Launch blocked: {error}. The task-specific proposal is retained for review; \
+             composition does not authorize execution. Resolve the failing pre-flight checks \
+             before launch. {}",
+                rationale.unwrap_or_default(),
+            )
+            .trim()
+            .to_string(),
+        ),
+    }
+}
 
 /// The cluster-default governance policy. Assigned to any envelope the
 /// orchestrator (or operator) leaves un-governed, so the sandbox is BOTH

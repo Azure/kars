@@ -34,12 +34,55 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Prepare verified CodeQL compatibility bundle
+        if: matrix.language == 'rust' || matrix.language == 'actions'
+        id: rust-tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/kars-codeql-bundle-linux64.tar.gz"
+          curl --fail --location --retry 3 \
+            https://github.com/github/codeql-action/releases/download/codeql-bundle-v2.27.4/codeql-bundle-linux64.tar.gz \
+            --output "$archive"
+          printf '%s  %s\n' \
+            89ed56c8ec6bfccef6a0d2e7fe86da0469ca24b4db08b88016ec134b942c17a4 \
+            "$archive" | sha256sum --check --strict
+          mkdir "$RUNNER_TEMP/kars-codeql-bundle"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/kars-codeql-bundle"
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+
+      - name: Verify corrected Rust suite coverage and behavioral controls
+        if: matrix.language == 'rust'
+        id: rust-controls
+        env:
+          CODEQL_BIN: ${{ runner.temp }}/kars-codeql-bundle/codeql/codeql
+          CODEQL_SOURCE: ${{ runner.temp }}/kars-codeql-source
+          CODEQL_EVIDENCE: ${{ runner.temp }}/kars-codeql-controls
+          CODEQL_SOURCE_SHA: fdf5c8481ffef04e04c7376167fb5ce25aae8453
+        run: bash ci/codeql-rust-controls.sh
+
+      - name: Verify Actions cache-mode suite coverage and behavioral controls
+        if: matrix.language == 'actions'
+        id: actions-controls
+        env:
+          CODEQL_BIN: ${{ runner.temp }}/kars-codeql-bundle/codeql/codeql
+          CODEQL_SOURCE: ${{ runner.temp }}/kars-codeql-source
+          CODEQL_EVIDENCE: ${{ runner.temp }}/kars-codeql-controls
+          CODEQL_LANGUAGE: actions
+          # Immutable upstream github/codeql#22613 revision, including its controls.
+          CODEQL_SOURCE_SHA: dc2387baefc27bf00e6a8e6ecd2d4c6d3c8e07d7
+        run: bash ci/codeql-rust-controls.sh
+
       - name: Initialize CodeQL
         uses: github/codeql-action/init@e46ed2cbd01164d986452f91f178727624ae40d7 # v4.35.3
         with:
           languages: ${{ matrix.language }}
           config-file: ./.github/codeql-config.yml
-          queries: security-and-quality
+          # Temporary full-suite replacements for github/codeql#22917 and #22613.
+          # Restore bundled defaults once fixed releases pass these controls.
+          config: ${{ (matrix.language == 'rust' || matrix.language == 'actions') && '{"name":"Kars CodeQL Config","paths-ignore":[],"disable-default-queries":true}' || '' }}
+          queries: ${{ matrix.language == 'rust' && steps.rust-controls.outputs.suite || matrix.language == 'actions' && steps.actions-controls.outputs.suite || 'security-and-quality' }}
+          tools: ${{ steps.rust-tools.outputs.archive }}
 
       - name: Autobuild
         uses: github/codeql-action/autobuild@e46ed2cbd01164d986452f91f178727624ae40d7 # v4.35.3
@@ -48,3 +91,11 @@ jobs:
         uses: github/codeql-action/analyze@e46ed2cbd01164d986452f91f178727624ae40d7 # v4.35.3
         with:
           category: "/language:${{ matrix.language }}"
+
+      - name: Preserve scanner compatibility controls
+        if: always() && (matrix.language == 'rust' || matrix.language == 'actions')
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: codeql-${{ matrix.language }}-controls
+          path: ${{ runner.temp }}/kars-codeql-controls/
+          if-no-files-found: warn

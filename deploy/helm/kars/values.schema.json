@@ -2,6 +2,46 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
   "properties": {
+    "sre": {
+      "type": "object",
+      "properties": {
+        "modelRouteBaseline": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["provider", "model"],
+          "properties": {
+            "provider": { "type": "string" },
+            "model": { "type": "string" }
+          }
+        },
+        "datapathWitnessBaseline": {
+          "type": "object",
+          "required": ["managed", "enabled", "sandboxes", "aggregator", "gadget"],
+          "properties": {
+            "managed": { "const": true },
+            "enabled": { "const": true },
+            "scope": { "enum": ["all", "selected"] },
+            "sandboxes": { "type": "array", "uniqueItems": true, "maxItems": 50,
+              "items": { "type": "string", "maxLength": 58, "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" } },
+            "aggregator": { "type": "object", "required": ["image"], "properties": {
+              "image": { "type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[a-f0-9]{64}$" }
+            } },
+            "gadget": { "type": "object", "required": ["image"], "properties": {
+              "image": { "type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[a-f0-9]{64}$" }
+            } }
+          }
+        }
+      }
+    },
+    "headlamp": {
+      "type": "object",
+      "properties": {
+        "imageBaseline": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._:/-]*:latest(@sha256:[a-f0-9]{64})?$"
+        }
+      }
+    },
     "monitoring": {
       "type": "object",
       "properties": {
@@ -17,6 +57,19 @@
             "properties": {
               "kind": { "enum": ["User", "Group"] },
               "name": { "$ref": "#/definitions/text" }
+            }
+          }
+        },
+        "querySubjectsBaseline": { "$ref": "#/properties/monitoring/properties/querySubjects" },
+        "grafanaBaseline": {
+          "type": "object",
+          "required": ["enabled", "image", "sidecar"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "image": { "$ref": "#/definitions/monitoringImageBaseline" },
+            "sidecar": {
+              "type": "object", "required": ["image"],
+              "properties": { "image": { "$ref": "#/definitions/monitoringImageBaseline" } }
             }
           }
         },
@@ -47,6 +100,15 @@
     }
   },
   "definitions": {
+    "monitoringImageBaseline": {
+      "type": "object",
+      "required": ["registry", "repository", "tag"],
+      "properties": {
+        "registry": { "type": "string" },
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string", "pattern": "^latest(@sha256:[a-f0-9]{64})?$" }
+      }
+    },
     "guid": { "type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$" },
     "text": { "type": "string", "minLength": 1, "pattern": "^\\S(?:[^\\r\\n]*\\S)?$" },
     "https": { "type": "string", "pattern": "^https://[A-Za-z0-9][A-Za-z0-9.-]*(?::[0-9]+)?(?:/[^\\s]*)?/?$" },

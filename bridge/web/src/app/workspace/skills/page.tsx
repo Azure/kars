@@ -4,7 +4,7 @@
 // kars Bridge Workspace — Skills. The USER side of the skill trust gate: upload
 // a skill package, watch it move through operator review, and see which skills
 // are approved + usable to assign to a task or team. Uploading proposes
-// capability; a different operator reviews the validated content before use.
+// capability; operator review of the validated content is required before use.
 
 import { PageHeader, Section } from "@/components/ui";
 import { HonestState } from "@/components/honest-state";
@@ -44,7 +44,7 @@ export default async function SkillsPage() {
       <PageHeader
         eyebrow="Workspace"
         title="Skills"
-        lead="Reusable instructions and assets for your missions and teams. Upload a skill for content validation and independent operator review. Approval binds its current identity and content; it does not grant additional tools or certify a malware scan."
+        lead="Reusable instructions and assets for your missions and teams. Upload a skill for content validation and operator review. Administrators may approve their own submissions. Approval binds its current identity and content; it does not grant additional tools or certify a malware scan."
       />
 
       {error ? (
@@ -60,13 +60,13 @@ export default async function SkillsPage() {
             : <HonestState variant="not_wired" compact title="Skill authoring is unavailable"
                 detail="Tool policies could not be loaded. Existing skills remain visible; retry after checking connectivity." />}
 
-          <Section title="Approved skills" subtitle={`${usable.length} usable — independently reviewed and content-bound.`}>
+          <Section title="Approved skills" subtitle={`${usable.length} usable — reviewed and content-bound.`}>
             {usable.length === 0 ? (
               <HonestState
                 variant="empty"
                 compact
                 title="No approved skills yet"
-                detail="Upload a skill above; after a different operator approves its current content, it appears here ready to assign."
+                detail="Upload a skill above; after an operator approves its current content, it appears here ready to assign. Administrators may review their own submissions."
               />
             ) : (
               <ul className="divide-y divide-border">

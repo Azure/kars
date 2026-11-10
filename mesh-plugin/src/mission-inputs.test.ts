@@ -2,7 +2,8 @@
 // Licensed under the MIT License.
 
 import { describe, expect, it, vi } from "vitest";
-import { MAX_MISSION_INPUT_BYTES, missionInputContentDigest, missionInputReferences, missionInputs, missionInputsDigest } from "./mission-inputs.js";
+import { MAX_MISSION_INPUT_BYTES, MAX_MISSION_INPUT_FILE_BYTES, MAX_MISSION_INPUTS, missionInputContentDigest, missionInputReferences, missionInputs, missionInputsDigest } from "./mission-inputs.js";
+import { MAX_MISSION_BASE_BYTES, MAX_MISSION_MESSAGE_BYTES } from "./mission-protocol.js";
 
 const source = { namespace: "kars-system", taskName: "writer", taskUid: "task-uid", sandboxUid: "sandbox-uid",
   podUid: "pod-uid", runNonce: "run-first", assignmentId: "assignment-first", agentDid: `did:mesh:${"a".repeat(32)}`, artifactName: "draft.md" };
@@ -78,15 +79,23 @@ describe("immutable mission input contract", () => {
   it("enforces serialized UTF-8 size, unique names and collection bounds", () => {
     expect(() => missionInputs([])).toThrow();
     expect(() => missionInputs([input(), input()])).toThrow();
-    expect(missionInputs(Array.from({ length: 16 }, (_, i) => input(`file-${i}.md`)))).toHaveLength(16);
-    expect(() => missionInputs(Array.from({ length: 17 }, (_, i) => input(`file-${i}.md`)))).toThrow();
-    for (const content of ["x".repeat(MAX_MISSION_INPUT_BYTES), "✓".repeat(MAX_MISSION_INPUT_BYTES / 3), "\n".repeat(40_000) + "x"]) {
+    expect(MAX_MISSION_INPUTS).toBe(8 * 16 + 8 + 16);
+    for (const count of [16, 28, MAX_MISSION_INPUTS]) {
+      const documents = Array.from({ length: count }, (_, i) => input(`file-${i}.md`));
+      expect(missionInputs(documents)).toHaveLength(count);
+      expect(missionInputReferences(documents.map(({ content: _content, ...ref }) => ref))).toHaveLength(count);
+    }
+    expect(() => missionInputs(Array.from({ length: MAX_MISSION_INPUTS + 1 }, (_, i) => input(`file-${i}.md`)))).toThrow();
+    for (const content of ["x".repeat(MAX_MISSION_INPUT_FILE_BYTES + 1), "✓".repeat(Math.ceil(MAX_MISSION_INPUT_FILE_BYTES / 3))]) {
       expect(() => missionInputs([input("draft.md", content)])).toThrow();
     }
-    const small = input("draft.md", "x");
-    const overhead = Buffer.byteLength(JSON.stringify([small])) - 1;
-    expect(missionInputs([input("draft.md", "x".repeat(MAX_MISSION_INPUT_BYTES - overhead))])).toHaveLength(1);
-    expect(() => missionInputs([input("draft.md", "x".repeat(MAX_MISSION_INPUT_BYTES - overhead + 1))])).toThrow();
+    expect(MAX_MISSION_INPUT_BYTES).toBe(MAX_MISSION_MESSAGE_BYTES - MAX_MISSION_BASE_BYTES);
+    const prefix = Array.from({ length: 5 }, (_, i) => input(`file-${i}.md`, "x".repeat(MAX_MISSION_INPUT_FILE_BYTES)));
+    const remaining = MAX_MISSION_INPUT_BYTES - Buffer.byteLength(JSON.stringify([...prefix, input("c.md", "x")])) + 1;
+    expect(missionInputs([...prefix, input("c.md", "x".repeat(remaining))])).toHaveLength(6);
+    expect(() => missionInputs([...prefix, input("c.md", "x".repeat(remaining + 1))])).toThrow("serialized byte limit");
+    expect(missionInputs([input("escaped.md", "\n".repeat(40_000) + "✓")])).toHaveLength(1);
+    expect(() => missionInputs(Array.from({ length: 5 }, (_, i) => input(`escaped-${i}.md`, "\n".repeat(40_000) + "✓")))).toThrow("serialized byte limit");
   });
 
   it("rejects accessors, hidden/unknown fields, symbols, sparse and exotic containers without invoking getters", () => {

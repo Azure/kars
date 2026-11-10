@@ -15,7 +15,7 @@ use serde_json::json;
 
 pub(super) const REVISION: &str = "kars.azure.com/services-privacy-revision";
 pub(super) const VERSION: &str = crate::sre_registration::CONTROL_VERSION;
-pub(super) const RETIRED: &str = "kars.azure.com/services-credential-retired";
+pub(crate) const RETIRED: &str = "kars.azure.com/services-credential-retired";
 pub(super) const SOURCE_REVISION: &str = "kars.azure.com/services-source-revision";
 
 #[derive(Debug, thiserror::Error)]
@@ -45,7 +45,7 @@ pub(crate) struct Purpose {
     pub version_annotation: &'static str,
 }
 
-const ADMIN: Purpose = Purpose {
+pub(crate) const ADMIN: Purpose = Purpose {
     secret: SECRET,
     token_key: Some("control-token"),
     version_annotation: VERSION,
@@ -90,6 +90,18 @@ impl Projection {
     }
 
     pub(crate) fn decorate(&self, deployment: &mut Deployment) {
+        if let Some(epoch) = &self.epoch {
+            deployment
+                .spec
+                .as_mut()
+                .expect("controller Deployment spec")
+                .template
+                .metadata
+                .get_or_insert_default()
+                .annotations
+                .get_or_insert_default()
+                .insert(EPOCH.into(), epoch.clone());
+        }
         if let Some(epoch) = &self.consumption_epoch {
             deployment
                 .spec
@@ -127,11 +139,12 @@ impl Projection {
         // Include terminating Pods: Deployment availability alone can hide a
         // still-running router that accepts its old startup-cached token.
         Ok(pods.iter().all(|pod| {
-            pod.metadata
-                .annotations
-                .as_ref()
-                .and_then(|annotations| annotations.get(self.purpose.version_annotation))
+            let annotations = pod.metadata.annotations.as_ref();
+            annotations.and_then(|annotations| annotations.get(self.purpose.version_annotation))
                 == Some(&self.version)
+                && self.epoch.as_ref().is_none_or(|epoch| {
+                    annotations.and_then(|annotations| annotations.get(EPOCH)) == Some(epoch)
+                })
         }))
     }
 }
@@ -305,8 +318,12 @@ async fn quarantine(
             .unwrap_or(1)
             != 0
     {
+        let params = PatchParams {
+            field_manager: Some(crate::field_managers::CLAWSANDBOX.into()),
+            ..Default::default()
+        };
         Api::<Deployment>::namespaced(client.clone(), namespace)
-            .patch(name, &PatchParams::default(), &Patch::Merge(json!({
+            .patch(name, &params, &Patch::Merge(json!({
                 "metadata":{"uid":deployment.metadata.uid,"resourceVersion":deployment.metadata.resource_version},
                 "spec":{"replicas":0},
             }))).await.map_err(api_error)?;
@@ -322,9 +339,7 @@ async fn checked_epoch(
     purpose: Purpose,
 ) -> Result<Option<String>, IssuanceError> {
     let result = match crate::sre_authority::privacy_readiness(client, namespace).await {
-        Ok(crate::sre_authority::PrivacyReadiness::Qualified(_)) => {
-            crate::sre_authority::privacy_epoch(client, namespace).await
-        }
+        Ok(crate::sre_authority::PrivacyReadiness::Qualified(epoch)) => Ok(epoch),
         Ok(crate::sre_authority::PrivacyReadiness::Pending) => {
             return Err(IssuanceError::PrivacyPending);
         }
@@ -393,8 +408,8 @@ pub(super) async fn ensure(
     client: &Client,
     sandbox: &KarsSandbox,
     namespace: &Namespace,
-) -> Result<Projection, String> {
-    ensure_for(client, sandbox, namespace, ADMIN, None).await
+) -> Result<Projection, IssuanceError> {
+    ensure_bound(client, sandbox, namespace, ADMIN, None, None).await
 }
 
 pub(crate) async fn ensure_for(
@@ -632,11 +647,15 @@ pub(crate) async fn ensure_bound(
         purpose,
         epoch,
         consumption_epoch,
-        version: format!(
-            "{}:{}",
-            secret.metadata.uid.unwrap(),
-            secret.metadata.resource_version.unwrap()
-        ),
+        version: if purpose.secret == ADMIN.secret {
+            crate::sre_registration::control_credential_version(&secret)?
+        } else {
+            format!(
+                "{}:{}",
+                secret.metadata.uid.unwrap(),
+                secret.metadata.resource_version.unwrap()
+            )
+        },
     })
 }
 
@@ -678,7 +697,39 @@ pub(crate) async fn existing_configuration(
     sandbox: &KarsSandbox,
     namespace: &Namespace,
     purpose: Purpose,
-) -> Result<Option<serde_json::Value>, String> {
+) -> Result<Option<serde_json::Value>, IssuanceError> {
+    let Some(secret) = existing_secret_checked(client, sandbox, namespace, purpose).await? else {
+        return Ok(None);
+    };
+    secret
+        .data
+        .as_ref()
+        .and_then(|data| data.get("config.json"))
+        .map(|value| {
+            serde_json::from_slice(&value.0).map_err(|_| "Private configuration is invalid".into())
+        })
+        .transpose()
+}
+
+/// Read a purpose-specific credential through the same privacy/activation fences
+/// as configuration readers. Callers must also verify exact consumer versions.
+pub(crate) async fn existing_secret(
+    client: &Client,
+    sandbox: &KarsSandbox,
+    namespace: &Namespace,
+    purpose: Purpose,
+) -> Result<Option<Secret>, String> {
+    existing_secret_checked(client, sandbox, namespace, purpose)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn existing_secret_checked(
+    client: &Client,
+    sandbox: &KarsSandbox,
+    namespace: &Namespace,
+    purpose: Purpose,
+) -> Result<Option<Secret>, IssuanceError> {
     let namespace = super::super::namespace_ownership::recheck(client, sandbox, namespace)
         .await
         .map_err(|_| "Private configuration namespace authority changed")?;
@@ -711,17 +762,9 @@ pub(crate) async fn existing_configuration(
         Some(&secret),
         purpose,
     )
-    .await
-    .map_err(|error| error.to_string())?;
+    .await?;
     if !current(&secret, epoch.as_deref()) {
         return Ok(None);
     }
-    secret
-        .data
-        .as_ref()
-        .and_then(|data| data.get("config.json"))
-        .map(|value| {
-            serde_json::from_slice(&value.0).map_err(|_| "Private configuration is invalid".into())
-        })
-        .transpose()
+    Ok(Some(secret))
 }

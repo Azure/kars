@@ -60,6 +60,18 @@ Direct dependencies — see each package's `package.json`:
 | vitest (dev) | MIT |
 | oxlint (dev) | MIT |
 
+## CodeQL validation fixture
+
+`ci/codeql/bounded-value/fixtures/UnsafeDeserializationExtensions.qll` is an
+unmodified offline test fixture from `github/codeql` commit
+`fdf5c8481ffef04e04c7376167fb5ce25aae8453`, copyright 2006–2025 GitHub, Inc.,
+under the MIT License. The exact upstream license accompanies it at
+`ci/codeql/bounded-value/LICENSE.upstream`. Kars's separate installer and
+bounded-Value controls are first-party MIT code, not upstream CodeQL changes.
+The frozen controls retain their checksum-bound bytes and location-sensitive
+expected results; their explicit licensing coverage is in
+`ci/copyright-coverage.json` and the repository `LICENSE`.
+
 ## Container base images
 
 | Image | License/Provenance |
@@ -98,6 +110,20 @@ linked dependency notices accompany the built image. `bridge/idp/NOTICE`
 describes their installed locations. Generated module/checksum files and
 patch inputs retain their exact verified bytes; Kars headers must not rewrite
 them or imply ownership of upstream source. New Kars wrapper code is MIT.
+
+## Patched Headlamp Webpack checker
+
+`tools/headlamp-plugin/checker/fork-ts-checker-webpack-plugin-8.0.0-kars.tgz`
+is an attributable modification of the MIT-licensed upstream
+`fork-ts-checker-webpack-plugin` 8.0.0. The archive retains the upstream license,
+source ownership and worker/schema implementation. The Kars options-merge
+adapter replaces the vulnerable `deepmerge` dependency with MIT-licensed
+`deepmerge-ts` 8.0.2; this is not an unmodified upstream package.
+
+The deterministic preparation recipe, immutable upstream integrity and patch
+scope are documented in `tools/headlamp-plugin/checker/README.md` and
+`upstream.json`. Kars-authored integration code is separately covered by the
+adjacent Microsoft MIT license; it does not relicense upstream material.
 
 ## Vendored TypeScript SDK build
 

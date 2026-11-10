@@ -303,6 +303,12 @@ impl Cluster {
         let mut grouped =
             std::collections::BTreeMap::<_, Vec<(u8, MissionDeliverableRecord)>>::new();
         for cm in outputs.items {
+            let output_sha256 = cm.data.as_ref().and_then(|data| {
+                serde_json::to_vec(data)
+                    .ok()
+                    .map(|bytes| sha256_hex(&bytes))
+            });
+            let mut bound_task = None;
             let Some((key, role, mut data)) = mission_output_candidate(cm.clone()) else {
                 continue;
             };
@@ -335,6 +341,7 @@ impl Cluster {
                 {
                     continue;
                 }
+                bound_task = Some(task.clone());
                 data.remove("ownerSub");
                 if let Some(owner) = task
                     .metadata
@@ -391,6 +398,8 @@ impl Cluster {
                 mission_evidence_priority(&key, role.as_deref(), &data),
                 MissionDeliverableRecord {
                     output: project_mission_output_record(key, data),
+                    output_sha256,
+                    task: bound_task,
                     current,
                     artifacts: companion,
                 },
@@ -434,18 +443,20 @@ impl Cluster {
         Ok(())
     }
 
-    pub(crate) fn mission_attempt_name(uid: &str, nonce: &str) -> String {
-        let key = sha256_hex(serde_json::to_vec(&[uid, nonce]).expect("string pair"));
+    /// Deterministic record address from public identifiers, not a cryptographic nonce.
+    pub(crate) fn mission_attempt_name(uid: &str, run_id: &str) -> String {
+        let key = sha256_hex(serde_json::to_vec(&[uid, run_id]).expect("string pair"));
         format!("kars-mission-attempt-{}", &key[..40])
     }
 
     /// Untrusted snapshot: the caller must validate custody against a fresh owned Task.
-    pub(crate) async fn read_mission_attempt(&self, uid: &str, nonce: &str) -> Option<ConfigMap> {
+    pub(crate) async fn read_mission_attempt(
+        &self,
+        uid: &str,
+        nonce: &str,
+    ) -> Result<Option<ConfigMap>, kube::Error> {
         let cms: Api<ConfigMap> = Api::namespaced(self.client.clone(), "kars-system");
-        cms.get_opt(&Self::mission_attempt_name(uid, nonce))
-            .await
-            .ok()
-            .flatten()
+        cms.get_opt(&Self::mission_attempt_name(uid, nonce)).await
     }
 
     async fn current_mission_configmap(&self, task: &str, kind: &str) -> Option<ConfigMap> {
@@ -537,14 +548,12 @@ impl Cluster {
     /// telemetry substrate. Counts `kars-mission-trace-*` ConfigMaps carrying a
     /// non-empty trace, not deliverable count (the two can differ).
     pub async fn count_trace_records(&self) -> usize {
-        use kube::api::ListParams;
-        let cms: Api<ConfigMap> = Api::namespaced(self.client.clone(), "kars-system");
-        cms.list(&ListParams::default())
+        self.configmap_snapshot("kars-system", |map| trace_record_identity(&map))
             .await
-            .map(|l| {
-                l.items
-                    .iter()
-                    .filter_map(trace_record_identity)
+            .map(|snapshot| {
+                snapshot
+                    .items
+                    .into_iter()
                     .collect::<std::collections::HashSet<_>>()
                     .len()
             })

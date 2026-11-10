@@ -49,6 +49,15 @@ spec:
           spec:
             description: '`KarsTask.spec` — a governed unit of work plus its trust envelope.'
             properties:
+              requestedTier:
+                description: |-
+                  Exact autonomy tier requested for human review; never grants authority itself.
+                  Consumed execution identities require a fresh run rather than in-place widening.
+                type: integer
+                format: int32
+                minimum: 1.0
+                maximum: 5.0
+                nullable: true
               blueprint:
                 description: |-
                   The **run blueprint** — the concrete, editable shape of the agent that
@@ -95,7 +104,7 @@ spec:
                     nullable: true
                     type: string
                   skills:
-                    description: Same-namespace, independently approved skills pinned at runtime creation.
+                    description: Same-namespace, content-bound approved skills pinned at runtime creation.
                     type: array
                     items:
                       type: string
@@ -202,21 +211,27 @@ spec:
                                       - web-search
                                       - mcp
                                       - memory
+                                      - github-pr
+                                      - python-execute
                                       type: string
-                                    maxItems: 7
+                                    maxItems: 8
                                     type: array
+                                  executionMode:
+                                    enum:
+                                    - native
+                                    type: string
                                   freshContext:
                                     default: false
                                     type: boolean
                                   maxToolCalls:
                                     format: int32
-                                    maximum: 32.0
+                                    maximum: 2147483647.0
                                     minimum: 0.0
                                     type: integer
                                   minToolCalls:
                                     default: 0
                                     format: int32
-                                    maximum: 32.0
+                                    maximum: 2147483647.0
                                     minimum: 0.0
                                     type: integer
                                   name:
@@ -241,6 +256,7 @@ spec:
                                         name:
                                           enum:
                                           - github_actions_job_logs
+                                          - http_fetch
                                           type: string
                                       required:
                                       - name
@@ -261,7 +277,7 @@ spec:
                           - phases
                           type: object
                         maxItems: 8
-                        minItems: 1
+                        minItems: 0
                         type: array
                       schema:
                         enum:
@@ -280,12 +296,18 @@ spec:
                               - web-search
                               - mcp
                               - memory
+                              - github-pr
+                              - python-execute
                               type: string
-                            maxItems: 7
+                            maxItems: 8
                             type: array
+                          executionMode:
+                            enum:
+                            - native
+                            type: string
                           maxToolCalls:
                             format: int32
-                            maximum: 32.0
+                            maximum: 2147483647.0
                             minimum: 0.0
                             type: integer
                           objective:
@@ -573,7 +595,7 @@ spec:
                         type: string
                       kind:
                         type: string
-                        enum: [KarsTask, KarsTeam]
+                        enum: [KarsTask, KarsTeam, KarsSandbox]
                       resource:
                         type: object
                         properties:

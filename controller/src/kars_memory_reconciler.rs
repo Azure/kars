@@ -171,7 +171,7 @@ async fn reconcile(memory: Arc<KarsMemory>, ctx: Arc<Ctx>) -> Result<Action, Rec
 
     // Slice 1c.4 — resolve bundleRef (if set) into an effective spec
     // before compile. The bundle carries content (storeName, scope,
-    // retentionDays, deleteOnSandboxDelete, displayName); `sandboxRef`
+    // sharedScopes, retentionDays, deleteOnSandboxDelete, displayName); `sandboxRef`
     // always stays in the CR. When `bundleRef` is unset the path is
     // a no-op and returns the CR's spec verbatim.
     let (effective_spec, bundle_ref_digest, bundle_degraded) =
@@ -192,12 +192,9 @@ async fn reconcile(memory: Arc<KarsMemory>, ctx: Arc<Ctx>) -> Result<Action, Rec
 
     let cm_name = format!("karsmemory-{name}-binding");
 
-    // If bundleRef resolution already marked us Degraded
-    // (InvalidSpec mutex / fetch / verify failure), skip the
-    // ConfigMap write — `effective_spec` is the selector-only
-    // sentinel and compiling it would publish empty bytes that
-    // every router would reject anyway. Mirrors the 1c.3
-    // InferencePolicy path.
+    // Invalid inline access, bundle mutex, or fetch/verify failures must
+    // never publish an invalid binding. Bundle failures return a selector-only
+    // sentinel; invalid inline specs are retained only for diagnostics.
     if degraded.is_none() {
         match ensure_binding_configmap(
             &configmaps,
@@ -386,8 +383,9 @@ fn rfc3339_now() -> String {
 ///   `bundleRef` is unset, this is the CR's spec verbatim (the
 ///   inline path). When `bundleRef` is set and the fetch + cosign
 ///   verification succeed, the bundle's content fields are merged
-///   onto the CR's `sandboxRef`. On any error this is a
-///   selector-only sentinel that won't be compiled.
+///   onto the CR's `sandboxRef`. Bundle errors return a selector-only
+///   sentinel; invalid inline specs are returned with `degraded` set.
+///   Neither is published to the binding ConfigMap.
 /// - `bundle_ref_digest` is the verified bundle's
 ///   `sha256:...` (stamped into `status.bundleRefDigest`) when the
 ///   bundle path succeeded; `None` otherwise.
@@ -409,6 +407,7 @@ async fn resolve_memory_source(
     let spec = &memory.spec;
     let inline_any = spec.store_name.is_some()
         || spec.scope.is_some()
+        || spec.shared_scopes.is_some()
         || spec.retention_days.is_some()
         || spec.delete_on_sandbox_delete.is_some()
         || spec.display_name.is_some();
@@ -424,7 +423,7 @@ async fn resolve_memory_source(
             Some((
                 "InvalidSpec",
                 "spec.bundleRef is mutually exclusive with spec.storeName, \
-                 spec.scope, spec.retentionDays, spec.deleteOnSandboxDelete, \
+                 spec.scope, spec.sharedScopes, spec.retentionDays, spec.deleteOnSandboxDelete, \
                  and spec.displayName"
                     .into(),
             )),
@@ -432,7 +431,16 @@ async fn resolve_memory_source(
     }
 
     if !bundle_set {
-        return (spec.clone(), None, None);
+        let access = crate::memory_access::MemoryAccess {
+            store_name: spec.store_name.clone().unwrap_or_default(),
+            scope: spec.scope.clone().unwrap_or_default(),
+            shared_scopes: spec.shared_scopes.clone().unwrap_or_default(),
+        };
+        let degraded = access
+            .validate()
+            .err()
+            .map(|reason| ("InvalidSpec", reason.to_string()));
+        return (spec.clone(), None, degraded);
     }
 
     let bundle_ref = spec
@@ -501,6 +509,7 @@ fn merge_bundle_with_selector(
         store_name: verified.store_name.clone(),
         sandbox_ref: sandbox_ref.clone(),
         scope: verified.scope.clone(),
+        shared_scopes: verified.shared_scopes.clone(),
         retention_days: verified.retention_days,
         delete_on_sandbox_delete: verified.delete_on_sandbox_delete,
         display_name: verified.display_name.clone(),
@@ -908,6 +917,83 @@ pub async fn run(client: Client) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn memory_inline_access_is_validated_before_publication() {
+        for changes in [
+            json!({"storeName": null}),
+            json!({"scope": null}),
+            json!({"scope": "a/../b"}),
+            json!({"sharedScopes": ["*"]}),
+            json!({"sharedScopes": ["agent_x"]}),
+            json!({"sharedScopes": ["team_beta", "team_beta"]}),
+        ] {
+            let mut spec = json!({"sandboxRef":{"name":"x"},"storeName":"x","scope":"agent_x"});
+            spec.as_object_mut()
+                .unwrap()
+                .extend(changes.as_object().unwrap().clone());
+            let memory = KarsMemory::new("x", serde_json::from_value(spec).unwrap());
+            let (_, digest, degraded) = resolve_memory_source(&memory).await;
+            assert!(digest.is_none());
+            assert_eq!(degraded.unwrap().0, "InvalidSpec");
+        }
+        let memory = KarsMemory::new(
+            "x",
+            serde_json::from_value(json!({
+                "sandboxRef":{"name":"x"}, "storeName":"x", "scope":"agent_x",
+                "sharedScopes":["team_beta"]
+            }))
+            .unwrap(),
+        );
+        let (effective, digest, degraded) = resolve_memory_source(&memory).await;
+        assert!(degraded.is_none());
+        assert!(digest.is_none());
+        assert_eq!(
+            compile_to_binding(&effective)["sharedScopes"],
+            json!(["team_beta"])
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_bundle_rejects_even_empty_inline_shared_scopes_before_fetch() {
+        let memory = KarsMemory::new(
+            "x",
+            serde_json::from_value(json!({
+                "sandboxRef":{"name":"x"}, "sharedScopes":[],
+                "bundleRef":{
+                    "registry":"example.invalid", "repository":"memory",
+                    "digest":format!("sha256:{}", "a".repeat(64)),
+                    "artifactType":crate::policy_canonical::memory::MEMORY_BINDING_V1_MEDIA_TYPE
+                }
+            }))
+            .unwrap(),
+        );
+        let (effective, digest, degraded) = resolve_memory_source(&memory).await;
+        assert!(effective.store_name.is_none());
+        assert!(effective.shared_scopes.is_none());
+        assert!(digest.is_none());
+        let (reason, message) = degraded.unwrap();
+        assert_eq!(reason, "InvalidSpec");
+        assert!(message.contains("sharedScopes"));
+    }
+
+    #[test]
+    fn memory_bundle_merge_preserves_grants_and_cr_selector() {
+        let verified = crate::policy_canonical::memory::parse(
+            br#"{"storeName":"x","scope":"agent_x","sharedScopes":["team_beta"]}"#,
+        )
+        .unwrap();
+        let selector = crate::kars_memory::SandboxRef {
+            name: "sandbox-x".into(),
+        };
+        let effective = merge_bundle_with_selector(&selector, &verified);
+        assert_eq!(effective.sandbox_ref.name, "sandbox-x");
+        assert!(effective.bundle_ref.is_none());
+        let binding = compile_to_binding(&effective);
+        assert_eq!(binding["storeName"], "x");
+        assert_eq!(binding["scope"], "agent_x");
+        assert_eq!(binding["sharedScopes"], json!(["team_beta"]));
+    }
 
     #[test]
     fn rfc3339_now_is_utc_z_suffixed() {

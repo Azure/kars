@@ -39,6 +39,7 @@ function intake(intent, override = null, pending = false) {
     }, useTransition: () => [pending, fn => fn()] },
     "next/navigation": { useRouter: () => ({ push: href => routes.push(href) }) },
     "@/lib/classify-intent": { classifyIntent },
+    "@/components/navigation-link": { usePendingNavigation: value => assert.equal(value, pending) },
     "@/components/icon": { Icon: () => null },
   });
   return { routes, render() { cursor = 0; return IntentEntry(); } };

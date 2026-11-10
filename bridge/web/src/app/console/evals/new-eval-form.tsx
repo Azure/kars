@@ -16,6 +16,7 @@ const BUILTIN_CORPORA = [
   "prompt-injection-2026q1",
   "banned-tools",
   "egress-known-bad",
+  "governed-egress-tunnels",
   "memory-isolation",
 ];
 
@@ -34,10 +35,15 @@ export function NewEvalForm({
   const [runnerImage, setRunnerImage] = useState(defaultRunnerImage);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const targetAvailable = sandboxes.some((sandbox) => sandbox.name === target);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (busy) return;
+    if (!targetAvailable) {
+      setError("The selected sandbox is no longer available for a new eval. Choose a running target.");
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -91,10 +97,11 @@ export function NewEvalForm({
           <span className="text-xs font-medium text-foreground-muted">Target sandbox</span>
           <select
             required
-            value={target}
+            value={targetAvailable ? target : ""}
             onChange={(e) => setTarget(e.target.value)}
             className="mt-1 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm"
           >
+            <option value="" disabled>Select a running sandbox</option>
             {sandboxes.map((s) => (
               <option key={s.name} value={s.name}>
                 {s.name}{s.runtime ? ` · ${s.runtime}` : ""}
@@ -139,10 +146,28 @@ export function NewEvalForm({
           </span>
         </label>
       </fieldset>
+      {corpus.trim() === "egress-known-bad" && (
+        <p className="mt-3 text-xs text-foreground-muted">
+          This corpus expects strict egress enforcement with none of its probe destinations allowed.
+          Check the target&apos;s policy first: Learn mode or approved destinations can produce
+          mismatches or inconclusive results. Task-bound governed inference rejects opaque tunnels
+          before the allowlist runs, even with an unbounded allowance; use governed-egress-tunnels
+          for that boundary instead. Calendar-only accounting does not enable this tunnel fence.
+          Transport errors are not passing policy verdicts.
+        </p>
+      )}
+      {corpus.trim() === "governed-egress-tunnels" && (
+        <p className="mt-3 text-xs text-foreground-muted">
+          Requires task-bound governed inference, including unbounded allowances. Calendar-only
+          accounting is not sufficient: its proxy still evaluates destination policies. All six
+          destinations must return the explicit opaque-tunnel refusal. This does not test
+          destination-allowlist enforcement; generic denials and transport errors do not pass.
+        </p>
+      )}
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <button
           type="submit"
-          disabled={busy || !target || !corpus.trim()}
+          disabled={busy || !targetAvailable || !corpus.trim()}
           className="rounded-lg bg-signal px-3 py-1.5 text-xs font-semibold text-signal-fg transition hover:opacity-90 disabled:opacity-50"
         >
           {busy ? "Launching…" : "Configure & run"}

@@ -9,12 +9,16 @@ use kube::{
 };
 
 pub fn failure(message: &str) -> kube::Error {
-    kube::Error::Api(kube::core::ErrorResponse {
-        status: "Failure".into(),
-        reason: "CredentialAuthorityUnavailable".into(),
-        message: message.into(),
-        code: 409,
-    })
+    kube::Error::Api(
+        kube::core::Status {
+            status: Some(kube::core::response::StatusSummary::Failure),
+            reason: "CredentialAuthorityUnavailable".into(),
+            message: message.into(),
+            code: 409,
+            ..Default::default()
+        }
+        .boxed(),
+    )
 }
 
 pub(super) fn safe(stage: &str, error: kube::Error) -> kube::Error {
@@ -23,12 +27,16 @@ pub(super) fn safe(stage: &str, error: kube::Error) -> kube::Error {
     } else {
         502
     };
-    kube::Error::Api(kube::core::ErrorResponse {
-        status: "Failure".into(),
-        reason: "CredentialOperationFailed".into(),
-        message: format!("{stage}: Kubernetes status {code}"),
-        code,
-    })
+    kube::Error::Api(
+        kube::core::Status {
+            status: Some(kube::core::response::StatusSummary::Failure),
+            reason: "CredentialOperationFailed".into(),
+            message: format!("{stage}: Kubernetes status {code}"),
+            code,
+            ..Default::default()
+        }
+        .boxed(),
+    )
 }
 
 pub(super) fn object_api(cluster: &Cluster, namespace: &str, kind: &str) -> Api<DynamicObject> {

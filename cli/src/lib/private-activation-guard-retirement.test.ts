@@ -26,6 +26,32 @@ function expectedRemoval(namespace: any, guard: string): any {
 }
 
 describe("selected writer guard retirement review", () => {
+  it("accepts version-only capture drift only with complete namespace evidence", async () => {
+    const f = setup();
+    await applyReviewedGrant(f.execute, await f.document());
+    const activation = (await f.document()).spec.privateActivation;
+    const snapshots = activation.namespaces.map((scope: any) => structuredClone(f.namespace(scope.namespace.name)));
+    const ns = f.namespace("reader");
+    ns.metadata.resourceVersion = String(Number(ns.metadata.resourceVersion) + 1);
+    await expect(captureGuardRetirement(f.execute, activation, f.grant())).rejects.toThrow("expected writer-guard retirement");
+    await expect(captureGuardRetirement(f.execute, activation, f.grant(), [])).rejects.toThrow("expected writer-guard retirement");
+    const captured = await captureGuardRetirement(f.execute, activation, f.grant(), snapshots);
+    expect(captured.namespaces.find(scope => scope.identity.name === "reader")?.guarded).toBe(true);
+    expect(captured.activation.namespaces.find(scope => scope.namespace.name === "reader")?.namespace.resourceVersion)
+      .toBe(ns.metadata.resourceVersion);
+  });
+
+  it.each([false, true])("rejects changed namespace content with snapshot evidence and version change=%s", async versionChanged => {
+    const f = setup();
+    await applyReviewedGrant(f.execute, await f.document());
+    const activation = (await f.document()).spec.privateActivation;
+    const snapshots = activation.namespaces.map((scope: any) => structuredClone(f.namespace(scope.namespace.name)));
+    const ns = f.namespace("reader");
+    ns.metadata.annotations.external = "changed";
+    if (versionChanged) ns.metadata.resourceVersion = String(Number(ns.metadata.resourceVersion) + 1);
+    await expect(captureGuardRetirement(f.execute, activation, f.grant(), snapshots)).rejects.toThrow("expected writer-guard retirement");
+  });
+
   it.each([false, true])("updates ordinary keys after actual guard/RV removal with shared writer=%s", async shared => {
     const f = setup();
     await applyReviewedGrant(f.execute, await f.document());

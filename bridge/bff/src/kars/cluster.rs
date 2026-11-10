@@ -22,9 +22,11 @@ mod mission_runs;
 pub use mission_runs::MissionRunError;
 pub(crate) use mission_runs::run_nonce;
 mod orchestrator;
+mod orchestrator_funding;
 mod providers;
 mod resources;
 mod sandboxes;
+mod sre_reports;
 
 #[derive(Debug, Clone)]
 pub struct MissionOutputRecord {
@@ -35,6 +37,9 @@ pub struct MissionOutputRecord {
 
 pub struct MissionDeliverableRecord {
     pub output: MissionOutputRecord,
+    /// Exact producer map digest, before adding Task presentation metadata.
+    pub output_sha256: Option<String>,
+    pub task: Option<crate::kars::task::KarsTask>,
     pub current: bool,
     pub artifacts: Option<k8s_openapi::api::core::v1::ConfigMap>,
 }
@@ -164,6 +169,10 @@ pub struct GpuNodeSummary {
 }
 
 impl Cluster {
+    pub(crate) fn qualification_client(&self) -> Client {
+        self.client.clone()
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test_client(client: Client) -> Self {
         Self { client }
@@ -173,10 +182,26 @@ impl Cluster {
     /// locally, in-cluster ServiceAccount in production). Returns `None`-style
     /// errors as `anyhow` so the readiness probe can report honest status.
     pub async fn connect() -> anyhow::Result<Self> {
-        let client = Client::try_default().await?;
-        Ok(Self { client })
+        let config = kube::Config::infer()
+            .await
+            .map_err(kube::Error::InferConfig)?;
+        Ok(Self {
+            client: Client::try_from(Self::transport_config(config))?,
+        })
+    }
+
+    pub(crate) fn transport_config(mut config: kube::Config) -> kube::Config {
+        // kube 4 enables transparent retries even for writes. Keep retries in
+        // the existing UID/resourceVersion-fenced operations, not the transport.
+        config.default_retry = false;
+        // Preserve kube 0.99's idle read timeout, including stalled watches.
+        config.read_timeout = Some(std::time::Duration::from_secs(295));
+        config
     }
 }
+
+#[cfg(test)]
+mod kube_compatibility_tests;
 
 #[cfg(test)]
 mod mission_record_tests;

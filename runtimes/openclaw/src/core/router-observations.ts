@@ -3,13 +3,15 @@
 
 import http, { type IncomingHttpHeaders } from "node:http";
 import { routerUrl } from "./router-client.js";
+import { MAX_MISSION_ACTIVITY_BYTES, MAX_ROUTER_OBSERVATION_EVENTS, MAX_ROUTER_OBSERVATION_PAGE_BYTES, MAX_ROUTER_OBSERVATION_ROUNDS } from "@kars/mesh/dist/mission-protocol.js";
 
 export const ROUTER_OBSERVATIONS_ARTIFACT = "kars-router-observations.json";
-const MAX_ARTIFACT_BYTES = 32 * 1024;
+const MAX_ARTIFACT_BYTES = MAX_MISSION_ACTIVITY_BYTES;
 
 export type ToolResultSummary =
   | { kind: "file_read"; bytes: number; returned_bytes: number; truncated: boolean }
   | { kind: "file_write"; bytes: number; artifact_name?: string }
+  | { kind: "python_execution"; bytes: number; receipt_sha256: string; exit_code: number | null; reason: string }
   | { kind: "failure"; reason: "filesystem_operation_failed" | "invalid_arguments" | "policy_denied" | "reviewed_phase_denied" | "tool_execution_failed" };
 
 /** Select and report to the existing router recorder using returned response IDs. */
@@ -69,7 +71,7 @@ export class ReturnedRouterResponses {
     const round = Number(rawRound);
     if (typeof scope !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(scope)
       || typeof rawRound !== "string" || !/^[1-9][0-9]*$/.test(rawRound)
-      || !Number.isSafeInteger(round) || this.rounds.size >= 32
+      || !Number.isSafeInteger(round) || this.rounds.size >= MAX_ROUTER_OBSERVATION_ROUNDS
       || this.rounds.has(round) || (this.scope !== undefined && this.scope !== scope)) {
       this.invalid = true;
       return;
@@ -92,38 +94,22 @@ export class ReturnedRouterResponses {
       const trace = await readSelection(this.scope, rounds);
       if (trace.scope_id !== this.scope || trace.coverage !== "returned-responses-only"
         || trace.durable !== false || JSON.stringify(trace.rounds) !== JSON.stringify(rounds)
-        || !Array.isArray(trace.events) || trace.events.length > 256
+        || !Array.isArray(trace.events) || trace.events.length > MAX_ROUTER_OBSERVATION_EVENTS
         || !Array.isArray(trace.missing_rounds) || !trace.missing_rounds.every((n: unknown) => typeof n === "number" && rounds.includes(n))
         || typeof trace.dropped_events !== "number" || !Number.isSafeInteger(trace.dropped_events) || trace.dropped_events < 0
         || typeof trace.truncated !== "boolean"
         || !trace.events.every((event: Record<string, unknown>) => event && typeof event === "object"
           && event.scope_id === this.scope && typeof event.round === "number" && rounds.includes(event.round)
-          && (event.kind === "round" || event.kind === "tool_proposed"
-            || (event.kind === "tool_result" && typeof event.reported_in_round === "number" && rounds.includes(event.reported_in_round))))) {
+          && (event.kind === "round" || event.kind === "tool_proposed" || event.kind === "router_operation"
+            || (event.kind === "tool_result" && (
+              typeof event.reported_in_round === "number" && event.reported_in_round > event.round && rounds.includes(event.reported_in_round)
+              || !Object.hasOwn(event, "reported_in_round") && event.source === "harness-reported" && typeof event.ok === "boolean"
+                && Array.isArray(trace.events) && trace.events.some((proposal: Record<string, unknown>) => proposal.kind === "tool_proposed"
+                  && Number(proposal.seq) < Number(event.seq) && proposal.round === event.round
+                  && proposal.call_id === event.call_id && proposal.name === event.name)))))) {
         return unavailable("Router selection did not match returned response IDs");
       }
-      const events = trace.events.map((event: Record<string, unknown>) => {
-        const fields = event.kind === "round"
-          ? ["provider", "model", "http_status", "accepted", "outcome", "usage_state", "finish_reason", "partial_observation", "ms", "tool_calls_observed"]
-          : ["call_id", "name", "ok", "reported_in_round", "ms"];
-        const selected = Object.fromEntries(["kind", "round", "scope_id", "seq", "source", "observed_at", ...fields]
-          .filter(key => Object.hasOwn(event, key)).map(key => [key, event[key]]));
-        if (event.kind === "round" && event.usage && typeof event.usage === "object") {
-          const usage = event.usage as Record<string, unknown>;
-          selected.usage = Object.fromEntries(["prompt_tokens", "completion_tokens", "total_tokens"]
-            .map(key => [key, usage[key] ?? null]));
-        }
-        if (event.kind === "tool_result" && event.result_summary && typeof event.result_summary === "object") {
-          const summary = event.result_summary as Record<string, unknown>;
-          const keys = summary.kind === "file_read" ? ["kind", "bytes", "returned_bytes", "truncated"]
-            : summary.kind === "file_write" ? ["kind", "bytes", "artifact_name"]
-              : summary.kind === "failure" ? ["kind", "reason"] : [];
-          if (!keys.length) throw new Error("Unknown tool summary");
-          selected.result_summary = Object.fromEntries(keys.filter(key => Object.hasOwn(summary, key))
-            .map(key => [key, summary[key]]));
-        }
-        return selected;
-      });
+      const events = trace.events.map(sanitizeRouterEvent);
       const content = JSON.stringify({ ...base, state: "observed", trace: {
         scope_id: trace.scope_id, rounds: trace.rounds, coverage: trace.coverage, durable: false,
         missing_rounds: trace.missing_rounds, dropped_events: trace.dropped_events,
@@ -139,15 +125,84 @@ export class ReturnedRouterResponses {
   }
 }
 
-function readSelection(scope: string, rounds: number[]): Promise<Record<string, unknown>> {
+export function sanitizeRouterEvent(event: Record<string, unknown>): Record<string, unknown> {
+  const fields = event.kind === "round"
+    ? ["provider", "model", "http_status", "accepted", "outcome", "usage_state", "finish_reason", "partial_observation", "ms", "tool_calls_observed"]
+    : event.kind === "router_operation"
+      ? ["call_id", "name", "operation", "flag", "allowed", "http_status", "complete", "destination_host", "destination_port", "ms"]
+      : ["call_id", "name", "ok", "reported_in_round", "ms"];
+  const selected = Object.fromEntries(["kind", "round", "scope_id", "seq", "source", "observed_at", ...fields]
+    .filter(key => Object.hasOwn(event, key)).map(key => [key, event[key]]));
+  if (event.kind === "round" && event.usage && typeof event.usage === "object") {
+    const usage = event.usage as Record<string, unknown>;
+    selected.usage = Object.fromEntries(["prompt_tokens", "completion_tokens", "total_tokens"]
+      .map(key => [key, usage[key] ?? null]));
+  }
+  if (event.kind === "tool_proposed" && event.argument_preview !== undefined) {
+    const preview = event.argument_preview as Record<string, unknown> | null;
+    if (!preview || typeof preview !== "object" || Array.isArray(preview)
+      || Object.keys(preview).some(key => !["text", "truncated", "redacted"].includes(key))
+      || typeof preview.text !== "string" || !preview.text.length || Buffer.byteLength(preview.text) > 2048
+      || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(preview.text)
+      || typeof preview.truncated !== "boolean" || typeof preview.redacted !== "boolean") {
+      throw new Error("Invalid tool argument preview");
+    }
+    selected.argument_preview = { text: preview.text, truncated: preview.truncated, redacted: preview.redacted };
+  }
+  if (event.kind === "tool_result" && event.result_summary && typeof event.result_summary === "object") {
+    const summary = event.result_summary as Record<string, unknown>;
+    const keys = summary.kind === "file_read" ? ["kind", "bytes", "returned_bytes", "truncated"]
+      : summary.kind === "file_write" ? ["kind", "bytes", "artifact_name"]
+      : summary.kind === "python_execution" ? ["kind", "bytes", "receipt_sha256", "exit_code", "reason"]
+        : summary.kind === "failure" ? ["kind", "reason"] : [];
+    if (!keys.length) throw new Error("Unknown tool summary");
+    selected.result_summary = Object.fromEntries(keys.filter(key => Object.hasOwn(summary, key))
+      .map(key => [key, summary[key]]));
+  }
+  return selected;
+}
+
+async function readSelection(scope: string, rounds: number[]): Promise<Record<string, unknown>> {
+  const signal = AbortSignal.timeout(8000); // At most four recorder pages, two seconds each.
+  let first: Record<string, unknown> | undefined;
+  let highWater = 0;
+  let cursor = 0;
+  const events: Record<string, unknown>[] = [];
+  for (let page = 0; page < MAX_ROUTER_OBSERVATION_EVENTS / 256; page++) {
+    const trace = await readPage(scope, rounds, cursor, signal);
+    if (trace.scope_id !== scope || trace.coverage !== "returned-responses-only" || trace.durable !== false
+      || JSON.stringify(trace.rounds) !== JSON.stringify(rounds)
+      || !Number.isSafeInteger(trace.cursor) || Number(trace.cursor) < cursor
+      || !Number.isSafeInteger(trace.high_water) || Number(trace.high_water) < Number(trace.cursor)
+      || trace.has_more !== (Number(trace.cursor) < Number(trace.high_water))
+      || !Array.isArray(trace.events) || trace.events.length > 256) throw new Error("Invalid selection page");
+    if (!first) { first = trace; highWater = Number(trace.high_water); }
+    if (Number(trace.high_water) < highWater || trace.dropped_events !== first.dropped_events
+      || trace.truncated !== first.truncated || JSON.stringify(trace.missing_rounds) !== JSON.stringify(first.missing_rounds)) {
+      throw new Error("Selection changed during pagination");
+    }
+    for (const event of trace.events) {
+      if (!event || !Number.isSafeInteger(event.seq) || event.seq <= cursor || event.seq > Number(trace.cursor)) {
+        throw new Error("Invalid selection sequence");
+      }
+      cursor = event.seq;
+      if (cursor <= highWater) events.push(event);
+    }
+    if (cursor !== trace.cursor || (cursor < highWater && !trace.events.length)) throw new Error("Selection did not advance");
+    if (cursor >= highWater) return { ...first, events };
+  }
+  throw new Error("Selection exceeds recorder retention");
+}
+
+function readPage(scope: string, rounds: number[], cursor: number, signal: AbortSignal): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
-    const url = routerUrl(`/telemetry/trace?rounds=${rounds.join(",")}`);
-    const request = http.get(url, { headers: { "x-kars-service-scope": scope }, signal: AbortSignal.timeout(2000) }, response => {
+    const url = routerUrl(`/telemetry/trace?rounds=${rounds.join(",")}${cursor ? `&after=${cursor}` : ""}`);
+    const request = http.get(url, { headers: { "x-kars-service-scope": scope }, signal: AbortSignal.any([signal, AbortSignal.timeout(2000)]) }, response => {
       const chunks: Buffer[] = [];
       let size = 0;
       response.on("data", (chunk: Buffer) => {
         size += chunk.length;
-        if (size > 48 * 1024) { response.destroy(new Error("Observation response too large")); return; }
+        if (size > MAX_ROUTER_OBSERVATION_PAGE_BYTES) { response.destroy(new Error("Observation response too large")); return; }
         chunks.push(chunk);
       });
       response.on("end", () => {

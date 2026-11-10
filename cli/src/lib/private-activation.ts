@@ -33,6 +33,14 @@ export interface PrivateActivation {
 }
 
 export const PRIVATE_PREFIX = "kars.azure.com/private-";
+export const CORE_PUBLICATION = `${PRIVATE_PREFIX}core-publication`;
+export const CORE_PUBLICATION_FENCE = "kars.azure.com/core-publication-fence";
+
+export function assertNoCorePublication(namespace: unknown): void {
+  if (at(namespace, "metadata", "annotations", CORE_PUBLICATION) !== undefined) {
+    throw new Error("Protected Core publication is owned or its outcome is unknown; resume its original publication receipt, not qualification or recovery");
+  }
+}
 export const PRIVATE_CONTRACT = "kars.azure.com/private-consumption/v1";
 const grantResource = "karscredentialgrants.kars.azure.com";
 export const kinds: Record<string, string> = {
@@ -170,7 +178,7 @@ export async function reviewBudgetTls(execute: Execute, deployment: unknown, roo
   return { namespace: ns, secret, keyDigest: createHash("sha256").update(publicKey).digest("hex") };
 }
 
-function sameBudgetTls(a: BudgetTlsReview | undefined, b: BudgetTlsReview | undefined): boolean {
+export function sameBudgetTls(a: BudgetTlsReview | undefined, b: BudgetTlsReview | undefined): boolean {
   const normalized = (value: BudgetTlsReview | undefined) => value ? {
     ...value, namespace: { name: value.namespace.name, uid: value.namespace.uid },
   } : null;
@@ -392,7 +400,9 @@ export function validateActivationShape(activation: PrivateActivation, phase: Pr
   }
 }
 
-export async function validatePrivateActivation(execute: Execute, activation: PrivateActivation): Promise<void> {
+export async function validatePrivateActivation(
+  execute: Execute, activation: PrivateActivation, rolloutHistory = false,
+): Promise<void> {
   validateActivationShape(activation, "reviewed");
   if ((await execute(["auth", "can-i", "manage", `${grantResource}/workspace`, "--all-namespaces"])).trim() !== "yes") {
     throw new Error("Private activation staging requires the existing cluster-scoped credential operator authority");
@@ -438,7 +448,7 @@ export async function validatePrivateActivation(execute: Execute, activation: Pr
       }
     }
   }
-  await reviewPrivateContinuity(execute, activation);
+  await reviewPrivateContinuity(execute, activation, false, rolloutHistory);
   await preflightPrivateConsumers(execute, activation);
 }
 
@@ -474,6 +484,7 @@ export async function patchNamespace(
   strictVersion = false,
 ): Promise<void> {
   const current = await read(execute, "namespace", scope.namespace.name);
+  assertNoCorePublication(current);
   if (reviewed(current).uid !== scope.namespace.uid) throw new Error("Private namespace was replaced before staging");
   if (strictVersion && reviewed(current).resourceVersion !== scope.namespace.resourceVersion) {
     throw new Error("Private namespace changed before its reviewed continuity update; re-preview");
@@ -489,6 +500,7 @@ export async function patchNamespace(
 }
 
 export async function stagePrivateActivation(execute: Execute, activation: PrivateActivation): Promise<PrivateActivation> {
+  assertNoCorePublication(await read(execute, "namespace", activation.root.namespace.name));
   await validateObservedControllerProfile(execute, activation.profile);
   await validatePrivateActivation(execute, activation);
   const staged = structuredClone(activation);
@@ -640,12 +652,34 @@ export async function stagePrivateActivation(execute: Execute, activation: Priva
   return staged;
 }
 
-export async function validateQualifiedActivation(execute: Execute, activation: PrivateActivation): Promise<void> {
+export async function validateQualifiedActivation(
+  execute: Execute, activation: PrivateActivation, rolloutHistory = false,
+): Promise<void> {
   await validateQualifiedMetadata(execute, activation);
-  await verifySharedPublication(execute, activation);
+  await verifySharedPublication(execute, activation, rolloutHistory);
 }
 
 export async function validateQualifiedMetadata(execute: Execute, activation: PrivateActivation): Promise<void> {
+  await qualifiedMetadata(execute, activation, false);
+}
+
+/** Sealed authority review only; a revoked Pending namespace is not current execution qualification. */
+export async function reviewSealedAuthorityMetadata(execute: Execute, activation: PrivateActivation): Promise<void> {
+  await qualifiedMetadata(execute, activation, false, true);
+}
+
+/** Operator recovery review only: ordinary qualification still pins the exact Secret revision. */
+export async function reviewQualifiedBudgetRevision(execute: Execute, activation: PrivateActivation): Promise<BudgetTlsReview> {
+  const budget = await qualifiedMetadata(execute, activation, true);
+  if (!budget || budget.secret.resourceVersion === activation.root.budgetTls?.secret.resourceVersion) {
+    throw new Error("Budget TLS revision recovery requires an actual same-key revision change");
+  }
+  return budget;
+}
+
+async function qualifiedMetadata(
+  execute: Execute, activation: PrivateActivation, reviewBudgetRevision: boolean, authorityOnly = false,
+): Promise<BudgetTlsReview | undefined> {
   validateActivationShape(activation, "qualified");
   if (activation.contract !== PRIVATE_CONTRACT || activation.phase !== "qualified"
     || await verifyPrivateBundle(execute) !== activation.bundleRevision) throw new Error("Private qualification changed");
@@ -666,18 +700,23 @@ export async function validateQualifiedMetadata(execute: Execute, activation: Pr
     }
   }
   const root = await read(execute, "deployment", activation.root.deployment.name, activation.root.namespace.name);
-  if (!sameBudgetTls(await reviewBudgetTls(execute, root, activation.root.namespace.name), activation.root.budgetTls)) {
+  const budget = await reviewBudgetTls(execute, root, activation.root.namespace.name);
+  const compared = reviewBudgetRevision && budget && activation.root.budgetTls
+    ? { ...budget, secret: { ...budget.secret, resourceVersion: activation.root.budgetTls.secret.resourceVersion } } : budget;
+  if (!sameBudgetTls(compared, activation.root.budgetTls)) {
     throw new Error("Budget TLS review changed before grant publication");
   }
   for (const scope of activation.namespaces) {
     const current = await read(execute, "namespace", scope.namespace.name);
     const actual = record(at(current, "metadata", "annotations"));
+    const state = (reviewBudgetRevision || authorityOnly) && actual[`${PRIVATE_PREFIX}state`] === "Pending" ? "Pending" : "Qualified";
     if (reviewed(current).uid !== scope.namespace.uid || !scope.epoch
       || actual[`${PRIVATE_PREFIX}epoch`] !== scope.epoch
-      || Object.entries(annotations(activation, scope, "Qualified")).some(([key, value]) => actual[key] !== value)) {
+      || Object.entries(annotations(activation, scope, state)).some(([key, value]) => actual[key] !== value)) {
       throw new Error("Private namespace qualification changed before grant publication");
     }
   }
+  return budget;
 }
 
 export function privateMaterial(value: unknown, extraSecrets: string[] = []): boolean {

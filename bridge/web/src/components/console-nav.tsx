@@ -6,7 +6,7 @@
 // kars Bridge Operator Console — primary navigation (platform/SRE surface).
 // Dense, resource/policy/audit vocabulary. Kubernetes concepts are fine here.
 
-import Link from "next/link";
+import Link from "@/components/navigation-link";
 import { usePathname } from "next/navigation";
 
 // Grouped by what an operator reaches for: run the fleet, prove/govern it, set it
@@ -64,6 +64,7 @@ export function ConsoleNav() {
                   <li key={item.href}>
                     <Link
                       href={item.href}
+                      prefetch={false}
                       aria-current={active ? "page" : undefined}
                       aria-label={`${item.label} — ${item.hint}`}
                       className={[

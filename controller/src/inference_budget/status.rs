@@ -9,7 +9,9 @@ use super::{
     store::{Store, StoreError},
 };
 use crate::{
-    inference_budget_contract::{AccountPhase, Amounts, Limits, MAX_ATTEMPTS},
+    inference_budget_contract::{
+        AccountPhase, Amounts, Limits, MAX_ATTEMPTS, MAX_NODES, MAX_SESSIONS,
+    },
     status::conditions,
 };
 use kube::ResourceExt;
@@ -101,8 +103,10 @@ fn observe(account: &KarsBudgetAccount, error: Option<&StoreError>) -> Observati
             ),
         };
     }
+    // Store::ledger has already checked the additive ceiling arithmetic.
+    let limits = ledger.effective_limits().unwrap_or(ledger.limits);
     let durable = ledger.meters.settled.checked_add(ledger.meters.uncertain);
-    if durable.is_ok_and(|amount| at_limit(ledger.limits, amount)) {
+    if durable.is_ok_and(|amount| at_limit(limits, amount)) {
         return blocked(
             Phase::Blocked,
             "BudgetExhausted",
@@ -112,7 +116,7 @@ fn observe(account: &KarsBudgetAccount, error: Option<&StoreError>) -> Observati
     if ledger
         .meters
         .total()
-        .is_ok_and(|amount| at_limit(ledger.limits, amount))
+        .is_ok_and(|amount| at_limit(limits, amount))
     {
         return blocked(
             Phase::Blocked,
@@ -120,11 +124,31 @@ fn observe(account: &KarsBudgetAccount, error: Option<&StoreError>) -> Observati
             "Outstanding reservations occupy a declared ceiling; already funded work is retained.",
         );
     }
-    if !ledger.nodes.is_empty() && ledger.nodes.values().all(|node| !node.active) {
+    if (!ledger.nodes.is_empty()
+        || ledger
+            .history
+            .as_ref()
+            .is_some_and(|history| history.nodes > 0))
+        && ledger.nodes.values().all(|node| !node.active)
+    {
         return blocked(
             Phase::Blocked,
             "AuthorityRevoked",
             "All enrolled task authorities are closed; reopening requires controller-verified authority.",
+        );
+    }
+    if ledger.nodes.len() >= MAX_NODES {
+        return blocked(
+            Phase::Blocked,
+            "NodeCapacityReached",
+            "The accounting ledger cannot enroll another task identity; historical usage and replay protection are retained. This is storage capacity, not a spending limit. Already enrolled work still requires per-request admission.",
+        );
+    }
+    if ledger.sessions.len() >= MAX_SESSIONS {
+        return blocked(
+            Phase::Blocked,
+            "SessionCapacityReached",
+            "The accounting ledger cannot enroll another runtime session; closed-session replay fences are retained. This is storage capacity, not a spending limit. Already enrolled work still requires per-request admission.",
         );
     }
     if ledger.attempts.len() >= MAX_ATTEMPTS {
@@ -168,5 +192,9 @@ pub(super) fn project(
     .collect();
     status.phase = Some(observation.phase);
     status.observed_generation = account.metadata.generation;
+    status.effective_limits = Store::ledger(account)
+        .ok()
+        .filter(|ledger| !ledger.token_top_ups.is_empty())
+        .and_then(|ledger| ledger.effective_limits().ok());
     status
 }

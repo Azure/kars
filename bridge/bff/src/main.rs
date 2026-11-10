@@ -83,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
                 "orchestrator: standing `bridge-orchestrator` sandbox ensured (compose inference path)"
             ),
             Err(e) => tracing::warn!(
-                "orchestrator: could not ensure standing sandbox (compose falls back to any running sandbox): {e}"
+                "orchestrator: could not ensure standing sandbox (native compose waits for its own router): {e}"
             ),
         }
     } else if has_direct_endpoint {

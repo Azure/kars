@@ -52,6 +52,30 @@ class CryptoGateTests(GitFixture):
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stderr.count("introduces custom crypto"), 3)
 
+    def test_signed_mesh_regression_requires_test_only_module(self):
+        self.write("inference-router/src/routes/mesh_identity_tests.rs",
+                   "#![cfg(test)]\nuse ed25519_dalek::{Signer, SigningKey};\n")
+        self.commit()
+        result = self.gate()
+        self.assertEqual((result.returncode, result.stderr), (0, ""))
+
+    def test_mesh_regression_without_test_guard_is_rejected(self):
+        self.write("inference-router/src/routes/mesh_identity_tests.rs",
+                   "use ed25519_dalek::{Signer, SigningKey};\n")
+        self.commit()
+        result = self.gate()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("must remain a test-only module", result.stderr)
+
+    def test_mesh_regression_exception_does_not_extend_to_other_paths(self):
+        for name in ("mesh_identity_tests.rs-extra.rs", "other_tests.rs"):
+            self.write("inference-router/src/routes/" + name,
+                       "#![cfg(test)]\nuse ed25519_dalek::Signer;\n")
+        self.commit()
+        result = self.gate()
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr.count("introduces custom crypto"), 2)
+
     def test_existing_explicit_directory_and_file_contracts_still_work(self):
         self.write("controller/src/providers/signing.rs", "use sha2::{Digest, Sha256};\n")
         self.write("controller/src/mesh_peer/nested/wrapper.rs", "use ed25519_dalek::Signer;\n")

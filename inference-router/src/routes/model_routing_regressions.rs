@@ -100,6 +100,509 @@ pub(super) async fn post_chat(app: Router, stream: bool) -> (StatusCode, Bytes) 
 }
 
 #[tokio::test]
+async fn output_limit_guidance_retries_once_without_changing_model_or_request_controls() {
+    for stream in [false, true] {
+        for retry_succeeds in [false, true] {
+            let primary = MockServer::start().await;
+            let default = MockServer::start().await;
+            let error = json!({"error": {
+                "code":"unsupported_parameter", "param":"max_tokens",
+                "message":"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead."
+            }});
+            Mock::given(body_partial_json(json!({"max_tokens":1024})))
+                .respond_with(ResponseTemplate::new(400).set_body_json(error.clone()))
+                .expect(1)
+                .mount(&primary)
+                .await;
+            let success = json!({
+                "model":"gpt-6.1-sol", "choices":[{"message":{"content":"retained"}}],
+                "usage":{"prompt_tokens":20,"completion_tokens":10,"total_tokens":30}
+            });
+            let template = if retry_succeeds {
+                ResponseTemplate::new(200).set_body_json(success.clone())
+            } else {
+                ResponseTemplate::new(400).set_body_json(error.clone())
+            };
+            Mock::given(body_partial_json(json!({"max_completion_tokens":1024})))
+                .respond_with(template)
+                .expect(1)
+                .mount(&primary)
+                .await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(500))
+                .expect(0)
+                .mount(&default)
+                .await;
+            let state = state(config(
+                &default.uri(),
+                &[("primary", &primary.uri(), Some("key"))],
+            ));
+            let mut base =
+                UpstreamConfig::azure(default.uri(), "true-default-model".into(), "test".into());
+            base.provider_api_key = Some("default-key".into());
+            let request = json!({
+                "model":"gpt-6.1-sol", "messages":[{"role":"user","content":"Export"}],
+                "stream":stream, "max_tokens":1024, "reasoning_effort":"medium",
+                "tools":[{"type":"function","function":{"name":"deliverable","parameters":{"type":"object"}}}],
+                "tool_choice":{"type":"function","function":{"name":"deliverable"}}
+            });
+            let body = Bytes::from(serde_json::to_vec(&request).unwrap());
+            let policy = policy("primary", "gpt-6.1-sol");
+            let (status, response, selected) = if stream {
+                let (status, _, output, selected) =
+                    forward_stream_chat(&state, &base, &policy, HeaderMap::new(), body)
+                        .await
+                        .unwrap();
+                let response = output
+                    .try_fold(Vec::new(), |mut bytes, chunk| async move {
+                        bytes.extend_from_slice(&chunk);
+                        Ok(bytes)
+                    })
+                    .await
+                    .unwrap();
+                (status, Bytes::from(response), selected)
+            } else {
+                let (status, _, response, selected) =
+                    forward_chat(&state, &base, &policy, &HeaderMap::new(), body)
+                        .await
+                        .unwrap();
+                (status, response, selected)
+            };
+            assert_eq!(
+                status,
+                if retry_succeeds {
+                    StatusCode::OK
+                } else {
+                    StatusCode::BAD_REQUEST
+                }
+            );
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&response).unwrap(),
+                if retry_succeeds { success } else { error }
+            );
+            assert_eq!(selected.deployment, "gpt-6.1-sol");
+            assert_eq!(selected.endpoint, primary.uri());
+            assert!(state.unavailable_models.read().unwrap().is_empty());
+            let requests = primary.received_requests().await.unwrap();
+            assert_eq!(requests.len(), 2);
+            let first: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+            let second: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+            let mut expected = first.clone();
+            let limit = expected
+                .as_object_mut()
+                .unwrap()
+                .remove("max_tokens")
+                .unwrap();
+            expected["max_completion_tokens"] = limit;
+            assert_eq!(second, expected);
+            assert_eq!(first["reasoning_effort"], request["reasoning_effort"]);
+            assert_eq!(first["tool_choice"], request["tool_choice"]);
+            assert_eq!(first["tools"], request["tools"]);
+        }
+    }
+}
+
+#[tokio::test]
+async fn retained_and_generated_requests_keep_candidate_mutations_isolated_on_the_wire() {
+    for stream in [false, true] {
+        for origin in ["ingress", "generated", "legacy-bytes"] {
+            let primary = MockServer::start().await;
+            let fallback = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(503))
+                .expect(1)
+                .mount(&primary)
+                .await;
+            let response = if stream {
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(
+                        "data: {\"choices\":[],\"usage\":{\"total_tokens\":1}}\n\ndata: [DONE]\n\n",
+                    )
+            } else {
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"choices":[], "usage":{"total_tokens":1}}))
+            };
+            Mock::given(method("POST"))
+                .respond_with(response)
+                .expect(1)
+                .mount(&fallback)
+                .await;
+            let state = state(config(
+                &fallback.uri(),
+                &[
+                    ("primary", &primary.uri(), Some("primary-key")),
+                    ("fallback", &fallback.uri(), Some("fallback-key")),
+                ],
+            ));
+            let mut policy = policy("primary", "claude-sonnet-5");
+            policy
+                .model_preference
+                .as_mut()
+                .unwrap()
+                .fallback
+                .push(ModelRef {
+                    provider: "fallback".into(),
+                    deployment: "plain-fallback".into(),
+                });
+            let original = json!({
+                "model":"caller-model", "messages":[{"role":"user","content":"hello"}],
+                "stream":stream, "max_tokens":123,
+                "thinking":{"type":"enabled","budget_tokens":1024},
+                "stream_options":{"other":"keep"},
+                "extension":"x".repeat(if origin == "ingress" { 16 } else { 2 * 1024 * 1024 }),
+            });
+            let body = if origin == "generated" {
+                RequestBody::from_value(original.clone())
+            } else {
+                let bytes = Bytes::from(serde_json::to_vec(&original).unwrap());
+                if origin == "ingress" {
+                    let value = crate::routes::request_json::parse(&bytes).unwrap();
+                    RequestBody::from_validated(bytes, value)
+                } else {
+                    RequestBody::from_bytes(bytes)
+                }
+            };
+            let base = state.upstream_config(&state.sandbox_name);
+            if stream {
+                let (status, _, response, selected) =
+                    forward_stream_chat(&state, &base, &policy, HeaderMap::new(), body.clone())
+                        .await
+                        .unwrap();
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(selected.deployment, "plain-fallback");
+                response.try_collect::<Vec<_>>().await.unwrap();
+            } else {
+                let (status, _, _, selected) =
+                    forward_chat(&state, &base, &policy, &HeaderMap::new(), body.clone())
+                        .await
+                        .unwrap();
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(selected.deployment, "plain-fallback");
+            }
+            assert_eq!(body.json(), Some(&original));
+            for (server, model) in [(&primary, "claude-sonnet-5"), (&fallback, "plain-fallback")] {
+                let requests = server.received_requests().await.unwrap();
+                assert_eq!(requests.len(), 1, "{origin}, stream={stream}");
+                assert_eq!(requests[0].url.path(), "/chat/completions");
+                let actual: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+                let mut expected = original.clone();
+                expected["model"] = json!(model);
+                if model == "claude-sonnet-5" {
+                    expected["thinking"] = json!({"type":"adaptive"});
+                }
+                if stream {
+                    expected["stream_options"]["include_usage"] = json!(true);
+                }
+                assert_eq!(actual, expected, "{origin}, stream={stream}, model={model}");
+                if origin != "ingress" {
+                    assert!(requests[0].body.len() > 2 * 1024 * 1024);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn output_limit_correction_requires_explicit_guidance_and_unambiguous_positive_limit() {
+    let error = json!({"error": {
+        "param":"max_tokens", "code":"unsupported_parameter",
+        "message":"Unsupported parameter: 'max_tokens'. Use 'max_completion_tokens' instead."
+    }});
+    let request = json!({"model":"selected-alias", "max_tokens":1024, "stream":true});
+    let encode = |value: &serde_json::Value| serde_json::to_vec(value).unwrap();
+    let corrected = corrected_output_limit_request(
+        StatusCode::BAD_REQUEST,
+        &encode(&error),
+        &RequestBody::from_value(request.clone()),
+    )
+    .unwrap();
+    assert_eq!(
+        corrected.json().unwrap().clone(),
+        json!({"model":"selected-alias", "max_completion_tokens":1024, "stream":true})
+    );
+    for status in [
+        StatusCode::OK,
+        StatusCode::UNAUTHORIZED,
+        StatusCode::NOT_FOUND,
+        StatusCode::TOO_MANY_REQUESTS,
+        StatusCode::INTERNAL_SERVER_ERROR,
+    ] {
+        assert!(
+            corrected_output_limit_request(
+                status,
+                &encode(&error),
+                &RequestBody::from_value(request.clone())
+            )
+            .is_none()
+        );
+    }
+    for body in [
+        json!({}),
+        json!(null),
+        json!({"max_tokens":0}),
+        json!({"max_tokens":-1}),
+        json!({"max_tokens":"1024"}),
+        json!({"max_tokens":1.5}),
+        json!({"max_tokens":1024,"max_completion_tokens":1024}),
+        json!({"max_tokens":1024,"max_completion_tokens":null}),
+    ] {
+        assert!(
+            corrected_output_limit_request(
+                StatusCode::BAD_REQUEST,
+                &encode(&error),
+                &RequestBody::from_value(body.clone())
+            )
+            .is_none()
+        );
+    }
+    for patch in [
+        json!({"param":null}),
+        json!({"param":"model"}),
+        json!({"param":"temperature"}),
+        json!({"message":"The max_completion_tokens field exists."}),
+        json!({"message":"Use fewer max_tokens; max_completion_tokens is unsupported."}),
+        json!({"message":null}),
+    ] {
+        let mut modified = error.clone();
+        modified["error"]
+            .as_object_mut()
+            .unwrap()
+            .extend(patch.as_object().unwrap().clone());
+        assert!(
+            corrected_output_limit_request(
+                StatusCode::BAD_REQUEST,
+                &encode(&modified),
+                &RequestBody::from_value(request.clone())
+            )
+            .is_none()
+        );
+    }
+    assert!(
+        corrected_output_limit_request(
+            StatusCode::BAD_REQUEST,
+            b"{\"error\":",
+            &RequestBody::from_value(request.clone())
+        )
+        .is_none()
+    );
+    assert!(
+        corrected_output_limit_request(
+            StatusCode::BAD_REQUEST,
+            &encode(&error),
+            &RequestBody::from_bytes(Bytes::from_static(b"{"))
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn parameter_errors_do_not_report_model_or_endpoint_unavailability() {
+    for parameter in [
+        "max_tokens",
+        "reasoning_effort",
+        "temperature",
+        "messages[0].role",
+        "tools",
+    ] {
+        let error = json!({"error": {
+            "param":parameter, "message":"Unsupported API parameter is not supported with this model."
+        }});
+        let bytes = serde_json::to_vec(&error).unwrap();
+        assert!(!is_responses_only_error(&bytes), "{parameter}");
+        assert!(
+            !is_model_unavailable_error(StatusCode::BAD_REQUEST, &bytes),
+            "{parameter}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn foundry_request_incompatibility_recovers_without_changing_model() {
+    for stream in [false, true] {
+        let primary = MockServer::start().await;
+        let default = MockServer::start().await;
+        let error = json!({"error": {"param":"reasoning_effort", "message":
+            "Function tools with reasoning_effort are not supported for model gpt-6.1-sol in /v1/chat/completions. Use /v1/responses or reasoning_effort='none'."
+        }});
+        Mock::given(wiremock::matchers::path("/chat/completions"))
+            .and(body_partial_json(json!({"max_tokens":1024})))
+            .respond_with(ResponseTemplate::new(400).set_body_json(json!({"error": {
+                "param":"max_tokens", "code":"unsupported_parameter",
+                "message":"Unsupported parameter: 'max_tokens'. Use 'max_completion_tokens' instead."
+            }})))
+            .expect(1)
+            .mount(&primary)
+            .await;
+        Mock::given(wiremock::matchers::path("/chat/completions"))
+            .and(body_partial_json(
+                json!({"model":"gpt-6.1-sol", "max_completion_tokens":1024}),
+            ))
+            .respond_with(ResponseTemplate::new(400).set_body_json(error))
+            .expect(1)
+            .mount(&primary)
+            .await;
+        Mock::given(wiremock::matchers::path("/responses"))
+            .and(body_partial_json(json!({
+                "model":"gpt-6.1-sol", "reasoning":{"effort":"medium"},
+                "tools":[{"type":"function", "name":"deliverable", "parameters":{"type":"object"}}],
+                "tool_choice":{"type":"function", "name":"deliverable"},
+                "max_output_tokens":1024
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id":"response-selected-model", "model":"gpt-6.1-sol",
+                "output":[{"type":"function_call", "call_id":"export-1", "name":"deliverable", "arguments":"{}"}],
+                "usage":{"input_tokens":20, "output_tokens":10, "total_tokens":30}
+            })))
+            .expect(2)
+            .mount(&primary).await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(400))
+            .expect(0)
+            .mount(&default)
+            .await;
+        let state = state(config(
+            &default.uri(),
+            &[("primary", &primary.uri(), Some("key"))],
+        ));
+        let unavailable = state.unavailable_models.clone();
+        let app = router(state, &policy("primary", "gpt-6.1-sol")).await;
+        for _ in 0..2 {
+            let response = app.clone().oneshot(Request::builder().method("POST")
+                .uri("/v1/chat/completions").header("content-type", "application/json")
+                .body(Body::from(json!({
+                    "model":"gpt-6.1-sol", "messages":[{"role":"user","content":"Export the reviewed deliverable"}],
+                    "stream":stream, "reasoning_effort":"medium", "max_tokens":1024,
+                    "tools":[{"type":"function","function":{"name":"deliverable","parameters":{"type":"object"}}}],
+                    "tool_choice":{"type":"function","function":{"name":"deliverable"}}
+                }).to_string())).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "stream={stream}");
+            let body = axum::body::to_bytes(response.into_body(), 1_048_576)
+                .await
+                .unwrap();
+            let text = String::from_utf8(body.to_vec()).unwrap();
+            let json = if stream {
+                text.lines()
+                    .find_map(|line| line.strip_prefix("data: ").filter(|data| *data != "[DONE]"))
+                    .unwrap()
+            } else {
+                &text
+            };
+            let result: serde_json::Value = serde_json::from_str(json).unwrap();
+            assert_eq!(result["model"], "gpt-6.1-sol");
+            assert_eq!(result["usage"]["total_tokens"], 30);
+            let message = &result["choices"][0]["message"];
+            assert_eq!(message["tool_calls"][0]["function"]["name"], "deliverable");
+            assert!(unavailable.read().unwrap().is_empty());
+        }
+        assert!(default.received_requests().await.unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn content_safety_floors_refuse_unenforced_routes_before_provider_send() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&upstream)
+        .await;
+    for floor in [
+        json!({"requirePromptShields": true}),
+        json!({"hate": "Safe"}),
+        json!({"selfHarm": "Low"}),
+        json!({"sexual": "Medium"}),
+        json!({"violence": "High"}),
+    ] {
+        let mut policy = policy("primary", "primary-model");
+        policy.content_safety = crate::safety::ContentSafetyFloor::from_compiled_json(&floor);
+        let app = router(
+            state(config(
+                &upstream.uri(),
+                &[("primary", &upstream.uri(), Some("key"))],
+            )),
+            &policy,
+        )
+        .await;
+        for route in [
+            "/v1/responses",
+            "/v1/completions",
+            "/v1/embeddings",
+            "/v1/images/generations",
+            "/v1/messages",
+            "/anthropic/v1/messages",
+        ] {
+            for stream in [false, true] {
+                let response = app.clone().oneshot(Request::builder().method("POST").uri(route)
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({"model":"primary-model", "input":"hello", "messages":[{"role":"user","content":"hello"}], "stream":stream}).to_string())).unwrap()).await.unwrap();
+                assert_eq!(response.status(), StatusCode::FORBIDDEN, "{route}: {floor}");
+                assert_eq!(response.headers()["x-kars-decision"], "blocked");
+                let body = axum::body::to_bytes(response.into_body(), 16_384)
+                    .await
+                    .unwrap();
+                let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(body["error"]["code"], "content_safety_route_unsupported");
+            }
+        }
+    }
+    assert!(upstream.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn content_safety_floor_never_falls_back_to_responses() {
+    for cached in [false, true] {
+        for stream in [false, true] {
+            let upstream = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(
+                    ResponseTemplate::new(400)
+                        .set_body_json(json!({"error":{"code":"unsupported_api_for_model"}})),
+                )
+                .expect(if cached { 0 } else { 1 })
+                .mount(&upstream)
+                .await;
+            let state = state(config(
+                &upstream.uri(),
+                &[("primary", &upstream.uri(), Some("key"))],
+            ));
+            let mut policy = policy("primary", "primary-model");
+            policy.content_safety.require_prompt_shields = true;
+            if cached {
+                let target = effective_primary(
+                    &state,
+                    &state.upstream_config(&state.sandbox_name),
+                    &policy,
+                    &RequestBody::from_value(json!({})),
+                )
+                .unwrap();
+                state
+                    .responses_only_models
+                    .write()
+                    .unwrap()
+                    .insert(model_capability_key(&target));
+            }
+            let app = router(state, &policy).await;
+            let (status, body) = post_chat(app, stream).await;
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "cached={cached}, stream={stream}"
+            );
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["error"]["code"], "content_safety_route_unsupported");
+            let requests = upstream.received_requests().await.unwrap();
+            assert_eq!(requests.len(), if cached { 0 } else { 1 });
+            assert!(
+                requests
+                    .iter()
+                    .all(|request| request.url.path().ends_with("/chat/completions"))
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn explicit_provider_wins_over_informational_primary_for_buffered_and_streaming_chat() {
     for stream in [false, true] {
         let local = MockServer::start().await;
@@ -188,8 +691,20 @@ async fn availability_cache_does_not_skip_another_credential_on_the_same_endpoin
             .unwrap();
     let _: Vec<_> = stream.try_collect().await.unwrap();
     assert_eq!(selected.endpoint, shared.uri());
-    let a = primary_target(&state, &base, &a, b"{}").unwrap();
-    let b = primary_target(&state, &base, &b, b"{}").unwrap();
+    let a = primary_target(
+        &state,
+        &base,
+        &a,
+        &RequestBody::from_value(serde_json::json!({})),
+    )
+    .unwrap();
+    let b = primary_target(
+        &state,
+        &base,
+        &b,
+        &RequestBody::from_value(serde_json::json!({})),
+    )
+    .unwrap();
     assert_ne!(model_capability_key(&a), model_capability_key(&b));
     let cache = state.unavailable_models.read().unwrap();
     assert!(cache.contains(&model_capability_key(&a)));

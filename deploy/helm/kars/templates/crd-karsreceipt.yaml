@@ -199,7 +199,7 @@ spec:
                 nullable: true
                 type: integer
               issuedAt:
-                description: RFC3339 issuance time (unsigned — not part of the attested payload).
+                description: First RFC3339 issuance time for this receipt object (unsigned, not a heartbeat).
                 nullable: true
                 type: string
               observedTaskGeneration:

@@ -1,0 +1,108 @@
+{
+  "schemaVersion": "v1",
+  "name": "governed-egress-tunnels",
+  "cases": [
+    {
+      "id": "governed-egress-001-link-local",
+      "tags": [
+        "egress",
+        "imds",
+        "finite-budget"
+      ],
+      "scenario": {
+        "kind": "EgressConnect",
+        "host": "169.254.169.254",
+        "port": 80
+      },
+      "expect": {
+        "decision": "Blocked",
+        "reasonContains": "Opaque tunnels are unsupported for governed inference; use mediated router APIs"
+      }
+    },
+    {
+      "id": "governed-egress-002-cluster-internal",
+      "tags": [
+        "egress",
+        "lateral",
+        "finite-budget"
+      ],
+      "scenario": {
+        "kind": "EgressConnect",
+        "host": "kubernetes.default.svc.cluster.local",
+        "port": 443
+      },
+      "expect": {
+        "decision": "Blocked",
+        "reasonContains": "Opaque tunnels are unsupported for governed inference; use mediated router APIs"
+      }
+    },
+    {
+      "id": "governed-egress-003-fake-malicious",
+      "tags": [
+        "egress",
+        "exfil",
+        "finite-budget"
+      ],
+      "scenario": {
+        "kind": "EgressConnect",
+        "host": "exfil.example.test",
+        "port": 443
+      },
+      "expect": {
+        "decision": "Blocked",
+        "reasonContains": "Opaque tunnels are unsupported for governed inference; use mediated router APIs"
+      }
+    },
+    {
+      "id": "governed-egress-004-rfc1918",
+      "tags": [
+        "egress",
+        "private-net",
+        "finite-budget"
+      ],
+      "scenario": {
+        "kind": "EgressConnect",
+        "host": "10.0.0.1",
+        "port": 22
+      },
+      "expect": {
+        "decision": "Blocked",
+        "reasonContains": "Opaque tunnels are unsupported for governed inference; use mediated router APIs"
+      }
+    },
+    {
+      "id": "governed-egress-005-loopback",
+      "tags": [
+        "egress",
+        "loopback",
+        "finite-budget"
+      ],
+      "scenario": {
+        "kind": "EgressConnect",
+        "host": "127.0.0.1",
+        "port": 9000
+      },
+      "expect": {
+        "decision": "Blocked",
+        "reasonContains": "Opaque tunnels are unsupported for governed inference; use mediated router APIs"
+      }
+    },
+    {
+      "id": "governed-egress-006-non-https-port",
+      "tags": [
+        "egress",
+        "port",
+        "finite-budget"
+      ],
+      "scenario": {
+        "kind": "EgressConnect",
+        "host": "api.openai.com",
+        "port": 23
+      },
+      "expect": {
+        "decision": "Blocked",
+        "reasonContains": "Opaque tunnels are unsupported for governed inference; use mediated router APIs"
+      }
+    }
+  ]
+}

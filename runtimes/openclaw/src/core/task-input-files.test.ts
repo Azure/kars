@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
-import { missionInputContentDigest } from "@kars/mesh/dist/mission-inputs.js";
+import { MAX_MISSION_INPUT_BYTES, MAX_MISSION_INPUTS, missionInputContentDigest } from "@kars/mesh/dist/mission-inputs.js";
 import { readTaskFile, writeTaskFile, TaskInputFiles, TASK_INPUT_ROOT } from "./task-filesystem.js";
 
 const source = { namespace: "kars-system", taskName: "writer", taskUid: "task-uid", sandboxUid: "sandbox-uid",
@@ -37,23 +37,43 @@ describe("execution-local immutable input files", () => {
     expect(files.instructions()).not.toContain(original.content);
   });
 
-  it("reads all bounded inputs with full provenance atomically in one virtual bundle", async () => {
-    const original = Array.from({ length: 16 }, (_, i) => input(`Complete ${i}\r\n✓ 日本語 🌍`, `file-${i}.md`));
+  it.each([16, 28, MAX_MISSION_INPUTS])("reads %i inputs with full provenance atomically in one virtual bundle", async count => {
+    const original = Array.from({ length: count }, (_, i) => input(`Complete ${i}\r\n✓ 日本語 🌍`, `file-${i}.md`));
     const expected = structuredClone(original).sort((a, b) => a.name.localeCompare(b.name));
     const files = new TaskInputFiles(original);
     original[0].content = "Changed after admission";
     original[0].source.runNonce = "changed";
     const partial = await readTaskFile(TASK_INPUT_ROOT, 100, files);
     expect(partial.truncated).toBe(true);
-    expect(files.unreadPaths()).toHaveLength(16);
-    const complete = await readTaskFile(TASK_INPUT_ROOT, 65536, files);
+    expect(files.unreadPaths()).toHaveLength(count);
+    const complete = await readTaskFile(TASK_INPUT_ROOT, MAX_MISSION_INPUT_BYTES, files);
     expect(complete.truncated).toBe(false);
     expect(complete.returned_bytes).toBe(Buffer.byteLength(complete.content));
-    expect(complete.bytes).toBeLessThanOrEqual(65536);
+    expect(complete.bytes).toBeLessThanOrEqual(MAX_MISSION_INPUT_BYTES);
     expect(JSON.parse(complete.content)).toEqual(expected);
     expect(files.unreadPaths()).toEqual([]);
     await expect(writeTaskFile(TASK_INPUT_ROOT, "overwrite")).rejects.toThrow("read-only");
     await expect(readTaskFile(TASK_INPUT_ROOT, 65536)).rejects.toThrow("not supplied");
+  });
+
+  it.each([
+    { sizes: [31553, 26140, 10785] },
+    { sizes: [6196,14522,5685,3615,45629,12109,9141,9500,15944,8654,8654,10911,6554,6554,
+      2264,45629,14522,6196,3615,5685,4201,11018,1031,6672,2080,4430,6387,3899] },
+    { sizes: [35000, 13205, 19474, 43332, 17511, 5728, 4869, 12000, 7200] },
+    { sizes: [35000, 13205, 19474, 43332, 17511, 5728, 4869, 18352, 17947, 9524, 64000, 64000] },
+  ])("reads a complete research or continuity bundle without losing custody: $sizes", async ({ sizes }) => {
+    const original = sizes.map((bytes, i) => input("x".repeat(bytes - 4) + "\n✓", `research-${i}.md`));
+    const files = new TaskInputFiles(original);
+    expect((await readTaskFile(TASK_INPUT_ROOT, 65536, files)).truncated).toBe(true);
+    expect(files.unreadPaths()).toHaveLength(sizes.length);
+    const complete = await readTaskFile(TASK_INPUT_ROOT, MAX_MISSION_INPUT_BYTES, files);
+    expect(complete.truncated).toBe(false);
+    expect(complete.bytes).toBeGreaterThan(65536);
+    expect(JSON.parse(complete.content)).toEqual([...original].sort((a, b) => a.name.localeCompare(b.name)));
+    expect(files.unreadPaths()).toEqual([]);
+    expect(files.instructions()).toContain(`max_bytes ${MAX_MISSION_INPUT_BYTES}`);
+    expect(files.instructions(true)).toContain(`bounded to ${MAX_MISSION_INPUT_BYTES} bytes`);
   });
 
   it("freezes a private snapshot and cannot leak across executions or reads", async () => {

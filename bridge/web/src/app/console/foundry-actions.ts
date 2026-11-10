@@ -17,13 +17,10 @@ export async function connectFoundryAction(_prev: FoundryState, form: FormData):
   const project_endpoint = String(form.get("project_endpoint") ?? "").trim();
   const inference_endpoint = String(form.get("inference_endpoint") ?? "").trim();
   const memory_store_id = String(form.get("memory_store_id") ?? "").trim();
-  const auth = String(form.get("auth") ?? "auto") as "api" | "managed-identity";
+  const auth = String(form.get("auth") ?? "auto") as "api" | "managed-identity" | "auto";
   const api_key = String(form.get("api_key") ?? "").trim();
   if (!project_endpoint.startsWith("https://")) {
     return { error: "Enter the Foundry project endpoint (https://…/api/projects/<project>).", ok: null };
-  }
-  if (auth === "api" && !api_key) {
-    return { error: "API-key auth requires the Foundry project key.", ok: null };
   }
   try {
     await connectFoundry({
@@ -40,10 +37,11 @@ export async function connectFoundryAction(_prev: FoundryState, form: FormData):
       checks = res.checks;
       discovered = res.discovered;
     } catch {
-      /* discovery best-effort; connection still saved */
+      revalidatePath("/console/configuration");
+      return { error: "The connection was saved, but discovery could not be completed. Saved models were retained; retry Refresh models & services.", ok: null };
     }
     revalidatePath("/console/configuration");
-    const failed = checks?.some((c) => c.status === "fail");
+    const failed = checks?.some((c) => c.status !== "pass");
     return {
       error: null,
       ok: failed ? "Connected, but discovery found issues — see below." : "Connected to Foundry.",
@@ -58,7 +56,8 @@ export async function connectFoundryAction(_prev: FoundryState, form: FormData):
 export async function verifyFoundryAction(_prev: FoundryState, _form: FormData): Promise<FoundryState> {
   try {
     const res = await verifyFoundry();
-    const failed = res.checks.some((c) => c.status === "fail");
+    revalidatePath("/console/configuration");
+    const failed = res.checks.some((c) => c.status !== "pass");
     return {
       error: null,
       ok: failed ? "Verification found issues — see below." : "Foundry verified.",

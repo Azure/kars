@@ -33,6 +33,9 @@ const REQUIRED_RELEASE_ASSETS = [
   "deploy/helm/kars/values-local-dev.yaml",
   "deploy/helm/kars/values-generic.yaml",
   "deploy/helm/kars/values-existing-aks.yaml",
+  "deploy/helm/kars/values-kind-beta.yaml",
+  "bridge/deploy/helm/kars-bridge",
+  "bridge/deploy/helm/kars-bridge/values-kind-beta.yaml",
   "deploy/agentmesh-agt.yaml",
   // aks (kars up --release)
   "deploy/bicep/main.bicep",
@@ -49,9 +52,8 @@ describe("findRepoRootOrNull", () => {
     expect(root).toBe(repoRoot);
   });
 
-  it("returns null when run from outside any repo (e.g. an npm global dir)", () => {
-    const tmp = mkdtempSync(path.join(os.tmpdir(), "kars-norepo-"));
-    expect(findRepoRootOrNull(tmp)).toBeNull();
+  it("returns null at the filesystem root without creating an outside-workspace fixture", () => {
+    expect(findRepoRootOrNull(path.parse(repoRoot).root)).toBeNull();
   });
 });
 
@@ -90,7 +92,7 @@ describe("bundle-deploy-assets manifest", () => {
       "utf8",
     );
     // Extract the quoted asset paths the script declares in its `assets` list.
-    const declared = [...script.matchAll(/"((?:deploy|tools)\/[^"]+)"/g)].map((m) => m[1]);
+    const declared = [...script.matchAll(/"((?:deploy|tools|bridge)\/[^"]+)"/g)].map((m) => m[1]);
     expect(declared.length).toBeGreaterThan(0);
     for (const rel of REQUIRED_RELEASE_ASSETS) {
       // Covered if the asset is declared directly, or lives under a declared
@@ -131,18 +133,32 @@ describe("locked Core chart bundling", () => {
     }
     writeFileSync(path.join(root, "deploy/agentmesh-agt.yaml"), "kind: List\nitems: []\n");
     writeFileSync(path.join(distChart, "obsolete-template.yaml"), "stale");
+    const bridgeChart = path.join(root, "bridge/deploy/helm/kars-bridge");
+    const distBridge = path.join(root, "cli/dist/bridge/deploy/helm/kars-bridge");
+    mkdirSync(bridgeChart, { recursive: true }); mkdirSync(distBridge, { recursive: true });
+    writeFileSync(path.join(bridgeChart, "Chart.yaml"), "apiVersion: v2\nname: kars-bridge\nversion: 0.1.0\n");
+    writeFileSync(path.join(bridgeChart, "values-kind-beta.yaml"), "global:\n  installationProfile: kind-beta\n");
+    writeFileSync(path.join(distBridge, "obsolete-template.yaml"), "stale");
     return {
-      chart, distChart,
+      chart, distChart, bridgeChart, distBridge,
       bundle: () => execFileSync(process.execPath, [script], { encoding: "utf8", stdio: "pipe" }),
     };
   }
 
   it("bundles remote and local locked dependencies by original name and removes stale chart files", () => {
-    const { distChart, bundle } = fixture();
+    const { distChart, distBridge, bundle } = fixture();
     expect(bundle()).toContain("copied");
+    expect(existsSync(path.join(distBridge, "Chart.yaml"))).toBe(true);
+    expect(existsSync(path.join(distBridge, "values-kind-beta.yaml"))).toBe(true);
+    expect(existsSync(path.join(distBridge, "obsolete-template.yaml"))).toBe(false);
     expect(existsSync(path.join(distChart, "charts/dependency-1.2.3.tgz"))).toBe(true);
     expect(existsSync(path.join(distChart, "charts/local-child-0.1.0.tgz"))).toBe(true);
     expect(existsSync(path.join(distChart, "obsolete-template.yaml"))).toBe(false);
+  });
+
+  it("refuses a package missing the maintained Bridge chart", () => {
+    const { bridgeChart, bundle } = fixture(); rmSync(bridgeChart, { recursive: true });
+    expect(bundle).toThrow(/required asset.*bridge\/deploy\/helm\/kars-bridge/);
   });
 
   it.each(["Chart.lock", "charts/dependency-1.2.3.tgz", "charts/local-child-0.1.0.tgz"])(

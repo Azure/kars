@@ -6,7 +6,7 @@
 //! Two router surfaces are mocked here:
 //!
 //! 1. A wiremock HTTP server for `/v1/chat/completions`, `/mcp`,
-//!    `/platform/mcp` — used by ChatCompletion / ToolCall / MemoryRead
+//!    `/memory_stores/{store}:search_memories` — used by ChatCompletion / ToolCall / MemoryRead
 //!    scenarios.
 //! 2. A bare TCP listener that speaks just enough of the forward-proxy
 //!    HTTP-CONNECT protocol to return a configurable status line —
@@ -57,6 +57,135 @@ async fn spawn_fake_forward_proxy(response: &'static [u8]) -> (String, oneshot::
         }
     });
     (addr, tx)
+}
+
+#[tokio::test]
+async fn inference_safety_diagnostics_are_case_bound_private_and_do_not_change_verdicts() {
+    for detected in [false, true] {
+        let server = wiremock::MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "prompt_filter_results": [{"content_filter_results": {
+                    "jailbreak": {"detected": detected, "filtered": false}
+                }}],
+                "choices": [{"finish_reason": "stop", "message": {
+                    "content": "private-response-marker", "refusal": "private-refusal-marker"
+                }}]
+            })))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let report_path = dir.path().join("report.json");
+        let output = Command::new(runner_binary())
+            .env("KARS_EVAL_REPORT_FORMAT", "v2")
+            .env("RUST_LOG", "info")
+            .args([
+                "--corpus",
+                "builtin:jailbreak-baseline",
+                "--only-case",
+                "jb-003-roleplay-bypass",
+                "--router-base",
+                &server.uri(),
+                "--no-stdout",
+                "--output",
+            ])
+            .arg(&report_path)
+            .output()
+            .await
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        let diagnostic = stderr
+            .lines()
+            .find(|line| line.contains("Inference safety observation"))
+            .unwrap();
+        assert!(diagnostic.contains("jb-003-roleplay-bypass"));
+        assert!(diagnostic.contains("complete_shield_results: 1"));
+        assert!(diagnostic.contains(&format!("detected_attacks: {}", usize::from(detected))));
+        assert!(diagnostic.contains("structured_refusal_choices: 1"));
+        let report_bytes = std::fs::read(report_path).unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&report_bytes).unwrap();
+        assert_eq!(report["total"], 1);
+        assert_eq!(report["failed"], 1);
+        assert_eq!(report["errored"], 0);
+        assert_eq!(report["results"][0]["actual"]["decision"], "Allowed");
+        assert_eq!(
+            report["results"][0]["verdict"]["reason"],
+            "DecisionMismatch"
+        );
+        for private in ["private-response-marker", "private-refusal-marker"] {
+            assert!(!stderr.contains(private));
+            assert!(!String::from_utf8_lossy(&report_bytes).contains(private));
+        }
+    }
+}
+
+#[tokio::test]
+async fn governed_tunnel_corpus_requires_the_real_boundary_refusal() {
+    const REFUSAL: &str =
+        "Opaque tunnels are unsupported for governed inference; use mediated router APIs";
+    assert!(include_str!("../../inference-router/src/forward_proxy.rs").contains(REFUSAL));
+    let governed = "HTTP/1.1 403 Forbidden — Opaque tunnels are unsupported for governed inference; use mediated router APIs\r\nContent-Length: 0\r\n\r\n".as_bytes();
+    for (corpus, response, exit, passed, errored) in [
+        ("governed-egress-tunnels", governed, 0, 6, 0),
+        ("egress-known-bad", governed, 1, 0, 0),
+        (
+            "governed-egress-tunnels",
+            b"HTTP/1.1 403 host not in allowlist\r\n\r\n".as_slice(),
+            1,
+            0,
+            0,
+        ),
+        (
+            "governed-egress-tunnels",
+            b"HTTP/1.1 403 Forbidden\r\n\r\n".as_slice(),
+            1,
+            0,
+            0,
+        ),
+        (
+            "governed-egress-tunnels",
+            b"HTTP/1.1 502 Bad Gateway\r\n\r\n".as_slice(),
+            2,
+            0,
+            6,
+        ),
+    ] {
+        let (proxy_addr, _shutdown) = spawn_fake_forward_proxy(response).await;
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("report.json");
+        let status = Command::new(runner_binary())
+            .env("KARS_EVAL_REPORT_FORMAT", "v2")
+            .args([
+                "--corpus",
+                &format!("builtin:{corpus}"),
+                "--router-base",
+                "http://127.0.0.1:1",
+                "--forward-proxy",
+                &proxy_addr,
+                "--output",
+            ])
+            .arg(&output)
+            .arg("--no-stdout")
+            .status()
+            .await
+            .unwrap();
+        assert_eq!(status.code(), Some(exit), "{corpus}");
+        let report: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(output).unwrap()).unwrap();
+        assert_eq!(report["total"], 6);
+        assert_eq!(report["passed"], passed);
+        assert_eq!(report["errored"], errored);
+        if response == governed {
+            for case in report["results"].as_array().unwrap() {
+                assert_eq!(case["actual"]["decision"], "Blocked");
+                assert!(case["actual"].get("byPolicyKind").is_none());
+                assert!(case["actual"].get("reason").is_none());
+            }
+        }
+    }
 }
 
 #[tokio::test]

@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::reconciler::namespace_ownership as claim;
+use crate::reconciler::sre_egress::{cilium_installed as installed, cilium_spec};
 
 // A durable discovery hint, not authority. It survives partial policy/RBAC
 // cleanup and disappears with the namespace; ordinary runtimes never get it.
@@ -41,37 +42,6 @@ pub(super) fn approved(
     Ok(())
 }
 
-async fn installed(client: &Client) -> Result<bool, String> {
-    let resources = match client.list_api_group_resources("cilium.io/v2").await {
-        Ok(resources) => resources,
-        Err(kube::Error::Api(error)) if error.code == 404 && error.reason == "NotFound" => {
-            return Ok(false);
-        }
-        Err(error) => return Err(api_error("Discover observer Cilium policy API", error)),
-    };
-    let candidates: Vec<_> = resources
-        .resources
-        .iter()
-        .filter(|resource| resource.name == "ciliumnetworkpolicies")
-        .collect();
-    if resources.group_version != "cilium.io/v2"
-        || candidates.len() != 1
-        || candidates[0].kind != KIND
-        || !candidates[0].namespaced
-        || !["get", "list", "create", "update", "delete"]
-            .iter()
-            .all(|verb| {
-                candidates[0]
-                    .verbs
-                    .iter()
-                    .any(|value| value.as_str() == *verb)
-            })
-    {
-        return Err("Installed Cilium policy API has an unsupported resource contract".into());
-    }
-    Ok(true)
-}
-
 pub(super) async fn plan(client: &Client, host: &str, port: &str) -> Result<Plan, String> {
     let rules = crate::reconciler::sre_egress::rules(client, host, port).await?;
     Ok(Plan {
@@ -81,30 +51,7 @@ pub(super) async fn plan(client: &Client, host: &str, port: &str) -> Result<Plan
 }
 
 fn spec(sandbox: &KarsSandbox, namespace: &Namespace, plan: &Plan) -> Result<Value, String> {
-    let ports: BTreeSet<u16> = plan
-        .rules
-        .iter()
-        .map(|rule| {
-            rule["ports"][0]["port"]
-                .as_u64()
-                .and_then(|port| u16::try_from(port).ok())
-                .filter(|port| *port != 0)
-                .ok_or_else(|| "Canonical observer API port is invalid".to_string())
-        })
-        .collect::<Result<_, _>>()?;
-    if ports.is_empty() {
-        return Err("Canonical observer API targets are unavailable".into());
-    }
-    Ok(json!({
-        "endpointSelector":{"matchLabels":{
-            "k8s:kars.azure.com/sandbox":sandbox.name_any(),
-            "k8s:io.kubernetes.pod.namespace":namespace.name_any()
-        }},
-        "egress":[{"toEntities":["kube-apiserver"],"toPorts":[{
-            "ports":ports.into_iter().map(|port|json!({"port":port.to_string(),"protocol":"TCP"}))
-                .collect::<Vec<_>>()
-        }]}]
-    }))
+    cilium_spec(&sandbox.name_any(), &namespace.name_any(), &plan.rules)
 }
 
 pub(super) async fn ensure(

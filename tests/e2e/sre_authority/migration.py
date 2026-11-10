@@ -8,7 +8,7 @@ from .common import (
     assert_claim, assert_denial, enrollment_json, fingerprint, printed_object, require, review_args,
 )
 from .fixtures import CONTROL, CONTROL_NS, GROUP_BINDING, delegate_operators
-from .admission import admission_cases, policies_ready
+from .admission import admission_cases, policies_ready, retained_report_denials
 from .credential_paths import (
     assert_fresh_private_identity, block_prestaged_paths, fixture_review, secret_watch, token_secret_denials,
 )
@@ -21,6 +21,53 @@ def cli_failure(result, text, label):
 
 def pods(h, namespace):
     return json.loads(h.k("get", "pods", "-n", namespace, "-o", "json"))["items"]
+
+
+def rotated_control_pods(h, old_uids, epoch):
+    def inventory():
+        current = pods(h, CONTROL_NS)
+        require(not old_uids.intersection(pod["metadata"]["uid"] for pod in current),
+                "A startup-cached old control-token consumer survived Ready")
+        for pod in current:
+            require(pod["metadata"].get("annotations", {}).get(EPOCH) == epoch,
+                    "Control consumer lacks the new privacy epoch")
+        return current
+
+    # Check the security boundary immediately. Authority Ready does not imply
+    # workload rollout completion; pin cache-observation UIDs only afterwards.
+    inventory()
+    h.k("rollout", "status", f"deployment/{CONTROL}", "-n", CONTROL_NS,
+        "--timeout=120s", timeout=130)
+
+    def settled():
+        current = inventory()
+        return current if current and all(not pod["metadata"].get("deletionTimestamp")
+                                          for pod in current) else False
+
+    return h.poll("rotated control consumer rollout completion", settled, seconds=120)
+
+
+def assert_control_cache(h, pod, epoch, expected):
+    name, uid = pod["metadata"]["name"], pod["metadata"]["uid"]
+
+    def cache_ready():
+        current = h.get("pod", name, CONTROL_NS)
+        require(current is not None and current["metadata"]["uid"] == uid
+                and not current["metadata"].get("deletionTimestamp"),
+                "Control consumer identity changed before cache verification")
+        require(current["metadata"].get("annotations", {}).get(EPOCH) == epoch,
+                "Control consumer privacy epoch changed before cache verification")
+        return any(container.get("name") == "credential-consumer"
+                   and container.get("ready") is True
+                   and container.get("state", {}).get("running") is not None
+                   for container in current.get("status", {}).get("containerStatuses", []))
+
+    # Authority Ready fences old caches; it cannot wait for workload readiness,
+    # because the router's readiness itself depends on the completed authority.
+    h.poll("rotated control consumer cache readiness", cache_ready, seconds=120)
+    cached = h.k("exec", "-n", CONTROL_NS, name, "-c", "credential-consumer",
+                 "--", "cat", "/proof/cached.sha", timeout=25).split()
+    require(cached and cached[0] == expected, "Restarted control consumer did not cache the rotated token")
 
 
 def snapshot_grants(h, spec):
@@ -175,16 +222,10 @@ def legacy_migration(h):
     rotated = h.get("secret", "router-services-admin", CONTROL_NS)
     require(rotated["metadata"]["uid"] == h.state["control_secret_uid"], "Owned control Secret was replaced instead of rotated")
     require(fingerprint(rotated) != h.state["control_digest"], "Owned exposed control token was not rotated")
-    current_pods = pods(h, CONTROL_NS)
-    require(current_pods and not old_control_pods.intersection(pod["metadata"]["uid"] for pod in current_pods),
-            "A startup-cached old control-token consumer survived Ready")
+    current_pods = rotated_control_pods(h, old_control_pods, reg["status"]["privacyEpoch"])
     expected = fingerprint(rotated)
     for pod in current_pods:
-        require(pod["metadata"].get("annotations", {}).get(EPOCH) == reg["status"]["privacyEpoch"],
-                "Control consumer lacks the new privacy epoch")
-        cached = h.k("exec", "-n", CONTROL_NS, pod["metadata"]["name"], "-c", "credential-consumer",
-                     "--", "cat", "/proof/cached.sha", timeout=25).split()[0]
-        require(cached == expected, "Restarted control consumer did not cache the rotated token")
+        assert_control_cache(h, pod, reg["status"]["privacyEpoch"], expected)
     h.passed("Owned router-services-admin token rotates and every cached old consumer is gone before Ready")
     h.cli("install", timeout=240)
     rollback_guard(h)
@@ -222,6 +263,7 @@ def retire_and_uninstall(h):
         items = json.loads(h.k("get", kind, "-A", "-o", "json"))["items"]
         require(not any(item["metadata"].get("annotations", {}).get("kars.azure.com/sre-registration-uid") == reg["metadata"]["uid"]
                         for item in items), "Owned private grant survived retirement")
+    retained_report_denials(h, reg["metadata"]["uid"])
     h.cli("uninstall", timeout=180)
     h.poll("SRE source removal", lambda: h.get("karssandbox", "sre", SYSTEM) is None, seconds=120)
     h.poll("SRE namespace removal", lambda: h.get("namespace", RUNTIME) is None, seconds=120)
@@ -229,7 +271,7 @@ def retire_and_uninstall(h):
     retained = h.get("karssreregistrations.kars.azure.com", "canonical")
     require(retained["metadata"]["uid"] == reg["metadata"]["uid"] and retained["status"]["phase"] == "Retired",
             "Retired registration audit record was removed or replaced")
-    h.passed("Retire/uninstall revoke owned grants/credentials and remove the source namespace while retaining core UID and audit registration")
+    h.passed("Retire/uninstall revoke owned grants/credentials and remove the source namespace including its retained report while retaining core UID and audit registration")
 
 
 def fresh_reenrollment(h):

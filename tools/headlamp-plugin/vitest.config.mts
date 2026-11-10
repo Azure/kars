@@ -3,6 +3,7 @@
 
 import { fileURLToPath } from "node:url";
 import { mergeConfig } from "vite";
+import { configDefaults } from "vitest/config";
 import headlampConfig from "@kinvolk/headlamp-plugin/config/vite.config.mjs";
 
 // The host supplies these virtual entry points in production.
@@ -11,6 +12,10 @@ const library = (path: string) => fileURLToPath(
 );
 
 export default mergeConfig(headlampConfig, {
+  test: {
+    // npm test runs this Node-only suite before the browser component tests.
+    exclude: [...configDefaults.exclude, "patch-build-tool.test.mjs"],
+  },
   resolve: {
     alias: {
       "@kinvolk/headlamp-plugin/lib/K8s/deployment": library("lib/k8s/deployment.js"),

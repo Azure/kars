@@ -111,8 +111,20 @@ async fn registered_named_intent_and_explicit_native_intent_remain_separate() {
     let mut explicit = metadata.clone();
     explicit.provider = Some("anthropic".into());
     let base = UpstreamConfig::azure(default.uri(), "default".into(), "test".into());
-    let named = primary_target(&state, &base, &metadata, b"{}").unwrap();
-    let native = primary_target(&state, &base, &explicit, b"{}").unwrap();
+    let named = primary_target(
+        &state,
+        &base,
+        &metadata,
+        &RequestBody::from_value(serde_json::json!({})),
+    )
+    .unwrap();
+    let native = primary_target(
+        &state,
+        &base,
+        &explicit,
+        &RequestBody::from_value(serde_json::json!({})),
+    )
+    .unwrap();
     assert_eq!(named.provider, ProviderKind::AzureOpenAI);
     assert_eq!(named.provider_api_key.as_deref(), Some("registered-key"));
     assert_eq!(native.provider, ProviderKind::Anthropic);

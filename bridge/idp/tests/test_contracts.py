@@ -10,8 +10,9 @@ import io
 from pathlib import Path
 import tarfile
 import unittest
+from unittest import mock
 
-from contracts import BASE, LOCK_FILES, RPM_MANIFEST, check_modules, check_rootfs, check_scan, json_stream, module_inventory, resolve_base_file
+from contracts import BASE, LOCK_FILES, RPM_MANIFEST, check_ca_bundle, check_modules, check_rootfs, check_scan, json_stream, module_inventory, resolve_base_file
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("import_locks", ROOT / "scripts/import-locks.py")
@@ -20,6 +21,20 @@ spec.loader.exec_module(import_locks)
 
 
 class SourceContracts(unittest.TestCase):
+    def test_ca_bundle_rejects_empty_input_and_distrusted_fingerprints(self):
+        for invalid in ("", "no certificates"):
+            with self.assertRaisesRegex(ValueError, "empty or invalid"):
+                check_ca_bundle(invalid)
+        der = b"fingerprint-filter-test"
+        pem = "-----BEGIN CERTIFICATE-----\n" + base64.b64encode(der).decode() + "\n-----END CERTIFICATE-----"
+        self.assertEqual(check_ca_bundle(pem), 1)
+        with mock.patch("contracts.DISTRUSTED_ROOTS", {hashlib.sha256(der).hexdigest()}):
+            with self.assertRaisesRegex(ValueError, "compromised eMudhra"):
+                check_ca_bundle(pem)
+        qualifier = (ROOT / "tests/qualify.py").read_text()
+        self.assertIn("check_ca_bundle(documents[CA_BUNDLE])", qualifier)
+        self.assertIn("name in (RPM_MANIFEST, CA_BUNDLE)", qualifier)
+
     def test_json_stream(self):
         self.assertEqual(list(json_stream('{"Path":"a"}\n{"Path":"b"}\n')),
                          [{"Path": "a"}, {"Path": "b"}])
@@ -44,6 +59,16 @@ class SourceContracts(unittest.TestCase):
         self.assertIn("CGO_ENABLED=1", dockerfile)
         self.assertIn("GOTOOLCHAIN=local", dockerfile)
         self.assertNotIn("go get", (ROOT / "scripts/build.sh").read_text())
+
+    def test_source_stages_install_patch_before_fetching(self):
+        for name in ("Dockerfile", "Dockerfile.locks"):
+            with self.subTest(recipe=name):
+                source = (ROOT / name).read_text().split("\nFROM source AS ", 1)[0]
+                install = "apt-get install -y --no-install-recommends patch"
+                self.assertIn(install, source)
+                self.assertLess(source.index("apt-get update"), source.index(install))
+                self.assertLess(source.index(install), source.index("RUN sh /packaging/scripts/fetch-source.sh"))
+                self.assertIn("rm -rf /var/lib/apt/lists/*", source)
 
     def test_resolver_is_separate_from_runtime_build(self):
         runtime = (ROOT / "Dockerfile").read_text()

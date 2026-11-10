@@ -271,10 +271,13 @@ pub(super) fn approved(team: &KarsTeam, principal: &KarsTask) -> KarsApproval {
                 requested_tier: Some(5),
                 ..Default::default()
             },
+            requested_by: None,
             ttl: Some("PT1H".into()),
             decision: Some(ApprovalDecision {
                 verdict: "approve".into(),
                 decider: "human@example.com".into(),
+                decider_subject: None,
+                decider_roles: vec![],
                 reason: None,
             }),
         },

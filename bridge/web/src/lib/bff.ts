@@ -71,7 +71,9 @@ async function requestJson<T>(
   const res = await authenticatedBffFetch(path, init);
   if (!res.ok) {
     let code = `http_${res.status}`;
-    let message = "";
+    let message = res.status === 422
+      ? "The request does not match the API schema. Check required fields, field names, and value types."
+      : "";
     let credentialContinuation: CredentialContinuation | undefined;
     try {
       const body = await res.json();
@@ -341,8 +343,8 @@ export function getTeamLedger(
 }
 
 /** Fetch the composable launch-package options from live cluster state. */
-export function getOptions(): Promise<Options> {
-  return requestJson<Options>("/api/options");
+export function getOptions({ catalogueOnly = false }: { catalogueOnly?: boolean } = {}): Promise<Options> {
+  return requestJson<Options>(catalogueOnly ? "/api/options?catalogue_only=true" : "/api/options");
 }
 
 /** Validate a launch package against live cluster state (the §20 gate). */
@@ -351,10 +353,14 @@ export function validatePackage(
   blueprint: unknown,
   envelope?: {
     tier?: number;
+    delegation_depth?: number;
     budget_tokens?: number | null;
     budget_usd_micros?: number | null;
     budget_scope?: import("./types").Budget["scope"] | null;
     workload?: "mission" | "team";
+    team_roles?: CreateRole[];
+    git_write_repos?: string[];
+    qualification_run?: boolean;
   },
 ): Promise<import("./types").ValidationResult> {
   return requestJson(
@@ -362,24 +368,38 @@ export function validatePackage(
     { method: "POST", body: JSON.stringify({
       blueprint,
       tier: envelope?.tier,
+      delegation_depth: envelope?.delegation_depth,
       budget_tokens: envelope?.budget_tokens ?? undefined,
       budget_usd_micros: envelope?.budget_usd_micros ?? undefined,
       budget_scope: envelope?.budget_scope,
       workload: envelope?.workload,
+      team_roles: envelope?.team_roles,
+      git_write_repos: envelope?.git_write_repos,
+      qualification_run: envelope?.qualification_run,
     }) },
   );
+}
+
+function reviewedSpending(spending: import("./budget-review").CompositionSpending | undefined) {
+  if (spending == null) {
+    throw new BffError("bad_request", 400,
+      "Your editor needs an update before composing again. Copy your draft somewhere safe, then reload this page. No spending limits were changed.");
+  }
+  return spending;
 }
 
 /** Ask the orchestrator to compose a launch package from a plain objective. */
 export function composePackage(
   namespace: string,
   objective: string,
+  qualification_run?: boolean,
+  spending?: import("./budget-review").CompositionSpending,
 ): Promise<import("./types").ComposeResponse> {
   return requestJson(
     `/api/namespaces/${encodeURIComponent(namespace)}/compose`,
     {
       method: "POST",
-      body: JSON.stringify({ objective }),
+      body: JSON.stringify({ objective, qualification_run, spending: reviewedSpending(spending) }),
       signal: AbortSignal.timeout(120_000),
     },
   );
@@ -402,16 +422,25 @@ export function proposeLoop(
   );
 }
 
+export function qualifyTeam(namespace: string, name: string, teamUid: string, expected: import("./types").TeamTask): Promise<{ requested: boolean }> {
+  return requestJson(`/api/namespaces/${encodeURIComponent(namespace)}/teams/${encodeURIComponent(name)}/qualification`, {
+    method: "POST", body: JSON.stringify({ team_uid: teamUid, expected }),
+  });
+}
+
 /** Ask the orchestrator to compose an org chart from a team charter. */
 export function composeTeam(
   namespace: string,
   charter: string,
+  profile?: string,
+  qualification_run?: boolean,
+  spending?: import("./budget-review").CompositionSpending,
 ): Promise<import("./types").ComposeTeamResponse> {
   return requestJson(
     `/api/namespaces/${encodeURIComponent(namespace)}/compose-team`,
     {
       method: "POST",
-      body: JSON.stringify({ charter }),
+      body: JSON.stringify({ charter, ...(profile ? { profile } : {}), qualification_run, spending: reviewedSpending(spending) }),
       // Team composition can perform one structural repair and one qualification
       // repair after the initial proposal. Keep the browser alive for that bounded
       // server workflow instead of aborting a valid final repair mid-flight.
@@ -496,6 +525,10 @@ export function getGithubApp(): Promise<import("./types").GithubApp> {
 }
 
 // ─── kars-SRE self-remediation proposals ────────────────────────────────────
+
+export function getSreReport(): Promise<import("./types").SreReport> {
+  return requestJson("/api/operator/sre-report");
+}
 
 export function listSreActions(): Promise<import("./types").SreAction[]> {
   return requestJson("/api/operator/sre-actions");
@@ -646,6 +679,10 @@ export function putGithubApp(body: { app_id: string; private_key: string }): Pro
   return requestJson("/api/operator/github-app", { method: "PUT", body: JSON.stringify(body) });
 }
 
+export function convertGithubAppManifest(code: string): ReturnType<typeof putGithubApp> {
+  return requestJson("/api/operator/github-app", { method: "POST", body: JSON.stringify({ code }) });
+}
+
 export function deleteGithubApp(): Promise<{ configured: boolean }> {
   return requestJson("/api/operator/github-app", { method: "DELETE" });
 }
@@ -727,7 +764,7 @@ export function connectFoundry(body: {
   project_endpoint: string;
   inference_endpoint?: string;
   memory_store_id?: string;
-  auth: "api" | "managed-identity";
+  auth: "api" | "managed-identity" | "auto";
   api_key?: string;
 }): Promise<{ connected: boolean; note: string }> {
   return requestJson("/api/operator/foundry", { method: "POST", body: JSON.stringify(body) });
@@ -742,10 +779,10 @@ export function verifyFoundry(): Promise<FoundryVerifyResult> {
 export function listAgents(): Promise<import("./types").AgentLifecycle[]> {
   return requestJson("/api/agents");
 }
-export function createTeam(namespace: string, body: { name: string; display_name?: string; charter: string; budget?: import("./types").Budget; tier?: number; authority_ceiling?: number; delegation_depth?: number; reporting_to?: string; knowledge_commons?: string; memory?: string; tool_policy?: string; pin_tool_policy?: boolean; runtime?: string; model?: string; model_fallbacks?: string[]; mcp_servers?: string[]; egress?: { host: string; port?: number }[]; egress_mode?: "learning" | "strict"; cadence_minutes?: number; lifecycle_mode?: import("./types").TeamLifecycleMode; warm_idle_seconds?: number; launch?: boolean; roles?: CreateRole[]; execution_plan?: import("./types").ExecutionPlan; git_write_repos?: string[]; created_by?: string }): Promise<{ created: boolean; name: string }> {
+export function createTeam(namespace: string, body: { qualification_run?: boolean; name: string; display_name?: string; charter: string; budget?: import("./types").Budget; tier?: number; authority_ceiling?: number; delegation_depth?: number; reporting_to?: string; knowledge_commons?: string; memory?: string; tool_policy?: string; pin_tool_policy?: boolean; runtime?: string; model?: string; model_fallbacks?: string[]; mcp_servers?: string[]; egress?: { host: string; port?: number }[]; egress_mode?: "strict"; cadence_minutes?: number; lifecycle_mode?: "ephemeral"; warm_idle_seconds?: 0; launch?: boolean; roles?: CreateRole[]; execution_plan?: import("./types").ExecutionPlan; git_write_repos?: string[]; created_by?: string }): Promise<{ created: boolean; name: string }> {
   return requestJson(`/api/namespaces/${encodeURIComponent(namespace)}/teams`, { method: "POST", body: JSON.stringify(body) });
 }
-export function updateTeam(namespace: string, name: string, body: { charter?: string; paused?: boolean; cadence_minutes?: number; reporting_to?: string; lifecycle_mode?: import("./types").TeamLifecycleMode; warm_idle_seconds?: number; runtime?: string; model?: string; model_fallbacks?: string[]; memory?: string; mcp_servers?: string[]; execution_plan?: import("./types").ExecutionPlan }): Promise<{ updated: boolean }> {
+export function updateTeam(namespace: string, name: string, body: { charter?: string; paused?: boolean; cadence_minutes?: number; reporting_to?: string; lifecycle_mode?: "ephemeral"; warm_idle_seconds?: 0; runtime?: string; model?: string; model_fallbacks?: string[]; memory?: string; mcp_servers?: string[]; execution_plan?: import("./types").ExecutionPlan }): Promise<{ updated: boolean }> {
   return requestJson(`/api/namespaces/${encodeURIComponent(namespace)}/teams/${encodeURIComponent(name)}`, { method: "PATCH", body: JSON.stringify(body) });
 }
 
@@ -789,6 +826,19 @@ export function promoteAdditionalProvider(tag: string): Promise<{ promoted: bool
 }
 export function setDefaultModel(deployment: string, provider: string): Promise<{ ok: boolean; default: string; provider: string }> {
   return requestJson("/api/operator/models/default", { method: "POST", body: JSON.stringify({ deployment, provider }) });
+}
+export type ComponentModel = {
+  component: "orchestrator" | "sre"; policy: string; mode: "inherit" | "override";
+  desired: { provider: string; deployment: string } | null;
+  primary: { provider: string; deployment: string } | null;
+  applied: boolean; phase: string | null; uid: string; resource_version: string; editable: boolean;
+  conditions: { type: string; status: string; message?: string }[] | null;
+};
+export function getComponentModels(): Promise<{ cluster_default: ComponentModel["desired"]; components: ComponentModel[] }> {
+  return requestJson("/api/operator/component-models");
+}
+export function setComponentModel(component: string, body: { mode: "inherit" | "override"; model?: NonNullable<ComponentModel["desired"]>; uid: string; resource_version: string }): Promise<{ saved: boolean; note: string }> {
+  return requestJson(`/api/operator/component-models/${encodeURIComponent(component)}`, { method: "PUT", body: JSON.stringify(body) });
 }
 export function getLocalInferenceStatus(): Promise<LocalInferenceStatus> {
   return requestJson("/api/operator/local-inference/status");

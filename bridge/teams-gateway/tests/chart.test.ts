@@ -58,6 +58,28 @@ const scenarios = [
 ];
 
 describe("Bridge optional add-on boundary (offline Helm manifests)", () => {
+  it("prefers workers without requiring them for Bridge workloads and honors placement overrides", () => {
+    const defaults = render();
+    const disabled = render("--set-json", "affinity=null");
+    const required = { nodeAffinity: { requiredDuringSchedulingIgnoredDuringExecution: {
+      nodeSelectorTerms: [{ matchExpressions: [{ key: "pool", operator: "In", values: ["bridge"] }] }],
+    }, preferredDuringSchedulingIgnoredDuringExecution: [] } };
+    const overridden = render("--set-json", `affinity=${JSON.stringify(required)}`);
+    for (const name of ["kars-bridge-bff", "kars-bridge-web", "kars-bridge-teams-gateway"]) {
+      expect(resource<V1Deployment>(defaults, "Deployment", name).spec?.template.spec?.affinity)
+        .toEqual({ nodeAffinity: { preferredDuringSchedulingIgnoredDuringExecution: [{
+          weight: 100, preference: { matchExpressions: [
+            { key: "node-role.kubernetes.io/control-plane", operator: "DoesNotExist" },
+            { key: "node-role.kubernetes.io/master", operator: "DoesNotExist" },
+          ] },
+        }] } });
+      expect(resource<V1Deployment>(disabled, "Deployment", name).spec?.template.spec?.affinity)
+        .toBeUndefined();
+      expect(resource<V1Deployment>(overridden, "Deployment", name).spec?.template.spec?.affinity)
+        .toEqual(required);
+    }
+  });
+
   it("allows an explicit Dex Service address without changing default allocation", () => {
     const automatic = resource<V1Service>(render("--set", "idp.enabled=true"), "Service", "dex");
     expect(automatic.spec?.clusterIP).toBeUndefined();

@@ -135,6 +135,7 @@ struct ClientLayer {
 }
 
 pub(super) fn client(config: Config) -> Result<Client, kube::Error> {
+    let config = crate::kube_client_config::preserve_request_semantics(config);
     let mut bits = 0;
     if config.cluster_url.scheme_str() == Some("https") {
         bits |= HTTPS;

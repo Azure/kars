@@ -92,9 +92,15 @@ beforeEach(() => {
     if (bin === "helm" && args[0] === "upgrade") { state.afterHelm?.(); return { stdout: "" }; }
     if (bin === "kubectl" && args[0] === "get") {
       if (args[1] === "deployment,service") return { stdout: JSON.stringify({ items: [...state.deployments, ...state.services] }) };
-      if (args[1] === "deployment" && args[2] === "kars-controller") return { stdout: state.controllerHealthy ? "True" : "False" };
+      if (args[1] === "deployment" && args[2] === "kars-controller") return { stdout: args.includes("json") ? JSON.stringify({
+        metadata: { name: "kars-controller", namespace: "kars-system", generation: 1 },
+        spec: { replicas: 1, template: { spec: { containers: [{ name: "controller", image: "mirror.azurecr.io/kars-controller:latest" }] } } },
+        status: { observedGeneration: 1, updatedReplicas: 1, readyReplicas: state.controllerHealthy ? 1 : 0,
+          conditions: [{ type: "Available", status: state.controllerHealthy ? "True" : "False" }] },
+      }) : state.controllerHealthy ? "True" : "False" };
       if (args[1] === "deployment") return { stdout: JSON.stringify(state.deployments.find(item => item.metadata.name === args[2])) };
       if (args[1] === "pods") return { stdout: "" };
+      if (args[1] === "apiservice" && args[2] === "v1beta1.metrics.k8s.io" && args.includes("--ignore-not-found")) return { stdout: "" };
       if (["deployments", "karssandbox"].includes(args[1]!)) return { stdout: '{"items":[]}' };
     }
     if (bin === "kubectl" && args[0] === "rollout") return { stdout: "" };

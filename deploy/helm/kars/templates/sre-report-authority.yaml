@@ -1,0 +1,62 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+# This fixed report store is not writable through Bridge's general ConfigMap grant.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: kars-sre-report-authority
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["configmaps"]
+  matchConditions:
+    - name: fixed-sre-report
+      expression: >-
+        has(request.namespace) && request.namespace == 'kars-sre' &&
+        ((has(request.name) && request.name == 'sre-health-report') ||
+         (object != null && object.metadata.name == 'sre-health-report') ||
+         (oldObject != null && oldObject.metadata.name == 'sre-health-report'))
+  validations:
+    - expression: >-
+        authorizer.group('kars.azure.com').resource('karssreregistrations')
+          .name('canonical').check('use').allowed() ||
+        (request.operation == 'DELETE' &&
+         request.userInfo.username == 'system:serviceaccount:kube-system:namespace-controller' &&
+         namespaceObject != null &&
+         dyn(namespaceObject.metadata).?deletionTimestamp.orValue(null) != null &&
+         namespaceObject.status.phase == 'Terminating') ||
+        (request.operation == 'UPDATE' &&
+         request.userInfo.username == 'system:serviceaccount:kars-sre:sre-api-router' &&
+         oldObject != null && object.metadata.uid == oldObject.metadata.uid &&
+         has(object.metadata.annotations) && has(oldObject.metadata.annotations) &&
+         object.metadata.annotations == oldObject.metadata.annotations &&
+         'kars.azure.com/sre-report-source' in object.metadata.annotations &&
+         has(object.metadata.ownerReferences) && has(oldObject.metadata.ownerReferences) &&
+         object.metadata.ownerReferences == oldObject.metadata.ownerReferences &&
+         has(object.metadata.labels) == has(oldObject.metadata.labels) &&
+         (!has(object.metadata.labels) || object.metadata.labels == oldObject.metadata.labels) &&
+         has(object.metadata.finalizers) == has(oldObject.metadata.finalizers) &&
+         (!has(object.metadata.finalizers) || object.metadata.finalizers == oldObject.metadata.finalizers) &&
+         !has(object.metadata.deletionTimestamp) && !has(oldObject.metadata.deletionTimestamp) &&
+         !has(object.binaryData) && (!has(object.immutable) || !object.immutable) &&
+         has(object.data) && object.data.size() == 1 && 'report.json' in object.data &&
+         bytes(object.data['report.json']).size() <= 65536)
+      message: "Only the registrar owns the report target; the private SRE router may update bounded report data, and the namespace controller may delete it only during namespace termination"
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: kars-sre-report-authority
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  policyName: kars-sre-report-authority
+  validationActions: [Deny, Audit]

@@ -19,28 +19,18 @@ export function currentCoreSchemas(): ObjectMap[] {
 }
 
 export function canonicalMigrationSchemas(evalV2 = false): { before: ObjectMap[]; after: ObjectMap[] } {
-  // The closed migration predates credential, execution-plan and skill-package extensions.
-  // Reconstruct its exact pinned targets, not a permit for today's schemas.
-  const authBaseline = schemaDocuments(readFileSync(
-    new URL("../../../deploy/helm/kars/files/auth-config-schema-baseline.yaml", import.meta.url), "utf8",
-  ))[0];
-  const after = currentCoreSchemas().map(object => {
-    const kind = object.spec.names.kind;
-    if (kind === "KarsAuthConfig") return authBaseline;
-    const root = object.spec.versions[0].schema.openAPIV3Schema;
-    const spec = root.properties.spec;
-    if (kind === "KarsSkill") {
-      for (const key of ["package", "files", "packageDigest"]) delete spec.properties[key];
-    }
-    if (kind === "KarsTask" || kind === "KarsTeam") {
-      for (const key of ["skills", "executionPlan"]) delete spec.properties.blueprint.properties[key];
-    }
-    if (kind === "KarsTeam") {
-      for (const key of ["skills", "executionPlan"]) delete spec.properties.roster.items.properties.blueprint.properties[key];
-      delete root.properties.status.properties.runAdmission;
-    }
-    return object;
-  });
+  // Historical qualification must not drift with today's production charts.
+  // The checked-in targets still have to match every closed catalog fingerprint.
+  const after = schemaDocuments(readFileSync(
+    new URL("../../tests/fixtures/sre-migration-targets.yaml", import.meta.url), "utf8",
+  ));
+  const names = after.map(object => object.metadata.name).sort();
+  if (canonicalSchema(names) !== canonicalSchema(Object.keys(CANONICAL_SCHEMAS).sort())) {
+    throw new Error("Historical fixture inventory differs from the closed migration catalog");
+  }
+  const sandbox = after.find(object => object.spec.names.kind === "KarsSandbox")!;
+  sandbox.spec.versions[0].schema.openAPIV3Schema.properties.status.properties.conditions.items
+    .properties.observedGeneration = { type: "integer", format: "int64" };
   const evalCrd = after.find(object => object.spec.names.kind === "KarsEval")!;
   if (!CANONICAL_SCHEMAS[evalCrd.metadata.name].after.includes(schemaDigest(normalizedCrd(evalCrd)))) {
     throw new Error("Current evaluator schema is not a qualified fixture input");

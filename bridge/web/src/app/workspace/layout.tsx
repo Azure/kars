@@ -8,7 +8,7 @@
 // switcher. NO Kubernetes concept ever appears here — no namespace, no pod, no
 // CRD. This is the surface that must be flawless for a non-technical task-giver.
 
-import Link from "next/link";
+import Link from "@/components/navigation-link";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { WorkspaceNav } from "@/components/workspace-nav";

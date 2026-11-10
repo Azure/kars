@@ -5,7 +5,10 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
 pub struct ComposeRequest {
+    #[serde(default)]
+    pub qualification_run: bool,
     pub objective: String,
+    pub spending: super::spending::RequestedSpending,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -64,7 +67,8 @@ pub struct ComposeResponse {
     /// Why it isn't available (only set when `available` is false), so the UI
     /// can explain the manual-composer fallback honestly.
     pub reason: Option<String>,
-    /// The composed, validated launch package — ready to review and edit.
+    /// The composed package for review, not launch authorization. Missing
+    /// qualification is reported in rationale without discarding the proposal.
     pub proposal: Option<ComposeProposal>,
     /// A short, plain-language rationale for the choices (for the reviewer).
     pub rationale: Option<String>,

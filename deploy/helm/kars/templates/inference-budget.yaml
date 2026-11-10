@@ -8,6 +8,24 @@ identities are guessed. Old/reused values without this block render no broker.
 {{- if and (hasKey $budget "enabled") (not (kindIs "bool" $budget.enabled)) (not (kindIs "invalid" $budget.enabled)) -}}
 {{- fail "inferenceBudget.enabled must be a boolean" -}}
 {{- end -}}
+{{- if and ($budget.builtInFunding | default list) (not ($budget.enabled | default false)) -}}
+{{- fail "inferenceBudget.builtInFunding requires inferenceBudget.enabled" -}}
+{{- end -}}
+{{- if and ($budget.tokenTopUps | default list) (not ($budget.enabled | default false)) -}}
+{{- fail "inferenceBudget.tokenTopUps requires inferenceBudget.enabled" -}}
+{{- end -}}
+{{- if and ($budget.unboundedTokenAllowances | default list) (not ($budget.enabled | default false)) -}}
+{{- fail "inferenceBudget.unboundedTokenAllowances requires inferenceBudget.enabled" -}}
+{{- end -}}
+{{- $calendarPolicy := "enforce" -}}
+{{- if hasKey $budget "calendarPolicy" -}}
+{{- if not (kindIs "string" $budget.calendarPolicy) -}}{{- fail "inferenceBudget.calendarPolicy must be enforce or record-only" -}}{{- end -}}
+{{- $calendarPolicy = $budget.calendarPolicy -}}
+{{- end -}}
+{{- if not (has $calendarPolicy (list "enforce" "record-only")) -}}{{- fail "inferenceBudget.calendarPolicy must be enforce or record-only" -}}{{- end -}}
+{{- if and (eq $calendarPolicy "record-only") (not ($budget.enabled | default false)) -}}
+{{- fail "inferenceBudget.calendarPolicy record-only requires inferenceBudget.enabled" -}}
+{{- end -}}
 {{- if ($budget.enabled | default false) -}}
 {{- $version := required "inferenceBudget.catalogVersion is required" $budget.catalogVersion -}}
 {{- $contracts := required "inferenceBudget.contracts is required" $budget.contracts -}}
@@ -23,6 +41,20 @@ identities are guessed. Old/reused values without this block render no broker.
 {{- end -}}
 {{- if contains "PRIVATE KEY" $ca -}}{{- fail "inferenceBudget.caBundle must contain public certificates only" -}}{{- end -}}
 {{- $identity := $budget.tls | default dict -}}
+{{- $catalog := dict "version" $version "contracts" $contracts "nonInferenceEgressHosts" ($budget.nonInferenceEgressHosts | default list) -}}
+{{- $existingCatalog := lookup "v1" "ConfigMap" .Release.Namespace "kars-inference-budget-contracts" -}}
+{{- $catalogData := include "kars.inferenceBudget.catalogData" (dict "desired" $catalog "current" $existingCatalog "release" .Release.Name "namespace" .Release.Namespace) -}}
+{{- $allowances := ($budget.unboundedTokenAllowances | default list) | toJson -}}
+{{- if and .Release.IsUpgrade .Values.sre.firstInstallFunding.unboundedTokens -}}
+{{- $source := lookup "kars.azure.com/v1alpha1" "KarsSandbox" .Release.Namespace "sre" | default dict -}}
+{{- $accountName := dig "spec" "inferenceBudgetRef" "account" "name" "" $source -}}
+{{- $account := dict -}}
+{{- if $accountName -}}{{- $account = lookup "kars.azure.com/v1alpha1" "KarsBudgetAccount" .Release.Namespace $accountName | default dict -}}{{- end -}}
+{{- $allowances = include "kars.sre.firstInstallAllowances" (dict "desired" ($budget.unboundedTokenAllowances | default list)
+  "catalog" ($existingCatalog | default dict) "source" $source "account" $account "release" .Release.Name "namespace" .Release.Namespace
+  "intent" (lookup "v1" "ConfigMap" .Release.Namespace "kars-sre-first-install" | default dict)
+  "registration" (lookup "kars.azure.com/v1alpha1" "KarsSRERegistration" "" "canonical" | default dict)) -}}
+{{- end -}}
 {{- if $identity.certificate }}
 apiVersion: v1
 kind: Secret
@@ -52,7 +84,14 @@ metadata:
     app.kubernetes.io/name: kars
     app.kubernetes.io/component: inference-budget
 data:
-  contracts.json: {{ dict "version" $version "contracts" $contracts "nonInferenceEgressHosts" ($budget.nonInferenceEgressHosts | default list) | toJson | quote }}
+  {{- if .Values.sre.firstInstallFunding }}
+  first-install-sre-intent: kars-sre-first-install
+  {{- end }}
+  calendar-policy: {{ $calendarPolicy | quote }}
+  built-in-funding.json: {{ ($budget.builtInFunding | default list) | toJson | quote }}
+  token-top-ups.json: {{ ($budget.tokenTopUps | default list) | toJson | quote }}
+  unbounded-token-allowances.json: {{ $allowances | quote }}
+  contracts.json: {{ $catalogData | quote }}
   ca.crt: |
     {{- $ca | nindent 4 }}
 ---

@@ -5,10 +5,20 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import ssl
+
+# https://emudhra.we-have-a-problem.com/roots.json, reviewed 2026-10-28.
+DISTRUSTED_ROOTS = {
+    "7dd78d5f4f13459a83dff9abbba62edbaf6f2d102bf257fd712f4d9f2746ed8d",
+    "f2edaaff3d9b701fb4d14c9f285f8c0bad90fc3bcc1fa07d47f4718edaba34a5",
+    "d7a7a0fb5d7e2731d771e9484ebcdef71d5f0c3e0a2948782bc83ee0ea699ef4",
+    "86a1ecba089c4a8d3bbe2734c612ba341d813e043cf9e8a862cd5c57a36bbe6b",
+}
+CA_BUNDLE = "etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem"
 
 BASE = (
     "mcr.microsoft.com/azurelinux/distroless/base:3.0@sha256:"
-    "4377af4aa7a810b7d59f691eae5066895a71aa3eee4cfb4eba527bbebff16479"
+    "6b85a86416a29cdcfd404e9fbd9c5ef49cc0612882cecc702535dcac39c9446c"
 )
 RPM_MANIFEST = "var/lib/rpmmanifest/container-manifest-2"
 ACTIVE_LOCK_FILES = {"go.mod", "go.sum", "api/v2/go.mod", "api/v2/go.sum"}
@@ -69,7 +79,7 @@ def check_modules(root):
                 f"artifact digest mismatch: {name}")
     require({"./" + name for name in actual - {"SHA256SUMS"}} == set(records),
             "artifact checksum coverage is incomplete")
-    require(re.fullmatch(r"go version go1\.26\.8 linux/(amd64|arm64)\n",
+    require(re.fullmatch(r"go version go1\.27\.3 linux/(amd64|arm64)\n",
                          (generated / "toolchain.txt").read_text()),
             "unexpected resolver toolchain")
     inventories = {name: module_inventory((generated / name).read_text())
@@ -91,15 +101,28 @@ def check_modules(root):
     require(selected.get("github.com/dexidp/dex/api/v2", {}).get("Replace", {}).get("Path") == "./api/v2",
             "upstream local API replacement is missing")
     api = inventories["api-modules.json"]
-    require(api.get("google.golang.org/grpc", {}).get("Version") == "v1.83.2", "nested API gRPC is unpatched")
-    for name in ("go.mod", "api/v2/go.mod"):
+    require(api.get("google.golang.org/grpc", {}).get("Version") == "v1.84.0", "nested API gRPC is unpatched")
+    for name in ("golang.org/x/net", "golang.org/x/crypto", "golang.org/x/text"):
+        require(api.get(name, {}).get("Version") == selected[name]["Version"],
+                f"nested API unreviewed selection: {name}")
+    for name, minimum in (("go.mod", "1.27.0"), ("api/v2/go.mod", "1.26.0")):
         manifest = (generated / name).read_text()
-        require("\ngo 1.26.0\n" in manifest, f"unexpected Go requirement: {name}")
+        require(f"\ngo {minimum}\n" in manifest, f"unexpected Go requirement: {name}")
         # Go may omit a redundant toolchain directive; the pinned builder and
         # GOTOOLCHAIN=local remain authoritative in that case.
         directives = [line for line in manifest.splitlines() if line.startswith("toolchain ")]
-        require(not directives or directives == ["toolchain go1.26.8"],
+        require(not directives or directives == ["toolchain go1.27.3"],
                 f"unexpected automatic toolchain: {name}")
+
+
+def check_ca_bundle(bundle):
+    certificates = re.findall(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", bundle, re.S)
+    require(certificates, "runtime CA bundle is empty or invalid")
+    fingerprints = {hashlib.sha256(ssl.PEM_cert_to_DER_cert(cert)).hexdigest()
+                    for cert in certificates}
+    require(not fingerprints & DISTRUSTED_ROOTS,
+            "runtime CA bundle trusts roots of compromised eMudhra intermediates")
+    return len(certificates)
 
 
 def check_rootfs(base, runtime, manifest):

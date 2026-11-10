@@ -15,6 +15,12 @@ use axum::{
 };
 use tower::ServiceExt;
 
+#[path = "calendar_allowance_tests.rs"]
+mod calendar_allowance_tests;
+
+#[path = "memory_service_tests.rs"]
+mod memory_service_tests;
+
 fn default_upstream(fixture: &Fixture, governed: bool) -> UpstreamConfig {
     let mut upstream = UpstreamConfig::azure(fixture.provider.uri(), "model".into(), "task".into());
     upstream.inference_budget = governed.then(|| fixture.client.clone());
@@ -80,6 +86,7 @@ async fn endpoint_state(fixture: &Fixture, governed: bool) -> AppState {
         policy_status,
         inference_policy: crate::inference_policy_loader::empty_handle(),
         memory_binding: crate::memory_binding_loader::empty_handle(),
+        memory_updates: Default::default(),
         egress_allowlist: crate::egress_allowlist_loader::empty_handle(),
         deployment_health: Arc::new(crate::deployment_health::DeploymentHealthRegistry::new()),
     };
@@ -124,6 +131,232 @@ async fn readiness_status(state: AppState) -> StatusCode {
         .await
         .unwrap()
         .status()
+}
+
+async fn ollama_endpoint_state(fixture: &Fixture) -> AppState {
+    let mut state = endpoint_state(fixture, true).await;
+    Arc::get_mut(&mut state.config).unwrap().ollama_endpoint = Some(fixture.provider.uri());
+    {
+        let mut policy = state.inference_policy.write().await;
+        let policy = policy.as_mut().unwrap();
+        policy.provider = Some("ollama".into());
+        policy.model_preference.as_mut().unwrap().primary.provider = "ollama".into();
+    }
+    state
+}
+
+#[tokio::test]
+async fn governed_chat_uses_responses_only_contract_and_settles_in_both_stream_modes() {
+    for (stream, output_field) in [
+        (false, "max_tokens"),
+        (true, "max_tokens"),
+        (false, "max_completion_tokens"),
+        (true, "max_completion_tokens"),
+    ] {
+        let fixture = Fixture::for_operation(100, false, Operation::Responses).await;
+        Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/v1/responses"))
+            .and(wiremock::matchers::body_partial_json(json!({
+                "model": "model", "max_output_tokens": 20,
+                "reasoning": {"effort": "medium"}, "parallel_tool_calls": false,
+                "input": [{"type":"message", "role":"user", "content":[{"type":"input_text", "text":"text"}]}]
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id":"response", "model":"model", "status":"completed",
+                "output":[{"type":"message", "role":"assistant", "content":[{"type":"output_text", "text":"supported response"}]}],
+                "usage":{"input_tokens":4, "output_tokens":5, "total_tokens":9}
+            })))
+            .expect(1)
+            .mount(&fixture.provider).await;
+        let state = ollama_endpoint_state(&fixture).await;
+        let response = Router::new().merge(crate::routes::inference_routes()).with_state(state)
+            .oneshot(HttpRequest::builder().method("POST").uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"model":"model", "stream":stream,
+                    (output_field):20, "reasoning_effort":"medium", "parallel_tool_calls":false,
+                    "messages":[{"role":"user", "content":"text"}]
+                }).to_string())).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 16384).await.unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("supported response"));
+        let requests = fixture.provider.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].url.path(), "/v1/responses");
+        let ledger = fixture.ledger.lock().unwrap();
+        assert_eq!(ledger.meters.settled.tokens, 9);
+        assert_eq!(ledger.meters.reserved.tokens, 0);
+        assert_eq!(ledger.meters.uncertain.tokens, 0);
+    }
+}
+
+#[tokio::test]
+async fn governed_chat_responses_wire_denials_remain_typed_without_provider_send() {
+    for stream in [false, true] {
+        let fixture = Fixture::for_operation(100, false, Operation::Responses).await;
+        let response = Router::new()
+            .merge(crate::routes::inference_routes())
+            .with_state(ollama_endpoint_state(&fixture).await)
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"model":"model", "stream":stream,
+                            "max_tokens":20, "reasoning_effort":"medium", "unsupported_field":true,
+                            "messages":[{"role":"user", "content":"text"}]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            if stream {
+                StatusCode::OK
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+        );
+        let body = to_bytes(response.into_body(), 16384).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        let payload = if stream {
+            assert!(text.contains("data: [DONE]"));
+            text.lines()
+                .find_map(|line| line.strip_prefix("data: "))
+                .expect("typed SSE error frame")
+        } else {
+            &text
+        };
+        let error: serde_json::Value = serde_json::from_str(payload).unwrap();
+        assert_eq!(error["error"]["code"], "inference_budget_unavailable");
+        assert!(!text.contains("Failed to reach inference backend"));
+        assert!(
+            fixture
+                .provider
+                .received_requests()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let ledger = fixture.ledger.lock().unwrap();
+        assert_eq!(ledger.meters.settled.tokens, 0);
+        assert_eq!(ledger.meters.reserved.tokens, 0);
+        assert_eq!(ledger.meters.uncertain.tokens, 0);
+    }
+}
+
+#[tokio::test]
+async fn governed_chat_preserves_chat_contract_route() {
+    let fixture = Fixture::new(100, false).await;
+    Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices":[{"message":{"role":"assistant", "content":"chat response"}}],
+            "usage":{"prompt_tokens":4, "completion_tokens":5, "total_tokens":9}
+        })))
+        .expect(1)
+        .mount(&fixture.provider)
+        .await;
+    let app = Router::new()
+        .merge(crate::routes::inference_routes())
+        .with_state(ollama_endpoint_state(&fixture).await);
+    let response = app
+        .oneshot(
+            HttpRequest::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model":"model", "max_tokens":20,
+                        "messages":[{"role":"user", "content":"text"}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 16384).await.unwrap();
+    assert!(String::from_utf8_lossy(&body).contains("chat response"));
+    assert_eq!(fixture.provider.received_requests().await.unwrap().len(), 1);
+    assert_eq!(fixture.ledger.lock().unwrap().meters.settled.tokens, 9);
+}
+
+#[tokio::test]
+async fn governed_chat_rejects_unavailable_responses_contract_without_provider_send() {
+    for stream in [false, true] {
+        for failure in [
+            "provider", "endpoint", "model", "expired", "absent", "broker",
+        ] {
+            let fixture = Fixture::for_operation(100, false, Operation::Responses).await;
+            let mut catalog = fixture.client.catalog().await.unwrap();
+            match failure {
+                "provider" => catalog.contracts[0].provider_id = "other".into(),
+                "endpoint" => catalog.contracts[0].endpoint.push_str("/other"),
+                "model" => catalog.contracts[0].model = "other".into(),
+                "expired" => catalog.contracts[0].valid_until = "2020-01-01T00:00:00Z".into(),
+                "absent" => catalog.contracts.clear(),
+                _ => {}
+            }
+            fixture._broker.reset().await;
+            let template = if failure == "broker" {
+                ResponseTemplate::new(503)
+            } else {
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "catalog": catalog, "moneyRequired": true
+                }))
+            };
+            Mock::given(wiremock::matchers::method("POST"))
+                .respond_with(template)
+                .mount(&fixture._broker)
+                .await;
+            let app = Router::new()
+                .merge(crate::routes::inference_routes())
+                .with_state(ollama_endpoint_state(&fixture).await);
+            let response = app
+                .oneshot(
+                    HttpRequest::builder()
+                        .method("POST")
+                        .uri("/v1/chat/completions")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            json!({
+                                "model":"model", "stream":stream, "max_tokens":20,
+                                "messages":[{"role":"user", "content":"text"}]
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{failure}, stream={stream}"
+            );
+            let body = to_bytes(response.into_body(), 16384).await.unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["error"]["code"], "inference_budget_unavailable");
+            assert!(
+                fixture
+                    .provider
+                    .received_requests()
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            let ledger = fixture.ledger.lock().unwrap();
+            assert_eq!(ledger.meters.settled.tokens, 0);
+            assert_eq!(ledger.meters.reserved.tokens, 0);
+            assert_eq!(ledger.meters.uncertain.tokens, 0);
+        }
+    }
 }
 
 #[tokio::test]

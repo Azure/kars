@@ -38,12 +38,27 @@ pub async fn promote_team(
     Json(body): Json<PromoteRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
     let cluster = require_cluster(&state)?;
-    require_owned_team(cluster, &ns, &name, &principal).await?;
+    let team = require_owned_team(cluster, &ns, &name, &principal).await?;
+    if super::qualification::marked(&team) {
+        return Err(AppError::Conflict(
+            "Review qualified evidence before changing qualification Team authority".into(),
+        ));
+    }
     if !(1..=5).contains(&body.tier) {
         return Err(AppError::BadRequest("tier must be in 1..5".into()));
     }
     let api: Api<KarsTeam> = cluster.teams(&ns);
-    let patch = serde_json::json!({ "spec": { "requestedTier": body.tier } });
+    if body.tier <= team.spec.envelope.tier {
+        return Err(AppError::BadRequest(
+            "requested tier must exceed the current tier".into(),
+        ));
+    }
+    let patch = serde_json::json!({
+        "metadata": {"uid": team.uid(), "resourceVersion": team.resource_version(),
+            "annotations": {"kars.azure.com/promotion-requested-by-sub": principal.sub,
+                "kars.azure.com/promotion-requested-by": principal.name}},
+        "spec": { "requestedTier": body.tier }
+    });
     api.patch(
         &name,
         &kube::api::PatchParams::default(),
@@ -54,7 +69,7 @@ pub async fn promote_team(
     Ok(Json(serde_json::json!({
         "requested": true,
         "tier": body.tier,
-        "note": "A human approval has been opened. The team is promoted only once it is approved."
+        "note": "An exact-tier human review was requested. The controller opens a current-authority approval before promoting the Team. Existing consumed runs are not reauthorized by this request."
     })))
 }
 
@@ -87,24 +102,30 @@ pub(crate) async fn request_owned_team_run(
     cluster: &crate::kars::cluster::Cluster,
     team: &KarsTeam,
 ) -> AppResult<serde_json::Value> {
+    if super::qualification::marked(team) {
+        return Err(AppError::BadRequest("Unqualified Team: use its explicit single-attempt approval; normal and automatic work require separate evidence review".into()));
+    }
     let owner = super::work_owner(team)?;
     let ns = owner.namespace.as_str();
     let name = owner.name.as_str();
     let api: Api<KarsTeam> = cluster.teams(ns);
-    crate::kars::execution_plans::validate(&team, true).map_err(AppError::BadRequest)?;
-    let patch = run_request_patch(&team)?;
+    crate::kars::execution_plans::validate(team, true).map_err(AppError::BadRequest)?;
+    let patch = run_request_patch(team)?;
     if team.spec.paused {
         return Err(AppError::BadRequest(
             "team is paused — resume it before running".into(),
         ));
     }
-    crate::routes::validate::require_team_budget_contracts(cluster, team).await?;
     if team.annotations().contains_key("kars.azure.com/run-now") {
         return Err(AppError::BadRequest(
             "a run request is already pending for this team".into(),
         ));
     }
-    let work = super::read_tasks(cluster, &team).await?;
+    // Reject invalid authority before reading work; queue-specific checks still
+    // run before task discovery or recording a fenced request.
+    crate::routes::validate::require_team_budget_contracts(cluster, team).await?;
+    let work = super::read_tasks(cluster, team).await?;
+    super::backlog::validate_revision_plan(team, &work)?;
     if work.iter().any(|item| !super::work::finished(item))
         && super::work::next_pending(&work).is_none()
     {
@@ -121,7 +142,7 @@ pub(crate) async fn request_owned_team_run(
         .items
         .into_iter()
         .any(|task| {
-            owned_run(&task.metadata, &team)
+            owned_run(&task.metadata, team)
                 && task
                     .annotations()
                     .get("kars.azure.com/team-role")
@@ -180,7 +201,7 @@ pub(super) fn owned_run(
         && Some(&controllers[0].uid) == team.metadata.uid.as_ref()
 }
 
-fn run_request_patch(team: &KarsTeam) -> AppResult<serde_json::Value> {
+pub(super) fn run_request_patch(team: &KarsTeam) -> AppResult<serde_json::Value> {
     let identity = || AppError::Conflict("team lacks current identity or is being deleted".into());
     let uid = team
         .metadata

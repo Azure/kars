@@ -6,7 +6,7 @@ import { execa } from "execa";
 import { fileURLToPath } from "node:url";
 import { parseAllDocuments } from "yaml";
 import type { Execute } from "./sre-authority.js";
-import { listSreHelmReleases, sreHelmStageWait } from "./sre-helm.js";
+import { listSreHelmReleases, sreHelmStageWait, sreInferenceFlags } from "./sre-helm.js";
 
 const inventory = JSON.stringify([{ name: "kars", namespace: "workspace", status: "pending-upgrade" }]);
 const unsupported = () => Object.assign(new Error("Helm flag rejected"), {
@@ -15,12 +15,63 @@ const unsupported = () => Object.assign(new Error("Helm flag rejected"), {
 
 afterEach(() => vi.restoreAllMocks());
 
+describe("SRE inference selection", () => {
+  it("omits overrides rather than replacing existing provider/model or budgets", () => {
+    expect(sreInferenceFlags({})).toEqual([]);
+    expect(sreInferenceFlags({ provider: "copilot" })).toEqual(["--set-json", 'sre.provider="copilot"']);
+    expect(sreInferenceFlags({ model: "gpt-4.1" })).toEqual(["--set-json", 'sre.model="gpt-4.1"']);
+  });
+
+  it("retains the original route across later model selections, including inherited defaults", () => {
+    expect(sreInferenceFlags({ model: "next" }, { sre: {} }).at(-1))
+      .toBe('sre.modelRouteBaseline={"provider":"","model":""}');
+    const baseline = { provider: "azure-openai", model: "original" };
+    expect(sreInferenceFlags({ provider: "github-copilot" }, { sre: baseline }).at(-1))
+      .toBe(`sre.modelRouteBaseline=${JSON.stringify(baseline)}`);
+    expect(sreInferenceFlags({ model: "next" }, { sre: {
+      provider: "github-copilot", model: "previous", modelRouteBaseline: baseline,
+    } }).at(-1)).toBe(`sre.modelRouteBaseline=${JSON.stringify(baseline)}`);
+    expect(sreInferenceFlags({}, { sre: baseline })).toEqual([]);
+  });
+
+  it.each([null, [], "invalid", { sre: null }, { sre: [] }, { sre: { provider: 12 } },
+    { sre: { modelRouteBaseline: { provider: "original" } } },
+    { sre: { modelRouteBaseline: { provider: "original", model: "original", extra: true } } },
+  ])("rejects malformed stored values without inventing a baseline: %j", previous => {
+    expect(() => sreInferenceFlags({ model: "next" }, previous)).toThrow(/valid existing|original provider/);
+  });
+
+  it.each([
+    { provider: "copilot", model: "gpt-4.1" },
+    { provider: "local", model: "org/model:small" },
+    { provider: "customer-foundry", model: 'quoted"\\model,sre.dailyTokens=999999,{list}' },
+  ])("renders the exact pair %j without changing governance or the runtime", async selection => {
+    const chart = fileURLToPath(new URL("../../../deploy/helm/kars", import.meta.url));
+    const { stdout } = await execa("helm", [
+      "template", "kars", chart, "--namespace", "kars-system",
+      "--set", "sre.enabled=true,sre.dailyTokens=50000,sre.tokenBudget=12000,sre.requirePromptShields=true",
+      "--show-only", "templates/sre.yaml", ...sreInferenceFlags(selection),
+    ], { timeout: 10_000 });
+    const parsed = parseAllDocuments(stdout);
+    expect(parsed.flatMap(document => document.errors)).toEqual([]);
+    const documents = parsed.map(document => document.toJSON());
+    const policy = documents.find(document => document?.kind === "InferencePolicy");
+    expect(policy.spec.modelPreference.primary).toEqual({
+      provider: selection.provider, deployment: selection.model,
+    });
+    expect(policy.spec.tokenBudget).toEqual({ dailyTokens: 50000, perRequestTokens: 12000 });
+    expect(policy.spec.contentSafety.requirePromptShields).toBe(true);
+    const sandbox = documents.find(document => document?.kind === "KarsSandbox");
+    expect(sandbox.spec.runtime.kind).toBe("Hermes");
+  });
+});
+
 describe("SRE Helm release inventory compatibility", () => {
   it("renders channel-free governed health sweeps without obsolete polling modes", async () => {
     const chart = fileURLToPath(new URL("../../../deploy/helm/kars", import.meta.url));
     const { stdout } = await execa("helm", [
       "template", "kars", chart, "--namespace", "kars-system",
-      "--set", "sre.enabled=true", "--show-only", "templates/sre.yaml",
+      "--set", "sre.enabled=true,controller.inferenceDefaults.provider=azure-openai,controller.inferenceDefaults.model=reviewed-model", "--show-only", "templates/sre.yaml",
     ]);
     const documents = parseAllDocuments(stdout);
     expect(documents.flatMap(document => document.errors)).toEqual([]);

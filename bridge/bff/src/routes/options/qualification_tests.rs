@@ -11,6 +11,46 @@ use super::{
 use std::collections::BTreeSet;
 
 #[test]
+fn per_run_qualification_palette_matches_mode_and_fails_closed() {
+    const CHILD: &str = "KARS_QUALIFICATION_PALETTE_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        for mode in [
+            None,
+            Some("required"),
+            Some("validation"),
+            Some("invalid"),
+            Some(""),
+        ] {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args(["--exact", "routes::options::qualification_tests::per_run_qualification_palette_matches_mode_and_fails_closed"])
+                .env(CHILD, "1")
+                .env_remove("BRIDGE_ROUTE_QUALIFICATION_MODE");
+            if let Some(mode) = mode {
+                command.env("BRIDGE_ROUTE_QUALIFICATION_MODE", mode);
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        }
+        return;
+    }
+    let available = super::qualification::per_run_qualification_available();
+    assert_eq!(
+        available,
+        matches!(
+            std::env::var("BRIDGE_ROUTE_QUALIFICATION_MODE").as_deref(),
+            Err(std::env::VarError::NotPresent) | Ok("required")
+        )
+    );
+}
+
+#[test]
 fn public_resource_admission_never_reports_missing_evidence_as_qualified() {
     const CHILD: &str = "KARS_RESOURCE_ADMISSION_TEST_CHILD";
     if std::env::var_os(CHILD).is_none() {

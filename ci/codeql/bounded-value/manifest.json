@@ -1,0 +1,18 @@
+{
+  "upstreamCommit": "fdf5c8481ffef04e04c7376167fb5ce25aae8453",
+  "upstreamFile": "rust/ql/lib/codeql/rust/security/UnsafeDeserializationExtensions.qll",
+  "upstreamSha256": "5ed51f5a338722805f9810ac1306b8246c86e4eaf743c86b0eef22cf765b611a",
+  "patchedSha256": "c0da0548958ba44252eab00c1a70f99b0afd5ab8a269d85d6ff0dea2f38111eb",
+  "validatedSourceManifestSha256": "e856e935770c7738ea867f0c63b8e48641f5c6b798eceb20573cba768fb94e7d",
+  "validatedRun": "ch2b",
+  "codeqlCliVersion": "2.27.4",
+  "controls": {
+    "BoundedJsonValue.qll": "465acfa0c730667e385323edd0c6b338426bd49aee5615835e6b8e67df7b391f",
+    "BoundedValueControl.expected": "d1e2450021fecf81fd2befad87fffbcfd471333053b8a157154ad153d2685d3b",
+    "BoundedValueControl.ql": "bf0a277cb99f20c66e76e04e98d6323037ce32eded89b5ce0921a234dd099236",
+    "IntegratedFlowControl.expected": "7132559f3721746aeafc38b6700edd43d1a2e6fb0e4ea1fe1f6d3449e93d2461",
+    "IntegratedFlowControl.ql": "4aeb93331c69b18149a5889fb1b41f4c82558208271383480ab945810f0511a1",
+    "main.rs": "eab7d98835188a744c6076453f25b17c96cd3b3cd12c126e08e0d19cf20678e2",
+    "options.yml": "e64719bbd01915c6c7650b7a6d16338fe8d57c0cb9f8323f65c4fbbfc792dc40"
+  }
+}

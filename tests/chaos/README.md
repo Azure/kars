@@ -86,13 +86,15 @@ infinite loop, eventual convergence, bounded calls).
 
 | Bench | File | Baseline | Regression gate |
 |---|---|---|---|
-| Reconciler decision | `controller/benches/reconciler_bench.rs` | `controller/benches/baselines.json` | median + 25 % |
-| Proxy hot path | `inference-router/benches/proxy_bench.rs` | `inference-router/benches/baselines.json` | median + 25 %, p99 ≤ 5 ms |
+| Synthetic reconciler decision | `controller/benches/reconciler_bench.rs` | event base measured in the same job | candidate ≤ baseline + 25 % |
+| Synthetic proxy work | `inference-router/benches/proxy_bench.rs` | event base measured in the same job | candidate ≤ baseline + 25 % |
 | Router smoke (k6) | `tests/k6/router_smoke.js` | inline `thresholds` (p95 < 100 ms, err < 0.1 %) | nightly only |
 
-Refresh baselines via `cargo bench --bench <name> -- --save-baseline dev`,
-then copy the criterion-reported median into the corresponding
-`baselines.json` file. Document the refresh in CHANGELOG.
+The committed `baselines.json` files retain historical timings and supply the
+benchmark inventory and unchanged tolerance; do not refresh them to clear CI.
+See the [operations guide](../../docs/operations/chaos-tier.md#performance-baselines)
+for trusted baseline selection, pinned compiler/profile, fail-closed handling and
+retained same-runner evidence. Synthetic benches do not measure production p99.
 
 ## Anti-patterns
 

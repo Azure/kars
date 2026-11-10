@@ -1,5 +1,9 @@
 {{/* Copyright (c) Microsoft Corporation.
-Licensed under the MIT License. */}}{{- if (.Values.governance | default dict).enabled | default true }}
+Licensed under the MIT License. */}}
+{{- $pausedMaintenance := and .Release.IsUpgrade (eq (int .Values.controller.replicas) 0) (not (empty .Values.controller.upgradePrecondition)) -}}
+{{/* A fenced, paused Core cannot finalize hook replacement. Publish the default
+     after activation restores Core, not during its unchanged maintenance step. */}}
+{{- if and ((.Values.governance | default dict).enabled | default true) (not $pausedMaintenance) }}
 # kars-default ToolPolicy — the system-default AGT profile that the
 # controller falls back to when a KarsSandbox sets
 # `spec.governance.enabled=true` (the new default) and omits

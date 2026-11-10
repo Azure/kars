@@ -9,7 +9,7 @@
 
 use axum::Json;
 use axum::Router;
-use axum::extract::State;
+use axum::extract::{ConnectInfo, Extension, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -103,23 +103,34 @@ async fn egress_learned_clear(State(state): State<AppState>) -> impl IntoRespons
 /// Security model:
 /// 1. Blocklist → hard deny (threat intelligence)
 /// 2. Allowlist → approved domains pass through
-/// 3. Unknown domain → deny (Strict) or log + allow (Learn). There is no
-///    in-process pending-approval queue — widening egress is an operator action
-///    on the signed allowlist bundle (Slice 5c.1).
+/// 3. Unknown domain → deny (Strict) and record a scoped access request, or
+///    log + allow (Learn). A request decision alone never widens policy; a
+///    signed baseline update or installed temporary grant is still required.
 /// 4. Learn mode → log + allow (discovery phase only)
 /// 5. Private/internal IP → always deny (SSRF protection)
 /// 6. Redirects → returned as-is (never followed)
 /// 7. Response capped at 2 MB
 ///
 /// Body: { "url": "https://...", "method": "GET"|"POST"|..., "headers": {}, "body": "..." }
-/// Returns: { "status": <http_code>, "headers": {...}, "body": "..." }
+/// Returns status, headers, body, truncation, and router-observed UTC time (observed_at).
 async fn egress_fetch(
     State(state): State<AppState>,
+    peer: Option<Extension<ConnectInfo<std::net::SocketAddr>>>,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let started = std::time::Instant::now();
     let telemetry_scope = state.services.telemetry.cursor().0;
+    let correlation = state.services.telemetry.correlate_fetch(&req);
     let url = req.get("url").and_then(|v| v.as_str()).unwrap_or("");
+    use crate::task_telemetry::operation::RouterOperation;
+    let observe = |operation| {
+        state.services.telemetry.record_operation(
+            correlation.as_ref(),
+            operation,
+            Some(url),
+            started.elapsed().as_millis() as u64,
+        )
+    };
     let method = req.get("method").and_then(|v| v.as_str()).unwrap_or("GET");
     let req_body = req.get("body").and_then(|v| v.as_str()).unwrap_or("");
     let req_headers = req.get("headers").and_then(|v| v.as_object());
@@ -159,6 +170,10 @@ async fn egress_fetch(
             };
             if is_private {
                 tracing::warn!("Egress fetch blocked: private/internal target");
+                observe(RouterOperation::EgressPolicy {
+                    allowed: false,
+                    flag: "private_target",
+                });
                 state.services.telemetry.record_router_tool(
                     &telemetry_scope,
                     "http_fetch",
@@ -179,12 +194,62 @@ async fn egress_fetch(
         }
     }
 
+    let github = match super::github_proxy::prepare_fetch(
+        &state,
+        peer.map(|Extension(ConnectInfo(peer))| peer),
+        &req,
+    )
+    .await
+    {
+        Ok(fetch) => fetch,
+        Err(response) => {
+            observe(RouterOperation::EgressPolicy {
+                allowed: false,
+                flag: "github_service",
+            });
+            state.services.telemetry.record_router_tool(
+                &telemetry_scope,
+                "http_fetch",
+                Some(false),
+                Some(response.status().as_u16()),
+                started.elapsed().as_millis() as u64,
+                true,
+            );
+            return errors::flat(
+                response.status(),
+                "Governed GitHub fetch is unavailable or outside permitted scope",
+            )
+            .into_response();
+        }
+    };
+
     let sandbox: &str = &state.sandbox_name;
-    let mut dispatch_request = None;
+    let governed_github = github.is_some();
+    let check_policy = || async {
+        if governed_github {
+            state
+                .blocklist
+                .check_github_service_egress(url, sandbox)
+                .await
+                .map(|()| None)
+        } else {
+            state
+                .blocklist
+                .check_egress_in_scope(url, sandbox, &telemetry_scope)
+                .await
+        }
+    };
+    let policy = check_policy().await;
+    let mut dispatch_request = policy.as_ref().ok().cloned().flatten();
+    let mut waited = false;
 
     // Check egress access: blocklist → allowlist (Strict denies the rest).
-    if let Err(reason) = state.blocklist.check_egress(url, sandbox).await {
+    if let Err(reason) = policy {
         tracing::warn!("Egress fetch denied by policy");
+        observe(RouterOperation::EgressPolicy {
+            allowed: false,
+            flag: "egress_check",
+        });
         let target = reqwest::Url::parse(url).ok().and_then(|url| {
             url.host_str()
                 .zip(url.port_or_known_default())
@@ -234,6 +299,7 @@ async fn egress_fetch(
                 return super::access_request::error(error);
             }
             dispatch_request = Some(entry.request_id);
+            waited = true;
         } else {
             state.services.telemetry.record_router_tool(
                 &telemetry_scope,
@@ -246,6 +312,8 @@ async fn egress_fetch(
             return (StatusCode::FORBIDDEN, Json(serde_json::json!({
             "error": reason,
             "url": url,
+            "request": entry,
+            "enforcement_changed": false,
             "action": "If legitimate, an operator can add the host to the baseline allowlist ('kars egress <name> --approve <host>', which re-signs) or grant it temporarily ('kars egress allow-extra <name> --host <host> --ttl <dur> --reason <why>').",
             }))).into_response();
         }
@@ -262,6 +330,11 @@ async fn egress_fetch(
     {
         return super::access_request::error(crate::access_request::Error::StaleScope);
     }
+
+    observe(RouterOperation::EgressPolicy {
+        allowed: true,
+        flag: "egress_check",
+    });
 
     // Record in learn mode
     state.blocklist.record_learned(url).await;
@@ -308,32 +381,57 @@ async fn egress_fetch(
 
     const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024; // 2 MB
 
-    // No await separates this atomic claim from starting the send. A successful
-    // cancel/reset before the claim wins; afterwards prevention is not promised.
-    let _dispatch_claim = if wait_ms > 0 {
-        if state.blocklist.check_egress(url, sandbox).await.is_err() {
+    let current_request = match check_policy().await {
+        Ok(request) => request,
+        Err(_) => {
+            observe(RouterOperation::EgressPolicy {
+                allowed: false,
+                flag: "dispatch_recheck",
+            });
             return errors::flat(
                 StatusCode::FORBIDDEN,
                 "Egress policy no longer permits this operation",
             )
             .into_response();
         }
-        match state
+    };
+    // No await separates the atomic claim below from starting the send.
+    // Cancellation/reset before the claim wins; afterwards prevention is not promised.
+    let dispatch_request = dispatch_request.or(current_request);
+    let claim = if !waited && let Some(id) = dispatch_request.as_deref() {
+        state
+            .services
+            .requests
+            .claim_grant_dispatch(&telemetry_scope, id, &state.services.shutdown)
+    } else {
+        state
             .services
             .claim_egress_dispatch(&telemetry_scope, dispatch_request.as_deref())
-        {
-            Ok(claim) => Some(claim),
-            Err(error) => return super::access_request::error(error),
-        }
-    } else {
-        None
+    };
+    let _dispatch_claim = match claim {
+        Ok(claim) => claim,
+        Err(error) => return super::access_request::error(error),
     };
 
-    match request
-        .timeout(std::time::Duration::from_secs(30))
-        .send()
-        .await
-    {
+    let response = if let Some(fetch) = github {
+        Ok(fetch.send().await)
+    } else {
+        request
+            .timeout(std::time::Duration::from_secs(30))
+            .send()
+            .await
+            .map(|response| {
+                let status = response.status();
+                let headers = response.headers().clone();
+                let mut result = axum::response::Response::new(axum::body::Body::from_stream(
+                    response.bytes_stream(),
+                ));
+                *result.status_mut() = status;
+                *result.headers_mut() = headers;
+                result
+            })
+    };
+    match response {
         Ok(resp) => {
             let status = resp.status().as_u16();
             // Strip sensitive response headers
@@ -362,13 +460,22 @@ async fn egress_fetch(
                 .collect();
             // Cap response body to prevent OOM
             use futures::StreamExt;
-            let mut stream = resp.bytes_stream();
+            let mut truncated = governed_github
+                && resp
+                    .headers()
+                    .get("x-kars-log-truncated")
+                    .is_some_and(|v| v == "true");
+            let mut stream = resp.into_body().into_data_stream();
             let mut body_bytes = Vec::new();
-            let mut truncated = false;
             while let Some(chunk) = stream.next().await {
                 let chunk = match chunk {
                     Ok(chunk) => chunk,
                     Err(_) => {
+                        observe(RouterOperation::Fetch {
+                            status: Some(status),
+                            complete: false,
+                            flag: "body_error",
+                        });
                         state.services.telemetry.record_router_tool(
                             &telemetry_scope,
                             "http_fetch",
@@ -395,6 +502,11 @@ async fn egress_fetch(
             if truncated {
                 body.push_str(&format!("... [truncated at {MAX_RESPONSE_BYTES} bytes]"));
             }
+            observe(RouterOperation::Fetch {
+                status: Some(status),
+                complete: !truncated,
+                flag: "response",
+            });
             state.services.telemetry.record_router_tool(
                 &telemetry_scope,
                 "http_fetch",
@@ -416,12 +528,18 @@ async fn egress_fetch(
                     "headers": resp_headers,
                     "body": body,
                     "truncated": truncated,
+                    "observed_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
                 })),
             )
                 .into_response()
         }
         Err(_) => {
             tracing::warn!("Egress fetch failed");
+            observe(RouterOperation::Fetch {
+                status: None,
+                complete: false,
+                flag: "transport_error",
+            });
             state.services.telemetry.record_router_tool(
                 &telemetry_scope,
                 "http_fetch",

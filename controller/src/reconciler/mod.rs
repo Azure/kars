@@ -21,10 +21,7 @@ use k8s_openapi::api::{
 use kube::{
     Client, ResourceExt,
     api::{Api, DeleteParams, ListParams, Patch, PatchParams},
-    runtime::{
-        controller::{Action, Controller},
-        reflector::ObjectRef,
-    },
+    runtime::controller::{Action, Controller},
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -34,6 +31,7 @@ use crate::crd::KarsSandbox;
 use crate::fedcred::{FedCredConfig, FedCredManager};
 
 mod agent_env;
+mod builtin_memory;
 pub(crate) mod byo_contract;
 pub(crate) mod credential_sources;
 mod dev_env;
@@ -41,6 +39,7 @@ mod github_services;
 pub(crate) mod governance_mounts;
 pub(crate) mod governed_services;
 mod inference;
+mod inference_watch;
 mod legacy_blocklist;
 mod mcp_binding;
 mod mcp_egress;
@@ -48,6 +47,10 @@ pub(crate) mod namespace_ownership;
 mod skills;
 mod sre_writer;
 pub(crate) mod trustgraph_mount;
+mod watch;
+mod witness_baseline;
+
+use watch::{deployment_to_sandbox_ref, task_to_sandbox_ref};
 
 use mcp_egress::mcp_egress_rule;
 
@@ -173,6 +176,14 @@ struct Context {
 
 /// Main reconciliation function — called whenever a KarsSandbox changes.
 async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Action, ReconcileError> {
+    // Keep the sandbox state machine off the watcher and metrics futures' stacks.
+    Box::pin(reconcile_inner(sandbox, ctx)).await
+}
+
+async fn reconcile_inner(
+    sandbox: Arc<KarsSandbox>,
+    ctx: Arc<Context>,
+) -> Result<Action, ReconcileError> {
     let name = sandbox.name_any();
 
     // Validate sandbox name — must be K8s-safe (alphanumeric + hyphens)
@@ -207,29 +218,15 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         }
     };
 
-    // The label selects SRE behavior, but never grants it. The cluster-scoped
-    // registration and live UID/namespace checks below authorize that behavior.
-    let is_sre_sandbox = sandbox
-        .metadata
-        .labels
-        .as_ref()
-        .and_then(|l| l.get("kars.azure.com/role"))
-        .map(|v| v == "sre")
-        .unwrap_or(false);
-
-    // The router's apiserver egress uses the cluster's own Service address.
-    let apiserver_ip =
-        std::env::var("KUBERNETES_SERVICE_HOST").unwrap_or_else(|_| "10.96.0.1".to_string());
-    let apiserver_port = std::env::var("KUBERNETES_SERVICE_PORT_HTTPS")
-        .or_else(|_| std::env::var("KUBERNETES_SERVICE_PORT"))
-        .unwrap_or_else(|_| "443".to_string());
-
     tracing::info!("Reconciling KarsSandbox {name}");
 
     // ── Finalizer: cascading namespace deletion ──────────────────────────
     if sandbox.metadata.deletion_timestamp.is_some() {
         tracing::info!("KarsSandbox {name} is being deleted — cleaning up namespace {sandbox_ns}");
 
+        builtin_memory::cleanup(client, &sandbox)
+            .await
+            .map_err(|error| ReconcileError::Configuration(error.to_string()))?;
         namespace_ownership::delete(client, &sandbox, owned_namespace.as_ref()).await?;
 
         // Clean up the spawner ClusterRoleBinding
@@ -306,6 +303,22 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         return Ok(Action::await_change());
     }
 
+    // Optional observer failures revoke only its owned grants and never gate Core.
+    let mut witness_pending = false;
+    if let Some(namespace) = owned_namespace.as_ref()
+        && let Err(error) = witness_baseline::reconcile(client, &sandbox, namespace).await
+    {
+        witness_pending = true;
+        tracing::warn!(sandbox = %name, error = %error, "Datapath witness baseline unavailable; Core reconciliation continues");
+    }
+
+    if crate::mission_delivery::terminal_run(client, &sandbox)
+        .await
+        .map_err(|error| ReconcileError::Configuration(error.to_string()))?
+    {
+        return Ok(Action::requeue(Duration::from_secs(5)));
+    }
+
     let sre_projection = match crate::sre_authority::pod::authorize(
         client,
         &sandbox,
@@ -341,6 +354,67 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         &ctx.sandbox_image,
     )
     .await?;
+
+    // Keep the namespace lock through provisioning, but not its large state machine
+    // in this preflight/error poll frame. The factory also isolates construction.
+    reconcile_provisioning(
+        sandbox,
+        ctx,
+        owned_namespace,
+        witness_pending,
+        sre_projection,
+        credentials,
+    )
+    .await
+}
+
+fn reconcile_provisioning(
+    sandbox: Arc<KarsSandbox>,
+    ctx: Arc<Context>,
+    owned_namespace: Option<Namespace>,
+    witness_pending: bool,
+    sre_projection: Option<crate::sre_authority::pod::Projection>,
+    credentials: credential_sources::Mode,
+) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<Action, ReconcileError>> + Send>> {
+    Box::pin(reconcile_provisioning_inner(
+        sandbox,
+        ctx,
+        owned_namespace,
+        witness_pending,
+        sre_projection,
+        credentials,
+    ))
+}
+
+async fn reconcile_provisioning_inner(
+    sandbox: Arc<KarsSandbox>,
+    ctx: Arc<Context>,
+    owned_namespace: Option<Namespace>,
+    witness_pending: bool,
+    sre_projection: Option<crate::sre_authority::pod::Projection>,
+    credentials: credential_sources::Mode,
+) -> Result<Action, ReconcileError> {
+    let name = sandbox.name_any();
+    let sandbox_ns = format!("kars-{name}");
+    let client = &ctx.client;
+
+    // The label selects SRE behavior, but never grants it. The cluster-scoped
+    // registration and live UID/namespace checks above authorize that behavior.
+    let is_sre_sandbox = sandbox
+        .metadata
+        .labels
+        .as_ref()
+        .and_then(|l| l.get("kars.azure.com/role"))
+        .map(|v| v == "sre")
+        .unwrap_or(false);
+
+    // The router's apiserver egress uses the cluster's own Service address.
+    let apiserver_ip =
+        std::env::var("KUBERNETES_SERVICE_HOST").unwrap_or_else(|_| "10.96.0.1".to_string());
+    let apiserver_port = std::env::var("KUBERNETES_SERVICE_PORT_HTTPS")
+        .or_else(|_| std::env::var("KUBERNETES_SERVICE_PORT"))
+        .unwrap_or_else(|_| "443".to_string());
+
     let skill_catalog = match skills::project(
         client,
         &sandbox,
@@ -476,6 +550,9 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             crate::status::stamp_degraded(client, &sandbox, &name, $reason, &$msg).await;
             return Ok(Action::requeue(Duration::from_secs(60)));
         }};
+    }
+    if let Err(message) = agent_env::validate_instructions(agent_config.instructions.as_deref()) {
+        degrade!(SPEC_INVALID, message);
     }
     if !["standard", "enhanced", "confidential"].contains(&isolation.as_str()) {
         tracing::error!("Invalid isolation level: {isolation}");
@@ -712,6 +789,10 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         String::new()
     };
 
+    // Separate phase poll frames: boxing only the enclosing provisioning future
+    // leaves all of these API/JSON temporaries in one oversized poll frame.
+    // Await each phase before constructing the next, retaining only its outputs.
+    Box::pin(async {
     // ── Step 2: Create ServiceAccount with Workload Identity ─────────────
     let sa_api: Api<ServiceAccount> = Api::namespaced(client.clone(), &sandbox_ns);
     let sa: ServiceAccount = serde_json::from_value(json!({
@@ -890,6 +971,10 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         )
         .await?;
 
+        Ok::<_, ReconcileError>(())
+    }).await?;
+
+    let network = Box::pin(async {
     // ── Step 3: Apply default-deny NetworkPolicy + allowlist ─────────────
     //
     // Pod-level NetworkPolicy controls what the entire pod can reach.
@@ -980,14 +1065,42 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         .extend(inference::configured_local_egress_rules().map_err(ReconcileError::Configuration)?);
     egress_rules.extend(crate::inference_budget::pod::egress(&sandbox)?);
 
+    let builtin_memory_enabled =
+        ctx.foundry_project_endpoint.trim().is_empty() && spec.memory_ref.is_none();
+    if builtin_memory_enabled {
+        let rules = sre_egress::rules(client, &apiserver_ip, &apiserver_port)
+            .await
+            .map_err(ReconcileError::Configuration)?;
+        builtin_memory::api_egress(
+            client,
+            &sandbox,
+            owned_namespace.as_ref().ok_or_else(|| {
+                ReconcileError::Configuration("Sandbox namespace is absent".into())
+            })?,
+            &rules,
+        )
+        .await
+        .map_err(|error| ReconcileError::Configuration(error.to_string()))?;
+        egress_rules.extend(rules);
+    }
+
     // Policy enforcement may observe the API's post-DNAT endpoint IP/port.
     // Only registered routers receive exact targets; UID 1000 stays locked down.
     if sre_projection.is_some() {
-        egress_rules.extend(
-            sre_egress::rules(client, &apiserver_ip, &apiserver_port)
-                .await
-                .map_err(ReconcileError::Configuration)?,
-        );
+        let rules = sre_egress::rules(client, &apiserver_ip, &apiserver_port)
+            .await
+            .map_err(ReconcileError::Configuration)?;
+        crate::sre_authority::api_egress::ensure(
+            client,
+            &sandbox,
+            owned_namespace.as_ref().ok_or_else(|| {
+                ReconcileError::Configuration("Sandbox namespace is absent".into())
+            })?,
+            &rules,
+        )
+        .await
+        .map_err(ReconcileError::Configuration)?;
+        egress_rules.extend(rules);
     }
 
     // Add user-defined allowed endpoints (for the inference-router to reach
@@ -1027,7 +1140,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         Ok(rules) => egress_rules.extend(rules),
         Err(e) => {
             tracing::error!(error = %e, sandbox = %name, "MCP egress derivation failed");
-            return Ok(Action::requeue(Duration::from_secs(15)));
+            return Ok(std::ops::ControlFlow::Break(Action::requeue(Duration::from_secs(15))));
         }
     }
 
@@ -1084,6 +1197,9 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
     } else {
         vec![operator_policy_echo_ingress]
     };
+
+    let mut ingress_rules = ingress_rules;
+    ingress_rules.push(governed_services::control_transport::ingress());
 
     let netpol: NetworkPolicy = serde_json::from_value(json!({
         "apiVersion": "networking.k8s.io/v1",
@@ -1237,10 +1353,26 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         let _ = sandbox_api
             .patch_status(&name, &PatchParams::default(), &Patch::Merge(status_obj))
             .await;
-        return Ok(Action::requeue(crate::backoff::requeue_secs_with_jitter(
+        return Ok(std::ops::ControlFlow::Break(Action::requeue(crate::backoff::requeue_secs_with_jitter(
             60,
-        )));
+        ))));
     }
+        Ok::<_, ReconcileError>(std::ops::ControlFlow::Continue((
+            allowlist_resolution,
+            builtin_memory_enabled,
+            egress_allowlist_cm_name,
+            egress_approvals_cm_name,
+        )))
+    }).await?;
+    let (
+        allowlist_resolution,
+        builtin_memory_enabled,
+        egress_allowlist_cm_name,
+        egress_approvals_cm_name,
+    ) = match network {
+        std::ops::ControlFlow::Continue(outputs) => outputs,
+        std::ops::ControlFlow::Break(action) => return Ok(action),
+    };
 
     // ── Step 3.5: Provision per-sandbox Entra Agent Identity (when active) ──
     //
@@ -1334,6 +1466,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         if overlay_mode {
             break 'deployment_block;
         }
+        let prepared = Box::pin(async {
         // Phase G P1 #4: spec.suspended scales the Deployment to 0
         // replicas without removing it, preserving cluster state for
         // a graceful resume. We still walk the rest of this block so
@@ -1637,7 +1770,11 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         // map is sourced from the matching variant struct via
         // `runtime::build_runtime_plan`. Keys are validated against
         // reserved prefixes regardless of source.
-        agent_env::merge(&mut openclaw_env, &runtime_plan);
+        agent_env::merge(
+            &mut openclaw_env,
+            &runtime_plan,
+            agent_config.instructions.as_deref(),
+        );
 
         // Build the inference-router env array
         let service_identity = match governed_services::ensure(
@@ -1650,7 +1787,30 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         .await
         {
             Ok(projection) => projection,
-            Err(detail) => degrade!("GovernedServicePrivacyNotReady", detail),
+            Err(error @ governed_services::credentials::IssuanceError::PrivacyPending) => {
+                let patch = crate::status::build_pending_status_patch(
+                    &sandbox,
+                    "GovernedServicePrivacyPending",
+                    &error.to_string(),
+                );
+                let current = serde_json::to_value(&sandbox.status)?;
+                if patch["status"]
+                    .as_object()
+                    .is_some_and(|fields| fields.iter().any(|(key, value)| current[key] != *value))
+                {
+                    Api::<KarsSandbox>::namespaced(
+                        client.clone(),
+                        &sandbox.namespace().unwrap_or_default(),
+                    )
+                    .patch_status(&name, &PatchParams::default(), &Patch::Merge(patch))
+                    .await?;
+                }
+                return Ok(std::ops::ControlFlow::Break(Action::requeue(Duration::from_secs(10))));
+            }
+            Err(governed_services::credentials::IssuanceError::Rejected(detail)) => {
+                crate::status::stamp_degraded(client, &sandbox, &name, "GovernedServicePrivacyNotReady", &detail).await;
+                return Ok(std::ops::ControlFlow::Break(Action::requeue(Duration::from_secs(60))));
+            }
         };
         let mut router_env = vec![
             json!({"name": "AZURE_OPENAI_ENDPOINT", "value": &ctx.openai_endpoint}),
@@ -1670,6 +1830,10 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             json!({"name": "RUST_LOG", "value": "info,inference_router=debug"}),
         ];
         router_env.extend(router_agt_env);
+        router_env.extend(pod_spec::memory_model_env(
+            std::env::var("FOUNDRY_MEMORY_CHAT_MODEL").ok(),
+            std::env::var("FOUNDRY_MEMORY_EMBEDDING_MODEL").ok(),
+        ));
         if let Some(default_model) = pod_spec::cluster_default_model() {
             router_env.push(json!({"name": "DEFAULT_MODEL", "value": default_model}));
         }
@@ -1959,7 +2123,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         let egress_guard_cmd = build_egress_guard_command(is_sre_sandbox);
 
         // Build the pod spec — runtimeClassName only set for Kata (confidential)
-        let mut pod_spec = json!({
+        let pod_spec = json!({
             "serviceAccountName": "sandbox",
             "securityContext": build_pod_security_context(&sandbox_config),
             // ── Init container: iptables-based per-container egress control ──
@@ -2067,226 +2231,114 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                         }],
                         "nodeSelector": node_selector
         });
-        if let Some(digest) = &skill_catalog {
-            governance_mounts::inject_configmap_mount(
-                &mut pod_spec,
-                "openclaw",
-                crate::skill_delivery::CATALOG_NAME,
-                "approved-skills",
-                crate::skill_delivery::CATALOG_PATH,
-                Some((crate::skill_delivery::CATALOG_DIGEST_ENV, digest)),
-            );
-        }
+            Ok::<_, ReconcileError>(std::ops::ControlFlow::Continue((
+                pod_spec, service_identity, agent_container_name, desired_replicas, runtime_class,
+            )))
+        }).await?;
+        let (
+            mut pod_spec,
+            mut service_identity,
+            agent_container_name,
+            desired_replicas,
+            runtime_class,
+        ) = match prepared {
+            std::ops::ControlFlow::Continue(outputs) => outputs,
+            std::ops::ControlFlow::Break(action) => return Ok(action),
+        };
 
-        service_identity.mount(&mut pod_spec);
-        crate::credential_grants::mount_observations(&mut pod_spec, &sandbox);
-
-        // Set runtimeClassName for Kata (confidential) isolation
-        if let Some(rc) = runtime_class {
-            pod_spec
-                .as_object_mut()
-                .unwrap()
-                .insert("runtimeClassName".into(), json!(rc));
-        }
-
-        // ── Shared sidecar — NO per-pod injection ────────────────────
-        //
-        // The auth-sidecar runs ONCE per cluster in `kars-system`
-        // (Helm-deployed Deployment), not as a per-pod container.
-        // Cross-pod access is gated by a NetworkPolicy on the
-        // sidecar's namespace that allows ingress only from pods
-        // labeled `kars.azure.com/component=inference-router`. The
-        // per-sandbox identity attribution is enforced by the
-        // PINNED_AGENT_IDENTITY_APP_ID env var on the inference-
-        // router (set above) — the sidecar's
-        // `?AgentIdentity=<appId>` query parameter mints the token
-        // for that specific child agent identity.
-        //
-        // Resource savings: 10 sandboxes × 128MiB sidecar = 1.28GB
-        // saved vs the per-pod model. MSAL token cache is centralized
-        // in the single sidecar instance.
-
-        // S7 wiring — mirror governance CRD ConfigMaps/Secrets from the
-        // user namespace into the sandbox namespace, then inject mounts
-        // into the inference-router container.
-        //
-        // ToolPolicy (always, when governance enabled):
-        //   - Source: `toolpolicy-{tp_ref_name}-profile` ConfigMap
-        //     (key `profile.json`) in `sandbox_self_ns`, owned by the
-        //     ToolPolicy reconciler.
-        //   - Destination: same name in `sandbox_ns`.
-        //   - Mount: `/etc/agt/policies` + env `AGT_POLICY_DIR`.
-        //   - Failure: source missing → mount omitted (router falls back
-        //     to empty policy engine, fail-closed at the AGT layer).
-        if governance_config.enabled && !tool_policy_profile.is_empty() {
-            let cm_name = format!("toolpolicy-{}-profile", tool_policy_profile);
-            match governance_mounts::mirror_configmap(
-                client,
-                &cm_name,
-                &sandbox_self_ns,
-                &sandbox_ns,
-                &name,
-                "ToolPolicy",
-            )
-            .await
-            {
-                Ok(governance_mounts::MirrorOutcome::Mirrored) => {
-                    governance_mounts::inject_configmap_mount(
-                        &mut pod_spec,
-                        "inference-router",
-                        &cm_name,
-                        "agt-policy",
-                        governance_mounts::paths::TOOL_POLICY_DIR,
-                        Some(("AGT_POLICY_DIR", governance_mounts::paths::TOOL_POLICY_DIR)),
-                    );
-                    // Also mount into the agent container — both OpenClaw
-                    // and Hermes load the compiled `agt-profile.yaml` in
-                    // the in-process governance engine (TS:
-                    // `@microsoft/agent-governance-sdk`; Python:
-                    // `agent-governance-toolkit-core`). Without this
-                    // mount the agent container starts with an empty
-                    // policy set and the AGT engine fails closed on
-                    // every tool call. The volume itself was already
-                    // added by `inject_configmap_mount` above, so this
-                    // only appends the mount + env into whichever
-                    // container holds the agent runtime.
-                    //
-                    // Container name depends on the runtime kind:
-                    // OpenClaw uses "openclaw", every other runtime
-                    // (Hermes, OpenAIAgents, MAF, BYO, ...) uses the
-                    // generic "agent" name (see S10.A2.b — single
-                    // branch point keyed off `is_openclaw`).
-                    governance_mounts::inject_container_mount_public(
-                        &mut pod_spec,
-                        agent_container_name,
-                        "agt-policy",
-                        governance_mounts::paths::TOOL_POLICY_DIR,
-                        Some(("AGT_POLICY_DIR", governance_mounts::paths::TOOL_POLICY_DIR)),
-                    );
-                }
-                Ok(governance_mounts::MirrorOutcome::Skipped(reason)) => {
-                    tracing::warn!(
-                        sandbox = %name,
-                        cm = %cm_name,
-                        reason = %reason,
-                        "ToolPolicy compiled-profile ConfigMap not mirrored; \
-                         router will start with empty policy engine",
-                    );
-                }
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        sandbox = %name,
-                        cm = %cm_name,
-                        "ToolPolicy ConfigMap mirror failed",
-                    );
-                    return Ok(Action::requeue(Duration::from_secs(15)));
-                }
+        let projected = Box::pin(async {
+            if let Some(digest) = &skill_catalog {
+                governance_mounts::inject_configmap_mount(
+                    &mut pod_spec,
+                    agent_container_name,
+                    crate::skill_delivery::CATALOG_NAME,
+                    "approved-skills",
+                    crate::skill_delivery::CATALOG_PATH,
+                    Some((crate::skill_delivery::CATALOG_DIGEST_ENV, digest)),
+                );
             }
 
-            // Add writable emptyDir volume for trust store + audit log persistence
-            if let Some(volumes) = pod_spec.get_mut("volumes").and_then(|v| v.as_array_mut())
-                && !volumes
-                    .iter()
-                    .any(|v| v.get("name").and_then(|n| n.as_str()) == Some("agt-data"))
-            {
-                volumes.push(json!({
-                    "name": "agt-data",
-                    "emptyDir": {"sizeLimit": "10Mi"}
-                }));
+            service_identity.mount(&mut pod_spec);
+            if builtin_memory_enabled {
+                if let Err(error) = service_identity
+                    .ensure_builtin_memory(
+                        client,
+                        &sandbox,
+                        owned_namespace.as_ref().ok_or_else(|| {
+                            ReconcileError::Configuration("Sandbox namespace is absent".into())
+                        })?,
+                    )
+                    .await
+                {
+                    if error.is::<crate::reviewed_execution::TaskSnapshotChanged>()
+                        || error.is::<builtin_memory::CredentialEpochChanged>()
+                    {
+                        return Ok(std::ops::ControlFlow::Break(Action::requeue(
+                            Duration::from_secs(1),
+                        )));
+                    }
+                    crate::status::stamp_degraded(
+                        client,
+                        &sandbox,
+                        &name,
+                        "BuiltinMemoryNotReady",
+                        &error.to_string(),
+                    )
+                    .await;
+                    return Ok(std::ops::ControlFlow::Break(Action::requeue(
+                        Duration::from_secs(60),
+                    )));
+                }
+                builtin_memory::mount(&mut pod_spec);
             }
-        }
+            crate::credential_grants::mount_observations(&mut pod_spec, &sandbox);
 
-        // InferencePolicy (always — `spec.inferenceRef` is required by
-        // the CRD): mirror the compiled profile ConfigMap and mount it
-        // into the router. The router's `inference_policy_loader`
-        // sha256s the bytes and echoes the digest via
-        // `/internal/policy-status`; the controller's
-        // `inference_policy_reconciler` polls that endpoint to
-        // close the §3 Ready ⇔ router-echo loop (Slice 2a).
-        //
-        // Failure mode: source missing → mount omitted, router boots
-        // with no InferencePolicy loaded (per-request token budget
-        // cap is None, defence-in-depth gate becomes a no-op). The
-        // existing env-driven `TOKEN_BUDGET_PER_REQUEST` warn-only
-        // path stays in place as a safety net.
-        if !inference_ref_name.is_empty() {
-            let ip_cm = format!("inferencepolicy-{}-profile", inference_ref_name);
-            match governance_mounts::mirror_configmap(
-                client,
-                &ip_cm,
-                &sandbox_self_ns,
-                &sandbox_ns,
-                &name,
-                "InferencePolicy",
-            )
-            .await
-            {
-                Ok(governance_mounts::MirrorOutcome::Mirrored) => {
-                    governance_mounts::inject_configmap_mount(
-                        &mut pod_spec,
-                        "inference-router",
-                        &ip_cm,
-                        "inference-policy",
-                        governance_mounts::paths::INFERENCE_POLICY_DIR,
-                        Some((
-                            "INFERENCE_POLICY_DIR",
-                            governance_mounts::paths::INFERENCE_POLICY_DIR,
-                        )),
-                    );
-                }
-                Ok(governance_mounts::MirrorOutcome::Skipped(reason)) => {
-                    tracing::warn!(
-                        sandbox = %name,
-                        cm = %ip_cm,
-                        reason = %reason,
-                        "InferencePolicy profile ConfigMap not mirrored; \
-                         router will start without InferencePolicy enforcement",
-                    );
-                }
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        sandbox = %name,
-                        cm = %ip_cm,
-                        "InferencePolicy ConfigMap mirror failed",
-                    );
-                    return Ok(Action::requeue(Duration::from_secs(15)));
-                }
+            // Set runtimeClassName for Kata (confidential) isolation
+            if let Some(rc) = runtime_class {
+                pod_spec
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("runtimeClassName".into(), json!(rc));
             }
-        }
 
-        // KarsMemory (optional, Slice 3a): if the sandbox references
-        // one via `spec.memoryRef`, mirror its compiled binding
-        // ConfigMap and mount it into the inference-router. The router's
-        // `memory_binding_loader` reads the file, registers the digest
-        // under `PolicyKind::Memory`, and echoes it via
-        // `/internal/policy-status` so the `kars_memory_reconciler` can
-        // close the §3 Ready ⇔ router-echo loop.
-        //
-        // The agent container does NOT need this mount: memory is a
-        // router-owned capability. Both runtime plugins (OpenClaw and
-        // Hermes) are thin clients — they forward `foundry.memory`
-        // intent to the router's platform MCP server and the router
-        // resolves the store name + scope from this binding, applies the
-        // Memory Store REST contract, auto-provisions, and retries. The
-        // agent process therefore carries no Foundry contract knowledge
-        // and never reads `binding.json` directly.
-        //
-        // Failure mode: source missing → mount omitted, router boots
-        // without a binding loaded (digest absent in
-        // `/internal/policy-status`, KarsMemory stays `Compiled`).
-        if let Some(memory_ref) = spec.memory_ref.as_ref() {
-            let memory_name = memory_ref.name.trim();
-            if !memory_name.is_empty() {
-                let mem_cm = format!("karsmemory-{memory_name}-binding");
+            // ── Shared sidecar — NO per-pod injection ────────────────────
+            //
+            // The auth-sidecar runs ONCE per cluster in `kars-system`
+            // (Helm-deployed Deployment), not as a per-pod container.
+            // Cross-pod access is gated by a NetworkPolicy on the
+            // sidecar's namespace that allows ingress only from pods
+            // labeled `kars.azure.com/component=inference-router`. The
+            // per-sandbox identity attribution is enforced by the
+            // PINNED_AGENT_IDENTITY_APP_ID env var on the inference-
+            // router (set above) — the sidecar's
+            // `?AgentIdentity=<appId>` query parameter mints the token
+            // for that specific child agent identity.
+            //
+            // Resource savings: 10 sandboxes × 128MiB sidecar = 1.28GB
+            // saved vs the per-pod model. MSAL token cache is centralized
+            // in the single sidecar instance.
+
+            // S7 wiring — mirror governance CRD ConfigMaps/Secrets from the
+            // user namespace into the sandbox namespace, then inject mounts
+            // into the inference-router container.
+            //
+            // ToolPolicy (always, when governance enabled):
+            //   - Source: `toolpolicy-{tp_ref_name}-profile` ConfigMap
+            //     (key `profile.json`) in `sandbox_self_ns`, owned by the
+            //     ToolPolicy reconciler.
+            //   - Destination: same name in `sandbox_ns`.
+            //   - Mount: `/etc/agt/policies` + env `AGT_POLICY_DIR`.
+            //   - Failure: source missing → mount omitted (router falls back
+            //     to empty policy engine, fail-closed at the AGT layer).
+            if governance_config.enabled && !tool_policy_profile.is_empty() {
+                let cm_name = format!("toolpolicy-{}-profile", tool_policy_profile);
                 match governance_mounts::mirror_configmap(
                     client,
-                    &mem_cm,
+                    &cm_name,
                     &sandbox_self_ns,
                     &sandbox_ns,
                     &name,
-                    "KarsMemory",
+                    "ToolPolicy",
                 )
                 .await
                 {
@@ -2294,381 +2346,575 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                         governance_mounts::inject_configmap_mount(
                             &mut pod_spec,
                             "inference-router",
-                            &mem_cm,
-                            "claw-memory-binding",
-                            governance_mounts::paths::MEMORY_BINDING_DIR,
+                            &cm_name,
+                            "agt-policy",
+                            governance_mounts::paths::TOOL_POLICY_DIR,
+                            Some(("AGT_POLICY_DIR", governance_mounts::paths::TOOL_POLICY_DIR)),
+                        );
+                        // Also mount into the agent container — both OpenClaw
+                        // and Hermes load the compiled `agt-profile.yaml` in
+                        // the in-process governance engine (TS:
+                        // `@microsoft/agent-governance-sdk`; Python:
+                        // `agent-governance-toolkit-core`). Without this
+                        // mount the agent container starts with an empty
+                        // policy set and the AGT engine fails closed on
+                        // every tool call. The volume itself was already
+                        // added by `inject_configmap_mount` above, so this
+                        // only appends the mount + env into whichever
+                        // container holds the agent runtime.
+                        //
+                        // Container name depends on the runtime kind:
+                        // OpenClaw uses "openclaw", every other runtime
+                        // (Hermes, OpenAIAgents, MAF, BYO, ...) uses the
+                        // generic "agent" name (see S10.A2.b — single
+                        // branch point keyed off `is_openclaw`).
+                        governance_mounts::inject_container_mount_public(
+                            &mut pod_spec,
+                            agent_container_name,
+                            "agt-policy",
+                            governance_mounts::paths::TOOL_POLICY_DIR,
+                            Some(("AGT_POLICY_DIR", governance_mounts::paths::TOOL_POLICY_DIR)),
+                        );
+                    }
+                    Ok(governance_mounts::MirrorOutcome::Skipped(reason)) => {
+                        tracing::warn!(
+                            sandbox = %name,
+                            cm = %cm_name,
+                            reason = %reason,
+                            "ToolPolicy compiled-profile ConfigMap not mirrored; \
+                             router will start with empty policy engine",
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            sandbox = %name,
+                            cm = %cm_name,
+                            "ToolPolicy ConfigMap mirror failed",
+                        );
+                        return Ok(std::ops::ControlFlow::Break(Action::requeue(
+                            Duration::from_secs(15),
+                        )));
+                    }
+                }
+
+                // Add writable emptyDir volume for trust store + audit log persistence
+                if let Some(volumes) = pod_spec.get_mut("volumes").and_then(|v| v.as_array_mut())
+                    && !volumes
+                        .iter()
+                        .any(|v| v.get("name").and_then(|n| n.as_str()) == Some("agt-data"))
+                {
+                    volumes.push(json!({
+                        "name": "agt-data",
+                        "emptyDir": {"sizeLimit": "10Mi"}
+                    }));
+                }
+            }
+
+            // InferencePolicy (always — `spec.inferenceRef` is required by
+            // the CRD): mirror the compiled profile ConfigMap and mount it
+            // into the router. The router's `inference_policy_loader`
+            // sha256s the bytes and echoes the digest via
+            // `/internal/policy-status`; the controller's
+            // `inference_policy_reconciler` polls that endpoint to
+            // close the §3 Ready ⇔ router-echo loop (Slice 2a).
+            //
+            // Failure mode: source missing → mount omitted, router boots
+            // with no InferencePolicy loaded (per-request token budget
+            // cap is None, defence-in-depth gate becomes a no-op). The
+            // existing env-driven `TOKEN_BUDGET_PER_REQUEST` warn-only
+            // path stays in place as a safety net.
+            if !inference_ref_name.is_empty() {
+                let ip_cm = format!("inferencepolicy-{}-profile", inference_ref_name);
+                match governance_mounts::mirror_configmap(
+                    client,
+                    &ip_cm,
+                    &sandbox_self_ns,
+                    &sandbox_ns,
+                    &name,
+                    "InferencePolicy",
+                )
+                .await
+                {
+                    Ok(governance_mounts::MirrorOutcome::Mirrored) => {
+                        governance_mounts::inject_configmap_mount(
+                            &mut pod_spec,
+                            "inference-router",
+                            &ip_cm,
+                            "inference-policy",
+                            governance_mounts::paths::INFERENCE_POLICY_DIR,
                             Some((
-                                "MEMORY_BINDING_DIR",
-                                governance_mounts::paths::MEMORY_BINDING_DIR,
+                                "INFERENCE_POLICY_DIR",
+                                governance_mounts::paths::INFERENCE_POLICY_DIR,
                             )),
                         );
                     }
                     Ok(governance_mounts::MirrorOutcome::Skipped(reason)) => {
                         tracing::warn!(
                             sandbox = %name,
-                            cm = %mem_cm,
+                            cm = %ip_cm,
                             reason = %reason,
-                            "KarsMemory binding ConfigMap not mirrored; \
-                             router will start without KarsMemory binding loaded",
+                            "InferencePolicy profile ConfigMap not mirrored; \
+                             router will start without InferencePolicy enforcement",
                         );
                     }
                     Err(e) => {
                         tracing::error!(
                             error = %e,
                             sandbox = %name,
-                            cm = %mem_cm,
-                            "KarsMemory ConfigMap mirror failed",
+                            cm = %ip_cm,
+                            "InferencePolicy ConfigMap mirror failed",
                         );
-                        return Ok(Action::requeue(Duration::from_secs(15)));
+                        return Ok(std::ops::ControlFlow::Break(Action::requeue(
+                            Duration::from_secs(15),
+                        )));
                     }
                 }
             }
-        }
 
-        // Slice 5c.1: egress allowlist mount. The ConfigMap was
-        // published earlier in this reconcile pass directly in the
-        // sandbox namespace (no cross-NS mirror — the data lives
-        // inline on the `KarsSandbox` CR, no separate producer CRD).
-        // Mount only on the inference-router container; the agent
-        // container (UID 1000) has no business reading it.
-        //
-        // The router's `egress_allowlist_loader` reads
-        // `${EGRESS_ALLOWLIST_DIR}/allowlist.json`, atomically
-        // replaces `Blocklist.allowlist` (the L7 hostname filter
-        // consulted by `forward_proxy::handle_connect`), and
-        // registers the digest under `PolicyKind::EgressAllowlist`
-        // on `/internal/policy-status`.
-        governance_mounts::inject_configmap_mount(
-            &mut pod_spec,
-            "inference-router",
-            &egress_allowlist_cm_name,
-            "egress-allowlist",
-            governance_mounts::paths::EGRESS_ALLOWLIST_DIR,
-            Some((
-                "EGRESS_ALLOWLIST_DIR",
-                governance_mounts::paths::EGRESS_ALLOWLIST_DIR,
-            )),
-        );
-
-        // EgressApproval (Slice 5e): per-approval allowlist deltas live in
-        // a sibling ConfigMap owned by `egress_approval_reconciler`. The
-        // router UNIONs them with the baseline `EGRESS_ALLOWLIST_DIR`
-        // contents and echoes a merged-set digest under
-        // `PolicyKind::EgressApproval`. Optional mount — empty/missing
-        // when no approvals are active; the router treats absence as
-        // "no extra hosts" and falls back to the baseline digest.
-        governance_mounts::inject_configmap_mount(
-            &mut pod_spec,
-            "inference-router",
-            &egress_approvals_cm_name,
-            "egress-approvals",
-            governance_mounts::paths::EGRESS_APPROVAL_DIR,
-            Some((
-                "EGRESS_APPROVAL_DIR",
-                governance_mounts::paths::EGRESS_APPROVAL_DIR,
-            )),
-        );
-
-        // McpServer (optional, plural): for each entry in `mcpServerRefs`,
-        // mirror its JWKS ConfigMap + signing-key Secret and mount them
-        // at per-name subdirectories so the router can address them
-        // individually.
-        //
-        // Mount layout (Slice 4d.2):
-        //   - JWKS:    /etc/kars/mcp/{name}/jwks.json
-        //   - signing: /etc/kars/mcp-signing/{name}/{keys...}
-        //
-        // Env vars set on `inference-router`:
-        //   - `MCP_JWKS_DIR`: parent dir for all per-server JWKS subdirs.
-        //     Router scans this dir to discover servers (Slice 4d.2
-        //     startup log). Multi-JWKS OAuth verification + namespaced
-        //     tool dispatch land in Slice 4d.3.
-        //   - `MCP_JWKS_PATH`: legacy single-file pointer, kept for
-        //     backwards compatibility with existing OAuth code in
-        //     `inference-router/src/main.rs::build_mcp_router()`. Points
-        //     at the FIRST entry's `jwks.json` (deterministic ordering
-        //     given the CEL-enforced unique-by-name).
-        //   - `MCP_SIGNING_KEY_DIR`: legacy single-dir pointer for the
-        //     first entry; namespaced replacement TBD in 4d.3.
-        let bindings = mcp_binding::resolve_all(client, &sandbox, &governance_config)
-            .await
-            .map_err(ReconcileError::Configuration)?;
-        let mut mirrored_mcp_names: Vec<String> = Vec::with_capacity(bindings.len());
-        let mut mcp_revisions = Vec::new();
-        for (mcp_name, binding) in bindings {
-            let first_mcp = mirrored_mcp_names.is_empty();
-            mcp_revisions.push(binding.revision);
-            let jwks_cm = format!("mcp-{mcp_name}-jwks");
-            let signing_secret = format!("mcp-{mcp_name}-signing");
-            let jwks_volume = format!("mcp-jwks-{mcp_name}");
-            let signing_volume = format!("mcp-signing-{mcp_name}");
-            let jwks_mount = format!("{}/{}", governance_mounts::paths::MCP_JWKS_DIR, mcp_name);
-            let signing_mount =
-                format!("{}/{}", governance_mounts::paths::MCP_SIGNING_DIR, mcp_name);
-
-            match governance_mounts::mirror_configmap(
-                client,
-                &jwks_cm,
-                &sandbox_self_ns,
-                &sandbox_ns,
-                &name,
-                "McpServer",
-            )
-            .await
-            {
-                Ok(governance_mounts::MirrorOutcome::Mirrored) => {
-                    // First-entry only: keep legacy single-file env var
-                    // pointing at this server's jwks.json so the existing
-                    // single-JWKS OAuth verifier keeps working unchanged.
-                    let legacy_env = if first_mcp {
-                        Some(("MCP_JWKS_PATH", format!("{jwks_mount}/jwks.json")))
-                    } else {
-                        None
-                    };
-                    governance_mounts::inject_configmap_mount(
-                        &mut pod_spec,
-                        "inference-router",
-                        &jwks_cm,
-                        &jwks_volume,
-                        &jwks_mount,
-                        legacy_env.as_ref().map(|(k, v)| (*k, v.as_str())),
-                    );
-                    mirrored_mcp_names.push(mcp_name.to_string());
-                }
-                Ok(governance_mounts::MirrorOutcome::Skipped(reason)) => {
-                    tracing::warn!(
-                        sandbox = %name,
-                        cm = %jwks_cm,
-                        reason = %reason,
-                        "McpServer JWKS ConfigMap not mirrored; \
-                         router will not advertise this MCP",
-                    );
-                }
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        sandbox = %name,
-                        cm = %jwks_cm,
-                        "McpServer JWKS mirror failed",
-                    );
-                    return Ok(Action::requeue(Duration::from_secs(15)));
-                }
-            }
-            if !binding.signing {
-                continue;
-            }
-            match governance_mounts::mirror_secret(
-                client,
-                &signing_secret,
-                &sandbox_self_ns,
-                &sandbox_ns,
-                &name,
-                "McpServer",
-            )
-            .await
-            {
-                Ok(governance_mounts::MirrorOutcome::Mirrored) => {
-                    let legacy_env = if first_mcp {
-                        Some(("MCP_SIGNING_KEY_DIR", signing_mount.clone()))
-                    } else {
-                        None
-                    };
-                    governance_mounts::inject_secret_mount(
-                        &mut pod_spec,
-                        "inference-router",
-                        &signing_secret,
-                        &signing_volume,
-                        &signing_mount,
-                        legacy_env.as_ref().map(|(k, v)| (*k, v.as_str())),
-                    );
-                    // The signing secret is the minimum the router needs
-                    // to forward signed MCP requests upstream on this
-                    // server's behalf. JWKS (used for inbound OAuth
-                    // verification) only exists when productionMode=true.
-                    // So track this server as available to OpenClaw even
-                    // when JWKS was skipped (productionMode=false) —
-                    // otherwise the per-server `mcp.servers.<name>` block
-                    // never lands in openclaw.json and the lane is dead.
-                    if !mirrored_mcp_names.iter().any(|n| n == mcp_name) {
-                        mirrored_mcp_names.push(mcp_name.to_string());
+            // KarsMemory (optional, Slice 3a): if the sandbox references
+            // one via `spec.memoryRef`, mirror its compiled binding
+            // ConfigMap and mount it into the inference-router. The router's
+            // `memory_binding_loader` reads the file, registers the digest
+            // under `PolicyKind::Memory`, and echoes it via
+            // `/internal/policy-status` so the `kars_memory_reconciler` can
+            // close the §3 Ready ⇔ router-echo loop.
+            //
+            // The agent container does NOT need this mount: memory is a
+            // router-owned capability. Both runtime plugins (OpenClaw and
+            // Hermes) are thin clients — they forward `foundry.memory`
+            // intent to the router's platform MCP server and the router
+            // resolves the store name + scope from this binding, applies the
+            // Memory Store REST contract, auto-provisions, and retries. The
+            // agent process therefore carries no Foundry contract knowledge
+            // and never reads `binding.json` directly.
+            //
+            // Source missing → mount omitted, but memory remains required.
+            // Missing or malformed bindings must fail closed, never fall back
+            // to a convention-based store or scope.
+            if let Some(memory_ref) = spec.memory_ref.as_ref() {
+                governance_mounts::inject_container_env(
+                    &mut pod_spec,
+                    "inference-router",
+                    "MEMORY_BINDING_REQUIRED",
+                    "true",
+                );
+                let memory_name = memory_ref.name.trim();
+                if !memory_name.is_empty() {
+                    let mem_cm = format!("karsmemory-{memory_name}-binding");
+                    match governance_mounts::mirror_configmap(
+                        client,
+                        &mem_cm,
+                        &sandbox_self_ns,
+                        &sandbox_ns,
+                        &name,
+                        "KarsMemory",
+                    )
+                    .await
+                    {
+                        Ok(governance_mounts::MirrorOutcome::Mirrored) => {
+                            governance_mounts::inject_configmap_mount(
+                                &mut pod_spec,
+                                "inference-router",
+                                &mem_cm,
+                                "claw-memory-binding",
+                                governance_mounts::paths::MEMORY_BINDING_DIR,
+                                Some((
+                                    "MEMORY_BINDING_DIR",
+                                    governance_mounts::paths::MEMORY_BINDING_DIR,
+                                )),
+                            );
+                        }
+                        Ok(governance_mounts::MirrorOutcome::Skipped(reason)) => {
+                            tracing::warn!(
+                                sandbox = %name,
+                                cm = %mem_cm,
+                                reason = %reason,
+                                "KarsMemory binding ConfigMap not mirrored; \
+                                 router memory access remains blocked until a valid binding loads",
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                error = %e,
+                                sandbox = %name,
+                                cm = %mem_cm,
+                                "KarsMemory ConfigMap mirror failed",
+                            );
+                            return Ok(std::ops::ControlFlow::Break(Action::requeue(
+                                Duration::from_secs(15),
+                            )));
+                        }
                     }
                 }
-                Ok(governance_mounts::MirrorOutcome::Skipped(reason)) => {
-                    tracing::warn!(
-                        sandbox = %name,
-                        secret = %signing_secret,
-                        reason = %reason,
-                        "McpServer signing-key Secret not mirrored",
-                    );
-                }
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        sandbox = %name,
-                        secret = %signing_secret,
-                        "McpServer signing Secret mirror failed",
-                    );
-                    return Ok(Action::requeue(Duration::from_secs(15)));
-                }
             }
-        }
-        // Set MCP_JWKS_DIR (parent) once if any McpServer was mirrored.
-        // Router uses this to discover all servers at startup.
-        if !mirrored_mcp_names.is_empty() {
-            governance_mounts::inject_container_env(
+
+            // Slice 5c.1: egress allowlist mount. The ConfigMap was
+            // published earlier in this reconcile pass directly in the
+            // sandbox namespace (no cross-NS mirror — the data lives
+            // inline on the `KarsSandbox` CR, no separate producer CRD).
+            // Mount only on the inference-router container; the agent
+            // container (UID 1000) has no business reading it.
+            //
+            // The router's `egress_allowlist_loader` reads
+            // `${EGRESS_ALLOWLIST_DIR}/allowlist.json`, atomically
+            // replaces `Blocklist.allowlist` (the L7 hostname filter
+            // consulted by `forward_proxy::handle_connect`), and
+            // registers the digest under `PolicyKind::EgressAllowlist`
+            // on `/internal/policy-status`.
+            governance_mounts::inject_configmap_mount(
                 &mut pod_spec,
                 "inference-router",
-                "MCP_JWKS_DIR",
-                governance_mounts::paths::MCP_JWKS_DIR,
+                &egress_allowlist_cm_name,
+                "egress-allowlist",
+                governance_mounts::paths::EGRESS_ALLOWLIST_DIR,
+                Some((
+                    "EGRESS_ALLOWLIST_DIR",
+                    governance_mounts::paths::EGRESS_ALLOWLIST_DIR,
+                )),
             );
-            // Project the list of mirrored MCP server names into the
-            // agent container so the entrypoint can render an
-            // `mcp.servers.<name>` block pointing each server at the
-            // loopback router (`127.0.0.1:8443/mcp`). Router resolves
-            // the `x-kars-mcp-server` header → registered McpServer,
-            // signs with the mounted key, filters by allowedTools,
-            // forwards to the upstream URL. Container name was
-            // hard-coded to "openclaw" which silently dropped
-            // KARS_MCP_SERVERS on hermes/pydantic-ai/anthropic/etc.
-            let names_csv = mirrored_mcp_names.join(",");
-            let agent_container = if matches!(runtime_spec.kind, crate::crd::RuntimeKind::OpenClaw)
-            {
-                "openclaw"
-            } else {
-                "agent"
-            };
-            governance_mounts::inject_container_env(
-                &mut pod_spec,
-                agent_container,
-                "KARS_MCP_SERVERS",
-                &names_csv,
-            );
-        }
 
-        // A2AAgent (optional): when A2A is enabled, mirror the signed
-        // AgentCard ConfigMap so the router can serve `/.well-known/agent.json`.
-        // Defaults to an A2AAgent named after the sandbox itself.
-        let a2a_cfg_opt = spec.a2a.as_ref();
-        if let Some(a2a_cfg) = a2a_cfg_opt
-            && a2a_cfg.enabled
-        {
-            let agent_name = a2a_cfg
-                .agent_ref
-                .as_ref()
-                .map(|r| r.name.as_str())
-                .unwrap_or(name.as_str());
-            if !agent_name.is_empty() {
-                let card_cm = format!("a2aagent-{agent_name}-card");
+            // EgressApproval (Slice 5e): per-approval allowlist deltas live in
+            // a sibling ConfigMap owned by `egress_approval_reconciler`. The
+            // router UNIONs them with the baseline `EGRESS_ALLOWLIST_DIR`
+            // contents and echoes a merged-set digest under
+            // `PolicyKind::EgressApproval`. Optional mount — empty/missing
+            // when no approvals are active; the router treats absence as
+            // "no extra hosts" and falls back to the baseline digest.
+            governance_mounts::inject_configmap_mount(
+                &mut pod_spec,
+                "inference-router",
+                &egress_approvals_cm_name,
+                "egress-approvals",
+                governance_mounts::paths::EGRESS_APPROVAL_DIR,
+                Some((
+                    "EGRESS_APPROVAL_DIR",
+                    governance_mounts::paths::EGRESS_APPROVAL_DIR,
+                )),
+            );
+
+            // McpServer (optional, plural): for each entry in `mcpServerRefs`,
+            // mirror its JWKS ConfigMap + signing-key Secret and mount them
+            // at per-name subdirectories so the router can address them
+            // individually.
+            //
+            // Mount layout (Slice 4d.2):
+            //   - JWKS:    /etc/kars/mcp/{name}/jwks.json
+            //   - signing: /etc/kars/mcp-signing/{name}/{keys...}
+            //
+            // Env vars set on `inference-router`:
+            //   - `MCP_JWKS_DIR`: parent dir for all per-server JWKS subdirs.
+            //     Router scans this dir to discover servers (Slice 4d.2
+            //     startup log). Multi-JWKS OAuth verification + namespaced
+            //     tool dispatch land in Slice 4d.3.
+            //   - `MCP_JWKS_PATH`: legacy single-file pointer, kept for
+            //     backwards compatibility with existing OAuth code in
+            //     `inference-router/src/main.rs::build_mcp_router()`. Points
+            //     at the FIRST entry's `jwks.json` (deterministic ordering
+            //     given the CEL-enforced unique-by-name).
+            //   - `MCP_SIGNING_KEY_DIR`: legacy single-dir pointer for the
+            //     first entry; namespaced replacement TBD in 4d.3.
+            let bindings = mcp_binding::resolve_all(client, &sandbox, &governance_config)
+                .await
+                .map_err(ReconcileError::Configuration)?;
+            let mut mirrored_mcp_names: Vec<String> = Vec::with_capacity(bindings.len());
+            let mut mcp_revisions = Vec::new();
+            for (mcp_name, binding) in bindings {
+                let first_mcp = mirrored_mcp_names.is_empty();
+                mcp_revisions.push(binding.revision);
+                let jwks_cm = format!("mcp-{mcp_name}-jwks");
+                let signing_secret = format!("mcp-{mcp_name}-signing");
+                let jwks_volume = format!("mcp-jwks-{mcp_name}");
+                let signing_volume = format!("mcp-signing-{mcp_name}");
+                let jwks_mount = format!("{}/{}", governance_mounts::paths::MCP_JWKS_DIR, mcp_name);
+                let signing_mount =
+                    format!("{}/{}", governance_mounts::paths::MCP_SIGNING_DIR, mcp_name);
+
                 match governance_mounts::mirror_configmap(
                     client,
-                    &card_cm,
+                    &jwks_cm,
                     &sandbox_self_ns,
                     &sandbox_ns,
                     &name,
-                    "A2AAgent",
+                    "McpServer",
                 )
                 .await
                 {
                     Ok(governance_mounts::MirrorOutcome::Mirrored) => {
+                        // First-entry only: keep legacy single-file env var
+                        // pointing at this server's jwks.json so the existing
+                        // single-JWKS OAuth verifier keeps working unchanged.
+                        let legacy_env = if first_mcp {
+                            Some(("MCP_JWKS_PATH", format!("{jwks_mount}/jwks.json")))
+                        } else {
+                            None
+                        };
                         governance_mounts::inject_configmap_mount(
                             &mut pod_spec,
                             "inference-router",
-                            &card_cm,
-                            "a2a-card",
-                            governance_mounts::paths::A2A_CARD_DIR,
-                            Some(("A2A_CARD_DIR", governance_mounts::paths::A2A_CARD_DIR)),
+                            &jwks_cm,
+                            &jwks_volume,
+                            &jwks_mount,
+                            legacy_env.as_ref().map(|(k, v)| (*k, v.as_str())),
                         );
+                        mirrored_mcp_names.push(mcp_name.to_string());
                     }
                     Ok(governance_mounts::MirrorOutcome::Skipped(reason)) => {
                         tracing::warn!(
                             sandbox = %name,
-                            cm = %card_cm,
+                            cm = %jwks_cm,
                             reason = %reason,
-                            "A2AAgent card ConfigMap not mirrored; \
-                             /.well-known/agent.json will 404",
+                            "McpServer JWKS ConfigMap not mirrored; \
+                             router will not advertise this MCP",
                         );
                     }
                     Err(e) => {
                         tracing::error!(
                             error = %e,
                             sandbox = %name,
-                            cm = %card_cm,
-                            "A2AAgent card mirror failed",
+                            cm = %jwks_cm,
+                            "McpServer JWKS mirror failed",
                         );
-                        return Ok(Action::requeue(Duration::from_secs(15)));
+                        return Ok(std::ops::ControlFlow::Break(Action::requeue(
+                            Duration::from_secs(15),
+                        )));
+                    }
+                }
+                if !binding.signing {
+                    continue;
+                }
+                match governance_mounts::mirror_secret(
+                    client,
+                    &signing_secret,
+                    &sandbox_self_ns,
+                    &sandbox_ns,
+                    &name,
+                    "McpServer",
+                )
+                .await
+                {
+                    Ok(governance_mounts::MirrorOutcome::Mirrored) => {
+                        let legacy_env = if first_mcp {
+                            Some(("MCP_SIGNING_KEY_DIR", signing_mount.clone()))
+                        } else {
+                            None
+                        };
+                        governance_mounts::inject_secret_mount(
+                            &mut pod_spec,
+                            "inference-router",
+                            &signing_secret,
+                            &signing_volume,
+                            &signing_mount,
+                            legacy_env.as_ref().map(|(k, v)| (*k, v.as_str())),
+                        );
+                        // The signing secret is the minimum the router needs
+                        // to forward signed MCP requests upstream on this
+                        // server's behalf. JWKS (used for inbound OAuth
+                        // verification) only exists when productionMode=true.
+                        // So track this server as available to OpenClaw even
+                        // when JWKS was skipped (productionMode=false) —
+                        // otherwise the per-server `mcp.servers.<name>` block
+                        // never lands in openclaw.json and the lane is dead.
+                        if !mirrored_mcp_names.iter().any(|n| n == mcp_name) {
+                            mirrored_mcp_names.push(mcp_name.to_string());
+                        }
+                    }
+                    Ok(governance_mounts::MirrorOutcome::Skipped(reason)) => {
+                        tracing::warn!(
+                            sandbox = %name,
+                            secret = %signing_secret,
+                            reason = %reason,
+                            "McpServer signing-key Secret not mirrored",
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            sandbox = %name,
+                            secret = %signing_secret,
+                            "McpServer signing Secret mirror failed",
+                        );
+                        return Ok(std::ops::ControlFlow::Break(Action::requeue(
+                            Duration::from_secs(15),
+                        )));
                     }
                 }
             }
-        }
+            // Set MCP_JWKS_DIR (parent) once if any McpServer was mirrored.
+            // Router uses this to discover all servers at startup.
+            if !mirrored_mcp_names.is_empty() {
+                governance_mounts::inject_container_env(
+                    &mut pod_spec,
+                    "inference-router",
+                    "MCP_JWKS_DIR",
+                    governance_mounts::paths::MCP_JWKS_DIR,
+                );
+                // Project the list of mirrored MCP server names into the
+                // agent container so the entrypoint can render an
+                // `mcp.servers.<name>` block pointing each server at the
+                // loopback router (`127.0.0.1:8443/mcp`). Router resolves
+                // the `x-kars-mcp-server` header → registered McpServer,
+                // signs with the mounted key, filters by allowedTools,
+                // forwards to the upstream URL. Container name was
+                // hard-coded to "openclaw" which silently dropped
+                // KARS_MCP_SERVERS on hermes/pydantic-ai/anthropic/etc.
+                let names_csv = mirrored_mcp_names.join(",");
+                let agent_container =
+                    if matches!(runtime_spec.kind, crate::crd::RuntimeKind::OpenClaw) {
+                        "openclaw"
+                    } else {
+                        "agent"
+                    };
+                governance_mounts::inject_container_env(
+                    &mut pod_spec,
+                    agent_container,
+                    "KARS_MCP_SERVERS",
+                    &names_csv,
+                );
+            }
 
-        // Phase F2b: per-sandbox TrustGraph projection mount.
-        // Filters cluster-wide projections to outbound edges only,
-        // publishes a per-sandbox ConfigMap, and mounts it into the
-        // inference-router. Errors are logged but non-fatal — the
-        // F2a router-side loader fail-closes to an empty projection.
-        match trustgraph_mount::ensure_trustgraph_mount(client, &sandbox_ns, &name, &mut pod_spec)
+            // A2AAgent (optional): when A2A is enabled, mirror the signed
+            // AgentCard ConfigMap so the router can serve `/.well-known/agent.json`.
+            // Defaults to an A2AAgent named after the sandbox itself.
+            let a2a_cfg_opt = spec.a2a.as_ref();
+            if let Some(a2a_cfg) = a2a_cfg_opt
+                && a2a_cfg.enabled
+            {
+                let agent_name = a2a_cfg
+                    .agent_ref
+                    .as_ref()
+                    .map(|r| r.name.as_str())
+                    .unwrap_or(name.as_str());
+                if !agent_name.is_empty() {
+                    let card_cm = format!("a2aagent-{agent_name}-card");
+                    match governance_mounts::mirror_configmap(
+                        client,
+                        &card_cm,
+                        &sandbox_self_ns,
+                        &sandbox_ns,
+                        &name,
+                        "A2AAgent",
+                    )
+                    .await
+                    {
+                        Ok(governance_mounts::MirrorOutcome::Mirrored) => {
+                            governance_mounts::inject_configmap_mount(
+                                &mut pod_spec,
+                                "inference-router",
+                                &card_cm,
+                                "a2a-card",
+                                governance_mounts::paths::A2A_CARD_DIR,
+                                Some(("A2A_CARD_DIR", governance_mounts::paths::A2A_CARD_DIR)),
+                            );
+                        }
+                        Ok(governance_mounts::MirrorOutcome::Skipped(reason)) => {
+                            tracing::warn!(
+                                sandbox = %name,
+                                cm = %card_cm,
+                                reason = %reason,
+                                "A2AAgent card ConfigMap not mirrored; \
+                                 /.well-known/agent.json will 404",
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                error = %e,
+                                sandbox = %name,
+                                cm = %card_cm,
+                                "A2AAgent card mirror failed",
+                            );
+                            return Ok(std::ops::ControlFlow::Break(Action::requeue(
+                                Duration::from_secs(15),
+                            )));
+                        }
+                    }
+                }
+            }
+
+            // Phase F2b: per-sandbox TrustGraph projection mount.
+            // Filters cluster-wide projections to outbound edges only,
+            // publishes a per-sandbox ConfigMap, and mounts it into the
+            // inference-router. Errors are logged but non-fatal — the
+            // F2a router-side loader fail-closes to an empty projection.
+            match trustgraph_mount::ensure_trustgraph_mount(
+                client,
+                &sandbox_ns,
+                &name,
+                &mut pod_spec,
+            )
             .await
-        {
-            Ok(trustgraph_mount::MountOutcome::Mounted {
-                version_hash,
-                edges,
-            }) => {
-                tracing::info!(
-                    sandbox = %name,
-                    edges = edges,
-                    version_hash = %version_hash,
-                    "TrustGraph per-sandbox projection mounted"
-                );
+            {
+                Ok(trustgraph_mount::MountOutcome::Mounted {
+                    version_hash,
+                    edges,
+                }) => {
+                    tracing::info!(
+                        sandbox = %name,
+                        edges = edges,
+                        version_hash = %version_hash,
+                        "TrustGraph per-sandbox projection mounted"
+                    );
+                }
+                Ok(trustgraph_mount::MountOutcome::EmptySlice) => {
+                    tracing::debug!(
+                        sandbox = %name,
+                        "TrustGraph projection contains no outbound edges for this sandbox"
+                    );
+                }
+                Ok(trustgraph_mount::MountOutcome::NoSource) => {
+                    tracing::debug!(
+                        sandbox = %name,
+                        "No TrustGraph projections present in kars-system"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        sandbox = %name,
+                        "TrustGraph mount failed; router will start without projection"
+                    );
+                }
             }
-            Ok(trustgraph_mount::MountOutcome::EmptySlice) => {
-                tracing::debug!(
-                    sandbox = %name,
-                    "TrustGraph projection contains no outbound edges for this sandbox"
-                );
-            }
-            Ok(trustgraph_mount::MountOutcome::NoSource) => {
-                tracing::debug!(
-                    sandbox = %name,
-                    "No TrustGraph projections present in kars-system"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    sandbox = %name,
-                    "TrustGraph mount failed; router will start without projection"
-                );
-            }
-        }
 
-        // Mount blocklist seed ConfigMap into the router container
-        governance_mounts::inject_configmap_mount(
-            &mut pod_spec,
-            "inference-router",
-            &blocklist_cm_name,
-            "blocklist-seed",
-            "/etc/kars/blocklist",
-            None,
-        );
+            // Mount blocklist seed ConfigMap into the router container
+            governance_mounts::inject_configmap_mount(
+                &mut pod_spec,
+                "inference-router",
+                &blocklist_cm_name,
+                "blocklist-seed",
+                "/etc/kars/blocklist",
+                None,
+            );
 
-        let provider_version =
-            inference::mirror_providers(client, &sandbox_self_ns, &sandbox_ns, &name).await?;
-        if sre_projection.is_some() {
-            crate::sre_authority::pod::project(&mut pod_spec);
-        }
-        let mut pod_annotations = crate::inference_budget::pod::decorate(
-            client,
-            &sandbox,
-            owned_namespace.as_ref().ok_or_else(|| {
-                ReconcileError::Configuration("Runtime namespace identity missing".into())
-            })?,
-            &mut pod_spec,
-        )
+            let provider_version =
+                inference::mirror_providers(client, &sandbox_self_ns, &sandbox_ns, &name).await?;
+            if sre_projection.is_some() {
+                crate::sre_authority::pod::project(&mut pod_spec);
+            }
+            let mut pod_annotations = crate::inference_budget::pod::decorate(
+                client,
+                &sandbox,
+                owned_namespace.as_ref().ok_or_else(|| {
+                    ReconcileError::Configuration("Runtime namespace identity missing".into())
+                })?,
+                &mut pod_spec,
+            )
+            .await?;
+            pod_annotations.insert(
+                "kars.azure.com/inference-providers-version".into(),
+                provider_version.unwrap_or_default(),
+            );
+            Ok::<_, ReconcileError>(std::ops::ControlFlow::Continue((
+                mcp_revisions,
+                pod_annotations,
+            )))
+        })
         .await?;
-        pod_annotations.insert(
-            "kars.azure.com/inference-providers-version".into(),
-            provider_version.unwrap_or_default(),
-        );
+        let (mcp_revisions, pod_annotations) = match projected {
+            std::ops::ControlFlow::Continue(outputs) => outputs,
+            std::ops::ControlFlow::Break(action) => return Ok(action),
+        };
+
         let mut deployment: Deployment = serde_json::from_value(json!({
             "apiVersion": "apps/v1",
             "kind": "Deployment",
@@ -2684,6 +2930,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             },
             "spec": {
                 "replicas": desired_replicas,
+                "strategy": pod_spec::singleton_rollout_strategy(),
                 "selector": {
                     "matchLabels": {"kars.azure.com/sandbox": name}
                 },
@@ -2720,6 +2967,9 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         service_identity.decorate(&mut deployment);
         crate::credential_grants::decorate_observations(&mut deployment, &sandbox);
         let mission = crate::mission_delivery::prepare(client, &sandbox, &mut deployment).await;
+        if matches!(mission, Err(crate::mission_delivery::Error::Completed)) {
+            return Ok(Action::requeue(Duration::from_secs(5)));
+        }
         if matches!(mission, Err(crate::mission_delivery::Error::NotReady(_))) {
             match crate::mission_delivery::defer_until_ready(client, &sandbox, &mut deployment)
                 .await
@@ -2760,6 +3010,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         service_projection = Some(service_identity);
     } // end 'deployment_block
 
+    Box::pin(async {
     // ── Step 4b: Azure Services RBAC annotations ─────────────────────────
     // If spec.azure_services is configured, annotate the ServiceAccount and
     // namespace so that `kars up` (or a future RBAC controller) can
@@ -2979,6 +3230,29 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         );
     }
 
+    let human_requests = service_projection
+        .as_ref()
+        .is_some_and(|projection| projection.identity["task"].is_object())
+        && !spec.suspended.unwrap_or(false);
+    if human_requests && let Some(namespace) = owned_namespace.as_ref() {
+        match tokio::time::timeout(
+            Duration::from_secs(20),
+            Box::pin(governed_services::access_requests::reconcile(
+                client, &sandbox, namespace,
+            )),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(reason)) => {
+                tracing::warn!(sandbox = %name, reason, "Human request Inbox synchronization pending")
+            }
+            Err(_) => {
+                tracing::warn!(sandbox = %name, "Human request Inbox synchronization timed out; retrying")
+            }
+        }
+    }
+
     // ── Step 5: Update status ────────────────────────────────────────────
     // Idempotency guard: skip the patch when the desired status already
     // matches reality. Without this, every reconcile bumps
@@ -3109,14 +3383,17 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
     }
 
     tracing::info!("KarsSandbox {name} reconciled successfully");
-    Ok(Action::requeue(if mission_pending {
+    Ok(Action::requeue(if mission_pending || human_requests {
         Duration::from_secs(5)
-    } else if sre_projection.is_some() || !governance_config.effective_mcp_server_refs().is_empty()
+    } else if witness_pending
+        || sre_projection.is_some()
+        || !governance_config.effective_mcp_server_refs().is_empty()
     {
         Duration::from_secs(30)
     } else {
         credential_sources::refresh_interval(&sandbox)
     }))
+    }).await
 }
 
 /// How long to wait before requeuing a failed reconcile, by error kind.
@@ -3324,7 +3601,46 @@ pub async fn run(client: Client) -> Result<()> {
         agent_id_cache: Arc::new(crate::agent_id_provisioning::ProvisionerCache::new()),
     });
 
-    Controller::new(sandboxes, crate::watch_config::bounded())
+    let controller = Controller::new(sandboxes, crate::watch_config::bounded());
+    let sandbox_store = controller.store();
+    let witness_settings_store = controller.store();
+    let witness_observer_store = controller.store();
+    controller
+        .watches(
+            Api::<ConfigMap>::namespaced(ctx.client.clone(), witness_baseline::WORKSPACE),
+            crate::watch_config::bounded()
+                .fields(&format!("metadata.name={}", witness_baseline::SETTINGS)),
+            move |settings| {
+                witness_baseline::affected_sandboxes(
+                    &settings.metadata,
+                    witness_baseline::SETTINGS,
+                    witness_baseline::WORKSPACE,
+                    &witness_settings_store.state(),
+                )
+            },
+        )
+        .watches(
+            Api::<ServiceAccount>::namespaced(
+                ctx.client.clone(),
+                witness_baseline::OBSERVER_NAMESPACE,
+            ),
+            crate::watch_config::bounded()
+                .fields(&format!("metadata.name={}", witness_baseline::OBSERVER)),
+            move |observer| {
+                witness_baseline::affected_sandboxes(
+                    &observer.metadata,
+                    witness_baseline::OBSERVER,
+                    witness_baseline::OBSERVER_NAMESPACE,
+                    &witness_observer_store.state(),
+                )
+            },
+        )
+        .watches(
+            Api::<ConfigMap>::all(ctx.client.clone()),
+            crate::watch_config::bounded()
+                .labels("kars.azure.com/artifact=inference-policy-profile"),
+            move |profile| inference_watch::referencing_sandboxes(&profile, &sandbox_store.state()),
+        )
         .owns(
             Api::<Secret>::all(ctx.client.clone()),
             crate::watch_config::bounded(),
@@ -3376,149 +3692,3 @@ pub async fn run(client: Client) -> Result<()> {
 mod tests;
 
 pub mod runtime;
-
-/// Phase G P1 #5 — Deployment-to-KarsSandbox parent mapper.
-///
-/// Triggers a reconcile on the parent KarsSandbox whenever a child
-/// Deployment is created, updated, or deleted. Combined with
-/// `Controller::watches`, this closes the gap that previously let
-/// manual `kubectl edit deploy` / `kubectl scale` mutations linger
-/// for up to 5 minutes (the periodic requeue interval) before the
-/// reconciler restored the desired state.
-///
-/// Cross-namespace constraint: K8s does not allow ownerReferences
-/// across namespaces, and the Deployment lives in `kars-{name}`
-/// while the parent KarsSandbox can live in any namespace. We
-/// therefore identify the parent by the labels we stamp at
-/// Deployment-creation time:
-///
-/// * `kars.azure.com/component=sandbox` — required (filters
-///   out unrelated Deployments).
-/// * `kars.azure.com/sandbox=<name>` — parent CR name.
-/// * `kars.azure.com/parent-namespace=<ns>` — parent CR
-///   namespace.
-///
-/// Deployments that pre-date this PR carry the first two labels but
-/// not the third. They are silently skipped by the mapper; the next
-/// periodic 5-minute requeue re-applies the Deployment with the new
-/// label, after which subsequent edits trigger this watch.
-fn deployment_to_sandbox_ref(d: Deployment) -> Option<ObjectRef<KarsSandbox>> {
-    let labels = d.metadata.labels.as_ref()?;
-    if labels.get("kars.azure.com/component").map(|s| s.as_str()) != Some("sandbox") {
-        return None;
-    }
-    let sandbox_name = labels.get("kars.azure.com/sandbox")?;
-    let parent_ns = labels.get("kars.azure.com/parent-namespace")?;
-    if sandbox_name.is_empty() || parent_ns.is_empty() {
-        return None;
-    }
-    Some(ObjectRef::<KarsSandbox>::new(sandbox_name).within(parent_ns))
-}
-
-// Annotation-only run requests must refresh the installed admission without waiting for a spec change.
-fn task_to_sandbox_ref(task: crate::kars_task::KarsTask) -> Option<ObjectRef<KarsSandbox>> {
-    let name = task.metadata.name.as_deref().filter(|v| !v.is_empty())?;
-    let namespace = task
-        .metadata
-        .namespace
-        .as_deref()
-        .filter(|v| !v.is_empty())?;
-    Some(ObjectRef::<KarsSandbox>::new(name).within(namespace))
-}
-
-#[cfg(test)]
-mod watch_tests {
-    use super::*;
-    use std::collections::BTreeMap;
-
-    #[test]
-    fn task_mapper_requires_nonempty_name_and_namespace() {
-        let mut task = crate::kars_task::KarsTask::new("writer", Default::default());
-        task.metadata.namespace = Some("team-work".into());
-        let reference = task_to_sandbox_ref(task.clone()).unwrap();
-        assert_eq!(reference.name, "writer");
-        assert_eq!(reference.namespace.as_deref(), Some("team-work"));
-        for value in [None, Some(String::new())] {
-            let mut missing_name = task.clone();
-            missing_name.metadata.name = value.clone();
-            assert!(task_to_sandbox_ref(missing_name).is_none());
-            let mut missing_namespace = task.clone();
-            missing_namespace.metadata.namespace = value;
-            assert!(task_to_sandbox_ref(missing_namespace).is_none());
-        }
-    }
-
-    fn deploy_with_labels(labels: BTreeMap<String, String>) -> Deployment {
-        Deployment {
-            metadata: kube::api::ObjectMeta {
-                labels: Some(labels),
-                ..Default::default()
-            },
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn mapper_returns_ref_for_well_labeled_deployment() {
-        let mut labels = BTreeMap::new();
-        labels.insert(
-            "kars.azure.com/component".to_string(),
-            "sandbox".to_string(),
-        );
-        labels.insert("kars.azure.com/sandbox".to_string(), "my-agent".to_string());
-        labels.insert(
-            "kars.azure.com/parent-namespace".to_string(),
-            "kars-system".to_string(),
-        );
-        let r = deployment_to_sandbox_ref(deploy_with_labels(labels)).expect("ref");
-        assert_eq!(r.name, "my-agent");
-        assert_eq!(r.namespace.as_deref(), Some("kars-system"));
-    }
-
-    #[test]
-    fn mapper_skips_unlabeled_deployment() {
-        assert!(deployment_to_sandbox_ref(deploy_with_labels(BTreeMap::new())).is_none());
-    }
-
-    #[test]
-    fn mapper_skips_wrong_component() {
-        let mut labels = BTreeMap::new();
-        labels.insert("kars.azure.com/component".to_string(), "router".to_string());
-        labels.insert("kars.azure.com/sandbox".to_string(), "my-agent".to_string());
-        labels.insert(
-            "kars.azure.com/parent-namespace".to_string(),
-            "kars-system".to_string(),
-        );
-        assert!(deployment_to_sandbox_ref(deploy_with_labels(labels)).is_none());
-    }
-
-    #[test]
-    fn mapper_skips_pre_pr_deployment_without_parent_namespace() {
-        // Deployments created before this PR have component+sandbox
-        // labels but lack parent-namespace. They MUST be skipped (the
-        // periodic requeue re-applies them with the new label, then
-        // subsequent edits start triggering this watch).
-        let mut labels = BTreeMap::new();
-        labels.insert(
-            "kars.azure.com/component".to_string(),
-            "sandbox".to_string(),
-        );
-        labels.insert("kars.azure.com/sandbox".to_string(), "my-agent".to_string());
-        assert!(deployment_to_sandbox_ref(deploy_with_labels(labels)).is_none());
-    }
-
-    #[test]
-    fn mapper_skips_empty_label_values() {
-        let mut labels = BTreeMap::new();
-        labels.insert(
-            "kars.azure.com/component".to_string(),
-            "sandbox".to_string(),
-        );
-        labels.insert("kars.azure.com/sandbox".to_string(), "".to_string());
-        labels.insert(
-            "kars.azure.com/parent-namespace".to_string(),
-            "kars-system".to_string(),
-        );
-        assert!(deployment_to_sandbox_ref(deploy_with_labels(labels)).is_none());
-    }
-}

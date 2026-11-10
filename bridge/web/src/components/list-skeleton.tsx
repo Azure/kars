@@ -3,8 +3,8 @@
 
 import { Skeleton } from "@/components/ui";
 
-/// A shared loading scaffold for the workspace list pages (missions, teams,
-/// inbox, artifacts, skills). Shown via Next.js `loading.tsx` while the server
+/// A shared loading scaffold for Workspace lists.
+/// Shown via Next.js `loading.tsx` while the server
 /// component fetches from the BFF — so a slow round-trip reads as "loading",
 /// never a blank page that looks broken.
 export function ListSkeleton({ rows = 4, title = "Loading…" }: { rows?: number; title?: string }) {

@@ -17,6 +17,7 @@ fn candidate(task: &KarsTask, data: &BTreeMap<String, String>) -> Option<String>
     let annotations = task.annotations();
     (task.namespace().as_deref() == Some("kars-system")
         && task.metadata.deletion_timestamp.is_none()
+        && !annotations.contains_key("kars.azure.com/halted")
         && task
             .uid()
             .filter(|s| !s.is_empty())
@@ -164,6 +165,13 @@ mod tests {
             let mut changed = task.clone();
             changed.metadata.annotations.as_mut().unwrap().remove(key);
             assert!(candidate(&changed, &data).is_none());
+        }
+        for decision in ["operator emergency-stop", ""] {
+            let mut halted = task.clone();
+            halted
+                .annotations_mut()
+                .insert("kars.azure.com/halted".into(), decision.into());
+            assert!(candidate(&halted, &data).is_none());
         }
         let mut completed = task;
         completed

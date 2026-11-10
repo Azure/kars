@@ -8,6 +8,9 @@
 !bridge/bff/**
 !shared/
 !shared/**
+!eval-corpus/
+!eval-corpus/src/
+!eval-corpus/src/builtin_names.rs
 **/target
 **/node_modules
 **/.git

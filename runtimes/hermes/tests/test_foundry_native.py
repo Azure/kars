@@ -40,12 +40,18 @@ def test_register_skipped_for_slim_provider(monkeypatch: pytest.MonkeyPatch) -> 
     assert ctx.tools == {}
 
 
-def test_register_skipped_without_foundry_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("sre_enabled", ["false", "true"])
+def test_register_governed_memory_without_foundry_endpoint(
+    monkeypatch: pytest.MonkeyPatch, sre_enabled: str,
+) -> None:
     monkeypatch.delenv("KARS_PROVIDER", raising=False)
     monkeypatch.delenv("FOUNDRY_PROJECT_ENDPOINT", raising=False)
+    monkeypatch.setenv("SRE_ENABLED", sre_enabled)
     ctx = _FakeCtx()
     foundry.register(ctx)
-    assert ctx.tools == {}
+    assert set(ctx.tools) == {"foundry_memory"}
+    assert ctx.tools["foundry_memory"]["handler"] is foundry._foundry_memory
+    assert "built-in private memory" in ctx.tools["foundry_memory"]["description"]
 
 
 def test_register_native_five(monkeypatch: pytest.MonkeyPatch) -> None:

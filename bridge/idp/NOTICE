@@ -4,25 +4,26 @@ Dex is an OpenID Connect identity provider originally developed by CoreOS,
 maintained by the Dex project and its contributors:
 https://github.com/dexidp/dex
 
-This package uses Dex v2.45.1 application source at commit
-11d2eeb52b42e1980e14cb91e69dd9e3faab2076 under the Apache License, Version 2.0.
+This package targets Dex v2.46.1 application source at commit
+75eb19238e10fc4750e7efb05a4031b254b04029 under the Apache License, Version 2.0.
 The unchanged upstream LICENSE is fetched from the verified source archive
 and installed as /usr/share/doc/dex/DEX-LICENSE.
 
 This is NOT the official or unmodified upstream Dex image. Kars changes the
 Go toolchain, module dependency manifests and container packaging, and marks
-the binary version v2.45.1-kars.1. Two production calls in server/oauth2.go
-now use a constant "%s" format to preserve preformatted error descriptions
-literally and satisfy Go vet. These are the only production-source changes.
+the binary version v2.46.1-kars.1. The previous literal-OAuth-error and
+historical-SAML-clock patches are obsolete with this released source and
+removed. There are no Kars changes to upstream production or test files;
+two added Kars regression test files retain the relevant behavior checks.
 Production certificate validation, connectors, embedded web assets and real
 CGO SQLite storage remain unchanged upstream implementations.
 
-A test-only patch validates the historical OAM SAML signature fixture at its
-signed IssueInstant, using goxmldsig's supported test clock. Other signature
-tests retain their real-clock default. The certificate and signed XML are not
-changed. Added Go regressions exercise literal OAuth errors and enforce
-certificate validity before/after the fixture certificate's lifetime.
-The reviewed patches, regression sources and pinned before/after file hashes
+Upstream renewed the OAM fixture certificate through July 2125. The unchanged
+upstream signature tests retain their real-clock default. The Kars regression
+uses goxmldsig's supported fake clock to check validity within, before and
+after that certificate's lifetime, without altering the certificate or XML.
+The OAuth regression now targets the released server/authflow parser.
+The reviewed regression sources and pinned added-file hashes
 are distributed in /usr/share/doc/dex/source-patches. Complete original and
 expected patched source inventories are distributed as source.upstream.sha256
 and source.sha256 in /usr/share/doc/dex.
@@ -37,10 +38,14 @@ go.sum retain their normal filenames and full dependency/security scanning.
 Linked dependency license and notice files are distributed in
 /usr/share/doc/dex/third-party.
 
-The requested dependency graph now includes github.com/Azure/go-ntlmssp
-v0.1.1 for CVE-2026-32952; the updated graph must be generated and verified
-before a new image can be accepted. No other toolchain/base/crypto pin is
-changed for this correction. The build retains the actual compiled-package
+The dependency requests match v2.46.1, including github.com/Azure/go-ntlmssp
+v0.1.1 for CVE-2026-32952 and golang.org/x/crypto v0.57.0. Source preparation
+selects the manifest-verified Go 1.27.2 Bookworm compiler to satisfy upstream's
+Go 1.27.0 requirement, while retaining the AL3 base digest. The source preflight
+still rejects unsupported requirements before resolution. Manifest inspection
+is not compiler/build qualification. The checked-in generated artifact is unchanged
+v2.45.1 evidence and cannot qualify this release; genuine Go generation,
+reviewed promotion and full qualification are still required. The build retains the actual compiled-package
 inventory as /usr/share/doc/dex/runtime-packages.json and fails if
 golang.org/x/crypto/openpgp or a subpackage is linked (GO-2026-5932).
 This does not suppress scanning of golang.org/x/crypto or any runtime module.
@@ -51,4 +56,6 @@ explicit configuration file, not upstream entrypoint template expansion.
 
 Kars packaging code: Copyright (c) Microsoft Corporation.
 Licensed under the MIT License in the Kars repository root.
-Azure Linux base contents and attribution remain unchanged.
+Azure Linux base contents and attribution remain unchanged. The upstream
+official-image CA bundle changes are not implicitly inherited by AL3;
+trust-policy qualification remains required before acceptance.

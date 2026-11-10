@@ -23,7 +23,7 @@ export interface MissionServiceConfig {
   timeoutMs: number;
   entra?: DispatcherEntraConfig;
 }
-export type MissionServiceEvent = "custody-unavailable" | "discovery-unavailable" | "candidate-unavailable" | "transport-error";
+export type MissionServiceEvent = "custody-unavailable" | "discovery-unavailable" | "candidate-unavailable" | "transport-error" | "run-interrupted";
 export interface MissionServiceDependencies {
   acquireWriter: typeof acquireMissionWriter;
   custody: typeof dispatcherCustody;
@@ -53,7 +53,7 @@ export class MissionDispatchService {
   private checking: Promise<boolean> | undefined;
   private mesh: IMeshTransport | undefined;
   private auth: RequiredMeshAuth<IMeshTransport> | undefined;
-  private active: MissionCandidate | undefined;
+  private readonly active = new Map<string, MissionCandidate>();
 
   constructor(private readonly api: KubernetesJson, private readonly config: MissionServiceConfig,
     dependencies: Partial<MissionServiceDependencies> = {}) {
@@ -106,6 +106,7 @@ export class MissionDispatchService {
     if (signal.aborted) { this.stopping = true; return; }
     const writer = await this.deps.acquireWriter();
     const monitoring = new AbortController();
+    const deliveries = new Set<Promise<void>>();
     let monitor: Promise<void> | undefined;
     const stop = () => { this.stopping = true; monitoring.abort(); };
     signal.addEventListener("abort", stop, { once: true });
@@ -142,11 +143,11 @@ export class MissionDispatchService {
       const admission = new KubernetesMissionStore(this.api, admitted);
       const store = new KubernetesMissionStore(this.api, admitted);
       this.mesh.onKnock(async from => {
-        const active = this.active;
-        if (!active || from !== active.agentDid || this.mesh?.isConnected !== true) return { accept: false };
+        const active = this.active.get(from);
+        if (!active || this.mesh?.isConnected !== true) return { accept: false };
         try {
           const current = await admission.isCurrent(active);
-          return { accept: current && this.active === active && this.mesh.isConnected };
+          return { accept: current && this.active.get(from) === active && this.mesh.isConnected };
         } catch { return { accept: false }; }
       });
       this.mesh.onError(() => this.deps.warn("transport-error"));
@@ -157,18 +158,30 @@ export class MissionDispatchService {
         throw new Error("Mission dispatcher transport identity or encryption configuration is invalid");
       }
       monitor = this.monitor(monitoring.signal);
-      const dispatcher = new MissionDispatcher(this.mesh, store, randomUUID(), this.config.timeoutMs);
+      const ownerSession = randomUUID();
+      const dispatcher = new MissionDispatcher(this.mesh, store, ownerSession, this.config.timeoutMs);
       while (!this.stopping && !this.fatal) {
         try {
           for await (const reference of store.pendingTasks()) {
-            if (this.stopping || this.fatal) break;
+            // The controller admits dependencies and maxParallel; this bounds process work
+            // without serializing its already-admitted roles (at most eight per plan).
+            if (this.stopping || this.fatal || deliveries.size >= 8) break;
+            if ([...this.active.values()].some(candidate => candidate.namespace === reference.namespace
+              && candidate.taskName === reference.taskName)) continue;
             try {
               const candidate = await store.candidate(reference, identity.did);
-              if (!candidate || this.stopping || this.fatal) continue;
-              this.active = candidate;
-              await dispatcher.dispatch(candidate);
+              if (!candidate || this.stopping || this.fatal || this.active.has(candidate.agentDid)) continue;
+              if (await store.recoverInterrupted(candidate, ownerSession)) {
+                this.deps.warn("run-interrupted");
+                continue;
+              }
+              if (this.stopping || this.fatal) break;
+              this.active.set(candidate.agentDid, candidate);
+              const delivery = dispatcher.dispatch(candidate)
+                .then(() => {}, () => { this.deps.warn("candidate-unavailable"); })
+                .finally(() => { this.active.delete(candidate.agentDid); deliveries.delete(delivery); });
+              deliveries.add(delivery);
             } catch { this.deps.warn("candidate-unavailable"); }
-            finally { this.active = undefined; }
           }
         } catch { this.deps.warn("discovery-unavailable"); }
         if (!this.fatal) await pause(this.config.pollMs, signal);
@@ -177,6 +190,7 @@ export class MissionDispatchService {
     } finally {
       this.stopping = true;
       this.verifiedAt = null;
+      await Promise.all(deliveries);
       monitoring.abort();
       signal.removeEventListener("abort", stop);
       await monitor;

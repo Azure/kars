@@ -22,6 +22,13 @@ installations; it is not the Helm-only beta acceptance path.
 - Original revision-one Core install into a dedicated namespace, with no existing
   release history. Do not use replacement, upgrade, rollback or automatic
   failure-uninstall flags with this hook.
+- An operator-provided `kars-system` namespace must have restricted Pod Security
+  enforce/audit/warn labels plus `app.kubernetes.io/name=kars` and
+  `app.kubernetes.io/component=system`. The chart validates these labels without
+  adopting the namespace. Sandbox ingress selects those Kars labels for router
+  policy confirmation; missing labels leave policies unready even when routers
+  are healthy. Set them only on the verified, dedicated Core namespace, retaining
+  its UID, existing labels and operator ownership.
 - Architecture: `amd64` or `arm64`, matching the reviewed helper image digest.
 - Exact helper image repository, `latest` tag and `sha256` digest. Never use a
   digest from a different build or architecture.
@@ -68,6 +75,18 @@ The entrypoint resolves ConfigMap projection symlinks before checking whether it
 is the main module. A successful Job alone is not staging evidence: retain its
 JSON result and verify schema publication occurred before Helm continued.
 
+Run the entrypoint and enrollment regressions together:
+
+```bash
+npm --prefix cli test -- src/schema-hook-process.test.ts src/schema-hook.test.ts src/schema-hook-executor.test.ts src/lib/core-helm-sre-hook.test.ts
+```
+
+Process tests cover both `schemas` and `sre` phases through compiled and bundled
+ConfigMap projections, including credential refusal, no local-cluster fallback,
+redacted failures and import safety. These checks do not prove successful
+in-cluster enrollment; qualify the mounted bundle on the exact toolchain image
+and the complete first-install lifecycle separately.
+
 The image recipe is `cli/schema-hook/Dockerfile`, built with the repository root
 as context. Its Dockerfile-specific ignore file includes only the recipe, its
 ignore file and `build-tools.sh`. It supplies Node 22, Helm 4.3.0+kars.1 and
@@ -110,6 +129,103 @@ helm install kars deploy/helm/kars \
 This example is the non-Entra generic cluster path. AKS uses its reviewed AKS
 values instead. Bridge remains a separate Helm release; this command does not
 install Bridge or qualify agent execution, encrypted handback or deliverables.
+
+## Integrated SRE first-install lifecycle
+
+When `schemaHook.enabled=true` and `sre.enabled=true`, the same Core install now
+has three ordered phases; no extra release or post-install activation command:
+
+1. The existing schema-only pre-install Job establishes discovery/admission.
+2. Ordinary Helm resources create the controller, budget catalog and retained,
+   immutable `kars-sre-first-install` ConfigMap. SRE custom resources are encoded
+   there, not in the cold manifest whose REST mappings Helm resolves before hooks.
+3. A **different**, bounded post-install identity creates the two policies and
+   SRE source, waits for the controller's genuine namespace claim, and creates
+   canonical registration with the original intent UID/digest and funding policy
+   resolved to the real source/workspace/cluster UIDs. Registration authority
+   validates this intent before minting private credentials; the existing budget
+   consumer validates it again before creating/binding the authoritative ledger.
+   The Job waits for current authority and the matching active ledger. For native
+   unbounded funding it additionally uses the existing account `fund` and exact
+   catalog CAS authorization to publish the standard UID/digest-bound allowance,
+   then waits for controller consumption. Runtime creation and dispatch remain
+   blocked until that receipt exists. The Job neither calls a model nor proves
+   an installed SRE customer journey.
+
+Kind beta selects exactly `sre.firstInstallFunding: {unboundedTokens: true}`:
+no artificial initial cap, funding expiry or renewal, with actual usage retained.
+Non-beta installs can instead supply `sre.firstInstallFunding.tokens` (positive
+safe integer) and `expiresAt` (future UTC `YYYY-MM-DDTHH:MM:SSZ`). Mixed policies
+are rejected. The ordinary finite hook retains its read/create-only permissions;
+only the explicit unbounded hook receives `fund` and exact-catalog patch rights.
+Helm adoption preserves the exact still-authorized consumed cold receipt without
+rewriting values or restoring a revoked catalog entry.
+Both policies require an enabled governed broker, real provider
+contracts/endpoint/auth references and broker TLS configuration.
+`sre.provider`, `sre.model` and policy token ceilings remain operator-selected;
+policy ceilings do not themselves authorize spending. Controller, Hermes, router
+and helper inputs require approved immutable image identities. No existing SRE
+catalog grant may compete with the first-install authorization. The immutable
+intent binds all values by digest, the rendered source/policies, catalog, limits
+and expiry; it excludes TLS private material from its plaintext payload.
+The shared SRE renderer explicitly includes API-defaulted sandbox security
+settings (including writable paths) and policy defaults, so live API defaulting
+does not change the authorized spec. SRE explicitly requests an empty SELinux
+context rather than inheriting the CRD's literal escaped-string default. The
+controller still compares the full typed spec exactly, excluding only its own
+budget binding; it does not normalize away live security or policy changes.
+The helper compares controller environment literals using Kubernetes' empty-value
+default: an omitted `EnvVar.value` is empty only when `valueFrom` is also absent.
+Nonempty values, references and missing environment entries still fail the
+rendered-intent check, and the full live controller spec stays pinned throughout
+enrollment.
+
+The post-install Job has a 600-second program bound, a 660-second Pod deadline,
+zero retries and API-only network access. It can CREATE the three named-intent
+resource kinds and registration, but cannot patch/delete registration, mint
+credentials, alter a ledger, update namespaces or publish CRDs. As with Kubernetes
+CRD creation, CREATE RBAC cannot restrict names; the packaged caller validates
+its exact intended writes. Namespace-wide Helm Secret reads require the same
+trusted dedicated namespace as the schema phase.
+
+A conflict, ambiguous CREATE response, changed manifest/controller/catalog,
+foreign occupant, missing/expired intent or interrupted attempt fails closed.
+No read/adopt recovery, replay funding, grant change, reset or automatic cleanup
+is performed. Preserve failed hook evidence and objects for explicit operator
+review; do not rerun an interrupted install as a fresh attempt.
+
+A later ordinary-resource ownership transition must disable `schemaHook` while
+preserving every other original value, the original live authority/source UIDs,
+unchanged unexpired funding and the existing source budget binding. The same
+release then includes the inference and tool policies in its ordinary Helm
+inventory. The funded source remains controller-owned and outside that inventory:
+Helm 4 may send an UPDATE even when its rendered spec is unchanged, which the
+runtime-binding admission policy correctly refuses. The transition verifies the
+live source configuration and intended labels without writing to that source.
+Before transitioning an older installation, verify that its latest deployed
+release does not already inventory the source; removing an inventoried source
+requires a separately reviewed retention migration, not this cold-install path.
+After all authority checks, the transition records the original intent UID and
+a values hash excluding only `controller.image` in the immutable Helm-owned
+`kars-sre-helm-adoption` ConfigMap. It does not annotate or modify the funded
+source: runtime metadata and configuration remain controller-only. Subsequent
+ordinary Core upgrades validate this release-owned receipt and the same live
+identities, rendered SRE source/policies, catalog, budget binding and unexpired
+finite grant. This permits a qualified controller image refresh while keeping
+all other values pinned; it does not permit arbitrary Core settings changes.
+The first transition still permits only disabling `schemaHook`; perform it
+separately before changing other settings.
+Missing receipts require that original transition again; foreign receipts fail
+closed. Re-enabling the first-install hook is refused.
+
+The intent remains retained, registration stays authority-owned, and qualified
+Core upgrade guards still apply. This bounded transition is not a general
+provider/funding migration; changing those inputs needs separately reviewed
+migration rather than relaxing the immutable grant.
+
+This integrates the previously missing SRE caller. It does **not** supply the
+mandatory Kind beta operations values/vanilla-machine bootstrap or qualify the
+combined witness, OIDC, provider and two-release installed lifecycle.
 
 ## Authority and failure handling
 

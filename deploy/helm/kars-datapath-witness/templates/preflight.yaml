@@ -6,6 +6,11 @@ Licensed under the MIT License. */}}
 {{- if and (not .Values.managed) (or (ne .Release.Name "kars") .Values.enabled) -}}
 {{- fail "managed=false is only for Core retaining an external witness and requires enabled=false" -}}
 {{- end -}}
+{{- if eq (include "witness.kindBeta" .) "true" -}}
+  {{- if or (ne .Release.Name "kars") (not .Values.managed) (not .Values.enabled) (ne .Values.scope "all") (not .Values.nodes) -}}
+    {{- fail "kind-beta requires the Core-owned witness, scope=all, and explicit nodes" -}}
+  {{- end -}}
+{{- end -}}
 {{- $root := . -}}
 {{- $ns := "kars-witness-gadget" -}}
 {{/* Guard removals as well as creations. Helm uninstall does not render templates;

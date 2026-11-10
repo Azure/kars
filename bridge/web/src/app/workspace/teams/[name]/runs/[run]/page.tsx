@@ -1,24 +1,22 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import Link from "next/link";
+import Link from "@/components/navigation-link";
 import { DeliverableBody } from "@/components/deliverable-view";
 import { RetainedTeamDocuments } from "@/components/retained-team-documents";
 import { HonestState } from "@/components/honest-state";
 import { ExecutionExplorer } from "@/components/execution-explorer";
 import { LiveRefresh } from "@/components/live-refresh";
-import { TeamRunFlow } from "@/components/team-run-flow";
 import { TaskCheckpointPanel } from "@/components/task-checkpoint";
 import { TaskApprovalsPanel } from "@/app/tasks/[name]/task-approvals-panel";
-import { DeployTimeline } from "@/app/workspace/missions/[name]/deploy-timeline";
 import { EgressRequest } from "@/app/workspace/missions/[name]/egress-request";
 import { MissionBlockers } from "@/app/workspace/missions/[name]/mission-blockers";
 import { authWired, defaultNamespace, operatorIdentity } from "@/lib/config";
 import { getArchivedTeamRun, getTask, getTeam, listTaskApprovals } from "@/lib/bff";
-import { analyzeTeamRun, teamRunMetrics } from "@/lib/team-run-evidence";
-import { isSystemEvidenceArtifact } from "@/lib/router-activity";
+import { analyzeTeamRun, hasActiveReviewedPhases, teamRunMetrics } from "@/lib/team-run-evidence";
+import { isSystemEvidenceArtifact, routerOperationSummary } from "@/lib/router-activity";
 import { formatEvidenceTime } from "@/lib/format";
-import { missionFailureMessage, missionRunState, revisionArtifactUrl } from "@/lib/mission-run-evidence";
+import { missionFailureMessage, missionRunState, reviewedPhaseFailureMessage, revisionArtifactUrl } from "@/lib/mission-run-evidence";
 import { currentPrincipal } from "@/lib/session";
 import type { ReactNode } from "react";
 import { HaltTeamRunButton } from "./halt-button";
@@ -28,11 +26,6 @@ import { missingTeamResource, TeamReadError } from "../../../read-error";
 export const dynamic = "force-dynamic";
 
 const OUTCOME = {
-  paused: {
-    label: "Paused",
-    detail: "This run was paused with its evidence preserved. It is not executing while the standing team is hibernating.",
-    tone: "border-border bg-surface-muted/50 text-foreground-muted",
-  },
   running: {
     label: "Running",
     detail: "The run remains active. Published evidence appears here as it becomes available; this status does not establish which individual roles are currently executing.",
@@ -46,6 +39,11 @@ const OUTCOME = {
   delivered_with_issues: {
     label: "Delivered with coordination issues",
     detail: "A usable outcome landed, but one or more mesh handoffs or evidence steps failed and required recovery.",
+    tone: "border-warning/50 bg-warning/[0.08] text-warning",
+  },
+  held: {
+    label: "Held",
+    detail: "Reviewed execution is held. A phase outcome is uncertain or execution is blocked; principal synthesis is prohibited. Completed role evidence is preserved, but this is not a final delivery.",
     tone: "border-warning/50 bg-warning/[0.08] text-warning",
   },
   incomplete: {
@@ -165,6 +163,7 @@ export default async function TeamRunPage({
   const metrics = teamRunMetrics(task);
   const { currentResult, failed, realDelivery, routerActivity } = missionRunState(task);
   const producer = currentResult?.run_evidence;
+  const artifactContext = { namespace: ns, task: run, runNonce: task.current_run_nonce, artifacts: task.artifacts };
   const rosterRuntimes = [...new Set(team.roster.flatMap((role) => role.runtime ? [role.runtime] : []))];
   const rosterModels = [...new Set(team.roster.flatMap((role) => role.model ? [role.model] : []))];
   const principalRuntime = task.composition?.runtime ?? (rosterRuntimes.length === 1 ? rosterRuntimes[0] : null);
@@ -215,7 +214,8 @@ export default async function TeamRunPage({
     );
   const running =
     evidence.outcome === "running"
-    && task.launched && !team.paused && (awaitingAssignment || assignmentInFlight);
+    && task.launched && (awaitingAssignment || assignmentInFlight);
+  const observing = running || hasActiveReviewedPhases(task);
   const failedPhases = metrics.phases?.filter((phase) => phase.state === "failed") ?? [];
   const roleDelivered = evidence.roles.filter((r) => r.state === "delivered").length;
   const lastActivityAt =
@@ -249,7 +249,7 @@ export default async function TeamRunPage({
 
   return (
     <div className="space-y-6">
-      <LiveRefresh active={running} />
+      <LiveRefresh active={observing} />
       <nav aria-label="Breadcrumb" className="flex flex-wrap items-center text-sm text-foreground-muted">
         <Link href="/workspace/teams" prefetch={false} className="hover:text-foreground">Teams</Link>
         <span className="px-1.5" aria-hidden>/</span>
@@ -268,7 +268,7 @@ export default async function TeamRunPage({
             A managed execution of this standing team: assignments, handoffs, decisions, and final result.
           </p>
         </div>
-        {running && <HaltTeamRunButton ns={ns} team={name} run={run} />}
+        {task.launched && <HaltTeamRunButton ns={ns} team={name} run={run} />}
       </div>
       <dl className="flex flex-wrap gap-x-6 gap-y-2 rounded-xl border border-border bg-surface px-5 py-3 text-xs text-foreground-muted">
         <div>
@@ -300,6 +300,9 @@ export default async function TeamRunPage({
           <div>
             <h2 className="font-semibold">{outcome.label}</h2>
             <p className="mt-1 max-w-3xl text-sm text-foreground-muted">{outcome.detail}</p>
+            {evidence.outcome === "held" && task.execution_phase === "Degraded" && task.execution_detail && (
+              <p className="mt-2 max-w-3xl whitespace-pre-wrap text-xs text-foreground-muted">{task.execution_detail}</p>
+            )}
           </div>
           <div className="grid grid-cols-3 gap-5 text-right text-xs text-foreground-muted">
             <div><strong className="block text-base text-foreground">{metrics.selectedRoles == null || !metrics.roleLifecycleKnown ? "Unavailable" : `${roleDelivered}/${metrics.selectedRoles}`}</strong>recorded role completions</div>
@@ -325,7 +328,7 @@ export default async function TeamRunPage({
             <div key={`${phase.role}:${phase.phase}`} className="mt-3">
               <h3 className="text-sm font-medium">{phase.role} / {phase.phase}</h3>
               <p className="mt-1 whitespace-pre-wrap break-words text-xs text-foreground-muted">
-                {missionFailureMessage(phase.result)}
+                {reviewedPhaseFailureMessage(phase)}
               </p>
             </div>
           ))}
@@ -436,14 +439,16 @@ export default async function TeamRunPage({
                                   ? "Working"
                                   : r.state === "failed"
                                     ? phases.length > 0 ? "Phase failed" : "Handback failed"
-                                    : "No handback visible"}
+                                    : r.state === "uncertain"
+                                      ? "Outcome uncertain"
+                                      : r.state === "held" ? "Held" : "No handback visible"}
                           </span>
                         </div>
                         <p className="mt-1 text-xs text-foreground-muted">{r.role.system_prompt}</p>
                         {phases.length > 0 ? (
                           <div className="mt-2 space-y-2">
                             <p className="text-[11px] text-foreground-muted">
-                              Recorded from revision-bound phase results, not mesh handback messages.
+                              Recorded from revision-bound phase state and retained results, not mesh handback messages.
                             </p>
                             {phases.map((phase) => (
                               <details key={`${phase.phase}:${phase.task_uid}:${phase.run_nonce}`} className="rounded-md border border-border p-2">
@@ -457,10 +462,14 @@ export default async function TeamRunPage({
                                     </p>
                                     {phase.state === "failed" ? (
                                       <p className="mt-2 whitespace-pre-wrap break-words text-xs text-danger">
-                                        {missionFailureMessage(phase.result)}
+                                        {reviewedPhaseFailureMessage(phase)}
                                       </p>
                                     ) : <DeliverableBody output={phase.result.output} />}
                                   </>
+                                ) : phase.state === "failed" ? (
+                                  <p className="mt-2 whitespace-pre-wrap break-words text-xs text-danger">
+                                    {reviewedPhaseFailureMessage(phase)}
+                                  </p>
                                 ) : <p className="mt-2 text-xs text-foreground-muted">Phase output is not available.</p>}
                               </details>
                             ))}
@@ -501,11 +510,14 @@ export default async function TeamRunPage({
             badge: evidence.collaboration.length + evidence.research.length,
             node: (
               <div className="space-y-4">
-                {task.result == null && <DeployTimeline task={task} />}
                 <ExecutionExplorer
+                  teamFlow={{ task, evidence }}
+                  startupTask={task.result == null ? task : null}
+                  stoppedActivity={task.stopped_activity}
                   routerActivity={routerActivity && producer ? { observations: routerActivity, producer, provisional: false } : null}
                   phases={metrics.phases ?? []}
                   running={running}
+                  observing={observing}
                   activity={task.activity}
                   telemetry={task.telemetry}
                   assignmentEvents={task.assignment_events}
@@ -514,12 +526,12 @@ export default async function TeamRunPage({
                   name={run}
                   runNonce={task.current_run_nonce}
                   agentLabel={team.display_name ?? team.name}
-                  agentPhase={currentResult?.run_evidence?.status ?? (team.paused ? "Hibernating" : task.assignment?.state ?? task.execution_phase ?? task.phase)}
+                  agentPhase={evidence.outcome === "held" ? "Held" : currentResult?.run_evidence?.status ?? (task.assignment?.state ?? task.execution_phase ?? task.phase)}
                   agentRuntime={principalRuntime}
                   agentModel={principalModel}
                   subAgents={graphSubAgents}
                   identity={task.agent_identity}
-                  envelopeDigest={task.envelope_digest ?? team.envelope_digest}
+                  envelopeDigest={task.envelope_digest}
                 />
                 <MissionBlockers
                   ns={ns}
@@ -536,7 +548,6 @@ export default async function TeamRunPage({
                   authWired={authWired()}
                 />
                 {task.execution_phase === "Running" && <EgressRequest mission={run} />}
-                <TeamRunFlow task={task} evidence={evidence} />
               </div>
             ),
           },
@@ -565,6 +576,11 @@ export default async function TeamRunPage({
                   <p className="mt-1 text-xs text-foreground-muted">
                     Files retained for this revision. Role attribution is shown only when recorded or explicitly inferred.
                   </p>
+                  {evidenceArtifacts.length === 0 && (
+                    <p className="mt-3 text-sm text-foreground-muted">
+                      No run-level files have been captured. This does not mean the specialists produced no work.
+                    </p>
+                  )}
                   <div className="mt-3 space-y-3">
                     {evidence.roles.flatMap((r) => r.artifacts.map((a) => (
                       <details key={`${r.role.name}-${a.name}`} className="rounded-lg border border-border bg-surface-muted/30">
@@ -572,6 +588,7 @@ export default async function TeamRunPage({
                         <div className="border-t border-border px-4 py-3">
                           <ArtifactBody
                             artifact={a}
+                            artifactContext={artifactContext}
                             downloadHref={revisionArtifactUrl(ns, run, a.name, task.current_run_nonce)}
                           />
                         </div>
@@ -583,6 +600,7 @@ export default async function TeamRunPage({
                         <div className="border-t border-border px-4 py-3">
                           <ArtifactBody
                             artifact={a}
+                            artifactContext={artifactContext}
                             downloadHref={revisionArtifactUrl(ns, run, a.name, task.current_run_nonce)}
                           />
                         </div>
@@ -590,6 +608,34 @@ export default async function TeamRunPage({
                     ))}
                   </div>
                 </section>
+                {(metrics.phases ?? []).some((phase) => phase.result && phase.task_name && phase.task_uid && phase.run_nonce) && (
+                  <section className="rounded-xl border border-border bg-surface p-5">
+                    <h2 className="text-sm font-semibold">Retained specialist work</h2>
+                    <p className="mt-1 text-xs text-foreground-muted">
+                      Open a specialist’s work to inspect and download its recorded files, including execution reports.
+                      These are intermediate contributions, not an approved final delivery. Failed checks remain part of the record.
+                    </p>
+                    <ul className="mt-3 space-y-3">
+                      {(metrics.phases ?? []).filter((phase) => phase.result && phase.task_name && phase.task_uid && phase.run_nonce).map((phase) => (
+                        <li key={`${phase.task_uid}:${phase.run_nonce}`} className="rounded-lg border border-border p-3">
+                          <p className="text-sm font-medium">{phase.role} · {phase.phase}</p>
+                          <p className="mt-1 text-xs text-foreground-muted">
+                            {phase.state} · {phase.result?.artifact_count == null
+                              ? "Recorded file count unavailable"
+                              : `${phase.result.artifact_count} recorded file${phase.result.artifact_count === 1 ? "" : "s"}`}
+                          </p>
+                          <Link
+                            href={`/workspace/missions/${encodeURIComponent(phase.task_name!)}?tab=artifacts`}
+                            prefetch={false}
+                            className="mt-2 inline-flex rounded-lg border border-border px-3 py-2 text-xs font-medium text-signal hover:bg-surface-muted"
+                          >
+                            Open {phase.role} files
+                          </Link>
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
+                )}
                 {task.artifacts.some((artifact) => isSystemEvidenceArtifact(artifact.name)) && (
                   <section className="rounded-xl border border-border bg-surface p-5">
                     <h2 className="text-sm font-semibold">System evidence</h2>
@@ -600,7 +646,7 @@ export default async function TeamRunPage({
                       <details key={artifact.name} className="mt-3 rounded-lg border border-border">
                         <summary className="cursor-pointer px-4 py-3 text-sm">{artifact.name}</summary>
                         <div className="border-t border-border px-4 py-3">
-                          <ArtifactBody artifact={artifact} downloadHref={revisionArtifactUrl(ns, run, artifact.name, task.current_run_nonce)} />
+                          <ArtifactBody artifact={artifact} artifactContext={artifactContext} downloadHref={revisionArtifactUrl(ns, run, artifact.name, task.current_run_nonce)} />
                         </div>
                       </details>
                     ))}
@@ -609,7 +655,7 @@ export default async function TeamRunPage({
                 {currentResult && realDelivery && (
                   <section className="rounded-xl border border-border bg-surface p-5">
                     <h2 className="text-sm font-semibold">Principal synthesis</h2>
-                    <div className="mt-3"><DeliverableBody output={currentResult.output} /></div>
+                    <div className="mt-3"><DeliverableBody output={currentResult.output} artifactContext={artifactContext} /></div>
                   </section>
                 )}
               </div>
@@ -621,17 +667,22 @@ export default async function TeamRunPage({
             badge: evidence.research.length || null,
             node: evidence.research.length > 0 ? (
               <section className="rounded-xl border border-border bg-surface p-5">
-                <h2 className="text-sm font-semibold">External egress attempts</h2>
+                <h2 className="text-sm font-semibold">External egress observations</h2>
                 <p className="mt-1 text-xs text-foreground-muted">
-                  Router-authoritative HTTP egress events include the credential-safe source URL, enforcement outcome, status, and timing. Legacy runs fall back to clearly labelled agent-reported evidence.
+                  Retained router evidence from the principal and reviewed roles, including failed roles. Native observations contain destination host and port, not source URLs. Policy permission, upstream responses, and harness outcomes are distinct; these records do not prove useful research or complete traffic coverage.
                 </p>
                 <ul className="mt-4 space-y-2">
                   {evidence.research.map((e, i) => (
                     <li key={`${e.url}-${i}`} className="rounded-lg border border-border bg-surface-muted/30 px-4 py-3">
-                      <a href={e.url} target="_blank" rel="noreferrer" className="break-all text-sm font-medium text-signal hover:underline">{e.url} ↗</a>
+                      {e.url ? (
+                        <a href={e.url} target="_blank" rel="noreferrer" className="break-all text-sm font-medium text-signal hover:underline">{e.url} ↗</a>
+                      ) : (
+                        <p className="break-all text-sm font-medium">{e.host ?? "Destination unavailable"}{e.operation?.destination_port != null ? `:${e.operation.destination_port}` : ""} · URL not retained</p>
+                      )}
                       <p className="mt-1 font-mono text-[11px] text-foreground-muted">
-                        {e.source} · {e.agent ?? "agent"} · {e.outcome ?? "unknown"}{e.status ? ` · HTTP ${e.status}` : ""}{e.digest ? ` · ${e.digest}` : ""}
+                        {e.source} · {e.agent ?? "agent"} · {e.operation ? routerOperationSummary(e.operation) : `${e.outcome ?? "unknown"}${e.status ? ` · HTTP ${e.status}` : ""}${e.digest ? ` · ${e.digest}` : ""}`}
                       </p>
+                      <p className="mt-1 text-[11px] text-foreground-muted">{e.at ? formatEvidenceTime(e.at) : "Timestamp unavailable"}</p>
                     </li>
                   ))}
                 </ul>
@@ -639,8 +690,8 @@ export default async function TeamRunPage({
             ) : (
               <HonestState
                 variant="empty"
-                title="No external research observed"
-                detail="This run did not retain governed HTTP source evidence. Connected services and model calls are not presented as external research."
+                title="External egress evidence unavailable"
+                detail="No bound HTTP egress observations are available here; this does not establish that no external traffic occurred. Connected services and model calls alone are not research evidence."
               />
             ),
           },
@@ -769,9 +820,11 @@ function TeamRunTabs({
 function ArtifactBody({
   artifact,
   downloadHref,
+  artifactContext,
 }: {
   artifact: import("@/lib/types").MissionArtifact;
   downloadHref: string | undefined;
+  artifactContext: import("@/lib/mission-run-evidence").RevisionArtifactContext;
 }) {
   const actions = downloadHref ? (
     <span className="flex flex-wrap gap-2">
@@ -831,7 +884,7 @@ function ArtifactBody({
       // Invalid JSON remains inspectable as text instead of disappearing.
       return (
         <div className="space-y-3">
-          <DeliverableBody output={artifact.content} />
+          <DeliverableBody output={artifact.content} artifactContext={artifactContext} />
           {actions}
         </div>
       );
@@ -845,7 +898,7 @@ function ArtifactBody({
   }
   return (
     <div className="space-y-3">
-      <DeliverableBody output={artifact.content} />
+      <DeliverableBody output={artifact.content} artifactContext={artifactContext} />
       {actions}
     </div>
   );

@@ -17,6 +17,7 @@ use kube::{
 use serde_json::json;
 
 const STOPPED: &str = "kars.azure.com/sre-migration-stopped";
+const CONTROL_DRAIN: &str = "kars.azure.com/sre-control-drain";
 pub(super) const WAITING_FOR_CONSUMERS: &str =
     "Waiting for legacy SRE consumers to terminate; no private credentials issued";
 const WAITING_FOR_ROTATION: &str =
@@ -25,6 +26,8 @@ const WAITING_FOR_ROLLOUT: &str =
     "Waiting for prior-epoch or prior-control-version consumers to terminate";
 const WAITING_FOR_CONSUMER_REMOVAL: &str =
     "Waiting for the owned SRE consumer Deployment to be removed";
+const WAITING_FOR_CONTROL_RETIREMENT: &str =
+    "Waiting for owned control credential namespace retirement to complete";
 
 pub(super) fn is_waiting(detail: &str) -> bool {
     matches!(
@@ -33,6 +36,7 @@ pub(super) fn is_waiting(detail: &str) -> bool {
             | WAITING_FOR_ROTATION
             | WAITING_FOR_ROLLOUT
             | WAITING_FOR_CONSUMER_REMOVAL
+            | WAITING_FOR_CONTROL_RETIREMENT
     )
 }
 
@@ -225,7 +229,13 @@ pub(super) async fn stop_legacy_consumer(
         }
         validate_consumer(client, reg).await?;
         if deployment.spec.as_ref().and_then(|spec| spec.replicas) != Some(0) {
-            api.patch("sre",&PatchParams::default(),&Patch::Merge(json!({
+            // A legacy review authorizes retirement, not controller ownership.
+            let params = PatchParams {
+                field_manager: controller_managed(&deployment, "sre")
+                    .then(|| crate::field_managers::CLAWSANDBOX.into()),
+                ..Default::default()
+            };
+            api.patch("sre",&params,&Patch::Merge(json!({
                 "metadata":{"uid":deployment.metadata.uid,"resourceVersion":deployment.metadata.resource_version,
                     "annotations":{STOPPED:reg.metadata.uid}},
                 "spec":{"replicas":0},
@@ -271,6 +281,40 @@ pub(crate) fn controller_managed(deployment: &Deployment, sandbox: &str) -> bool
             })
 }
 
+async fn verify_retiring_control(
+    client: &Client,
+    reg: &KarsSRERegistration,
+    namespace: &Namespace,
+    secret: &Secret,
+) -> Result<(), String> {
+    if namespace.metadata.deletion_timestamp.is_none() {
+        return Err(WAITING_FOR_CONTROL_RETIREMENT.into());
+    }
+    let name = namespace.name_any();
+    check_secret_denial(client, &name).await?;
+    let pods = Api::<Pod>::namespaced(client.clone(), &name)
+        .list(&ListParams::default())
+        .await
+        .map_err(|e| api_error("Verify retiring control credential consumers", e))?;
+    let epoch = reg.epoch();
+    let version = crate::sre_registration::control_credential_version(secret)?;
+    // A terminating namespace cannot admit new Pods. Empty namespaces, or
+    // consumers of the already-qualified credential, do not expose old caches.
+    if pods.items.is_empty()
+        || (super::live::currently_qualified(reg)
+            && crate::reconciler::governed_services::credentials::current(secret, Some(&epoch))
+            && pods.iter().all(|pod| {
+                let annotations = pod.metadata.annotations.as_ref();
+                annotations.and_then(|a| a.get(EPOCH)) == Some(&epoch)
+                    && annotations.and_then(|a| a.get(CONTROL_VERSION)) == Some(&version)
+            }))
+    {
+        Ok(())
+    } else {
+        Err(WAITING_FOR_CONTROL_RETIREMENT.into())
+    }
+}
+
 /// Existing #550 control credentials may have been exposed by the old SRE
 /// identity. Rotate only proven controller-owned instances and restart their
 /// owned consumer; the old router caches the token at startup.
@@ -300,7 +344,6 @@ pub(super) async fn rotate_owned_control_credentials(
                 .resource_version
                 .as_deref()
                 .is_none_or(str::is_empty)
-            || secret.metadata.deletion_timestamp.is_some()
             || secret
                 .metadata
                 .owner_references
@@ -321,13 +364,24 @@ pub(super) async fn rotate_owned_control_credentials(
             continue;
         };
         let namespaces: Api<Namespace> = Api::all(client.clone());
-        let namespace = namespaces
-            .get(&namespace_name)
+        let Some(namespace) = namespaces
+            .get_opt(&namespace_name)
             .await
-            .map_err(|e| api_error("Read control credential namespace", e))?;
-        if namespace.metadata.uid.as_deref() != Some(namespace_uid)
-            || namespace.metadata.deletion_timestamp.is_some()
-        {
+            .map_err(|e| api_error("Read control credential namespace", e))?
+        else {
+            // Confirm garbage collection against a fresh read rather than
+            // dropping global readiness for an already-deleted credential.
+            if Api::<Secret>::namespaced(client.clone(), &namespace_name)
+                .get_opt("router-services-admin")
+                .await
+                .map_err(|e| api_error("Verify collected control credential", e))?
+                .is_none()
+            {
+                continue;
+            }
+            return Err(WAITING_FOR_CONTROL_RETIREMENT.into());
+        };
+        if namespace.metadata.uid.as_deref() != Some(namespace_uid) {
             return Err("Control credential namespace changed".into());
         }
         let ns_annotations = namespace
@@ -343,15 +397,57 @@ pub(super) async fn rotate_owned_control_credentials(
             .ok_or("Control namespace owner is absent")?;
         let sandboxes: Api<KarsSandbox> = Api::namespaced(client.clone(), workspace);
         let sandbox = sandboxes
-            .get(name)
+            .get_opt(name)
             .await
             .map_err(|e| api_error("Read control credential owner", e))?;
-        if sandbox.metadata.uid.as_deref() != Some(source_uid)
-            || sandbox.metadata.deletion_timestamp.is_some()
-            || !crate::reconciler::namespace_ownership::claimed(&namespace, &sandbox)
-                .map_err(|_| "Control namespace ownership is invalid")?
-        {
-            return Err("Control credential ownership changed; no rotation was authorized".into());
+        if let Some(sandbox) = sandbox {
+            if sandbox.metadata.uid.as_deref() != Some(source_uid)
+                || !crate::reconciler::namespace_ownership::claimed(&namespace, &sandbox)
+                    .map_err(|_| "Control namespace ownership is invalid")?
+            {
+                return Err(
+                    "Control credential ownership changed; no rotation was authorized".into(),
+                );
+            }
+            if namespace.metadata.deletion_timestamp.is_some()
+                || sandbox.metadata.deletion_timestamp.is_some()
+            {
+                verify_retiring_control(client, reg, &namespace, &secret).await?;
+                continue;
+            }
+        } else {
+            // Cleanup can remove the Sandbox before its claimed namespace finishes
+            // terminating. The surviving namespace claim must still bind this UID.
+            use crate::reconciler::namespace_ownership::{PRESTAGE, SOURCE_UID, VERSION};
+            if namespace.metadata.deletion_timestamp.is_some()
+                && !source_uid.is_empty()
+                && !namespace_uid.is_empty()
+                && !workspace.is_empty()
+                && !name.is_empty()
+                && namespace.name_any() == format!("kars-{name}")
+                && namespace
+                    .metadata
+                    .resource_version
+                    .as_deref()
+                    .is_some_and(|v| !v.is_empty())
+                && namespace
+                    .metadata
+                    .owner_references
+                    .as_ref()
+                    .is_none_or(Vec::is_empty)
+                && ns_annotations.get(VERSION).map(String::as_str) == Some("v1")
+                && ns_annotations.get(SOURCE_UID) == Some(source_uid)
+                && !ns_annotations.contains_key(PRESTAGE)
+            {
+                verify_retiring_control(client, reg, &namespace, &secret).await?;
+                continue;
+            }
+            return Err(
+                "Control credential owner is absent without a retiring namespace claim".into(),
+            );
+        }
+        if secret.metadata.deletion_timestamp.is_some() {
+            return Err("Owned control credential identity is incomplete or terminating".into());
         }
         check_secret_denial(client, &namespace_name).await?;
         let deployments: Api<Deployment> = Api::namespaced(client.clone(), &namespace_name);
@@ -360,12 +456,70 @@ pub(super) async fn rotate_owned_control_credentials(
             .await
             .map_err(|e| api_error("Read control credential consumer", e))?
         else {
+            use crate::reconciler::governed_services::credentials;
+            let retired = annotations
+                .and_then(|a| a.get(credentials::RETIRED))
+                .map(String::as_str)
+                == Some("true");
+            let current = super::live::currently_qualified(reg)
+                && credentials::current(&secret, Some(&reg.epoch()));
+            if current {
+                credentials::validate(&secret, source_uid, &namespace, credentials::ADMIN)?;
+            }
+            if retired || current {
+                let pods = Api::<Pod>::namespaced(client.clone(), &namespace_name)
+                    .list(&ListParams::default())
+                    .await
+                    .map_err(|e| api_error("Verify absent control credential consumers", e))?;
+                if pods.items.is_empty() {
+                    // Issuance precedes Deployment creation. A validated current-epoch
+                    // credential with no consumers needs no rotation; retired material
+                    // remains quarantined until normal qualified issuance resumes.
+                    continue;
+                }
+            }
             return Err("Owned control credential has no verified consumer Deployment".into());
         };
-        if !controller_managed(&deployment, name) {
+        if !controller_managed(&deployment, name)
+            || deployment.metadata.uid.as_deref().is_none_or(str::is_empty)
+            || deployment
+                .metadata
+                .resource_version
+                .as_deref()
+                .is_none_or(str::is_empty)
+            || deployment
+                .metadata
+                .generation
+                .is_none_or(|generation| generation <= 0)
+            || deployment.metadata.deletion_timestamp.is_some()
+        {
             return Err("Control credential consumer is not controller-owned".into());
         }
+        // Keep subsequent ownership checks valid after non-apply writes too.
+        let params = PatchParams {
+            field_manager: Some(crate::field_managers::CLAWSANDBOX.into()),
+            ..Default::default()
+        };
         let epoch = reg.epoch();
+        let replicas = deployment
+            .spec
+            .as_ref()
+            .and_then(|spec| spec.replicas)
+            .filter(|replicas| *replicas >= 0)
+            .ok_or("Owned control credential consumer replica intent is missing")?;
+        let restore = deployment.metadata.annotations.as_ref()
+            .and_then(|annotations| annotations.get(CONTROL_DRAIN))
+            .map(|drain| drain.strip_prefix(&format!("{epoch}:"))
+                .and_then(|replicas| replicas.parse::<i32>().ok())
+                .filter(|replicas| *replicas > 0)
+                .ok_or("Control credential drain belongs to a changed epoch or invalid replica intent"))
+            .transpose()?;
+        if restore.is_some() && replicas != 0 {
+            return Err(
+                "Control credential drain replica intent was changed; operator review required"
+                    .into(),
+            );
+        }
         let rotated = annotations.and_then(|a| a.get(EPOCH)) != Some(&epoch);
         let secret = if rotated {
             let secrets: Api<Secret> = Api::namespaced(client.clone(), &namespace_name);
@@ -377,19 +531,7 @@ pub(super) async fn rotate_owned_control_credentials(
         } else {
             secret
         };
-        let version = format!(
-            "{}:{}",
-            secret
-                .metadata
-                .uid
-                .as_deref()
-                .ok_or("Control credential UID missing")?,
-            secret
-                .metadata
-                .resource_version
-                .as_deref()
-                .ok_or("Control credential version missing")?
-        );
+        let version = crate::sre_registration::control_credential_version(&secret)?;
         let template_annotations = deployment
             .spec
             .as_ref()
@@ -403,7 +545,7 @@ pub(super) async fn rotate_owned_control_credentials(
             || (require_version
                 && template_annotations.and_then(|a| a.get(CONTROL_VERSION)) != Some(&version))
         {
-            deployments.patch(name,&PatchParams::default(),&Patch::Merge(json!({
+            deployments.patch(name,&params,&Patch::Merge(json!({
                 "metadata":{"uid":deployment.metadata.uid,"resourceVersion":deployment.metadata.resource_version},
                 "spec":{"template":{"metadata":{"annotations":{EPOCH:epoch,CONTROL_VERSION:version}}}},
             }))).await.map_err(|e|api_error("Restart owned control credential consumer",e))?;
@@ -423,6 +565,21 @@ pub(super) async fn rotate_owned_control_credentials(
             .list(&ListParams::default().labels(&selector))
             .await
             .map_err(|e| api_error("Verify old control credential consumers have terminated", e))?;
+        if let Some(restore) = restore {
+            let stopped = deployment.status.as_ref().is_some_and(|status| {
+                status.observed_generation == deployment.metadata.generation
+                    && status.replicas.unwrap_or_default() == 0
+            });
+            if !pods.items.is_empty() || !stopped {
+                return Err(WAITING_FOR_ROLLOUT.into());
+            }
+            deployments.patch(name, &params, &Patch::Merge(json!({
+                "metadata":{"uid":deployment.metadata.uid,"resourceVersion":deployment.metadata.resource_version,
+                    "annotations":{CONTROL_DRAIN:serde_json::Value::Null}},
+                "spec":{"replicas":restore},
+            }))).await.map_err(|e| api_error("Restore drained control credential consumer", e))?;
+            return Err(WAITING_FOR_ROTATION.into());
+        }
         if pods.iter().any(|pod| {
             let annotations = pod.metadata.annotations.as_ref();
             annotations.and_then(|annotations| annotations.get(EPOCH)) != Some(&epoch)
@@ -430,8 +587,16 @@ pub(super) async fn rotate_owned_control_credentials(
                     && annotations.and_then(|annotations| annotations.get(CONTROL_VERSION))
                         != Some(&version))
         }) {
-            // Rollout availability alone can exclude a still-terminating old
-            // router which continues accepting its startup-cached control token.
+            // Calendar readiness requires the completed privacy epoch. A rolling
+            // update otherwise retains the old cache while its replacement waits
+            // for this migration. Drain the owned consumer, preserving its intent.
+            if replicas > 0 {
+                deployments.patch(name, &params, &Patch::Merge(json!({
+                    "metadata":{"uid":deployment.metadata.uid,"resourceVersion":deployment.metadata.resource_version,
+                        "annotations":{CONTROL_DRAIN:format!("{epoch}:{replicas}")}},
+                    "spec":{"replicas":0},
+                }))).await.map_err(|e| api_error("Drain prior control credential consumers", e))?;
+            }
             return Err(WAITING_FOR_ROLLOUT.into());
         }
         // Privacy completion is credential/template identity plus termination

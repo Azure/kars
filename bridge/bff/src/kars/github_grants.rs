@@ -33,14 +33,26 @@ impl Cluster {
         let uid = connection
             .uid()
             .ok_or_else(|| failure("GitHub connection UID is missing"))?;
-        let approved=grant.document.data["spec"]["githubConnections"].as_array()
-            .and_then(|entries|entries.iter().find(|entry|
-                entry["ownerSubject"]==subject && entry["connection"]["name"]==name && entry["connection"]["uid"]==uid))
-            .ok_or_else(||failure("GitHub connection requires explicit operator App/installation/repository enrollment; no legacy token fallback"))?;
         let repositories = repositories
             .into_iter()
             .map(|repo| repo.to_ascii_lowercase())
             .collect::<Vec<_>>();
+        let approved = grant.document.data["spec"]["githubConnections"]
+            .as_array()
+            .and_then(|entries| {
+                entries.iter().find(|entry| {
+                    entry["ownerSubject"] == subject
+                        && entry["connection"]["name"] == name
+                        && entry["connection"]["uid"] == uid
+                        && (!write || entry["write"] == true)
+                        && entry["repositories"].as_array().is_some_and(|allowed| {
+                            repositories.iter().all(|repo| {
+                                allowed.iter().any(|value| value.as_str() == Some(repo.as_str()))
+                            })
+                        })
+                })
+            })
+            .ok_or_else(|| failure("GitHub scope requires one covering operator App/installation/repository enrollment; no legacy token fallback"))?;
         let allowed = approved["repositories"]
             .as_array()
             .ok_or_else(|| failure("GitHub repository grant is malformed"))?;

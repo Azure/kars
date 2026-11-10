@@ -4,15 +4,27 @@
 //! Single-account transitions. A caller must persist `next` with the account
 //! UID/resourceVersion CAS before returning a grant or performing a send.
 
-use super::{tariffs::Quote, types::*};
+use super::{tariffs::AttemptQuote, types::*};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+#[path = "ledger_history.rs"]
+mod history;
+pub use history::{History, HistoryRecord};
 #[path = "ledger_lifecycle.rs"]
 mod lifecycle;
+#[path = "ledger_topups.rs"]
+mod topups;
+#[path = "ledger_unbounded.rs"]
+mod unbounded;
 #[path = "ledger_validation.rs"]
 mod validation;
+// Public contract export; the controller binary only names it in tests.
+#[allow(unused_imports)]
+pub use topups::FundingRenewal;
+pub use topups::{BridgeReactivation, MAX_TOKEN_TOP_UPS, TokenTopUp};
+pub use unbounded::UnboundedTokenAllowance;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -21,6 +33,13 @@ pub struct Meters {
     pub settled: Amounts,
     pub uncertain: Amounts,
     pub unpriced_attempts: u64,
+    /// Dispatched record-only attempts whose provider usage is still unknown.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub unknown_usage_attempts: u64,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 impl Meters {
@@ -56,7 +75,7 @@ pub struct Attempt {
     pub key: AttemptKey,
     pub identity: ExecutionIdentity,
     pub wire_digest: String,
-    pub quote: Quote,
+    pub quote: AttemptQuote,
     pub phase: AttemptPhase,
     pub expires_at: i64,
     pub charged: Amounts,
@@ -74,11 +93,17 @@ pub struct Ledger {
     pub account_uid: String,
     pub root: RootIdentity,
     pub limits: Limits,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub token_top_ups: BTreeMap<String, TokenTopUp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unbounded_tokens: Option<UnboundedTokenAllowance>,
     pub phase: AccountPhase,
     pub meters: Meters,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history: Option<History>,
     pub nodes: BTreeMap<String, Node>,
-    /// Retain closed session identities and high-water marks. Capacity is
-    /// explicit: never discard a replay fence to make room for new work.
+    /// Closed identities and high-water marks remain here or in authenticated
+    /// history. Neither location permits a closed session to be reissued.
     pub sessions: BTreeMap<String, Session>,
     pub attempts: BTreeMap<String, Attempt>,
 }
@@ -126,8 +151,11 @@ impl Ledger {
             account_uid,
             root,
             limits: limits.normalized(),
+            token_top_ups: BTreeMap::new(),
+            unbounded_tokens: None,
             phase: AccountPhase::Active,
             meters: Meters::default(),
+            history: None,
             nodes: BTreeMap::new(),
             sessions: BTreeMap::new(),
             attempts: BTreeMap::new(),
@@ -147,6 +175,24 @@ impl Ledger {
     fn accepting(&self) -> Result<(), BudgetError> {
         if self.phase != AccountPhase::Active {
             return Err(BudgetError::Closed);
+        }
+        Ok(())
+    }
+
+    fn funding_at(&self, now: i64) -> Result<(), BudgetError> {
+        if self.root.kind == RootKind::KarsSandbox {
+            let node = self
+                .nodes
+                .get(&self.root.resource.uid)
+                .ok_or(BudgetError::Authorization)?;
+            let grant: BuiltinFunding =
+                serde_json::from_value(node.authority.effective_authorization.clone())
+                    .map_err(|_| BudgetError::Authorization)?;
+            grant.validate(i64::MIN)?;
+            self.validate_funding_expiry(&grant, now)?;
+            if grant.root != self.root || grant.limits.normalized() != self.limits {
+                return Err(BudgetError::Authorization);
+            }
         }
         Ok(())
     }
@@ -174,6 +220,9 @@ impl Ledger {
             .get(&identity.task_uid)
             .ok_or(BudgetError::Authorization)?;
         if identity.authorization_digest != node.authority.authorization_digest
+            || (self.root.kind == RootKind::KarsSandbox
+                && (identity.sandbox != self.root.resource
+                    || identity.task_uid != self.root.resource.uid))
             || identity.sandbox.namespace != self.root.resource.namespace
             || path.iter().any(|uid| !self.nodes[uid].active)
         {
@@ -194,12 +243,40 @@ impl Ledger {
             }))
     }
 
+    /// An uncapped reviewed account need not carry a finite-budget override receipt.
+    pub fn allows_unbounded_inference(
+        &self,
+        identity: &ExecutionIdentity,
+        now: i64,
+    ) -> Result<bool, BudgetError> {
+        self.validate()?;
+        self.accepting()?;
+        self.funding_at(now)?;
+        let path = self.authorized(identity)?;
+        if self.effective_limits()?.normalized() != Limits::default() {
+            return Ok(false);
+        }
+        for uid in path {
+            if self.effective_node_limits(&uid)?.normalized() != Limits::default() {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Memory performs internal model work without a provider-enforced bound.
+    pub fn allows_memory_service(
+        &self,
+        identity: &ExecutionIdentity,
+        now: i64,
+    ) -> Result<bool, BudgetError> {
+        self.allows_unbounded_inference(identity, now)
+    }
+
+    /// Enrolled tasks require the broker for accounting even without spending ceilings.
     pub fn requires_enforcement(&self, task_uid: &str) -> Result<bool, BudgetError> {
-        Ok(self.limits.finite()
-            || self
-                .ancestors(task_uid)?
-                .iter()
-                .any(|uid| self.nodes[uid].authority.limits.finite()))
+        self.ancestors(task_uid)?;
+        Ok(true)
     }
 
     pub fn register_task(&self, authority: TaskAuthority) -> Result<Mutation<()>, BudgetError> {
@@ -225,6 +302,8 @@ impl Ledger {
         authority.task.validate()?;
         authority.limits = authority.limits.normalized();
         if authority.task.namespace != self.root.resource.namespace
+            || (self.root.kind == RootKind::KarsSandbox
+                && (authority.task != self.root.resource || authority.parent_uid.is_some()))
             || !valid_uid(&authority.root_task_uid)
             || !valid_digest(&authority.authorization_digest)
             || !authority.effective_authorization.is_object()
@@ -251,13 +330,17 @@ impl Ledger {
                 .ok_or(BudgetError::Authorization)?;
             if (active && !parent.active)
                 || parent.authority.root_task_uid != authority.root_task_uid
-                || !authority.limits.attenuates(parent.authority.limits)
+                || !self
+                    .token_allowance_limits(authority.limits)
+                    .attenuates(self.token_allowance_limits(parent.authority.limits))
             {
                 return Err(BudgetError::Authorization);
             }
         } else if authority.root_task_uid != authority.task.uid
-            || !authority.limits.attenuates(self.limits)
-            || (self.root.kind == RootKind::KarsTask && authority.task != self.root.resource)
+            || !self
+                .token_allowance_limits(authority.limits)
+                .attenuates(self.token_allowance_limits(self.limits))
+            || (self.root.kind != RootKind::KarsTeam && authority.task != self.root.resource)
         {
             return Err(BudgetError::Authorization);
         }
@@ -286,18 +369,34 @@ impl Ledger {
         if authority.task != old.authority.task
             || authority.parent_uid != old.authority.parent_uid
             || authority.root_task_uid != old.authority.root_task_uid
-            || !authority.limits.attenuates(old.authority.limits)
-            || !authority.limits.allows(old.meters.total()?)
+            || !self
+                .token_allowance_limits(authority.limits)
+                .attenuates(self.token_allowance_limits(old.authority.limits))
+            || !self
+                .token_allowance_limits(authority.limits)
+                .allows(old.meters.total()?)
             || !valid_digest(&authority.authorization_digest)
             || !authority.effective_authorization.is_object()
         {
             return Err(BudgetError::Authorization);
         }
+        if self.token_allowance_limits(authority.limits).finite()
+            && (old.meters.unknown_usage_attempts > 0
+                || self.attempts.values().any(|attempt| {
+                    !attempt.phase.terminal()
+                        && attempt.quote.is_record_only()
+                        && self
+                            .ancestors(&attempt.identity.task_uid)
+                            .is_ok_and(|path| path.contains(&authority.task.uid))
+                }))
+        {
+            return Err(BudgetError::Contract);
+        }
         if authority.limits.normalized().usd_micros.is_some()
             && (old.meters.unpriced_attempts > 0
                 || self.attempts.values().any(|attempt| {
                     !attempt.phase.terminal()
-                        && !attempt.quote.price_covered
+                        && !attempt.quote.price_covered()
                         && self
                             .ancestors(&attempt.identity.task_uid)
                             .is_ok_and(|path| path.contains(&authority.task.uid))
@@ -349,10 +448,16 @@ impl Ledger {
     ) -> Result<Mutation<Reservation>, BudgetError> {
         self.validate()?;
         self.accepting()?;
+        self.funding_at(now)?;
         if request.account_uid != self.account_uid || !valid_digest(&request.wire_digest) {
             return Err(BudgetError::Identity);
         }
         let path = self.authorized(&request.identity)?;
+        if request.quote.is_record_only()
+            && !self.allows_unbounded_inference(&request.identity, now)?
+        {
+            return Err(BudgetError::Authorization);
+        }
         let session = self
             .sessions
             .get(&request.identity.pod_uid)
@@ -378,7 +483,7 @@ impl Ledger {
                 self.clone(),
                 Reservation {
                     key,
-                    maximum: existing.quote.maximum,
+                    maximum: existing.quote.maximum(),
                     expires_at: existing.expires_at,
                     phase: existing.phase,
                 },
@@ -399,28 +504,25 @@ impl Ledger {
         request
             .quote
             .validate(now, self.requires_price(&request.identity.task_uid)?)?;
-        let maximum = request.quote.maximum;
+        let maximum = request.quote.maximum();
         if !self
-            .limits
+            .effective_limits()?
             .allows(self.meters.total()?.checked_add(maximum)?)
             || path.iter().any(|uid| {
                 let node = &self.nodes[uid];
                 node.meters
                     .total()
                     .and_then(|total| total.checked_add(maximum))
-                    .map_or(true, |total| !node.authority.limits.allows(total))
+                    .and_then(|total| {
+                        self.effective_node_limits(uid)
+                            .map(|limits| limits.allows(total))
+                    })
+                    .map_or(true, |allowed| !allowed)
             })
         {
             return Err(BudgetError::Exhausted);
         }
-        let expires_at = now
-            .checked_add(RESERVATION_TTL_SECONDS)
-            .ok_or(BudgetError::Overflow)?
-            .min(
-                chrono::DateTime::parse_from_rfc3339(&request.quote.contract.valid_until)
-                    .map_err(|_| BudgetError::Contract)?
-                    .timestamp(),
-            );
+        let expires_at = request.quote.expires_at(now)?;
         let mut next = self.clone();
         next.meters.reserved = next.meters.reserved.checked_add(maximum)?;
         for uid in path {
@@ -482,6 +584,7 @@ impl Ledger {
     ) -> Result<Mutation<Reservation>, BudgetError> {
         self.validate()?;
         self.accepting()?;
+        self.funding_at(now)?;
         self.authorized(&command.identity)?;
         let session = self
             .sessions
@@ -497,12 +600,17 @@ impl Ledger {
         if now >= attempt.expires_at {
             return Err(BudgetError::Expired);
         }
+        if attempt.quote.is_record_only()
+            && !self.allows_unbounded_inference(&command.identity, now)?
+        {
+            return Err(BudgetError::Authorization);
+        }
         attempt
             .quote
             .validate(now, self.requires_price(&attempt.identity.task_uid)?)?;
         let response = Reservation {
             key: attempt.key.clone(),
-            maximum: attempt.quote.maximum,
+            maximum: attempt.quote.maximum(),
             expires_at: attempt.expires_at,
             phase: AttemptPhase::InFlight,
         };
@@ -530,13 +638,19 @@ impl Ledger {
         }
         let path = self.ancestors(&attempt.identity.task_uid)?;
         let apply = |meters: &mut Meters| -> Result<(), BudgetError> {
-            meters.reserved = meters.reserved.subtract(attempt.quote.maximum)?;
+            meters.reserved = meters.reserved.subtract(attempt.quote.maximum())?;
             if phase == AttemptPhase::Uncertain {
                 meters.uncertain = meters.uncertain.checked_add(charged)?;
+                if attempt.quote.is_record_only() {
+                    meters.unknown_usage_attempts = meters
+                        .unknown_usage_attempts
+                        .checked_add(1)
+                        .ok_or(BudgetError::Overflow)?;
+                }
             } else {
                 meters.settled = meters.settled.checked_add(charged)?;
             }
-            if phase != AttemptPhase::Expired && !attempt.quote.price_covered {
+            if phase != AttemptPhase::Expired && !attempt.quote.price_covered() {
                 meters.unpriced_attempts = meters
                     .unpriced_attempts
                     .checked_add(1)
@@ -557,6 +671,97 @@ impl Ledger {
         Ok(())
     }
 
+    fn resolve_recorded_usage(
+        &mut self,
+        attempt: &Attempt,
+        amount: Amounts,
+    ) -> Result<(), BudgetError> {
+        let path = self.ancestors(&attempt.identity.task_uid)?;
+        let apply = |meters: &mut Meters| -> Result<(), BudgetError> {
+            meters.settled = meters.settled.checked_add(amount)?;
+            meters.unknown_usage_attempts = meters
+                .unknown_usage_attempts
+                .checked_sub(1)
+                .ok_or(BudgetError::Corrupt)?;
+            Ok(())
+        };
+        apply(&mut self.meters)?;
+        for uid in path {
+            apply(&mut self.nodes.get_mut(&uid).ok_or(BudgetError::Corrupt)?.meters)?;
+        }
+        let row = self
+            .attempts
+            .get_mut(&attempt.key.storage_key())
+            .ok_or(BudgetError::Corrupt)?;
+        row.phase = AttemptPhase::Settled;
+        row.charged = amount;
+        // A closed session may have advanced its replay fence past this tombstone.
+        // Remove only resolved evidence, never the durable session fence.
+        if attempt.key.sequence <= self.sessions[&attempt.key.pod_uid].closed_through
+            && row.observed_breach.is_none()
+        {
+            self.attempts.remove(&attempt.key.storage_key());
+        }
+        Ok(())
+    }
+
+    fn settle_record_only(
+        &self,
+        attempt: &Attempt,
+        usage: Option<&Usage>,
+    ) -> Result<Mutation<SettlementResult>, BudgetError> {
+        let mut breach = false;
+        if let Some(usage) = usage {
+            let result = attempt.quote.usage(usage).and_then(|amount| {
+                let mut next = self.clone();
+                if attempt.phase == AttemptPhase::Uncertain {
+                    next.resolve_recorded_usage(attempt, amount)?;
+                } else {
+                    next.charge(&attempt.key, AttemptPhase::Settled, amount)?;
+                }
+                next.compact()?;
+                self.mutation(
+                    next,
+                    SettlementResult {
+                        finalized: true,
+                        uncertain: false,
+                        breach: attempt.observed_breach.is_some(),
+                        charged: Some(amount),
+                    },
+                )
+            });
+            match result {
+                Ok(mutation) => return Ok(mutation),
+                Err(BudgetError::Overflow | BudgetError::Breach) => breach = true,
+                Err(error) => return Err(error),
+            }
+        }
+        let mut next = self.clone();
+        if attempt.phase == AttemptPhase::InFlight {
+            next.charge(&attempt.key, AttemptPhase::Uncertain, Amounts::default())?;
+        }
+        if breach {
+            next.phase = AccountPhase::Frozen;
+            next.attempts
+                .get_mut(&attempt.key.storage_key())
+                .ok_or(BudgetError::Corrupt)?
+                .observed_breach = usage
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|_| BudgetError::Corrupt)?;
+        }
+        next.compact()?;
+        self.mutation(
+            next,
+            SettlementResult {
+                finalized: true,
+                uncertain: true,
+                breach: breach || attempt.observed_breach.is_some(),
+                charged: Some(Amounts::default()),
+            },
+        )
+    }
+
     pub fn settle(
         &self,
         settlement: &Settlement,
@@ -573,7 +778,9 @@ impl Ledger {
         if session.identity != command.identity {
             return Err(BudgetError::Identity);
         }
-        if command.key.sequence <= session.closed_through {
+        if command.key.sequence <= session.closed_through
+            && !self.attempts.contains_key(&command.key.storage_key())
+        {
             return self.mutation(
                 self.clone(),
                 SettlementResult {
@@ -585,6 +792,14 @@ impl Ledger {
             );
         }
         let attempt = self.attempt(command)?;
+        if attempt.quote.is_record_only()
+            && matches!(
+                attempt.phase,
+                AttemptPhase::InFlight | AttemptPhase::Uncertain
+            )
+        {
+            return self.settle_record_only(attempt, settlement.usage.as_ref());
+        }
         if attempt.phase.terminal() {
             if attempt.phase == AttemptPhase::Uncertain
                 && let Some(usage) = &settlement.usage
@@ -621,12 +836,12 @@ impl Ledger {
             return Err(BudgetError::AlreadyDispatched);
         }
         let (phase, charge, breach) = match &settlement.usage {
-            None => (AttemptPhase::Uncertain, attempt.quote.maximum, false),
+            None => (AttemptPhase::Uncertain, attempt.quote.maximum(), false),
             Some(usage) => match attempt.quote.usage(usage) {
-                Ok(amount) if amount.within(attempt.quote.maximum) => {
+                Ok(amount) if amount.within(attempt.quote.maximum()) => {
                     (AttemptPhase::Settled, amount, false)
                 }
-                _ => (AttemptPhase::Uncertain, attempt.quote.maximum, true),
+                _ => (AttemptPhase::Uncertain, attempt.quote.maximum(), true),
             },
         };
         let mut next = self.clone();
@@ -706,7 +921,7 @@ impl Ledger {
             .filter(|attempt| {
                 affected.contains(&attempt.identity.task_uid) && !attempt.phase.terminal()
             })
-            .map(|attempt| (attempt.key.clone(), attempt.phase, attempt.quote.maximum))
+            .map(|attempt| (attempt.key.clone(), attempt.phase, attempt.quote.maximum()))
             .collect();
         for (key, phase, maximum) in attempts {
             if phase == AttemptPhase::Reserved {
@@ -751,13 +966,19 @@ impl Ledger {
                 let Some(attempt) = self.attempts.get(&key) else {
                     break;
                 };
-                if !attempt.phase.terminal()
-                    || attempt.phase == AttemptPhase::Uncertain
-                    || attempt.observed_breach.is_some()
-                {
+                if !attempt.phase.terminal() {
                     break;
                 }
-                self.attempts.remove(&key);
+                let retain =
+                    attempt.phase == AttemptPhase::Uncertain || attempt.observed_breach.is_some();
+                if retain && !session.closed {
+                    break;
+                }
+                // Closed sessions cannot dispatch again. Retain their uncertain
+                // contracts for late evidence without pinning later settled rows.
+                if !retain {
+                    self.attempts.remove(&key);
+                }
                 session.closed_through = sequence;
             }
         }

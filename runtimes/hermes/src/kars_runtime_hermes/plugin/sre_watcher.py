@@ -20,10 +20,11 @@ import signal
 import subprocess
 import time
 from typing import Any
+from uuid import uuid4
 
 import yaml
 
-from . import router_client, sre, sre_kube
+from . import router_client, sre, sre_kube, sre_reports
 
 logger = logging.getLogger("kars.hermes.sre_watcher")
 MAX_TURN_LOG_BYTES = 256 * 1024
@@ -80,18 +81,29 @@ def _notify_target() -> str | None:
     return None
 
 
+def _configured_model(home: Path) -> str:
+    config = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+    if not isinstance(config, dict):
+        raise RuntimeError("Installed Hermes model configuration is required")
+    model = config.get("model", {})
+    if (not isinstance(model, dict)
+            or model.get("provider") != "azure-foundry"
+            or model.get("base_url") != "http://127.0.0.1:8443/v1"
+            or "kars" not in config.get("plugins", {}).get("enabled", [])):
+        raise RuntimeError("The installed Kars plugin and loopback inference configuration are required")
+    selected = model.get("default")
+    if not isinstance(selected, str) or not selected.strip():
+        raise RuntimeError("An explicit installed Hermes model is required for SRE health sweeps")
+    return selected
+
+
 def _preflight(home: Path) -> list[dict[str, Any]]:
     if not sre.is_enabled():
         raise RuntimeError("SRE mode is not enabled")
     if (os.environ.get("KUBERNETES_SERVICE_HOST") != "127.0.0.1"
             or os.environ.get("KUBERNETES_SERVICE_PORT") != "9446"):
         raise RuntimeError("Registered private SRE loopback projection is required")
-    config = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
-    model = config.get("model", {})
-    if (model.get("provider") != "azure-foundry"
-            or model.get("base_url") != "http://127.0.0.1:8443/v1"
-            or "kars" not in config.get("plugins", {}).get("enabled", [])):
-        raise RuntimeError("The installed Kars plugin and loopback inference configuration are required")
+    _configured_model(home)
     if not (home / "plugins/kars/__init__.py").is_file():
         raise RuntimeError("Installed Hermes Kars plugin entry point is absent")
     if sre_kube.client().get("/readyz").get("ready") is not True:
@@ -114,12 +126,23 @@ def _preflight(home: Path) -> list[dict[str, Any]]:
     ]
 
 
+def _turn_output(path: Path) -> dict[str, Any]:
+    with path.open("rb") as output:
+        text = output.read(65537)
+        truncated = len(text) > 65536
+        if truncated:
+            marker = b"\n[turn output truncated; diagnostic coverage incomplete]\n"
+            output.seek(-(32768 - len(marker)), os.SEEK_END)
+            text = text[:32768] + marker + output.read()
+    return {"output": text.decode("utf-8", errors="replace"), "output_truncated": truncated}
+
+
 def _run_hermes(home: Path, prompt: str, timeout: int) -> dict[str, Any]:
     # -z is the maintained oneshot route. Explicit hook consent is necessary
     # for unattended turns; it accepts installed hooks, NOT SRE action proposals.
     command = [
         "hermes", "--accept-hooks", "--cli", "--provider", "azure-foundry",
-        "--toolsets", "sre", "-z", prompt,
+        "--model", _configured_model(home), "--toolsets", "sre", "-z", prompt,
     ]
     output_path = home / "sre-latest-turn.log"
     env = dict(os.environ)
@@ -150,14 +173,18 @@ def _run_hermes(home: Path, prompt: str, timeout: int) -> dict[str, Any]:
                         output.write(chunk[:allowed])
                         written += allowed
                         if allowed < len(chunk):
+                            output.flush()
                             return {
+                                **_turn_output(output_path),
                                 "turn_status": "failed",
                                 "error": f"Hermes health turn exceeded the {MAX_TURN_LOG_BYTES}-byte log limit",
                                 "output_truncated": True,
                             }
             code = process.wait(timeout=max(0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
-            return {"turn_status": "timeout", "error": "Hermes health turn exceeded its deadline"}
+            output.flush()
+            return {**_turn_output(output_path), "turn_status": "timeout",
+                    "error": "Hermes health turn exceeded its deadline"}
         finally:
             # Deadline, overflow and signal exits all reap the full child group.
             try:
@@ -166,13 +193,10 @@ def _run_hermes(home: Path, prompt: str, timeout: int) -> dict[str, Any]:
                 pass
             process.wait()
             process.stdout.close()
-    with output_path.open("rb") as output:
-        text = output.read(65537)
     return {
+        **_turn_output(output_path),
         "turn_status": "finished" if code == 0 else "failed",
         "exit_code": code,
-        "output": text[:65536].decode("utf-8", errors="replace"),
-        "output_truncated": len(text) > 65536,
         "acceptance": "unverified: inspect actual diagnostic tool and proposal evidence",
     }
 
@@ -188,7 +212,7 @@ def _notify(target: str, text: str) -> None:
 
 
 def _sweep(home: Path, timeout: int) -> dict[str, Any]:
-    record: dict[str, Any] = {"started_at": time.time(), "turn_status": "blocked"}
+    record: dict[str, Any] = {"sweep_id": uuid4().hex, "started_at": time.time(), "turn_status": "blocked"}
     try:
         proposals = _preflight(home)
         inventory = json.dumps(proposals, ensure_ascii=True)
@@ -202,10 +226,16 @@ def _sweep(home: Path, timeout: int) -> dict[str, Any]:
         record["error"] = str(exc)
     record["finished_at"] = time.time()
     try:
+        interval = _bounded_seconds("SRE_HEALTH_INTERVAL_SECONDS", 900, 60, 86400)
+        record["publication"] = sre_reports.publish(record, interval, timeout)
+    except Exception:
+        # Publication must not invoke inference, hide a blocked turn, or discard local evidence.
+        record["publication_error"] = "Report not confirmed persisted; authority or transport unavailable"
+    try:
         target = _notify_target()
         if target:
             _notify(target, "kars-sre health sweep: " + record["turn_status"]
-                    + "\n" + record.get("error", record.get("output", "")))
+                    + "\n" + sre_reports.payload(record, interval, timeout)["text"])
             record["notification"] = "sent"
         else:
             record["notification"] = "not configured; local report retained"

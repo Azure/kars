@@ -39,6 +39,42 @@ new Helm-only first-install preview or the Core + Bridge beta customer journeys.
 
 ## Existing non-AKS cluster
 
+### Default inference model
+
+Set the existing provider's default model before installing and privately
+activating the controller:
+
+```yaml
+controller:
+  inferenceDefaults:
+    provider: azure-openai
+    model: gpt-5.4-mini
+```
+
+Both fields are optional together. Leaving them empty preserves existing
+behavior. These typed values set the controller's existing Task/agent default
+model and provider; they do not register an endpoint, credentials or funding.
+Configure those independently through the existing operator inputs. Explicit
+per-agent models remain independent. SRE inherits the Core defaults unless
+`sre.provider` or `sre.model` explicitly overrides the corresponding field.
+Enabling SRE requires a configured route; no provider or model is invented.
+Existing releases with explicit SRE values retain their pinned route. In `kind-beta`,
+the default provider must match its configured SRE provider route, but the
+models may differ; arbitrary `controller.extraEnv` overrides remain forbidden.
+A qualified private controller's pod template is sealed: these values are not
+an in-place settings-migration or seal-bypass mechanism. Reconciled operator
+settings retain their existing authority over bootstrap defaults.
+
+With the inference broker enabled, conversational contracts for the default
+provider also populate the controller's model catalogue. An explicit operator
+catalogue takes precedence; model availability does not establish successful
+inference. After SRE adoption, operators can append contracts for new models
+under a new catalogue version without changing SRE's pinned policy or funding.
+Original contracts must remain in place with their bounds unchanged (only the
+existing validity/version renewal is allowed). Additions require unique routes,
+finite bounds and unexpired validity; router admission still validates the full
+contract and reserves against the requesting agent's existing budget.
+
 ### Headlamp user sign-in
 
 Core owns the AL3 Headlamp deployment and bundled Kars plugin. Its service
@@ -52,6 +88,26 @@ Register the exact browser callback with the identity provider. These are
 cluster/identity-provider prerequisites: enabling the chart setting does not
 change API-server authentication, grant roles, install a host CA or configure
 Bridge's Dex issuer.
+
+For a read-only operator dashboard, adapt the group in
+[`deploy/headlamp-reader-rbac.yaml`](../../headlamp-reader-rbac.yaml) to the
+**API-server-mapped** OIDC group (including its configured prefix), then have a
+cluster administrator apply that prerequisite. It grants explicit workload,
+node, CRD, metrics and Kars-resource reads rather than inheriting local
+aggregation or unrelated changes to built-in roles. It does not bind the
+Headlamp ServiceAccount, grant Secret access, permit pod exec/service proxy, or
+allow approving SRE actions. Monitoring queries and remediation decisions need
+separately reviewed permissions.
+
+Verify authorization with the actual signed-in identity, not just a successful
+OIDC callback: open Nodes and the Kars SRE console and confirm live reads. Before
+installing, an administrator can also use `kubectl auth can-i list nodes
+--as=<mapped-user> --as-group=<mapped-group>` and the equivalent check for
+`karssandboxes.kars.azure.com`. Keep negative checks for Secret reads, pod exec,
+proxy access and action updates. For subresources, use `create pods
+--subresource=exec` or `get services --subresource=proxy` with the same identity
+flags; `services/proxy` instead checks a Service named `proxy`. These
+impersonation checks complement, not replace, browser acceptance.
 
 ```yaml
 headlamp:
@@ -90,6 +146,45 @@ hostname/IP mappings. This affects only the Headlamp Pod: the API server and
 browser still need their own resolution and certificate trust for the same
 issuer. It does not change host DNS, host trust, or API-server authentication.
 
+### Adopted datapath witness upgrades
+
+An already enabled, Core-managed witness can change `datapathWitness.scope`,
+`sandboxes`, and the reviewed digest-pinned references in `aggregator.image` /
+`gadget.image` (including repository and tag changes) after SRE adoption. Supply `sre.datapathWitnessBaseline`: the **entire original
+effective `datapathWitness` object** from `helm get values kars -n kars-system
+--all -o json` before the first witness transition. Keep that same baseline on
+subsequent image refreshes; never replace it with the last upgrade's values.
+A baseline is not permission to change arbitrary settings: only the named
+fields are projected back, and the full comparison must reproduce the original
+immutable adoption digest. SRE identity, original receipts, funding, approved
+nodes, hook mode, DNS/TCP artifact digests, resources, authentication and all
+unrelated configuration remain sealed. Both original and selected runtime
+references must be valid images pinned to a full lowercase SHA-256 digest.
+
+For fleet discovery, select `datapathWitness.scope=all`,
+`datapathWitness.sandboxes=[]`, and qualified digest-pinned collector/daemon
+images. Qualified images may move repositories; retain the original baseline
+unchanged and preserve every other installed value.
+Place the baseline under `sre`, not `datapathWitness` (the dependency rejects
+unknown configuration fields). Baselines have no default and affect receipt
+comparison only, not the deployed witness configuration.
+
+Older sealed values omitted `scope`; that absence means legacy `selected`.
+Preserve the absence in the baseline. An unchanged legacy selection must pass
+`datapathWitness.scope=selected` explicitly because the current dependency
+default is `all`; an all scope with a nonempty sandbox list is invalid. The
+Kind beta profile requires fleet scope, so its next upgrade must select `all`
+and an empty list rather than retain selected scope.
+
+The maintained local Core Helm caller (`installLocalCoreChart`, used by
+`kars dev --target local-k8s`) captures the original effective witness baseline
+when adoption exists, retains a saved baseline on later upgrades, and passes it
+to both schema preflight and the final Helm invocation. It preserves the saved
+scope (or legacy selected scope) unless an overlay or assignment explicitly
+selects another scope. Cold installs and protected migration publication retain
+their separate existing paths. Direct Helm callers must supply the baseline and
+explicit scope themselves; no skip flag or receipt rewrite is supported.
+
 ### Prometheus monitoring
 
 Core installs the pinned `kube-prometheus-stack` dependency in `monitoring`;
@@ -123,6 +218,50 @@ monitoring:
 These are the API server's mapped subjects, not merely Bridge role names.
 No binding is created by default. An unauthorised user sees an explicit
 telemetry error, not fabricated zeroes.
+
+After completed SRE adoption, changing these readers requires
+`monitoring.querySubjectsBaseline`: the exact original `monitoring.querySubjects`
+array sealed by the adoption receipt (including `[]`). Set `querySubjects` to
+the selected User/Group list; `[]` revokes the entire query binding. Both lists
+require unique objects containing only `kind` and a nonempty `name` without
+surrounding whitespace or newlines. ServiceAccounts are never accepted.
+
+Refreshing Headlamp independently requires `headlamp.imageBaseline`, the exact
+original `repository:tag` string (`:latest` or `:latest@sha256:<64 lowercase hex>`).
+Select the qualified image through `headlamp.image.repository` and
+`headlamp.image.tag`; the selected tag must be `latest@sha256:<64 lowercase hex>`.
+The registry is operator-selected, not environment-specific. Supply each baseline
+only for its corresponding transition and retain the original baseline across
+subsequent upgrades, rather than replacing it with the last selected value.
+These optional keys have no defaults, so existing sealed values remain valid.
+Only those image fields and the reader list are restored for receipt comparison;
+the selected values are emitted and the original immutable receipt is retained.
+OIDC/authentication, ServiceAccounts, credentials, monitoring endpoints, SRE
+configuration and funding are not relaxed by these transitions.
+
+Enabling, disabling or refreshing Core-owned Grafana after SRE adoption requires
+`monitoring.grafanaBaseline`: the entire original effective
+`monitoring.grafana` object sealed by the adoption receipt (including chart
+defaults, not only user-supplied overrides). Select the new switch and image
+`registry`/`repository`/`tag` tuples through the existing Grafana values; both
+selected tags must be immutable `latest@sha256:<64 lowercase hex>` references.
+Retain the original baseline on later upgrades, including disable/re-enable
+operations. Treat baseline snapshots as private if they contain credentials.
+The baseline has no default and changes only receipt comparison. Helm adds
+Grafana dependency defaults when enabling it; comparison normalizes both sides
+against `files/monitoring/grafana-defaults.json`, verified by tests against the
+locked dependency archive. Refresh that generated JSON when upgrading the
+Grafana chart. Authentication, networking, resource limits, provisioning and
+SRE authority remain sealed. Alongside the switch and image tuples, the only
+permitted RBAC change is narrowing legacy `rbac.namespaced=false` to `true`;
+enabled Grafana must use namespace-scoped access. The maintained default is
+namespace-scoped, so older sealed releases also need their original baseline
+when adopting this default. Additional namespaces or permission changes remain
+rejected; Grafana must not receive cluster-wide access to tenant Secrets.
+Use the owning Core release, not a competing Grafana installation, and keep the
+ordinary-upgrade schema hook disabled. Kind beta still excludes Grafana during
+cold installation; after completed adoption it permits this qualified optional
+Grafana transition without enabling Alertmanager or duplicate Inspektor Gadget.
 
 `monitoring.enabled=false` retains an external monitoring installation without
 adopting its namespace. A foreign `monitoring` namespace causes installation to
@@ -164,6 +303,15 @@ durable audit evidence**; use an operator-provided
 `monitoring.prometheus.prometheusSpec.storageSpec` PVC for required durability. Node exporter mounts
 proc/sys read-only, without the full host root, host PID or host networking.
 
+Prometheus and optional Grafana prefer nodes without the standard `control-plane`
+or legacy `master` role labels, leaving control-plane headroom when workers are
+available. This is a scheduling preference, not a requirement or an eviction rule:
+single-node Kind remains supported, existing node selectors and taints still apply,
+and already-running Pods do not move until replaced. Override their respective
+`monitoring.prometheus.prometheusSpec.affinity` and `monitoring.grafana.affinity`
+values for dedicated monitoring pools, or set them to `null` to remove the preference.
+This does not increase resource limits or establish stability under load.
+
 Grafana remains optional (`monitoring.grafana.enabled=false`). Enabling it
 requires independently qualified Kars Grafana and sidecar images; successful
 Prometheus installation does not qualify Grafana or its signed plugins.
@@ -199,6 +347,15 @@ container limit. The upstream chart sets `GOMEMLIMIT` to the entire container
 limit; that alone does not reserve this headroom. Earlier collection trades
 some CPU for a smaller heap. Requalify sustained dashboard refreshes when
 overriding `monitoring.grafana.env.GOGC` or its resource limits.
+
+Kind beta gives kube-state-metrics a 256 MiB memory limit and 500m CPU limit
+through `values-kind-beta.yaml`; production defaults remain unchanged. The
+retained beta workload exhausted its 250m CPU allowance and approached the
+128 MiB memory limit during startup, with probe-triggered restarts and substantial
+memory page faults. This bounded profile adjustment keeps both existing health
+probes, collectors, and the AL3 image unchanged. Apply it through the Core release,
+not a competing Deployment patch, and verify sustained readiness and real metrics
+queries after installation; rendering the profile alone does not prove recovery.
 
 ### Metrics API
 
@@ -513,6 +670,91 @@ still requires genuine resource-issued v2 tokens accepted by **both** official
 services, rejection of wrong-tenant/audience or invalid tokens, and **distinct
 per-agent identity and proof-of-possession** with the intended grants. No live
 token exchange, verified membership or end-to-end Team/Bridge journey is claimed.
+
+### Initial SRE adoption and accounting policy
+
+The first ordinary upgrade disables `schemaHook.enabled` while preserving the
+sealed installation values and live SRE authority. An evaluation-runner image
+and `evals.runnerImageBaseline` already sealed during installation are retained;
+adding or changing them before adoption is not an initial ownership transition.
+The adopted receipt continues to bind subsequent runner upgrades to that baseline.
+
+Older sealed values without `inferenceBudget.calendarPolicy` mean `enforce`.
+An explicit null is rejected if Helm preserves it, or falls back to `enforce`
+if Helm removes it during values coalescing; null never selects `record-only`.
+After adoption, operators may select `enforce` or `record-only` without replacing
+the original SRE intent or receipt. The catalog update still requires the native
+`karsbudgetaccounts/fund` permission. Record-only retains actual usage and pending
+liabilities; it does not reset funding, identities, or unresolved requests.
+
+### Runtime image refresh after SRE adoption
+
+An adopted release can refresh the OpenClaw and Hermes image digests without
+replacing SRE authority or its immutable adoption receipt. Set
+`sre.runtimeImageBaseline.openclaw` and `sre.runtimeImageBaseline.hermes` to the
+full original image references from the values sealed at adoption; retain this
+baseline on subsequent upgrades. Select the qualified replacements through the
+existing `sandbox.image.tag` and `runtimes.hermes.image` values.
+
+Both original and selected references must use `:latest@sha256:<64 hex digits>`.
+Ordinary refreshes retain the same repositories. After a reviewed migration,
+Core publication may retain different repositories only when **both** selected
+references exactly match unique literal `SANDBOX_IMAGE` and
+`HERMES_RUNTIME_IMAGE` declarations on the same live, original-UID controller.
+Missing, duplicate, indirect or mismatched declarations fail closed; this cannot
+select a new repository or image that is not already installed. The chart
+substitutes only the two full original image references and removes the baseline
+metadata before checking the **entire** sealed values digest. An invented
+baseline cannot authorize other configuration changes.
+Initial adoption, router changes, policies, runtime settings, credentials,
+identities and funding retain their existing checks. The existing pull-coverage
+and Kind dispatcher transitions remain compatible; the original receipt is not
+rewritten.
+
+Review a server dry-run and qualify the selected images before upgrading. The
+controller reconciles the new defaults into agent Deployments: replacing a Pod
+with an `emptyDir` sandbox loses its temporary files. Preserve necessary data
+first or explicitly treat those test-agent files as disposable. Verify actual
+runtime image IDs, durable records and budget ledgers after rollout; Helm success
+alone is neither data-continuity proof nor beta acceptance.
+
+### Kind provider connections after SRE adoption
+
+Cold installation still rejects a populated `kars-inference-providers` Secret.
+An adopted upgrade can retain connections added through Bridge only when the
+live, Ready, generation-current workspace credential grant enrolls that exact
+Opaque Secret UID for `providers`, with its grant annotation intact. Deleted,
+replaced, disabled or unreconciled authority fails closed. Only the maintained
+named-provider keys and legacy Copilot token are allowed; arbitrary router
+environment overrides are rejected.
+
+A named alias for the sealed SRE provider must use the identical bootstrap
+endpoint and credential from the existing configured Secret reference. Other
+provider connections do not replace that route. Credentials are compared in
+memory, never rendered into manifests, changed or removed by this check. The
+full SRE adoption and private-continuity checks still apply.
+
+### Kind mission dispatcher after SRE adoption
+
+An adopted `kind-beta` release can activate the separate mission dispatcher from
+its sealed disabled defaults with `missionDispatcher.enabled=true`, explicit
+`authMode=development`, a nonempty image repository and immutable SHA-256 digest.
+Relay and registry overrides must remain empty, selecting Core's managed mesh.
+The original SRE adoption receipt is retained: all other values, funded source,
+policies, live identities and finite funding must still match. This exception
+cannot change dispatcher settings already sealed into that receipt and cannot
+be combined with the initial SRE ownership transition. Review a server dry-run
+before upgrading; activation is not proof of model execution or Team acceptance.
+Entra activation remains a separate reviewed identity transition.
+
+Mission-enabled task deployments use `Recreate` to avoid overlapping replicas
+sharing the runtime identity. For an existing owned `RollingUpdate` deployment,
+the controller first removes API-defaulted `rollingUpdate` settings with a
+UID/resource-version-fenced strategy-only merge patch, then rechecks task and
+source authority before applying the mission template. Server-side apply alone
+can retain these settings and fail with HTTP 422. A conflict is not permission
+to adopt a replacement; operators should not remove the isolation strategy or
+manually manufacture mission bindings to bypass a failed transition.
 
 ### Entra mission dispatcher
 

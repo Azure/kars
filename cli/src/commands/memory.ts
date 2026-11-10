@@ -34,7 +34,7 @@ export interface MemoryApplyOptions {
   scope?: string;
   retentionDays?: number;
   displayName?: string;
-  noDeleteOnSandboxDelete?: boolean;
+  deleteOnSandboxDelete?: boolean;
 }
 
 export function buildMemorySpecFromFlags(o: MemoryApplyOptions): Record<string, unknown> {
@@ -46,7 +46,7 @@ export function buildMemorySpecFromFlags(o: MemoryApplyOptions): Record<string, 
     retentionDays: o.retentionDays,
     displayName: o.displayName,
     // Default in CRD is true; only emit when the operator explicitly opts out.
-    deleteOnSandboxDelete: o.noDeleteOnSandboxDelete ? false : undefined,
+    deleteOnSandboxDelete: o.deleteOnSandboxDelete === false ? false : undefined,
   }) as Record<string, unknown>;
 }
 

@@ -65,6 +65,15 @@ kars's ten user-facing CRDs split into two operational shapes:
 
 All reconcilers run in the same controller pod under one leader-election lease, with a separate lease for the mesh-peer reconciler so it can fail independently.
 
+Lease acquisition and renewal are conditional on the observed UID and resource
+version. A replica starts reconcilers only after a successful write, then
+fail-stops if ownership is lost, the Lease is deleted or replaced, or renewal
+cannot finish before its deadline. API calls share that deadline; a stalled
+request cannot keep the old leader running indefinitely. The default 15-second
+Lease is renewed every 5 seconds, with a 10-second renewal deadline and a
+5-second handover margin. Changing or disabling these bounds is not a remedy
+for an overloaded control plane.
+
 ```mermaid
 graph TD
   subgraph operator["controller pod (replicas: 2, ns: kars-system)"]
@@ -193,6 +202,27 @@ sequenceDiagram
 ---
 
 ## `InferencePolicy` — the policy compile pattern
+
+### Standing component model defaults
+
+Configuration → Component models lets operators select independent provider/model
+pairs for Orchestrator and SRE, or explicitly inherit the saved cluster default.
+Existing policies remain overrides until inheritance is selected. Inheritance is
+stored as `kars.azure.com/model-default-source=cluster` on the standing
+`kars-system/bridge-orchestrator-inference` or `kars-system/sre-inference` policy.
+The controller verifies the enrolled provider registry and materializes its saved
+default into `spec.modelPreference.primary`, without changing fallbacks, budgets,
+safety settings, or reviewed task/Team routes. Composition consumes that selection
+rather than replacing it with its own model recommendation.
+
+Saving requests reconciliation; it does not mean the model is already applied.
+The existing compile, profile propagation, and sandbox reconciliation path runs
+automatically. Updating runtime defaults can roll the sandbox pods. Configuration
+shows **Applied** only when the desired primary matches, the current generation
+is Ready, and the router-loaded digest matches the compiled digest. Its five-second
+status refresh is not a five-second application guarantee. While inherited,
+primary-model edits belong in Configuration; other policy settings remain editable.
+
 
 ```mermaid
 sequenceDiagram
@@ -331,12 +361,45 @@ All four follow the same `compile → version_hash → SSA ConfigMap → patch_s
 
 ## Status, conditions, requeue
 
-Every reconcile ends with a `patch_status` call. The status block always carries:
+Reconcilers report their current result through status. The status block carries:
 
 - `phase` — see vocabulary table below.
 - `observedGeneration` — `metadata.generation` of the spec the reconciler saw.
 - `conditions[]` — at least `Ready`, `Progressing`, `Degraded`. Reasons are taxonomy-controlled — see [Conditions reference](conditions.md).
 - For compile pattern: `versionHash`, the `*-Ref` pointing at the produced `ConfigMap`/`Secret`, and `lastCompiledAt` / `lastProbedAt`.
+
+`InferencePolicy`, `ToolPolicy`, and `A2AAgent` preserve `lastCompiledAt`
+when their compilation result and enforcement status are unchanged. They
+still compile, repair their ConfigMaps, and perform applicable router checks
+on scheduled retries; an unchanged result does not write status and trigger
+another immediate watch event. The timestamp records a changed result
+published to status, not a periodic health heartbeat. Generation, digest,
+condition, failure, and recovery changes still publish status.
+
+`KarsTask` keeps live lineage, credential, budget and retirement validation on
+every reconciliation. A reviewed phase with a matching nonempty run/completion
+nonce uses the normal five-minute quiet requeue only after validation reports
+`Ready`, execution `Idle`, and no sandbox reference. Incomplete or temporarily
+stopped work keeps its one-minute idle retry; active funded work and pending
+transitions keep their fast retry. Direct Task changes still trigger the watch
+immediately. Completion annotations are a scheduling hint, not authorization.
+
+A matching nonempty Mission completion nonce also stops sandbox workload and
+binding updates while verified Task cleanup is pending. This applies to both
+OpenClaw and Hermes, including controller restarts and concurrent completion.
+It prevents a finished worker from rolling to a new pod identity; it does not
+authorize deletion or accept outputs. The Task reconciler still verifies the
+retained terminal evidence before retiring compute. A different requested run
+nonce is not suppressed by the previous completion marker.
+
+Receipt issuance, signing, inclusion-log repair and checkpoint publication still
+run on retries. `KarsReceipt.status.issuedAt` records the first issuance of that
+receipt object, not repeated verification; generation and inclusion changes
+still update the echo. Checkpoint `publishedAt` changes when the signed head
+changes or requires repair, not when an identical head is republished. Neither
+unsigned timestamp proves current enforcement or witness health. Existing
+timestamp values are retained; this does not reconstruct earlier issuance or
+publication times that older heartbeat-style writes may have overwritten.
 
 ### Phase vocabulary
 

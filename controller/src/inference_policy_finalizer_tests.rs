@@ -53,6 +53,75 @@ async fn setup() -> (MockServer, Arc<Ctx>) {
     (server, ctx)
 }
 
+#[tokio::test]
+async fn compilation_status_is_idempotent_without_skipping_verification_or_retries() {
+    let (server, ctx) = setup().await;
+    let mut policy = policy(false);
+    policy
+        .metadata
+        .finalizers
+        .as_mut()
+        .unwrap()
+        .push(FINALIZER.into());
+    policy.metadata.generation = Some(1);
+    Mock::given(method("PATCH"))
+        .and(path(CONFIGMAP_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "profile"},
+        })))
+        .expect(5)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(
+            "/apis/kars.azure.com/v1alpha1/namespaces/workspace/karssandboxes",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "apiVersion": "kars.azure.com/v1alpha1", "kind": "KarsSandboxList",
+            "metadata": {}, "items": [],
+        })))
+        .expect(5)
+        .mount(&server)
+        .await;
+    let status_path = format!("{POLICY_PATH}/status");
+    Mock::given(method("PATCH"))
+        .and(path(status_path.clone()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&policy))
+        .expect(4)
+        .mount(&server)
+        .await;
+
+    for (step, expected_writes) in [1, 1, 2, 3, 4].into_iter().enumerate() {
+        match step {
+            2 => policy.metadata.generation = Some(2),
+            3 => policy.status.as_mut().unwrap().loaded_digest = Some("stale".into()),
+            4 => policy.status.as_mut().unwrap().last_compiled_at = None,
+            _ => {}
+        }
+        assert_eq!(
+            reconcile(Arc::new(policy.clone()), ctx.clone())
+                .await
+                .unwrap(),
+            Action::requeue(REQUEUE_OK),
+        );
+        let requests = server.received_requests().await.unwrap();
+        let writes: Vec<_> = requests
+            .iter()
+            .filter(|r| r.url.path() == status_path)
+            .collect();
+        assert_eq!(writes.len(), expected_writes, "step {step}");
+        let body: Value = serde_json::from_slice(&writes.last().unwrap().body).unwrap();
+        let mut published: InferencePolicyStatus =
+            serde_json::from_value(body["status"].clone()).unwrap();
+        assert_eq!(published.observed_generation, policy.metadata.generation);
+        assert!(published.loaded_digest.is_none());
+        assert!(published.last_compiled_at.is_some());
+        // Make a timestamp-only update observable even within the same clock second.
+        published.last_compiled_at = Some("2020-01-01T00:00:00Z".into());
+        policy.status = Some(published);
+    }
+}
+
 async fn expect_patch(server: &MockServer, policy: &InferencePolicy, finalizers: Vec<String>) {
     let expected = json!({"metadata": {
         "name": "example", "namespace": "workspace", "uid": "policy-uid",

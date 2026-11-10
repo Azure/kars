@@ -37,6 +37,19 @@ else
   IS_ROOT=false
 fi
 
+# ── Writable default workspace ──────────────────────────────────────────
+# A mounted /sandbox hides the image's UID-1000-owned WORKDIR. The container
+# runtime can recreate the missing /sandbox/agent as root before dropping UID.
+# Replace only that empty, unwritable directory, using the sandbox identity;
+# never chmod, chown, or remove populated/read-only mounted agent code.
+if [ "$PWD" = "/sandbox/agent" ] && ! $AS_SANDBOX test -w .; then
+  if $AS_SANDBOX test -w .. && $AS_SANDBOX rmdir -- "$PWD" 2>/dev/null; then
+    cd ..
+    $AS_SANDBOX mkdir -- agent
+    cd agent
+  fi
+fi
+
 # ── SANDBOX_NAME fallback ────────────────────────────────────────────────
 # Controller injects SANDBOX_NAME in k8s. Docker dev may not (set by
 # `kars dev` only when --name is passed). Fall back to hostname-strip,
@@ -220,10 +233,9 @@ echo "[kars-hermes] Building MCP server config in $HERMES_CONFIG"
   # to whichever provider has env credentials — OPENAI_API_KEY → openrouter
   # (which then phones home to openrouter.ai), or Nous Portal OAuth (which
   # blocks on portal.nousresearch.com). The router accepts both
-  # /v1/chat/completions and /v1/responses; Azure gpt-5.x model family is
-  # forced to /v1/responses by Hermes (chat/completions returns 400
-  # "operation unsupported" for those models — see
-  # hermes_cli/runtime_provider.py::azure_foundry_model_api_mode).
+  # /v1/chat/completions and /v1/responses. Hermes selects Responses for
+  # Azure GPT-5.x and GPT-6.1 Sol; Sol rejects tools with reasoning on Chat
+  # Completions. The pinned model selector is patched at image build time.
   echo "model:"
   # Model selection — read the kars runtime contract var KARS_MODEL
   # first (set by controller from InferencePolicy.modelPreference.
@@ -869,9 +881,25 @@ if [ "$1" = "hermes" ]; then
     $AS_SANDBOX env HOME="$HOME" HERMES_HOME="$HERMES_HOME" \
       KARS_MESH_AUTO_RESPONDER=1 \
       python3 -c "
-import sys, threading, time
+import http.client, sys, threading, time
 print('[kars-mesh-keepalive] starting', flush=True)
 try:
+    # The sidecar can still be loading MCP discovery when this process starts.
+    deadline = time.monotonic() + 60
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('Loopback router did not become healthy within 60 seconds')
+        connection = http.client.HTTPConnection('127.0.0.1', 8443, timeout=min(2, remaining))
+        try:
+            connection.request('GET', '/healthz')
+            if connection.getresponse().status == 200:
+                break
+        except OSError:
+            pass
+        finally:
+            connection.close()
+        time.sleep(min(0.2, max(0, deadline - time.monotonic())))
     from kars_runtime_hermes.plugin import mesh as _m
     client = _m._get_or_init_client()
     print('[kars-mesh-keepalive] mesh client registered + connected', flush=True)
@@ -880,15 +908,15 @@ try:
         _w.start_worker(_m._get_or_init_client)
         print('[kars-mesh-keepalive] auto-responder worker started', flush=True)
     except Exception as e:
-        print(f'[kars-mesh-keepalive] worker skipped: {e!r}', flush=True)
+        print(f'[kars-mesh-keepalive] worker skipped: {type(e).__name__}', flush=True)
     # Park indefinitely — the MeshClient + worker live in our
     # process; if we exit, the relay drops our socket and the
     # registry marks us stale within ~90s.
     threading.Event().wait()
 except Exception as e:
-    print(f'[kars-mesh-keepalive] FATAL: {e!r}', flush=True)
+    print(f'[kars-mesh-keepalive] FATAL: {type(e).__name__}', flush=True)
     sys.exit(1)
-" > /tmp/hermes-mesh-keepalive.log 2>&1 &
+" 2>&1 &
   fi
 
   exec $AS_SANDBOX hermes gateway run --accept-hooks

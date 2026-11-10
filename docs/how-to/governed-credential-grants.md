@@ -7,7 +7,477 @@ This additive contract does not require Bridge. Direct credentials and the
 existing ten-key `credentialsRef` v1 flow remain unchanged unless explicitly
 selected for migration.
 
+## Mission delivery receipts
+
+The Core mission dispatcher does not need credential-use or projection authority
+to acknowledge a credential-bound Mission. Its admission exception permits only
+`run-ack` and `run-completed` annotations for the already-requested run, with the
+Task spec, status, other annotations, labels, ownership and finalizers unchanged.
+It cannot create a credential-bound Task, change bindings, launch work, alter the
+run request or remove receipts through this exception. Other principals cannot
+use the exception. Existing controller-only bundle and GitHub enrollment checks remain.
+
+A retained `uncertain` attempt after an acknowledgement failure is not successful
+execution or permission to resend the assignment. Preserve it, repair the reported
+admission or transport failure, and use a fresh reviewed workflow attempt.
+
+## Recovering an image-only root regression
+
+`kars credentials grant recover-root-image preview --private-root <namespace>
+--image <repository>:latest@sha256:<digest>` reviews a narrowly scoped rollback.
+The supplied immutable image must reconstruct the **entire** template digest
+in the existing sealed qualification. The live root, controller identities,
+privacy bundle, namespace proof, budget TLS and grants must still match; the
+only protected scope and consumer must be that root. Unknown private executions,
+additional affiliated scopes, mutable images and other template changes refuse
+recovery.
+
+Save the metadata-only preview and pass it to
+`kars credentials grant recover-root-image apply <reviewed-recovery>`.
+Apply repeats the review, server-dry-runs and UID/resourceVersion/spec-tests the
+image replacement, then verifies the actual restored rollout and private
+continuity. It does not rewrite grants, epochs, credentials or qualification
+proofs, and it does not roll back Helm release history. This is not recovery from
+suspected credential compromise or authorization for a new controller version:
+ordinary protected-root upgrades remain blocked.
+If the controller quarantined that same intact proof by changing only
+`private-state` to `Pending`, native admission blocks replacement startup.
+Recovery therefore temporarily scales the root to zero, retaining Pending until
+every old privileged Pod is gone. It verifies the original sealed proof, exact
+restored template and original keys against that genuinely retired execution,
+then UID/RV-tests restoration of the startup marker. Only then does it restore
+the sealed replica count and verify actual ready execution and full continuity.
+Missing proofs, altered epochs, changed keys or any other mismatch still refuse.
+A fresh preview resumes an interrupted image, retirement, marker or replica
+restoration. Image-only predecessor Pods must have the same actual root lineage
+and otherwise identical execution; they are approved only for retirement, never
+as replacements. A stopped root remains stopped if a proof or race check fails.
+
+## Migrating protected controller and runtime images
+
+`recover-root-image` is not an upgrade mechanism. The separate bounded
+`migrate-root-image` path supports **one root Deployment, already-enrolled
+Deployment companions across its qualified namespaces, and one affiliated
+workspace grant in the root namespace**. This includes Core and Bridge in
+`kars-system` with an enrolled SRE Deployment in `kars-sre`, without unenrolling
+SRE or removing Bridge. All grant writers and the budget TLS identity must remain
+in the root namespace. The complete cluster namespace/grant inventory and every
+enrolled namespace/consumer identity are retained; additional affiliated grants
+or non-Deployment consumers are rejected, not omitted. The historical
+`--sealed-root` recovery variant remains limited to one namespace and its root.
+Companions are captured from the existing qualification, including proven scopes
+enrolled after the original root seal, never added by migration. Their full specs and replica intent are durably bound:
+writers are withdrawn, all reviewed execution is genuinely retired, and all
+Deployments remain at zero through image cutover and fresh budget rotation.
+Finalize restores each companion's captured replica count (including zero) in
+the fresh epoch and verifies new Ready Pods before restoring writers. Companion
+configuration and identities cannot change, apart from fresh epoch metadata and
+restoration of captured replica intent. An explicitly selected root-namespace
+companion may refresh only existing container/init-container image fields, with
+immutable old and new `@sha256` references. Pass repeatable `--companion-image <deployment>`
+to `review-root-migration`; the Deployment must already be enrolled in the root
+namespace and present exactly once in the render. The review displays container
+names and old/new references, plus original and target full-spec/template digests.
+Unselected consumers cannot change, including replica-only deltas. Commands,
+environment, service accounts, volumes, selectors, replicas, and container names
+or ordering are retained exactly. A companion-only refresh may keep the root spec
+entirely unchanged, but still requires genuine retirement, fresh TLS rotation and
+qualification of the root and all companions before restoring retained grants.
+The receipt binds original companion objects and target specs; each image CAS has
+a durable updating/updated record and UID/resourceVersion/full-spec tests, with
+scope, zero-Pod, root and TLS drift checks before and after the write. Target
+companion template digests enter the new retirement/activation binding, never the
+old qualification. Lost image/pause/restore acknowledgments resume from the same
+receipt without repeating rotation.
+
+A runtime that reissues epoch-bound control material can also change its
+`kars.azure.com/services-credential-version` template annotation after the fresh
+root seal is written. This is a real template change, not an ignored epoch field.
+The current migration cannot settle that control-material transition: finalize
+fails closed and keeps grant writers withdrawn, including for a zero-replica SRE
+Deployment. Repeating finalize while the sealed digest differs will not repair
+it. Preserve the receipt, seal and rotated material; do not restore an obsolete
+version annotation, edit the receipt, or reseal an unreviewed live template.
+Such a transition requires separately guarded recovery before this topology can
+be considered qualified through the migration flow.
+
+Existing root-only receipts remain supported; historical already-rolled recovery
+with `--sealed-root` remains restricted to the root consumer alone. The server-projected target spec may change
+the controller container's immutable image and/or the literal values of its
+**existing** `HERMES_RUNTIME_IMAGE`, `SANDBOX_IMAGE`,
+`INFERENCE_ROUTER_IMAGE`, and `KARS_CONFORMANCE_RUNNER_IMAGE` environment entries.
+Controller and runtime references must remain immutable `@sha256` references;
+changing the runner likewise requires immutable old and new references. An untouched
+runner entry (including the public adoption default) is preserved during other
+image migrations. Evaluation runner-only changes use this same retirement, TLS
+rotation, protected publication, and fresh activation protocol; they do not change
+workload images. When publishing
+Core values, set `evals.runnerImage` and retain the exact original
+`evals.runnerImageBaseline`: the chart still verifies that baseline against sealed
+adoption and rejects unrelated settings or funding changes. A governed router
+image change must also update the **existing** `KARS_INFERENCE_BUDGET_ROUTER_DIGEST` literal to that
+image's digest; both old and new pins must match their respective router images.
+A missing, stale, independent or indirectly sourced pin is rejected before
+writes. This does not authorize changing broker enablement, funding or contracts.
+Runtime- or runner-only cutover may leave the controller
+image unchanged, but still retires and freshly qualifies that controller
+execution through the same migration path. A first adopted-SRE router upgrade
+may introduce `KARS_INFERENCE_BUDGET_FIRST_INSTALL_ROUTER_DIGEST` only by copying
+the original qualified root's unique literal governed router pin, matched to its
+immutable router image. Subsequent upgrades must preserve that baseline unchanged;
+immutable first-install intent and adoption verification still apply. Other
+environment additions, deletions, renames, reordering, duplicates, `valueFrom`
+image changes, and unrelated environment changes are rejected. Commands, funding settings, replicas,
+checksum annotations, selectors, accounts and other containers cannot
+change through this path. Image retirement/finalize alone does not apply the rest
+of the rendered release or advance Helm history. The optional protected Kind
+`publish-core` step below supplies bounded full-Core publication between them.
+Server-side **dry-run only** projections use `--force-conflicts` so image-field
+ownership retained by a legitimate `kubectl-patch` recovery does not block
+review. This does not transfer live field ownership or relax the review.
+Actual migration writes never force an apply: they retain exact
+UID/resourceVersion/full-spec JSON Patch tests.
+
+Operator sequence (run only against the intended cluster, after maintenance
+approval; these commands interrupt controller and enrolled companion availability):
+
+```bash
+kars credentials grant review-root-migration rendered-core.yaml \
+  --private-root kars-system --release kars --context <context> > root-review.json
+kars credentials grant migrate-root-image retire root-review.json rendered-core.yaml \
+  --receipt root-migration.jsonl --context <context>
+# If interrupted, retain the receipt and resume the same operation:
+kars credentials grant migrate-root-image resume-retirement root-migration.jsonl \
+  --context <context>
+# After the required operator-managed TLS rotation described below:
+kars credentials grant migrate-root-image finalize root-migration.jsonl \
+  --context <context>
+```
+
+For an already-enrolled dispatcher image-only refresh, review the exact render
+with the explicit companion selection before the same retire/rotation/finalize
+sequence (use the actual enrolled Deployment name):
+
+```bash
+kars credentials grant review-root-migration rendered-core.yaml \
+  --private-root kars-system --release kars --context <context> \
+  --companion-image kars-mission-dispatcher > root-review.json
+```
+
+This does not publish a Core release, advance Helm history, or authorize recovery
+of an unrelated historical failed Helm revision. Full-Core publication guards
+remain unchanged. Existing receipts without companion targets still permit only
+unchanged companions; changing the render or adding image authority requires a
+fresh review before retirement, not editing a receipt. Companion selection cannot
+be combined with historical `--sealed-root` recovery.
+
+If an image-only rollout already invalidated the sealed root, the same migration
+can retire the **actual current execution without reverting images**. Supply an
+operator-retained root Deployment JSON whose UID and template digest match the
+existing seal:
+
+```bash
+kars credentials grant review-root-migration rendered-current-core.yaml \
+  --private-root kars-system --release kars --context <context> \
+  --sealed-root retained-qualified-controller.json > root-review.json
+```
+
+The witness is bounded to 1 MiB and does not establish current qualification.
+Recovery can review the retained seal after the controller has revoked the
+namespace to `Pending`; all other sealed namespace bindings must still match.
+Ordinary qualification continues to require `Qualified`. Recovery never restores
+reader annotations to bypass revocation. Namespace version-only reconciliation
+can continue during review: the inventory binds namespace identity, annotations,
+labels, owners, finalizers, and spec, while writes retain fresh resource-version
+conflict checks. A grant may record a newer budget namespace resource version
+than the sealed predecessor; this alone is not a TLS identity change. Budget
+namespace name/UID, Secret name/UID/resource version, and key digest must still
+match. Changed authority or configuration still requires re-review.
+Only the existing immutable controller/runtime-image delta is permitted; the
+server-projected render must exactly retain the observed current Deployment
+spec. Additional configuration, topology or image changes require a later
+migration. Recovery reviews include historical and observed Deployment objects;
+protect these files like rendered configuration. Use the same retire/resume/
+rotation/finalize sequence above. Historical authority is verified separately
+from actual Pod ownership, zero-replica retirement and fresh qualification.
+No reader annotation, key, seal or epoch is borrowed to authorize changed code.
+
+Retire creates an exclusive, mode-0600, append-only, fsynced local operation
+receipt **before withdrawing writers**. It retains the original seal, exact
+grant intent, complete scope/grant inventory, projected target and actual
+retired Pod identities/ownership/template evidence. Keep this file and its
+backups private and durable; do not edit it or start a second migration. A local
+lock rejects concurrent writers; after a process crash, remove a stale
+`<receipt>.lock` only after verifying that its recorded process has stopped.
+An incomplete/torn journal, changed identity, unexpected inventory or failed
+compare-and-swap is an explicit recovery boundary, not permission to bypass
+qualification.
+
+Writer withdrawal reuses ordinary grant retirement: it waits for the controller
+to acknowledge the exact zero-writer spec, verifies all owned Roles/bindings are
+absent, and verifies removal of the captured writer guards. The still-sealed
+old root and its captured companions are UID/resourceVersion/full-spec fenced
+to zero. Every private Pod must have an actual reviewed owner; all reviewed
+execution, including temporarily non-consuming companion Pods, must finish
+retirement within a bounded wait. The original seal is verified against that genuinely retired execution
+before Pending is installed. The target spec is applied only at zero, while
+Pending forbids replacement startup. A new v1 retirement retains previous
+captured/exposed-key history and records the post-retirement baseline; it is
+**not** a qualification or permission to run new code with an old seal.
+
+When the budget broker is enabled, rotate its TLS private key **after** this
+baseline using the operator's approved key-generation process. Update the
+existing TLS Secret and `kars-inference-budget-contracts` public `ca.crt` in
+place, preserving both UIDs and all other contract data. The public CA must
+verify the new certificate. Do not reuse a previously exposed key, borrow an
+existing key, change accounts/charges/caps, or perform a Helm update that changes
+the paused Deployment's reviewed checksum/template. Image-only retirement and
+finalize never create, read, copy or write TLS private-key bytes. The optional
+full-Core publisher privately snapshots rendered, release-owned Secrets. An
+external budget TLS Secret remains operator-managed and is not imported into the
+Helm snapshot. A no-budget installation has no TLS rotation prerequisite.
+
+Finalize checks the new key and public CA, reuses ordinary private activation
+to mint fresh epochs in every enrolled namespace and a new complete seal on the
+actual new execution, then restores
+the original grant spec with only its `privateActivation` updated. It requires
+the original replica count of genuinely new, reviewed, Ready Pods and final
+controller acknowledgement of writer intent. Inventory checks fence each
+activation/publication write. Interrupted activation, rollout, grant publication
+or final receipt persistence resumes with the same `finalize` command. No
+readiness timeout is treated as acceptance.
+
+During qualification, a new controller may finish deleting an unrelated terminal
+sandbox namespace. Finalize can resume after that namespace disappears only when
+its sealed identity is absent from every reviewed activation, grant and writer
+guard, and its sealed metadata carries no private fields, reader guards or
+metadata finalizers. The original journal inventory is retained. Terminating
+namespaces, missing protected scopes, additions, UID replacements and changes to
+surviving namespaces still fail closed; this does not authorize namespace cleanup
+or alter failed execution records.
+
+Before the new v1 retirement replaces the old seal, exact-image recovery may
+still restore the original image under its existing strict checks; the original
+grant intent remains in the migration receipt, and must not be reconstructed
+from an empty writer list. After replacement, recovery must complete ordinary
+fresh-key activation, not reinstall or edit the retained old seal. Unexpected
+authority changes require explicit operator recovery rather than automatic
+rollback. CLI unit/type/lint validation is not deployed verification or full
+Kind customer acceptance; ordinary protected-root upgrade guards remain intact.
+
+### Protected full-Core publication on Kind
+
+Before planning full-Core publication, confirm the latest deployed release was
+already applied with SSA: its stored release must explicitly contain
+`apply_method: "ssa"`. CSA, absent and unknown apply methods are not supported;
+Helm's client-side field-manager conversion would invalidate pinned versions.
+The publisher rejects these cases before any of its mutations. It does not
+rotate TLS itself or provide a CSA migration. Check this prerequisite before
+retirement/manual TLS rotation, not after changing credentials.
+
+After the same retirement and approved fresh TLS rotation, **before finalize**:
+
+```bash
+kars credentials grant migrate-root-image publish-core root-migration.jsonl \
+  deploy/helm/kars --cluster-name <existing-kind-name> --release kars \
+  -f complete-core-values.yaml --set schemaHook.enabled=false
+kars credentials grant migrate-root-image finalize root-migration.jsonl
+```
+
+The maintained installer pins `kind-<existing-kind-name>` and `kars-system`;
+finalize inherits that recorded context and rejects an explicit conflicting one.
+No cluster creation, bootstrap, image build, ordinary unjournaled Helm fallback
+or hook execution occurs. Supply complete values with the already-live public
+CA and reviewed image references. Preserve the original TLS ownership model:
+Kind uses an existing operator-managed Secret, so leave the chart's
+`inferenceBudget.tls.certificate` and `privateKey` values empty. Do not copy the
+rotated private key into those fields or change an external Secret into a
+chart-managed one. The external Secret remains outside the Helm manifest and
+snapshot; retirement/finalize retain its rotation checks. Values must retain the
+reviewed root checksum/template, not generate
+another rollout. The publication forces root replicas to zero; finalize alone
+restores the sealed replica intent. Pending continuity also validates every
+enrolled, paused Deployment companion across the root and retained private
+namespaces (including SRE) against its retained parent UID, namespace authority,
+and the complete retirement binding; it does not assume Core runs alone.
+Missing, extra, replaced, or still-running enrolled consumers are refused.
+Supply the retired controller's current UID/resourceVersion in
+`controller.upgradePrecondition`, rather than reusing a stored pre-retirement
+fence.
+The first-install schema hook must be disabled for upgrades, without disabling
+governance. An unchanged existing `kars-default` policy is converted from its
+static Helm hook into an ordinary fenced resource. Its existing controller cleanup
+finalizer is preserved. If Helm trimmed the inline profile's final newline, the
+live profile bytes and digest are retained only when adding that one newline
+leaves the parsed YAML unchanged; other policy or finalizer differences are
+refused. Missing live Helm ownership annotations are added first by a journaled
+UID/version-tested metadata-only CAS;
+exact live ownership is checked before freezing the snapshot. The recorded
+adoption resumes safely before launch, including a lost CAS acknowledgement;
+conflicting owners or changed policy identities/bodies are refused. No broad
+`--take-ownership` is used. The complete maintained monitoring admission bootstrap
+may be omitted only when its hook definitions match a successful retained
+predecessor, monitoring values have remained unchanged, its resource inventory
+matches, and every projected monitoring resource is unchanged. Those Jobs are
+never executed or included in the snapshot. A frozen predecessor's monitoring
+values live in its stored chart defaults when Helm recorded no explicit overrides.
+Those defaults prove continuity only for the exact hook-free static publication
+chart: one maintained file-rendering template, no dependencies or schema, and one
+resource file matching its stored release manifest. Other chart shapes, overrides,
+changed defaults or mismatched resources cannot provide that fallback. Unknown,
+changed, incomplete or unsuccessful hooks remain refused. Monitoring dependency CRDs retain their
+separate bootstrap lifecycle: read-only schema qualification checks them without
+adopting them into the Core release. New/removal resources and unrelated
+ownership changes are rejected. Schema preflight requires compatible,
+already-installed schemas. Resource projections use each object's actual
+namespace. Protected resource bodies and root-namespace companions must remain
+unchanged, except that the datapath settings advance to the next release revision
+while capture scope and configuration remain identical. Recovery may skip only
+explicitly fenced failed revisions when those attempts left older settings intact. This is
+not a general chart migration.
+
+Publication keeps the reviewed root at zero replicas under Pending admission.
+It does not wait for that root's new ReplicaSet, which admission correctly denies
+until qualification. After normal hook-only Helm completion and durable immutable
+fencing, the publisher checks non-root workload, service, PVC and CRD readiness
+before releasing ownership. A failed readiness check resumes from `succeeded`
+without replaying Helm. Finalize still requires actual new qualified Ready Pods
+before restoring writer authority; ordinary install readiness is unchanged.
+
+The command requires inspected Helm 4.1.3 and forces `HELM_DRIVER=secret`. It saves
+an exact private minimal chart beside the receipt as `<receipt>.core-<attempt>-…`.
+**Unlike image-only receipts, this snapshot may contain private TLS keys and
+other credentials.** Files are mode-0400, directories mode-0500; retain the
+receipt and snapshot together on private durable storage, never in Git or public
+artifacts. Resume uses the snapshot, not changed source/value files. Missing,
+altered or extra files and stale live UID/version preconditions fail closed.
+Do not remove snapshots while a publication is unresolved; abandoned pre-launch
+snapshots may also contain private bytes and require deliberate secure retention
+or cleanup once their non-launch status has been established.
+
+Publication owns a namespace refusal marker and journals `publishing` before
+Helm runs. A one-time API compare-and-swap consumes launch ownership, preventing
+copied preparing/prepared receipts from launching concurrently. Its acknowledged
+namespace version is recorded in a replacement private snapshot before launch;
+both snapshots remain retained. Normal exit plus exact resource/history verification, acknowledged
+resource-version fences and **immutable old/new release Secrets** are required
+before durable `succeeded`. Historical bytes and UIDs remain retained; future
+supersession attempts can leave older immutable records labeled `deployed`.
+Rollback, uninstall, pruning and pending-record removal are not recovery tools.
+
+Rerun the identical `publish-core` command for `preparing`, an unchanged
+`prepared`, or durable `succeeded`; it never relaunches a completed publication.
+If rendering failed before a snapshot or launch and repaired immutable chart or
+values paths are needed, explicitly add `--replace-preparing-request` to
+`publish-core`. This is allowed only for the same retired migration in
+`rotation-required` with publication exactly `preparing`, no recorded snapshot
+or launch outcome, unchanged release storage and intact owned marker, retirement,
+rotation and withdrawn-writer fences. It appends the new request to the same
+journal and preserves the attempt; it does not clear ownership, replay retirement
+or rotate again. The flag is refused on an initial publication or after snapshot
+preparation. A witness already stopped during preparation may remain stopped:
+replacement first verifies its original identity/spec, zero replicas, no Pods or
+active autoscaler, Helm ownership and acknowledged evidence fence. Its original
+replica intent and fence stay in the journal; published/restored or unknown witness
+outcomes still refuse replacement. No witness write is performed by replacement.
+Without the flag, exact-request matching remains mandatory.
+
+When an adopted SRE policy already uses a controller-selected cluster default,
+retain that live primary pair in the replacement values with the original
+`sre.modelRouteBaseline`; do not overwrite it with stale bootstrap model values.
+The Kind profile retains authenticated, UID-enrolled HTTPS provider checks. A
+sealed first-install grant of exactly `unboundedTokens: true` does not require a
+selected-route spending contract; bounded or monetary funding still does. This
+does not bypass runtime funding authority, usage accounting or provider limits.
+GitHub credential admission policies render Kubernetes' native match defaults
+explicitly so their atomic `matchConstraints` can remain unchanged under SSA,
+without forcing ownership or weakening validation.
+`verified` proceeds to finalize. Any uncertain launch/terminal save or fence
+acknowledgement leaves `publishing` refused, even if Helm history says failed or
+a subprocess has stopped. Preserve Pending and ownership; do not use an older
+receipt to qualify, clear the marker, restamp an epoch or rotate again. A stale
+local journal lock may be removed only after its owning process has stopped;
+this **does not** resolve an ambiguous Helm writer.
+
+For an exact terminal **failed**, or completely projected **deployed**, SSA revision, explicitly rerun `publish-core` with
+`--recover-failed-publication` and the same receipt, context and release. This also
+supports a fenced `succeeded` publication whose readiness needs a chart or values
+repair: the deployed revision and immutable history must still match, and the
+witness remains stopped. Ordinary readiness retries without this flag keep the
+same revision and never relaunch Helm. Repaired
+chart/values paths may be supplied when starting recovery; subsequent resumes must
+keep that recorded request. The command reserves a fresh successor under the
+namespace marker, checks the failed manifest against the immutable snapshot,
+and accepts only the frozen, original-publication or reserved-successor admission
+fence during reservation. The complete bundle still requires unchanged bodies,
+UIDs and current observation; after reservation every admission fence must match
+the successor. It fences every frozen resource version and makes the complete matching Helm history
+immutable. It preserves failed bytes, UIDs, snapshots, retired authority and
+original witness replica intent. Admission-policy metadata version changes are
+rebound only from the complete frozen bundle with identical policy bodies and
+UIDs, current observation and owned fences. The new revision and all enrolled namespace snapshots are journaled before
+exact namespace updates. Every enrolled scope advances together, with partial
+updates resumable under the same identity and metadata fences; retirement
+attempts, captured Pods and TLS/key history are not reset. The same transition applies after normal publication, and lost
+acknowledgements resume without replaying Helm. Only complete rechecks allow a
+fresh snapshot and launch. A deployed revision must additionally match every
+recorded resource UID/body and have its witness stopped before recovery writes.
+Only the stopped witness and kube-state-metrics Deployment's monotonically
+advanced Kubernetes revision annotation may be compared using that Deployment's
+captured original value: the witness capture or the metrics server-projection
+record, not the chart (which may omit controller-managed annotations). Existing
+metrics receipts without that captured revision retain exact comparisons. This
+permits the reviewed metrics resource change to create a new ReplicaSet; all
+UIDs, other metadata and spec fields remain pinned.
+Other Deployments retain exact metadata comparisons. The original deployed history is preserved, not
+relabeled as failed or treated as customer acceptance. Pending, missing, changed
+or incompletely projected outcomes remain refused; the flag is not a force/retry
+bypass and cannot be combined with
+`--replace-preparing-request`. Keep using the same command to resume a lost recovery
+acknowledgement; never clear the owner or replay the failed snapshot. See the
+[terminal proof and interruption boundary](../operations/upgrades.md) for the
+resource/release-storage distinction. Installed API-server fence behavior,
+actual Core profile compatibility, controller convergence and end-to-end Kind
+acceptance still require authorized live validation; host-only fixtures are not
+those acceptance results.
+
+For a historical failed SSA revision from the ordinary monitoring admission hooks,
+`publish-core --retire-historical-monitoring-hooks` is a separate, explicit operation
+under an unpublished, genuinely retired root after TLS rotation. It requires the
+seven known service-account-only admission bootstrap resources and default ToolPolicy,
+an exact successful later hook intent, and fresh absence of the bootstrap Jobs,
+ServiceAccount, RBAC and every Pod using that account. Unknown hooks, independent
+credentials, pending/latest failures and changed history remain refused. No hook is
+executed and no workload, account or release record is deleted.
+
+Before mutation, the receipt durably binds the complete history and failed/successor
+identities and digests. A UID/resourceVersion-tested patch preserves the failed Secret's
+entire data and failed status, adds its proof annotation and makes it immutable.
+Resume the same flagged command after an interrupted acknowledgement; finalization
+refuses incomplete retirement. Subsequent publication journals verify the persistent
+proof and repeat the live authority checks rather than importing old recovery state.
+Do not combine this flag with either other recovery option. This does not authorize
+monitoring changes or establish installed customer acceptance by itself.
+
+The normal protected publication can separately apply a requested
+`monitoring.kube-state-metrics.resources` adjustment. Only positive CPU/memory
+requests and limits on the existing single-container kube-state-metrics Deployment
+are eligible. The server dry-run validates the resource quantities; the projected
+Deployment must otherwise match its live body exactly, including probes, image,
+ServiceAccount, selectors and replicas. All other monitoring configuration and
+successful admission-hook intent remain pinned. The changed resources are captured
+in the same immutable publication snapshot and verified after Helm applies it;
+there is no separate patch of the Helm-owned Deployment. Kind beta uses its own
+values override, leaving production defaults unchanged.
+
 ## Authority
+
+Core chart upgrades retain the running controller's published privacy-verifier
+Service selector instead of resetting it to `unavailable`. Fresh or missing
+Services still start closed. Retention requires the existing release ownership,
+fixed private endpoint and canonical selector; changed ownership, malformed
+selectors and failed reads require operator review. This does not qualify an
+endpoint: clients still verify its controller-issued descriptor and TLS identity.
 
 Bridge operators can select an already configured provider's model through
 Configuration → Model catalogue. This uses the enrolled controller-settings
@@ -20,8 +490,56 @@ not read an unenrolled bootstrap Secret to bypass that requirement. A cluster
 administrator can connect that provider through the normal additional-provider
 flow, using its existing credentials or Workload Identity as appropriate.
 
-Copilot sign-in stores its authentication; **Save model selection** then publishes
-the chosen models and closes the wizard. **Edit models** reuses that stored
+Ordinary provider, credential and standing-model rollouts do not require a new
+permission grant. For an already reviewed, controller-owned runtime Deployment,
+the projector records reconciliation in a protected namespace annotation. The
+credential annotations `inference-budget-ca-version`, `inference-providers-version`,
+`services-credential-version`, `sre-private-credential-uid`, `sre-tls-expiry`, and
+`credential-projection-version` (under `kars.azure.com/`) may differ from its
+qualified template. A governed agent credential projection refresh changes its
+UID/resource-version rollout annotation; the applied revision must match the
+controller-rendered revision and a fresh protected receipt before verification
+accepts the workload. Existing receipts that pinned that annotation remain valid
+while its revision is unchanged; the next verified reconciliation upgrades them.
+If the revision already differs, upgrade recovery still requires the exact
+reviewed ReplicaSet or renewed operator review, not an unchecked receipt rewrite.
+Model transitions
+may change only the literal values of agent `KARS_MODEL`, OpenClaw
+`OPENCLAW_MODEL`, and router `AZURE_OPENAI_DEPLOYMENT`. Those values must match
+both the controller-rendered workload and the current same-namespace
+InferencePolicy primary. For model transitions, environment names, presence,
+ordering and other fields remain pinned; duplicate model entries and `valueFrom`
+substitutions are refused.
+
+Current-observer enable, rotation and removal also use protected reconciliation
+receipts. Only the exact controller-rendered observer Secret volumes, router-only
+read-only mounts, version environment entry and annotation may change. Duplicate,
+extra or altered projection fields are rejected; only Kubernetes' Secret volume
+`defaultMode: 420` default is normalized. Applied and desired projections must
+match fresh issued status, with unchanged observation status since rendering.
+Enable/rotation require the current grant UID and same-workspace Sandbox target,
+runtime namespace and Deployment UIDs, capability, privacy revision and issued
+Secret UID/version to agree. Removal must match the absence of projected issuance
+in fresh status. Observer-pinned legacy receipts upgrade through verified
+reconciliation; CLI history alone cannot authorize observer enable or rotation.
+`Prepared` is not readiness: current-consumer and fresh privacy verification still
+must succeed.
+
+The receipt binds the privacy epoch, original template, current complete template
+and live Sandbox UID/generation. All other pod spec fields, labels, annotations
+and consumer identities remain pinned. Initial upgrade recovery may use an owned
+ReplicaSet whose full template matches the original qualification; subsequent
+rollouts use the protected receipt without retaining old history. Legacy
+credential-only receipts still authorize unchanged model structures; the first
+model transition requires the exact reviewed ReplicaSet to establish its model
+structure binding. A malformed receipt or unrelated workload change still fails
+closed; this is not an exemption for controller image or workload-spec upgrades.
+Reconciliation and router acknowledgement are asynchronous: a saved selection is
+not evidence of applied routing or successful inference.
+
+Copilot sign-in stores its authentication; **Next** opens model review without
+saving. **Save model selection** then publishes the chosen models and closes the
+wizard. **Edit models** reuses that stored
 sign-in. Saving a selection does not promote the provider. The catalogue retains
 identical deployment names on different providers as separate choices, and a
 default-provider switch preserves the registered previous provider and any
@@ -120,7 +638,30 @@ An enrolled provider/controller-settings store may only contain its
 purpose-specific keys. Core, not Bridge, applies typed provider environment
 updates and UID-bound Teams Deployment rollouts. Bridge has no Deployment patch
 permission. The controller-settings payload cannot change images, commands,
-ServiceAccounts or arbitrary environment variables.
+ServiceAccounts or arbitrary environment variables. Once the controller's private
+workspace is qualified, its complete pod template is sealed. Settings that would
+roll that controller (including credential rotation) are refused **before any
+Deployment mutation**; they are not permission to rewrite the seal. An unchanged,
+already-applied revision is accepted only after checking current private
+qualification and enrolled credential identities. Set cluster defaults before
+private activation; per-agent model selection is distinct from changing cluster
+defaults. A new settings request on a sealed controller remains unavailable rather
+than being reported as applied. Image-only migration does not authorize settings
+changes.
+
+The seal also covers each qualified consumer's complete Pod template, including
+annotations. `kubectl rollout restart` changes that template by adding
+`kubectl.kubernetes.io/restartedAt`; it can therefore revoke private writer
+readiness and make enrolled-provider discovery unavailable even when Pods are
+Ready. Do not add Secret RBAC or ignore that annotation to bypass qualification.
+For a recovery exercise, replace an explicitly identified Pod without modifying
+its owner's qualified template, retaining normal admission and lineage checks.
+If an accidental restart annotation is the only drift, remove only that change
+with UID/resourceVersion preconditions **after verifying** the resulting template
+matches the existing qualified digest. Otherwise use the reviewed migration or
+recovery flow. Check `WriterReady`, `PrivateConsumptionReady`, and authenticated
+provider discovery afterward; a Ready Pod or the grant's top-level phase alone
+is insufficient.
 
 Private egress observation is a separate opt-in capability,
 `kars.azure.com/egress-observation/v1`. `--observe <sandbox>` captures the
@@ -508,6 +1049,13 @@ Task-status transition. Current Task authorization, the revalidated grant/input
 generation, fresh refill, consumed Deployment revision and old-Pod retirement
 are still required. If Task authorization was observed withdrawn, a fresh
 Ready attestation is required; the captured digest is never substituted for it.
+When Task authority has not yet recovered, the controller can apply the refilled
+projection template at zero replicas before restoring the captured replica
+intent in a separate write. Apply recognizes both this sequence and the combined
+template/replica restore. For an initially running runtime these mean exactly
+three or two Deployment spec-generation increments, respectively, including the
+initial pause. The intermediate refilled pause cannot complete settlement;
+unrelated template changes, extra generations and missing witnesses still fail.
 The projection recheck aligns kubectl JSON and JSONPath views only for
 `managedFields` absent from the captured JSON view. Originally captured
 `managedFields` and all other metadata remain compared; this does not grant
@@ -630,6 +1178,49 @@ ledger, cancellation, settlement, pricing, or dispatch logic is changed by this
 private-capability activation check. Budget operation without this capability
 still has no additional activation/bootstrap requirement.
 
+### Same-key budget TLS revision recovery
+
+Normal private qualification requires the exact budget TLS Secret revision,
+not merely the same public key. A metadata/field-ownership update can invalidate
+that binding without changing the key. Do not weaken verification, restore an old
+Secret version, repeat retirement or reissue funding to recover it.
+
+For an already sealed, running **single-root** qualification with exactly its
+original `workspace` grant and no affiliated namespaces, a credential operator
+can explicitly review and publish just the revision delta:
+
+```bash
+kars credentials grant recover-budget-revision preview \
+  --private-root kars-system --context my-cluster > budget-revision-review.json
+kars credentials grant recover-budget-revision apply \
+  budget-revision-review.json --context my-cluster
+```
+
+The preview contains public identities and grant intent, never Secret data.
+It checks the original sealed retirement history, unchanged public key and Secret
+UID, controller identity/template/profile, consumer epochs and complete relevant
+grant/namespace inventories. Apply rereads those facts and uses UID/resourceVersion
+fences. It changes only the TLS revision in the root seal, namespace binding and
+matching grant. The key, original retirement record, grants' other settings,
+workloads and financial state are untouched.
+
+The controller may already have quarantined this sealed namespace as `Pending`
+after detecting the stale revision. The explicit review records that state and
+can restore `Qualified` only with the same sealed history, unchanged running root
+and fully reviewed current consumers. Missing history, unreviewed Pods, another
+state, or an unchanged Secret revision cannot use this recovery. Ordinary
+qualification never accepts `Pending`.
+
+If publication stops after the namespace write, retain this exact review and
+rerun `apply`; it accepts only the corresponding new seal and unchanged old/new
+grant intent. Ordinary qualification remains invalid until the matching grant
+is published. Changes to the key, UID, root, consumers, grant intent or reviewed
+revision require a new review, not a force option. After publication, confirm
+`WriterReady=True` and `PrivateConsumptionReady=True` at the grant's current
+generation. A successful CLI check alone is not installed runtime acceptance.
+
+### Initially retired Helm-managed TLS checksum recovery
+
 For a **Helm-managed** budget identity, rotating the supplied certificate/key also
 changes `checksum/inference-budget-tls` on the controller template. The initial
 retirement pins that template, so use the explicit checksum recovery rather than
@@ -642,7 +1233,11 @@ removing the retirement annotation or keeping stale Helm key values:
 2. Issue a fresh identity and use the normal core Helm upgrade with the reviewed
    certificate/key and public CA inputs. Keep `controller.replicas=0` in this
    maintenance upgrade. Preserve all other values, images, chart settings and
-   templates. Do not roll or recreate the paused root.
+   templates. Do not roll or recreate the paused root. Do not enable Helm's
+   `--wait` for this maintenance upgrade: Pending protection intentionally
+   denies creation of the changed root ReplicaSet until qualification. Check
+   the exact applied maintenance state instead; wait for readiness only after
+   recovery and qualification restore the root.
 3. Run `kars credentials grant recover-budget-tls apply tls-recovery.json`.
    It verifies that substituting the **old checksum alone** reconstructs the
    originally reviewed full template digest, that the same Secret now has a
@@ -653,14 +1248,23 @@ removing the retirement annotation or keeping stale Helm key values:
 4. Make a fresh normal grant preview and apply it to qualify and restore the
    original intent. Then persist that same original `controller.replicas` value
    in Helm through an otherwise unchanged upgrade, so subsequent upgrades do
-   not restore the temporary maintenance zero.
+   not restore the temporary maintenance zero. Explicitly supply the newly
+   issued TLS inputs again if the maintenance release failed: `--reuse-values`
+   can select the last successful release's exposed identity. Verify that the
+   restoring render preserves the rotated certificate/key and checksum before
+   applying it, then wait for the restored release to become ready.
 
 This checksum recovery is limited to initial single-root retirement, not a
 general template migration, completed/shared-root upgrade, certificate issuer or
 authority bypass. Any other template change, replaced identity, stale review,
 old key, live consumer or existing private grant/writer is refused. Externally
 managed Secret rotation with an unchanged controller template continues through
-the normal preview/apply flow without this checksum recovery.
+the normal preview/apply flow without this checksum recovery. After qualification,
+persist the rotated `inferenceBudget.caBundle` through an otherwise unchanged Core
+upgrade. When `inferenceBudget.tls.certificate` is empty, Core references the
+external Secret without adopting it into Helm. Continuity still requires the
+exact sealed Secret UID/version, namespace, type and live public CA; the catalog
+and any chart-managed TLS Secret must remain owned by the Core release.
 
 ### Shared roots and multiple workspaces
 
@@ -864,7 +1468,11 @@ kars credentials grant bootstrap-store --namespace kars-system \
 ```
 
 Review before omitting `--dry-run`. Existing stores are refused by bootstrap,
-not overwritten or adopted. Repeat for the operator stores in use, including
+not overwritten or adopted. Kind beta permits this empty provider store during
+Core upgrades because it cannot override the default route. A populated store
+still requires separate provider-route qualification; bootstrap alone neither
+enrolls credentials nor qualifies another inference provider.
+Repeat for the operator stores in use, including
 `kars-credential-controller-settings` with purpose `controller-settings`.
 
 Generate a metadata-only review:
@@ -923,6 +1531,12 @@ Selected Tasks recheck on the existing short reconciliation interval.
 Prelaunch sources remain unbound. Bridge stages Tasks/Teams without runnable
 execution, captures the actual CREATE UID, attaches the source selections, and
 only then requests activation. A CREATE conflict is never converted to adoption.
+Activation retains UID/resourceVersion fencing and allows at most two retries
+for status writes or the controller's initial Task/Team cleanup-finalizer
+registration. Only that exact added finalizer and its isolated SSA ownership
+entry are exempted from the intent comparison; existing finalizers, other field
+ownership, plans, credential bindings, annotations, identity and deletion state
+must remain unchanged. Removing a finalizer or changing authority still fails.
 Core verifies current Task authority before preparing a UID-owned bundle and
 the existing UID-fenced runtime projection. Agent values never enter router
 EnvFrom. Runtime environment overrides of selected keys are rejected.
@@ -964,10 +1578,29 @@ not an empty configuration.
 
 ### Keyless GitHub enrollment
 
+For a new Bridge installation, first complete the explicit
+[GitHub App storage enrollment](../../bridge/deploy/helm/kars-bridge/README.md#github-app-storage-enrollment)
+bootstrap/review/apply steps. Credential-free Helm enrollment intentionally has
+no App store or writer: disable `workspaceEnrollment.enabled` before operator
+expansion, retain all existing grant authority in the full desired-state
+preview, and qualify private activation. The Console withholds its App key
+form until the exact store is enrolled and readable. Store setup is distinct
+from the repository authority reviewed below.
+
 `--github-review <file>` accepts a metadata-only array of reviewed connections:
 `connection:{name,uid}`, `appSecret:{name,uid}`, `appId`, `ownerSubject`,
-`installationId`, canonical `repositories`, and `write`. The App store must
-also be explicitly enrolled with purpose `github-app`. Preview/apply recheck
+`installationId`, canonical `repositories`, and `write`. The same connection may have separate reviewed entries for different repository
+sets and write permissions—for example, write access to a demo repository and
+read-only access to a private repository. Each requested binding must be fully
+covered by one entry; permissions from separate entries are never combined.
+Existing App, connection, owner and installation identity checks still apply.
+Admission checks both resource permissions for every entry, up to the existing
+32-entry schema bound. These checks are split across four fail-closed policies
+so neither an expression nor a binding exceeds Kubernetes CEL authorization
+cost limits. All four `kars-credential-github-authority-*` policy/binding pairs
+must be installed before removing the older combined GitHub check from
+`kars-credential-grant-authority`; no resource permission check is optional.
+The App store must also be explicitly enrolled with purpose `github-app`. Preview/apply recheck
 the existing Secret and connection ConfigMap UIDs, installation and repository
 inventory without printing values. They never adopt another store or grant
 Bridge the ability to enlarge that operator review.
@@ -979,6 +1612,35 @@ exact `router-github-app/config.json` schema through the same strict
 `privacy_epoch`-gated private issuer. Configuration changes rotate the private
 version and require retirement of old consumers. Source stores retain their
 UIDs and values; neither tokens nor App keys enter agent source bundles.
+
+For read-only private repository metadata, select the App-connected repository
+in Mission/Team review and use native `network` capability. Both runtimes route
+canonical, headerless `GET https://api.github.com/repos/{owner}/{repo}` and
+paginated `/branches` reads through the existing keyless adapter. Match the
+repository's `default_branch` to the branch list's `commit.sha`; the adapter does
+not support `/branches/{branch}` or `/git/ref/heads/{branch}`. No extra direct
+GitHub egress, `github-pr` capability or write grant is needed for these reads.
+Binding authorization and the bounded REST allowlist still apply.
+
+**GitHub MCP is separate:** its configured bearer credential determines its
+access. Selecting App repositories neither grants nor restricts that credential.
+Successful MCP initialization or public reads do not prove private access. Use
+the App route for supported private metadata reads, or have the administrator
+review the MCP service's own authorization when MCP is explicitly required;
+do not broaden credentials or direct egress to work around a denial.
+
+Mission and Team readiness and creation derive write authority from the reviewed
+execution plan: only `github-pr` in a role phase or synthesis requests PR access.
+Network-only plans request read-only access. Team edits use the effective edited
+plan (or the saved plan when unchanged), and a plan-only change reauthorizes the
+saved repository selection; it cannot silently retain or add write permission.
+Legacy packages without a typed plan retain their explicit PR-access semantics.
+
+The Team editor displays its saved repository selection from `githubBinding`,
+including read-only selections, without treating them as permission to write.
+A present read-only or empty binding never falls back to broader legacy
+`gitWrite` selections. Older Teams without a binding still display their legacy
+selection until they are saved through the governed connection flow.
 
 The private Secret's separate source-revision annotation binds grant UID/spec
 generation, App-store and connection UIDs/resourceVersions, Sandbox generation,

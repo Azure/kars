@@ -34,6 +34,11 @@ function load(text, globals = {}) {
   });
   return exports;
 }
+const previewFile = new URL("../src/components/deliverable-view.tsx", import.meta.url);
+const previewSource = ts.createSourceFile(previewFile.pathname, readFileSync(previewFile, "utf8"),
+  ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+const { toPlainPreview } = load(previewSource.statements.filter(node => ts.isFunctionDeclaration(node)
+  && ["cleanDeliverable", "toPlainPreview"].includes(node.name?.text)).map(node => node.getText(previewSource)).join("\n"));
 const { TeamReadError } = load(readFileSync(
   new URL("../src/app/workspace/teams/read-error.tsx", import.meta.url), "utf8"));
 const retainedSource = readFileSync(new URL(
@@ -81,7 +86,7 @@ function render(section, state) {
     Link: ({ children, href }) => React.createElement("a", { href }, children),
     DeliverableBody: ({ output }) => React.createElement("p", null, output),
     TeamLedger: () => React.createElement("p", null, "retained ledger"),
-    toPlainPreview: content => content,
+    toPlainPreview,
   });
   return renderToStaticMarkup(React.createElement(component.View));
 }
@@ -110,11 +115,30 @@ test("memory exposes stored provenance separately from readable-content identity
     digest: "sha256:displayed", stored_digest: "sha256:stored", stored_size_bytes: 123,
   }] }, []);
   const html = render("knowledge", state);
-  assert.match(html, /1 entries/);
+  assert.match(html, /1 entry/);
+  assert.doesNotMatch(html, /1 entries/);
   assert.match(html, /Complete retained text/);
   assert.match(html, /sha256:displayed/);
   assert.match(html, /Stored record:.*sha256:stored.*123 bytes/);
   assert.doesNotMatch(html, /No shared knowledge yet|Unverified/);
+});
+
+test("retained Markdown titles recover link labels without changing document bytes", async () => {
+  const content = "\r\n[Download repository-metadata-report.md](sandbox:/sandbox/repository-metadata-report.md)\r\n\r\nHistorical evidence stays unchanged.";
+  for (const title of ["[Download repository-metadata-report", "Download repository-metadata-report.md](sandbox:/sandbox/repository-metadata-report.md)",
+    "[Download repository-metadata-report.md](sandbox:/sandbox/repository-metadata-report.md)"]) {
+    assert.equal(toPlainPreview(title, content), "Download repository-metadata-report.md");
+    const state = await reads({ count: 1, entries: [{ id: "one", title, content,
+      author: "run", source_task: "run", created_at: "2026-11-01T02:52:56Z", digest: "sha256:retained" }] }, []);
+    const html = render("knowledge", state);
+    assert.match(html, /text-sm font-medium">Download repository-metadata-report\.md<\/p>/);
+    assert.equal(state.commonsRead.value.entries[0].content, content);
+    assert.equal(state.commonsRead.value.entries[0].digest, "sha256:retained");
+  }
+  assert.equal(toPlainPreview("**Useful title**", content), "Useful title");
+  assert.equal(toPlainPreview("[Download report", null), "[Download report");
+  assert.equal(toPlainPreview("[Download report", "\n\n"), "[Download report");
+  assert.equal(toPlainPreview("[Reviewed] summary", content), "[Reviewed] summary");
 });
 
 test("memory exposes complete documents, peer provenance and exact-byte downloads", async () => {

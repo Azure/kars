@@ -53,6 +53,231 @@ pub(super) fn owned_task(team: &KarsTeam, role: &TeamRole) -> KarsTask {
 }
 
 #[tokio::test]
+async fn promotion_ticket_is_visible_to_team_owner_and_attributes_requester() {
+    let server = MockServer::start().await;
+    let mut team = team();
+    team.spec.requested_tier = Some(5);
+    for (key, value) in [
+        ("owner-sub", "customer"),
+        ("owner-name", "Customer"),
+        ("promotion-requested-by-sub", "requester"),
+        ("promotion-requested-by", "Requester"),
+    ] {
+        team.annotations_mut()
+            .insert(format!("kars.azure.com/{key}"), value.into());
+    }
+    let principal = principal(&team);
+    let approval = approved(&team, &principal);
+    Mock::given(method("GET"))
+        .and(path(task_path(&principal.name_any())))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&principal))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/apis/kars.azure.com/v1alpha1/namespaces/tenant-a/karsapprovals/{}",
+            approval.name_any()
+        )))
+        .respond_with(not_found())
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(
+            "/apis/kars.azure.com/v1alpha1/namespaces/tenant-a/karsapprovals",
+        ))
+        .respond_with(ResponseTemplate::new(201).set_body_json(&approval))
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert!(
+        !promotion::process_promotion(&client(&server).await, &team, &principal.name_any())
+            .await
+            .unwrap()
+    );
+    let requests = server.received_requests().await.unwrap();
+    let created: crate::kars_approval::KarsApproval =
+        serde_json::from_slice(&requests[2].body).unwrap();
+    assert_eq!(
+        created.annotations()["kars.azure.com/owner-sub"],
+        "customer"
+    );
+    assert_eq!(
+        created.annotations()["kars.azure.com/owner-name"],
+        "Customer"
+    );
+    assert_eq!(created.annotations()["kars.azure.com/team"], "eng");
+    assert_eq!(created.spec.requested_by.unwrap().subject, "requester");
+}
+
+#[tokio::test]
+async fn legacy_team_promotion_visibility_repair_is_metadata_only_and_foreign_owner_rejected() {
+    let server = MockServer::start().await;
+    let mut team = team();
+    team.spec.requested_tier = Some(5);
+    team.annotations_mut()
+        .insert("kars.azure.com/owner-sub".into(), "customer".into());
+    let principal = principal(&team);
+    let mut approval = approved(&team, &principal);
+    approval.metadata.resource_version = Some("30".into());
+    let approval_path = format!(
+        "/apis/kars.azure.com/v1alpha1/namespaces/tenant-a/karsapprovals/{}",
+        approval.name_any()
+    );
+    Mock::given(method("GET"))
+        .and(path(task_path(&principal.name_any())))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&principal))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(&approval_path))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&approval))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path(&approval_path))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&approval))
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert!(
+        !promotion::process_promotion(&client(&server).await, &team, &principal.name_any())
+            .await
+            .unwrap()
+    );
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 3);
+    let patch: serde_json::Value = serde_json::from_slice(&requests[2].body).unwrap();
+    assert_eq!(patch["metadata"]["uid"], approval.uid().unwrap());
+    assert_eq!(patch["metadata"]["resourceVersion"], "30");
+    assert_eq!(
+        patch["metadata"]["annotations"]["kars.azure.com/owner-sub"],
+        "customer"
+    );
+    assert!(patch.get("spec").is_none());
+    assert!(patch.get("status").is_none());
+    approval
+        .annotations_mut()
+        .insert("kars.azure.com/owner-sub".into(), "foreign".into());
+    assert!(!promotion::authorized(&team, &principal, &approval, 5));
+    approval
+        .annotations_mut()
+        .insert("kars.azure.com/owner-sub".into(), "customer".into());
+    assert!(promotion::authorized(&team, &principal, &approval, 5));
+}
+
+#[test]
+fn team_observation_status_coalesces_only_fresh_unchanged_facts() {
+    let now = parse_rfc3339("2026-10-15T16:35:30Z").unwrap();
+    let previous = json!({"phase":"Hibernating", "tokensSpentTotal":42,
+        "tokensSpentScope":"lifetime", "tokensObservedAt":"2026-10-15T16:35:00Z"});
+    let mut desired = previous.clone();
+    desired["tokensObservedAt"] = json!(now.to_rfc3339());
+    assert!(!status_needs_update(&previous, &desired, now));
+    assert!(!status_needs_update(&previous, &previous, now));
+    for (field, value) in [
+        ("phase", json!("Active")),
+        ("tokensSpentTotal", json!(43)),
+        ("tokensSpentScope", json!("synthesis")),
+        ("observedGeneration", json!(2)),
+        ("runAdmission", json!({"state":"reserved"})),
+        ("tokensObservedAt", serde_json::Value::Null),
+    ] {
+        let mut changed = desired.clone();
+        changed[field] = value;
+        assert!(status_needs_update(&previous, &changed, now), "{field}");
+    }
+}
+
+#[test]
+fn team_observation_status_refreshes_expired_missing_invalid_or_future_time() {
+    let now = parse_rfc3339("2026-10-15T16:36:00Z").unwrap();
+    let desired = json!({"tokensSpentTotal":42, "tokensObservedAt":now.to_rfc3339()});
+    for timestamp in [
+        json!("2026-10-15T16:35:00Z"),
+        json!("2026-10-15T16:34:59Z"),
+        json!("2026-10-15T16:36:01Z"),
+        json!("invalid"),
+        serde_json::Value::Null,
+    ] {
+        let mut previous = desired.clone();
+        previous["tokensObservedAt"] = timestamp;
+        assert!(status_needs_update(&previous, &desired, now));
+    }
+    let mut missing = desired.clone();
+    missing.as_object_mut().unwrap().remove("tokensObservedAt");
+    assert!(status_needs_update(&missing, &desired, now));
+}
+
+#[tokio::test]
+async fn team_status_skips_hot_loop_but_refreshes_with_identity_fence() {
+    let server = MockServer::start().await;
+    let mut team = team();
+    let now = Utc::now();
+    let mut desired = KarsTeamStatus {
+        phase: Some(PHASE_HIBERNATING.into()),
+        tokens_spent_total: Some(42),
+        tokens_observed_at: Some(now.to_rfc3339()),
+        ..Default::default()
+    };
+    team.status = Some(desired.clone());
+    team.status.as_mut().unwrap().tokens_observed_at =
+        Some((now - chrono::Duration::seconds(1)).to_rfc3339());
+    let api = Api::namespaced(client(&server).await, "tenant-a");
+    let retained = write_status(&api, &team, desired.clone()).await.unwrap();
+    assert_eq!(
+        retained.metadata.resource_version,
+        team.metadata.resource_version
+    );
+    assert_eq!(
+        retained.status.unwrap().tokens_observed_at,
+        team.status.as_ref().unwrap().tokens_observed_at
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+    let mut missing_uid = team.clone();
+    missing_uid.metadata.uid = None;
+    assert!(
+        write_status(&api, &missing_uid, desired.clone())
+            .await
+            .is_err()
+    );
+    let mut missing_version = team.clone();
+    missing_version.metadata.resource_version = None;
+    assert!(
+        write_status(&api, &missing_version, desired.clone())
+            .await
+            .is_err()
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+
+    team.status.as_mut().unwrap().tokens_observed_at =
+        Some((now - chrono::Duration::seconds(60)).to_rfc3339());
+    desired.tokens_observed_at = Some(Utc::now().to_rfc3339());
+    let mut refreshed = team.clone();
+    refreshed.status = Some(desired.clone());
+    refreshed.metadata.resource_version = Some("11".into());
+    Mock::given(method("PATCH"))
+        .and(path(
+            "/apis/kars.azure.com/v1alpha1/namespaces/tenant-a/karsteams/eng/status",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&refreshed))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let captured = write_status(&api, &team, desired.clone()).await.unwrap();
+    assert_eq!(captured.metadata.resource_version.as_deref(), Some("11"));
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    let patch: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(patch["metadata"]["uid"], "team-uid");
+    assert_eq!(patch["metadata"]["resourceVersion"], "10");
+    assert_eq!(patch["status"], serde_json::to_value(desired).unwrap());
+}
+
+#[tokio::test]
 async fn same_name_customer_task_is_never_adopted() {
     let server = MockServer::start().await;
     let team = team();
@@ -148,10 +373,11 @@ async fn task_replace_preserves_execution_metadata_and_clears_removed_fields() {
 }
 
 #[tokio::test]
-async fn paused_team_idles_exact_owned_tasks_and_preserves_spoofed_customer() {
+async fn paused_team_preserves_running_owned_tasks_and_spoofed_customer() {
     let server = MockServer::start().await;
     let mut team = team();
     team.spec.paused = true;
+    team.spec.envelope.budget = None;
     let role = TeamRole {
         name: "reader".into(),
         ..Default::default()
@@ -175,20 +401,14 @@ async fn paused_team_idles_exact_owned_tasks_and_preserves_spoofed_customer() {
         )
         .mount(&server)
         .await;
-    Mock::given(method("PUT"))
-        .and(path(task_path(&member.name_any())))
-        .respond_with(ResponseTemplate::new(200).set_body_json(&member))
-        .expect(1)
-        .mount(&server)
-        .await;
-    tasks::reconcile_revocations(&Api::namespaced(client(&server).await, "tenant-a"), &team)
-        .await
-        .unwrap();
+    let api = Api::namespaced(client(&server).await, "tenant-a");
+    for paused in [true, false] {
+        team.spec.paused = paused;
+        tasks::reconcile_revocations(&api, &team).await.unwrap();
+    }
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests.len(), 2);
-    let changed: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
-    assert_eq!(changed["spec"]["execution"]["launch"], false);
-    assert_eq!(changed["metadata"]["resourceVersion"], "40");
+    assert!(requests.iter().all(|request| request.method == "GET"));
 }
 
 #[tokio::test]
@@ -259,7 +479,7 @@ async fn revocation_delete_failure_is_retryable_not_success() {
 }
 
 #[tokio::test]
-async fn already_created_cadence_slot_is_not_relaunched() {
+async fn existing_cadence_slot_survives_pause_and_resume_without_replay() {
     let server = MockServer::start().await;
     let mut team = team();
     team.spec.envelope.budget = None;
@@ -276,23 +496,44 @@ async fn already_created_cadence_slot_is_not_relaunched() {
         ]
         .into(),
     );
-    run.spec.execution.as_mut().unwrap().launch = false;
-    Mock::given(method("GET"))
-        .and(path(task_path(&name)))
-        .respond_with(ResponseTemplate::new(200).set_body_json(&run))
-        .mount(&server)
-        .await;
-    let saved = tasks::apply_task(
-        &Api::namespaced(client(&server).await, "tenant-a"),
-        &team,
-        &name,
-        specs::run_spec(&team, "new knowledge").unwrap(),
-        "taskforce",
-    )
-    .await
-    .unwrap();
-    assert!(!saved.spec.execution.unwrap().launch);
-    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    let api = Api::namespaced(client(&server).await, "tenant-a");
+    for launched in [true, false] {
+        server.reset().await;
+        run.spec.execution.as_mut().unwrap().launch = launched;
+        Mock::given(method("GET"))
+            .and(path(task_path(&name)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&run))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/apis/kars.azure.com/v1alpha1/namespaces/tenant-a/karstasks",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(task_list(std::slice::from_ref(&run))),
+            )
+            .mount(&server)
+            .await;
+        for paused in [true, false] {
+            team.spec.paused = paused;
+            tasks::reconcile_revocations(&api, &team).await.unwrap();
+            let saved = tasks::apply_task(
+                &api,
+                &team,
+                &name,
+                specs::run_spec(&team, "new knowledge").unwrap(),
+                "taskforce",
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                serde_json::to_value(&saved).unwrap(),
+                serde_json::to_value(&run).unwrap()
+            );
+        }
+        let requests = server.received_requests().await.unwrap();
+        assert!(requests.iter().all(|request| request.method == "GET"));
+    }
 }
 
 #[tokio::test]
@@ -521,7 +762,8 @@ async fn malformed_or_foreign_digest_is_never_overwritten() {
             "report",
             1,
             1,
-            1,
+            Some(1),
+            crate::inference_budget::team::SYNTHESIS_SCOPE,
             1
         )
         .await

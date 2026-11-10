@@ -5,7 +5,7 @@ use super::AppState;
 use crate::{
     failover,
     inference_policy_loader::InferencePolicySnapshot,
-    proxy::{self, UpstreamConfig},
+    proxy::{self, RequestBody, UpstreamConfig},
 };
 use anyhow::Result;
 use axum::http::{HeaderMap, Method, StatusCode};
@@ -32,6 +32,50 @@ pub(super) fn model_capability_key(upstream: &UpstreamConfig) -> String {
     .expect("provider capability key always serializes")
 }
 
+fn is_non_model_parameter_error(error: &serde_json::Value) -> bool {
+    match error.get("param") {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::String(param)) => {
+            !param.is_empty() && !matches!(param.as_str(), "model" | "deployment")
+        }
+        Some(_) => true,
+    }
+}
+
+fn corrected_output_limit_request(
+    status: StatusCode,
+    response: &[u8],
+    body: &RequestBody,
+) -> Option<RequestBody> {
+    if status != StatusCode::BAD_REQUEST {
+        return None;
+    }
+    let response: serde_json::Value = serde_json::from_slice(response).ok()?;
+    let error = response.get("error").unwrap_or(&response);
+    if error.get("param")?.as_str()? != "max_tokens" {
+        return None;
+    }
+    let message = error.get("message")?.as_str()?.to_ascii_lowercase();
+    if ![
+        "use 'max_completion_tokens' instead",
+        "use \"max_completion_tokens\" instead",
+        "use `max_completion_tokens` instead",
+        "use max_completion_tokens instead",
+    ]
+    .iter()
+    .any(|guidance| message.contains(guidance))
+    {
+        return None;
+    }
+    let mut request = body.clone();
+    let object = request.json_mut()?.as_object_mut()?;
+    if object.contains_key("max_completion_tokens") || object.get("max_tokens")?.as_u64()? == 0 {
+        return None;
+    }
+    let limit = object.remove("max_tokens")?;
+    object.insert("max_completion_tokens".into(), limit);
+    Some(request)
+}
 pub(super) fn is_responses_only_error(body: &[u8]) -> bool {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
         return false;
@@ -46,6 +90,15 @@ pub(super) fn is_responses_only_error(body: &[u8]) -> bool {
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
+    if message.contains("not supported")
+        && message.contains("/chat/completions")
+        && message.contains("use /v1/responses")
+    {
+        return true;
+    }
+    if is_non_model_parameter_error(error) {
+        return false;
+    }
     code.eq_ignore_ascii_case("unsupported_api_for_model")
         || message.contains("not accessible via the /chat/completions endpoint")
         || (message.contains("unsupported")
@@ -62,6 +115,9 @@ fn is_model_unavailable_error(status: StatusCode, body: &[u8]) -> bool {
         return false;
     };
     let error = value.get("error").unwrap_or(&value);
+    if is_non_model_parameter_error(error) {
+        return false;
+    }
     let code = error
         .get("code")
         .and_then(|v| v.as_str())
@@ -89,18 +145,9 @@ fn is_model_unavailable_error(status: StatusCode, body: &[u8]) -> bool {
         .any(|phrase| message.contains(phrase)))
 }
 
-pub(super) fn override_model_in_body(body: &[u8], model: &str) -> Bytes {
-    match serde_json::from_slice::<serde_json::Value>(body) {
-        Ok(mut value) if value.is_object() => {
-            value["model"] = model.into();
-            serde_json::to_vec(&value)
-                .map(Bytes::from)
-                .unwrap_or_else(|_| Bytes::copy_from_slice(body))
-        }
-        _ => Bytes::copy_from_slice(body),
-    }
+pub(super) fn override_model_in_body(body: &RequestBody, model: &str) -> RequestBody {
+    body.with_model(model)
 }
-
 fn default_target(state: &AppState, base: &UpstreamConfig) -> UpstreamConfig {
     let mut target = base.clone();
     target.deployment = state.config.default_model.clone();
@@ -111,9 +158,9 @@ fn primary_target(
     state: &AppState,
     base: &UpstreamConfig,
     policy: &InferencePolicySnapshot,
-    body: &[u8],
+    body: &RequestBody,
 ) -> Result<UpstreamConfig> {
-    let candidates = failover::candidates_for_request(base, policy, body);
+    let candidates = failover::candidates_for_parsed_request(base, policy, body);
     failover::resolve_candidate(base, &state.config, &candidates[0])
         .map_err(proxy::failure::ForwardFailure::configuration)
 }
@@ -140,7 +187,7 @@ pub(super) fn effective_primary(
     state: &AppState,
     base: &UpstreamConfig,
     policy: &InferencePolicySnapshot,
-    body: &[u8],
+    body: &RequestBody,
 ) -> Result<UpstreamConfig> {
     let primary = primary_target(state, base, policy, body)?;
     let fallback = default_target(state, base);
@@ -159,8 +206,9 @@ pub(super) async fn forward_responses(
     policy: &InferencePolicySnapshot,
     selected: &UpstreamConfig,
     headers: &HeaderMap,
-    body: Bytes,
+    body: impl Into<RequestBody>,
 ) -> Result<BufferedResult> {
+    let body = body.into();
     use crate::inference_policy_loader::{ModelPreference, ModelRef};
     let candidates = failover::build_candidates(base, policy);
     let mut start = None;
@@ -191,7 +239,7 @@ pub(super) async fn forward_responses(
             primary: models[0].clone(),
             fallback: models[1..].to_vec(),
         });
-        return failover::forward_with_failover(
+        return failover::forward_with_parsed_request(
             &state.auth,
             Some(&state.copilot),
             &state.client,
@@ -206,7 +254,7 @@ pub(super) async fn forward_responses(
         )
         .await;
     }
-    proxy::forward(
+    proxy::forward_parsed(
         &state.auth,
         Some(&state.copilot),
         &state.client,
@@ -225,12 +273,13 @@ pub(super) async fn forward_chat(
     base: &UpstreamConfig,
     policy: &InferencePolicySnapshot,
     headers: &HeaderMap,
-    body: Bytes,
+    body: impl Into<RequestBody>,
 ) -> Result<BufferedResult> {
+    let body = body.into();
     let fallback = default_target(state, base);
     let primary = primary_target(state, base, policy, &body)?;
     let result = if cached_unavailable(state, &primary, &fallback) {
-        proxy::forward(
+        proxy::forward_parsed(
             &state.auth,
             Some(&state.copilot),
             &state.client,
@@ -243,7 +292,7 @@ pub(super) async fn forward_chat(
         .await
         .map(|(status, headers, bytes)| (status, headers, bytes, fallback.clone()))
     } else {
-        failover::forward_with_failover(
+        failover::forward_with_parsed_request(
             &state.auth,
             Some(&state.copilot),
             &state.client,
@@ -259,12 +308,32 @@ pub(super) async fn forward_chat(
         .await
     };
     if let Ok((status, _, response, selected)) = &result
+        && let Some(corrected) = corrected_output_limit_request(
+            *status,
+            response,
+            &override_model_in_body(&body, &selected.deployment),
+        )
+    {
+        return proxy::forward_parsed(
+            &state.auth,
+            Some(&state.copilot),
+            &state.client,
+            selected,
+            Method::POST,
+            "chat/completions",
+            headers,
+            corrected,
+        )
+        .await
+        .map(|(status, headers, bytes)| (status, headers, bytes, selected.clone()));
+    }
+    if let Ok((status, _, response, selected)) = &result
         && is_model_unavailable_error(*status, response)
         && !fallback.deployment.is_empty()
         && model_capability_key(selected) != model_capability_key(&fallback)
     {
         remember_unavailable(state, selected);
-        return proxy::forward(
+        return proxy::forward_parsed(
             &state.auth,
             Some(&state.copilot),
             &state.client,
@@ -285,13 +354,14 @@ pub(super) async fn forward_stream_chat(
     base: &UpstreamConfig,
     policy: &InferencePolicySnapshot,
     headers: HeaderMap,
-    body: Bytes,
+    body: impl Into<RequestBody>,
 ) -> Result<StreamingResult> {
+    let body = body.into();
     let fallback = default_target(state, base);
     let primary = primary_target(state, base, policy, &body)?;
     let (status, response_headers, stream, selected) =
         if cached_unavailable(state, &primary, &fallback) {
-            proxy::forward_stream(
+            proxy::forward_stream_parsed(
                 state.auth.clone(),
                 Some(state.copilot.clone()),
                 state.client.clone(),
@@ -303,7 +373,7 @@ pub(super) async fn forward_stream_chat(
             .await
             .map(|(status, headers, stream)| (status, headers, stream, fallback.clone()))?
         } else {
-            failover::forward_stream_with_failover(
+            failover::forward_stream_with_parsed_request(
                 state.auth.clone(),
                 Some(state.copilot.clone()),
                 state.client.clone(),
@@ -326,12 +396,29 @@ pub(super) async fn forward_stream_chat(
             Ok(bytes)
         })
         .await?;
+    if let Some(corrected) = corrected_output_limit_request(
+        status,
+        &bytes,
+        &override_model_in_body(&body, &selected.deployment),
+    ) {
+        return proxy::forward_stream_parsed(
+            state.auth.clone(),
+            Some(state.copilot.clone()),
+            state.client.clone(),
+            selected.clone(),
+            "chat/completions",
+            headers,
+            corrected,
+        )
+        .await
+        .map(|(status, headers, stream)| (status, headers, stream, selected));
+    }
     if is_model_unavailable_error(status, &bytes)
         && !fallback.deployment.is_empty()
         && model_capability_key(&selected) != model_capability_key(&fallback)
     {
         remember_unavailable(state, &selected);
-        return proxy::forward_stream(
+        return proxy::forward_stream_parsed(
             state.auth.clone(),
             Some(state.copilot.clone()),
             state.client.clone(),
@@ -369,7 +456,34 @@ pub(super) mod tests {
         matchers::{body_partial_json, header, path},
     };
 
-    pub(in crate::routes) fn test_state(config: crate::config::Config) -> AppState {
+    #[test]
+    fn generated_model_override_preserves_extensions_above_ingress_limit() {
+        let mut expected = json!({
+            "model": "requested", "extension": "x".repeat(2 * 1024 * 1024),
+        });
+        let body = serde_json::to_vec(&expected).unwrap();
+        assert!(body.len() > 2 * 1024 * 1024);
+        let rewritten =
+            override_model_in_body(&RequestBody::from_value(expected.clone()), "fallback");
+        expected["model"] = json!("fallback");
+        assert_eq!(
+            rewritten.to_bytes().unwrap().as_ref(),
+            serde_json::to_vec(&expected).unwrap()
+        );
+        let mut invalid = body;
+        invalid.extend_from_slice(b" trailing");
+        assert_eq!(
+            override_model_in_body(
+                &RequestBody::from_bytes(Bytes::copy_from_slice(&invalid)),
+                "fallback"
+            )
+            .to_bytes()
+            .unwrap()
+            .as_ref(),
+            invalid
+        );
+    }
+    pub(crate) fn test_state(config: crate::config::Config) -> AppState {
         let policy_status = Arc::new(crate::policy_status::PolicyStatusRegistry::new());
         let governance = Arc::new(crate::governance::Governance::new_with_status(
             "test",
@@ -403,6 +517,7 @@ pub(super) mod tests {
             policy_status,
             inference_policy: crate::inference_policy_loader::empty_handle(),
             memory_binding: crate::memory_binding_loader::empty_handle(),
+            memory_updates: Default::default(),
             egress_allowlist: crate::egress_allowlist_loader::empty_handle(),
             deployment_health: Arc::new(crate::deployment_health::DeploymentHealthRegistry::new()),
         }
@@ -561,6 +676,29 @@ pub(super) mod tests {
         assert!(!is_responses_only_error(
             br#"{"error":{"message":"unsupported tool argument"}}"#
         ));
+    }
+
+    #[test]
+    fn foundry_request_incompatibility_is_not_model_unavailability() {
+        for model in ["gpt-6.1-sol", "model gpt-6.1-sol"] {
+            let message = format!(
+                "Function tools with reasoning_effort are not supported for {model} in /v1/chat/completions. Use /v1/responses or reasoning_effort='none'."
+            );
+            for code in [serde_json::Value::Null, json!("unsupported_parameter")] {
+                let body =
+                    serde_json::to_vec(&json!({"error":{"code":code,"message":message}})).unwrap();
+                assert!(is_responses_only_error(&body));
+                assert!(!is_model_unavailable_error(StatusCode::BAD_REQUEST, &body));
+            }
+        }
+        for message in [
+            "Function tools are not supported in /v1/chat/completions.",
+            "Invalid tool arguments; use /v1/responses.",
+            "Model not found; use another deployment.",
+        ] {
+            let body = serde_json::to_vec(&json!({"error":{"message":message}})).unwrap();
+            assert!(!is_responses_only_error(&body));
+        }
     }
 
     #[test]

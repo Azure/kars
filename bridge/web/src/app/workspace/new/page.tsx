@@ -5,6 +5,7 @@
 
 import { IntakeFlow } from "./intake-flow";
 import { getOptions, getEfficiency } from "@/lib/bff";
+import { hasRole } from "@/lib/session";
 import type { Options, Efficiency } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -28,6 +29,7 @@ export default async function NewMissionPage({
   searchParams: Promise<{ intent?: string }>;
 }) {
   const { intent } = await searchParams;
+  const canQualify = await hasRole("operator");
   // The composable palette — real models/runtimes/policies/services/memory read
   // from the live cluster. Never fabricated; an unreachable BFF yields the empty
   // palette and the package degrades to the controller defaults honestly.
@@ -59,7 +61,7 @@ export default async function NewMissionPage({
           you to review and adjust before anything starts.
         </p>
       </div>
-      <IntakeFlow options={options} efficiency={efficiency} initialObjective={intent} />
+      <IntakeFlow options={options} efficiency={efficiency} initialObjective={intent} canQualify={canQualify && options.per_run_qualification_available === true} />
     </div>
   );
 }

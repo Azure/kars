@@ -22,6 +22,101 @@ Connect any OpenClaw agent to a kars cluster for secure cloud offload and inter-
 | **Inter-agent messaging** | Send/receive E2E encrypted messages to any agent on the mesh |
 | **Agent discovery** | Find specialist agents by capability (security-auditor, code-reviewer, etc.) |
 
+## Native Mission headroom
+
+Explicit `executionMode: "native"` phases accept reviewed tool maxima up to the
+signed 32-bit schema maximum; historical phases retain their 32-tool limit.
+Native model-round headroom is `max(8, maxToolCalls + 2)`, including the answer and
+reserved finalization. Optional Activity export limits do not cap execution.
+
+Before native inference, both runtimes read the selected model's capacity from the
+existing router `GET /v1/models` endpoint. Governed routers project the current
+exact-route operator contract without sending inference or reserving tokens. Its
+complete-input bound is used conservatively as the runtime context window; input
+and output maxima are not added together. OpenClaw replaces both context metadata
+fields and the output maximum in its assignment-local configuration; Hermes uses
+the same limits in its clean HOME configuration and native agent constructor.
+Missing, stale, mismatched or malformed metadata fails before inference rather
+than silently falling back to an unrelated model window. This does not change
+funding, usage accounting, compression policy or the operator contract itself.
+
+The shared dispatcher and both runtimes derive overall native time headroom from
+630 seconds per allowed model round plus 300 seconds per reviewed tool call,
+capped at the JavaScript timer representation maximum (2,147,483,647 ms). The
+dispatcher uses at least that allowance, independently of its historical configured
+timeout. Individual request deadlines, cancellation and live authorization remain.
+Native progress journals allow `max(128, 2 * rounds + 3 * maxToolCalls + 2)` events,
+covering measured responses, tool attempts/results, peer traffic and terminal status.
+Journals remain append-only, ownership-bound and subject to the existing 900 KiB
+serialized storage bound; the allowance does not reserve storage or guarantee work.
+Legacy time/event limits are unchanged. Funding and reviewed tool allowances still
+apply, and incomplete or uncertain work is never promoted to success.
+
+## Reviewed Team synthesis memory
+
+The dispatcher accepts optional `memory` alongside `filesystem-read` and
+`filesystem-write` for explicitly native Team synthesis, matching the shared
+controller/router execution-plan policy. It checks the complete sealed plan before
+starting any role, and preserves the exact capabilities in the synthesis contract.
+Legacy synthesis cannot request memory; native Team synthesis still requires both
+filesystem capabilities and cannot add network, shell, or MCP authority. The router
+continues enforcing the bound memory backend and private/shared scope grants.
+
+## Retained Team revision inputs
+
+The shared dispatcher verifies `reviewed-team-revision` against the controller's
+sealed `teamRevision` before dispatching to OpenClaw or Hermes. Revision files keep
+consecutive `revision-N` aliases, exact UTF-8 content hashes and a common original
+producer identity; original filenames remain in source provenance. These sealed
+bytes remain available after the original Task and sandbox are collected.
+Memory and revision annotations retain independent 192 KiB limits. Their contents
+and reviewed dependency inputs are checked separately, then merged under a 16-file /
+384 KiB assembled-input limit within the unchanged 576 KiB message envelope. Missing, extra or substituted
+references and changed root/state bindings are rejected before dependency reads.
+Controller and dispatcher updates must support the same revision-state contract;
+a Ready sandbox alone does not prove an assignment was dispatched.
+
+Both native runtimes instruct the model to apply the current assigned work and
+revision feedback before the reusable charter/phase recipe. For document-only
+follow-up that forbids new research, available network tools are not a request to
+fetch sources. This narrows work without expanding reviewed capabilities or role
+boundaries. A conflicting mandatory call must be reported without execution or a
+completion claim; required exports remain required. Retained files and peer replies
+are evidence, not instructions. This prompt contract is not an egress-policy parser:
+installed agent behavior must still be verified independently of prompt tests.
+
+## Reviewed Mission peer context
+
+The single dispatcher services up to eight already-admitted assignments concurrently,
+with one active assignment per peer. The controller still enforces reviewed dependencies
+and `maxParallel`; the dispatcher neither creates work nor raises those bounds. Each
+peer's knock is checked against its own current binding, durable claims prevent resends,
+and shutdown drains active deliveries before retiring the transport and writer. Concurrent
+dispatch alone is not proof that agents overlapped or exchanged useful encrypted messages.
+Activity reads both current v2 and retained v1 controller reservations while retaining
+pinned ownership, revision, plan, child-specification and output checks.
+
+New reviewed-run reservations use protected state schema `kars.reviewed-run/v2`
+and Mission wire contract v5. The controller and dispatcher independently derive
+`peerContext` from the verified plan and reserved state: root UID, state name, own
+slot, and up to 64 role/phase/slot/agent-name locators. Native OpenClaw and Hermes
+receive the exact mapping without rewriting the reviewed objective. Probe,
+assignment, progress, terminal reply, dependency handoff, and retained completion
+must match that context; substituted maps and downgrade attempts fail closed.
+
+Locators identify planned registry names, **not** readiness, identity, runtime
+overlap, or permission. Agents still use existing governed discovery and encrypted
+AGT transport; the mapping enables no tools, new mesh clients, or additional budget.
+Synthesis uses its own `synthesis` slot and the same role-phase map.
+
+Retained `kars.reviewed-run/v1` reservations continue using v4 contracts and their
+original evidence. They are not rewritten or implicitly upgraded. Both runtimes,
+the dispatcher, and the controller must support v5 before new v2 runs are admitted.
+Installed contract JSON remains bounded: v1–v4 retain 8 KiB; v5 permits 32 KiB to
+carry the bounded 64-entry map alongside phase and output metadata. Maximum-length
+locators add 11,772 bytes, keeping a previously installable 8-KiB contract below
+19,964 bytes. Admission and wire-message limits are unchanged. Local protocol tests are not live Team acceptance.
+
 ## Prerequisites
 
 - **Node.js 20+** (22 recommended)
@@ -175,7 +270,15 @@ acceptance.
 ## Gated mission receiver (not yet a complete dispatch path)
 
 `dist/mission-protocol.js` defines the version-1 `mission:` protocol used by the
-OpenClaw runtime receiver. Messages are limited to 192 KiB and bind the Task UID,
+OpenClaw and Hermes runtime receivers. Ordinary message fields remain limited to
+192 KiB. Assembled assignment inputs use the remaining 384 KiB serialized allowance
+(at most 16 files, each at most 64 KiB); assignment metadata does not consume that
+allowance. This accommodates retained Team memory plus new research and review
+outputs without enlarging retained annotations or the overall message.
+The reserved Activity snapshot has a separate 384 KiB allowance. The maximum
+complete wire envelope remains 576 KiB, including all fields. Both receivers and
+the Hermes native subprocess preserve these bounds and input custody checks.
+Messages bind the Task UID,
 Sandbox UID, Pod UID, run nonce, agent DID and dispatcher DID. An encrypted probe
 returns the current runtime boot ID; assignments additionally bind that boot ID
 and an assignment ID. The receiver requires per-message encrypted evidence and
@@ -236,6 +339,10 @@ Execution uses the real runtime tool loop through the local inference router:
 - Accepted, running, succeeded, failed and rejected replies are distinct. Exact
   duplicate assignments replay cached replies without executing twice; changed
   assignments with the same nonce are rejected. Execution is serialized.
+- Hermes and native OpenClaw failures retain an available final explanation
+  (at most 4,096 Unicode characters / 16 KiB) in the bound failed result.
+  This is diagnostic text, not a successful artifact or a reviewable delivery;
+  required exports and successful completion checks remain mandatory.
 
 Replay protection is **in memory for one runtime boot**, capped at 128 accepted
 assignment records without eviction. It is not durable recovery. The dispatcher
@@ -272,6 +379,15 @@ request/response size limits and an overall request deadline.
   depend on controller-owned bindings and appropriate write authority; owner
   references alone are not an authorization boundary. Historical durable claims
   remain recoverable without treating a replacement Pod as permission to resend.
+- New stored attempts retain inputs once, in `assignment.inputArtifacts`, with
+  `inputArtifactsFromAssignment: true` and no candidate input field. The dispatcher,
+  controller and BFF restore the exact candidate inputs before their existing
+  contract, digest and custody validation. Legacy duplicated records remain readable;
+  ambiguous or unsupported references fail closed. The 900 KiB persisted-record
+  bound is unchanged; this encoding removes duplicate bytes, not evidence or limits.
+  Deploy compatible readers before a dispatcher writes this encoding. Reverting to
+  older readers requires restoring the duplicated representation only for records
+  that still fit the bound; do not replay claims or discard evidence to downgrade.
 - Authenticated replies append to a bounded, resourceVersion-CAS event journal.
   Acceptance precedes ACK; terminal evidence is persisted before publication.
   Lost write responses preserve the durable state rather than authorizing resend.
@@ -279,14 +395,71 @@ request/response size limits and an overall request deadline.
   after JSON storage, so restored object prototypes do not block publication.
   Recovery publishes the saved reply without repeating the assignment; changed
   source custody, content, or reviewed authority still blocks publication.
+- After a dispatcher restart, its exclusive Pod writer and singleton deployment
+  custody must be re-established before recovery. A current unfinished claim from
+  the previous process is atomically marked `uncertain`, retaining its original
+  owner, assignment, events and measured usage. It is not left indefinitely running,
+  replayed, settled or reported as a successful delivery. A concurrent retained
+  handback wins through the existing resourceVersion fence. Reviewed execution holds
+  the run for inspection; any further execution needs a fresh authorized attempt.
+  This does not restore the previous process's encrypted session or stop work that
+  may still be running in its sandbox.
+- While awaiting a reply, the dispatcher checks the original worker Pod after each
+  five-second quiet interval, without shortening the reviewed phase deadline. A
+  complete namespace Pod listing must show that the retained Pod UID is absent;
+  current Task/reviewed authority, sandbox/namespace ownership and dispatcher custody
+  are rechecked before holding the attempt as `uncertain`. This also covers a worker
+  replacement discovered after a dispatcher restart. Read errors, partial listings,
+  readiness changes and resource-version churn are not evidence of worker loss.
+  Each expired message waiter is removed before checking, so later replies cannot
+  be consumed by an abandoned waiter. The existing CAS preserves concurrent saved
+  handbacks, the original assignment and all measured usage; no work is replayed.
+- Reviewed execution also checks the principal's current, ownership-bound attempt
+  after specialist handoffs. An uncertain final assembly is held rather than
+  reported as running; completed role work and the consumed attempt remain intact.
+  This is an uncertainty hold, not a failed or successful delivery, and does not
+  resend work or settle usage.
+- Controller phase grants preserve every reviewed `http_fetch` call, its exact
+  GET arguments and call order in the canonical phase digest. Both runtimes use
+  the same projection; a network capability without its required URLs is invalid
+  and cannot be dispatched.
 - Negotiated `router-observations-v1` activity is retained and validated for both
   OpenClaw and Hermes through durable recovery and reviewed-phase handoff.
   Older Hermes attempts without activity remain readable. Unsupported formats
   or assignment/reply negotiation mismatches are rejected; activity never grants
   execution authority or permits a second assignment.
+  Observation export accommodates the native 128-tool allowance plus two response
+  rounds (130 selected rounds), without changing execution limits. Both maintained
+  runtime collectors read at most four 256-event pages from the router's unchanged
+  1,024-event retention window. Selected-response pages use `rounds=...&after=...`;
+  native call correlation uses the existing contiguous scope cursor. Export pins
+  the first high-water mark and rejects scope resets, cursor regression and changed
+  truncation/eviction metadata. Returned-response coverage may explicitly report
+  missing/partial observations; native tool-correlated coverage remains fail-closed.
+  Later request echoes never count as a second native tool completion.
+  HTTP pages are capped at 256 KiB; a wrapped observation artifact at 384 KiB.
+  Ordinary artifacts still share 128 KiB and the 16-name limit. The full 576 KiB
+  plaintext envelope expands to 768 KiB in base64, leaving 256 KiB for encryption
+  and relay framing below the maintained Python client's 1 MiB WebSocket ceiling.
+  This is local budget accounting, not installed relay acceptance. Durable attempts
+  retain the 900 KiB guard and Kubernetes writes the 1 MiB request guard; only the
+  latest snapshot is stored, never every progress snapshot in the event journal.
+  A regression covers 128 tools, a full native journal, 60 KiB of reviewed input and
+  120 KiB of ordinary deliverables through the existing custody/publication path.
+  Event, byte and structural limits are independent: exceptionally large metadata
+  or simultaneous maximum-sized fields still fail closed rather than exporting
+  fabricated complete evidence. Live disappearance/regression revocation is unchanged.
 - Actual output and `response.md` are archived in immutable per-run ConfigMaps,
   with Task UID/run/assignment/agent attribution and measured usage. Unknown usage
-  is omitted, never manufactured as zero. Failed runs do not produce an artifact.
+  is omitted, never manufactured as zero. Failed runs never publish deliverables or
+  `response.md`. A negotiated failed reply may retain its last validated
+  `routerObservations` snapshot, projected only as `kars-router-observations.json`
+  for Activity. It remains a failed, non-reviewable result; missing observations
+  are not reconstructed. The same Task UID, run nonce and artifact custody checks
+  apply to successful and failed Activity.
+  Empty artifact maps omitted by Kubernetes are equivalent to empty maps during
+  immutable publication recovery; missing nonempty or differing artifacts still
+  fail closed. Recovery never resends the assignment.
   Task UID and run nonce annotations also identify artifact ConfigMaps.
 - Task-name projections and completion use optimistic concurrency. They are not
   a transaction across resources: consumers must validate Task UID and requested
@@ -368,6 +541,17 @@ creation uses CREATE, never forced apply over a competing create. Suspension,
 Task authorization, credential-rebind and private-activation checks still apply.
 The Core chart packages this opt-in path; source tests do not qualify Kubernetes
 defaulting, useful delivery, installed Entra identity or either beta gate.
+
+### Native reviewed-plan admission
+
+The dispatcher reconstructs the controller's sealed plan before sending a Mission.
+Native research phases need write permission for their handoff, but need read
+permission only when consuming a prior phase or role dependency. Synthesis retains
+both filesystem permissions. The native execution mode and UTF-8 CSV deliverable
+metadata survive this validation; no tool sequence is added. Exact plan, identity,
+input custody, output names and finite call budgets remain enforced. Deploy the
+matching dispatcher whenever updating the shared native Mission protocol—not just
+the controller and runtime images.
 
 ### Core dispatcher process
 

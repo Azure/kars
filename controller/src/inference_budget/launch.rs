@@ -32,7 +32,7 @@ pub fn capacity(ledger: &Ledger, task_uid: &str) -> Result<(), BudgetError> {
                 .filter(|limit| *limit > 0)
                 .is_some_and(|limit| used.usd_micros >= limit))
     };
-    if exhausted(ledger.limits, &ledger.meters)? {
+    if exhausted(ledger.effective_limits()?, &ledger.meters)? {
         return Err(BudgetError::Exhausted);
     }
     for uid in ledger.ancestors(task_uid)? {
@@ -40,7 +40,7 @@ pub fn capacity(ledger: &Ledger, task_uid: &str) -> Result<(), BudgetError> {
         if !node.active {
             return Err(BudgetError::Closed);
         }
-        if exhausted(node.authority.limits, &node.meters)? {
+        if exhausted(ledger.effective_node_limits(&uid)?, &node.meters)? {
             return Err(BudgetError::Exhausted);
         }
     }
@@ -59,6 +59,7 @@ pub async fn admit_new(client: &Client, task: &KarsTask) -> Result<(), StoreErro
         return Ok(());
     };
     let account = Store::new(client.clone(), &binding.account.namespace)
+        .for_task(&binding.task_uid)
         .read(&binding.root, &binding.account.uid)
         .await?;
     let ledger = account
@@ -67,6 +68,10 @@ pub async fn admit_new(client: &Client, task: &KarsTask) -> Result<(), StoreErro
         .and_then(|status| status.ledger.as_ref())
         .ok_or(StoreError::Missing)?;
     capacity(ledger, &binding.task_uid)?;
+    if !ledger.token_top_ups.is_empty() {
+        let settings = super::config::Settings::from_env()?.ok_or(BudgetError::Contract)?;
+        super::topups::authorize_read(client, &settings, ledger).await?;
+    }
     Ok(())
 }
 

@@ -29,3 +29,50 @@ Licensed under the MIT License. */}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
+
+{{- define "kars.inferenceBudget.catalogData" -}}
+{{- $encoded := .desired | toJson -}}
+{{- if .current -}}
+{{- $annotations := .current.metadata.annotations | default dict -}}
+{{- $labels := .current.metadata.labels | default dict -}}
+{{- if or .current.metadata.deletionTimestamp
+    (ne (get $annotations "meta.helm.sh/release-name") .release)
+    (ne (get $annotations "meta.helm.sh/release-namespace") .namespace)
+    (ne (get $labels "app.kubernetes.io/managed-by") "Helm")
+    (ne (get $annotations "kars.azure.com/inference-budget-contracts") "v1") -}}
+{{- fail "Cannot reuse an inference budget catalog outside this release's ownership" -}}
+{{- end -}}
+{{- $stored := index (.current.data | default dict) "contracts.json" | default "" -}}
+{{- if $stored -}}
+{{- if eq ($stored | mustFromJson | toJson) $encoded -}}
+{{- $encoded = $stored -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $encoded -}}
+{{- end -}}
+
+{{- define "kars.inferenceBudget.tlsChecksum" -}}
+{{- $checksum := dict "certificate" .identity.certificate "privateKey" .identity.privateKey | toJson | sha256sum -}}
+{{- $data := (.existing | default dict).data | default dict -}}
+{{- if and (eq (get $data "tls.crt") (.identity.certificate | b64enc))
+    (eq (get $data "tls.key") (.identity.privateKey | b64enc)) .controller -}}
+{{- range $object := list .existing .controller -}}
+{{- $annotations := $object.metadata.annotations | default dict -}}
+{{- if or (not $object.metadata.uid) $object.metadata.deletionTimestamp
+    (ne (get $annotations "meta.helm.sh/release-name") $.release)
+    (ne (get $annotations "meta.helm.sh/release-namespace") $.namespace)
+    (ne (get ($object.metadata.labels | default dict) "app.kubernetes.io/managed-by") "Helm") -}}
+{{- fail "Cannot retain the budget TLS checksum outside this release's live ownership" -}}
+{{- end -}}
+{{- end -}}
+{{- $retained := dig "spec" "template" "metadata" "annotations" "checksum/inference-budget-tls" "" .controller -}}
+{{- if $retained -}}
+{{- if not (regexMatch "^[a-f0-9]{64}$" $retained) -}}
+{{- fail "The retained budget TLS checksum is invalid" -}}
+{{- end -}}
+{{- $checksum = $retained -}}
+{{- end -}}
+{{- end -}}
+{{- $checksum -}}
+{{- end -}}

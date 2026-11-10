@@ -8,7 +8,7 @@
 // header carries the substrate scope (namespace + environment) and the switch
 // back to the Workspace.
 
-import Link from "next/link";
+import Link from "@/components/navigation-link";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { ConsoleNav } from "@/components/console-nav";

@@ -9,7 +9,7 @@ use k8s_openapi::api::{
 };
 use std::net::{IpAddr, SocketAddr};
 
-fn observer_endpoint(server_name: &str) -> Result<reqwest::Url, &'static str> {
+pub(crate) fn observer_endpoint(server_name: &str) -> Result<reqwest::Url, &'static str> {
     if !server_name.starts_with("observer-")
         || !server_name.ends_with(".kars.internal")
         || server_name.len() > 253
@@ -42,7 +42,8 @@ pub(super) async fn expiry(
         namespace,
         governed_services::credentials::OBSERVER,
     )
-    .await?
+    .await
+    .map_err(|error| error.to_string())?
         && let Ok(mut old) = serde_json::from_value::<Binding>(raw)
     {
         let expiry = old.expires_at;
@@ -137,38 +138,7 @@ pub(super) async fn probe(
             return Ok(false);
         }
         diagnostic.stage("consumer_lineage");
-        let owner = pod
-            .metadata
-            .owner_references
-            .as_ref()
-            .and_then(|owners| {
-                owners.iter().find(|owner| {
-                    owner.kind == "ReplicaSet"
-                        && owner.api_version == "apps/v1"
-                        && owner.controller == Some(true)
-                })
-            })
-            .ok_or("Observation consumer lineage missing")?;
-        let set = Api::<ReplicaSet>::namespaced(client.clone(), &runtime)
-            .get(&owner.name)
-            .await
-            .map_err(|error| {
-                diagnostic.api(&error);
-                api_error("Read observation consumer lineage", error)
-            })?;
-        if set.uid().as_deref() != Some(owner.uid.as_str())
-            || set.metadata.deletion_timestamp.is_some()
-            || set.metadata.owner_references.as_ref().is_none_or(|owners| {
-                !owners.iter().any(|owner| {
-                    owner.kind == "Deployment"
-                        && owner.api_version == "apps/v1"
-                        && owner.controller == Some(true)
-                        && Some(&owner.uid) == deployment.metadata.uid.as_ref()
-                })
-            })
-        {
-            return Err("Observation consumer lineage changed".into());
-        }
+        verify_consumer_lineage(client, &runtime, deployment, &pod).await?;
         diagnostic.stage("consumer_address");
         let Some(ip) = pod
             .status
@@ -180,21 +150,7 @@ pub(super) async fn probe(
         };
         diagnostic.stage("observer_tls_client");
         let endpoint = observer_endpoint(&binding.server_name)?;
-        let ca = reqwest::Certificate::from_pem(binding.ca_pem.as_bytes())
-            .map_err(|_| "Observation CA invalid")?;
-        let http = reqwest::Client::builder()
-            .no_proxy()
-            .https_only(true)
-            .tls_built_in_root_certs(false)
-            .add_root_certificate(ca)
-            .resolve(
-                &binding.server_name,
-                SocketAddr::new(ip, crate::service_observer::PORT),
-            )
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(std::time::Duration::from_secs(12))
-            .build()
-            .map_err(|_| "Observation probe TLS unavailable")?;
+        let http = pinned_client(binding, ip)?;
         diagnostic.stage("observer_transport");
         let response = match http.get(endpoint).bearer_auth(token).send().await {
             Ok(response) => response,
@@ -230,14 +186,81 @@ pub(super) async fn probe(
     Ok(seen)
 }
 
-async fn read_body(mut response: reqwest::Response) -> Result<serde_json::Value, &'static str> {
+pub(crate) async fn verify_consumer_lineage(
+    client: &Client,
+    runtime: &str,
+    deployment: &Deployment,
+    pod: &Pod,
+) -> Result<(), String> {
+    let owner = pod
+        .metadata
+        .owner_references
+        .as_ref()
+        .and_then(|owners| {
+            owners.iter().find(|owner| {
+                owner.kind == "ReplicaSet"
+                    && owner.api_version == "apps/v1"
+                    && owner.controller == Some(true)
+            })
+        })
+        .ok_or("Observation consumer lineage missing")?;
+    let set = Api::<ReplicaSet>::namespaced(client.clone(), runtime)
+        .get(&owner.name)
+        .await
+        .map_err(|error| api_error("Read observation consumer lineage", error))?;
+    if set.uid().as_deref() != Some(owner.uid.as_str())
+        || set.metadata.deletion_timestamp.is_some()
+        || set.metadata.owner_references.as_ref().is_none_or(|owners| {
+            !owners.iter().any(|owner| {
+                owner.kind == "Deployment"
+                    && owner.api_version == "apps/v1"
+                    && owner.controller == Some(true)
+                    && Some(&owner.uid) == deployment.metadata.uid.as_ref()
+            })
+        })
+    {
+        return Err("Observation consumer lineage changed".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn pinned_client(
+    binding: &Binding,
+    ip: IpAddr,
+) -> Result<reqwest::Client, &'static str> {
+    observer_endpoint(&binding.server_name)?;
+    let ca = reqwest::Certificate::from_pem(binding.ca_pem.as_bytes())
+        .map_err(|_| "Observation CA invalid")?;
+    reqwest::Client::builder()
+        .no_proxy()
+        .https_only(true)
+        .tls_built_in_root_certs(false)
+        .add_root_certificate(ca)
+        .resolve(
+            &binding.server_name,
+            SocketAddr::new(ip, crate::service_observer::PORT),
+        )
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(12))
+        .build()
+        .map_err(|_| "Observation probe TLS unavailable")
+}
+
+async fn read_body(response: reqwest::Response) -> Result<serde_json::Value, &'static str> {
+    read_bounded_body(response, crate::observation_privacy::MAX_BODY).await
+}
+
+pub(crate) async fn read_bounded_body(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> Result<serde_json::Value, &'static str> {
     let mut body = Vec::new();
     while let Some(chunk) = response
         .chunk()
         .await
         .map_err(|_| "Observation probe body transport failed")?
     {
-        if body.len().saturating_add(chunk.len()) > crate::observation_privacy::MAX_BODY {
+        if body.len().saturating_add(chunk.len()) > limit {
             return Err("Observation probe body exceeds its limit");
         }
         body.extend_from_slice(&chunk);

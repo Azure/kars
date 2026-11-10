@@ -1,6 +1,32 @@
 {{/* Copyright (c) Microsoft Corporation.
 Licensed under the MIT License. */}}{{- $rpc := .Values.observationPrivacyRpc | default dict }}
 {{- if ($rpc.enabled | default false) }}
+{{- $revision := "unavailable" }}
+{{- if .Release.IsUpgrade }}
+{{- $service := lookup "v1" "Service" .Release.Namespace "kars-observation-privacy" }}
+{{- if $service }}
+{{- $annotations := $service.metadata.annotations | default dict }}
+{{- $labels := $service.metadata.labels | default dict }}
+{{- $selector := $service.spec.selector | default dict }}
+{{- $published := index $selector "kars.azure.com/observation-privacy-revision" | default "" }}
+{{- $ports := list (dict "name" "privacy-rpc" "port" 9448 "targetPort" 9448 "protocol" "TCP") }}
+{{- if or (not $service.metadata.uid) $service.metadata.deletionTimestamp
+    (ne (index $annotations "meta.helm.sh/release-name") .Release.Name)
+    (ne (index $annotations "meta.helm.sh/release-namespace") .Release.Namespace)
+    (ne (index $labels "app.kubernetes.io/managed-by") "Helm")
+    (ne $service.spec.type "ClusterIP")
+    ($service.spec.externalName | default "")
+    (gt (len ($service.spec.externalIPs | default list)) 0)
+    (ne (toJson $service.spec.ports) (toJson $ports))
+    (ne (len $selector) 3)
+    (ne (index $selector "app.kubernetes.io/name") "kars")
+    (ne (index $selector "app.kubernetes.io/component") "controller")
+    (not (or (eq $published "unavailable") (regexMatch "^[a-f0-9]{32}$" $published))) }}
+{{- fail "Privacy verifier Service ownership or fixed endpoint changed; preserve it for explicit operator review" }}
+{{- end }}
+{{- $revision = $published }}
+{{- end }}
+{{- end }}
 apiVersion: v1
 kind: Service
 metadata:
@@ -14,8 +40,8 @@ spec:
   selector:
     app.kubernetes.io/name: kars
     app.kubernetes.io/component: controller
-    # Only the running TLS verifier advertises its actual certificate revision.
-    kars.azure.com/observation-privacy-revision: unavailable
+    # Bootstrap closed; upgrades retain the running controller's publication.
+    kars.azure.com/observation-privacy-revision: {{ $revision | quote }}
   ports:
     - name: privacy-rpc
       port: 9448

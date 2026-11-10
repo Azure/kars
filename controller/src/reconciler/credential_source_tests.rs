@@ -519,8 +519,7 @@ fn chart_schema_and_generated_reference_contract_agree() {
         .split_once("                runtime:\n")
         .unwrap()
         .0;
-    let chart: serde_yaml::Value = serde_yaml::from_str(contract).unwrap();
-    let chart = serde_json::to_value(chart).unwrap();
+    let chart: serde_json::Value = serde_saphyr::from_str(contract).unwrap();
     let generated = serde_json::to_value(KarsSandbox::crd()).unwrap();
     let path = "/spec/versions/0/schema/openAPIV3Schema/properties/spec/properties/credentialsRef";
     for key in ["name", "uid"] {
@@ -690,6 +689,49 @@ async fn opaque_type_and_explicit_runtime_env_conflicts_fail_closed_before_proje
 }
 
 #[test]
+fn reviewed_instruction_transport_rejects_nul_and_checks_utf8_bytes_without_truncation() {
+    use super::super::agent_env::{MAX_INSTRUCTION_BYTES, validate_instructions};
+
+    assert_eq!(validate_instructions(None), Ok(()));
+    assert_eq!(validate_instructions(Some("")), Ok(()));
+    assert!(validate_instructions(Some("before\0after")).is_err());
+    let exact = "x".repeat(MAX_INSTRUCTION_BYTES);
+    assert_eq!(validate_instructions(Some(&exact)), Ok(()));
+    assert!(validate_instructions(Some(&(exact + "x"))).is_err());
+    let mut unicode = "é".repeat(MAX_INSTRUCTION_BYTES / 2);
+    unicode.push_str(&"x".repeat(MAX_INSTRUCTION_BYTES % 2));
+    assert_eq!(unicode.len(), MAX_INSTRUCTION_BYTES);
+    assert_eq!(validate_instructions(Some(&unicode)), Ok(()));
+    unicode.push('é');
+    assert!(validate_instructions(Some(&unicode)).is_err());
+}
+
+#[test]
+fn reviewed_instructions_reach_both_runtime_environments_without_extra_env_overrides() {
+    for (kind, field) in [("OpenClaw", "openclaw"), ("Hermes", "hermes")] {
+        let runtime = serde_json::from_value(json!({"kind": kind, field: {}})).unwrap();
+        let mut plan = super::super::runtime::build_runtime_plan(&runtime, "agent:latest").unwrap();
+        plan.runtime_extra_env
+            .insert("KARS_AGENT_INSTRUCTIONS".into(), "unreviewed".into());
+        plan.raw_env
+            .push(json!({"name": "KARS_AGENT_INSTRUCTIONS", "value": "unreviewed"}));
+        for instructions in [
+            None,
+            Some(""),
+            Some("Verified facts: café\nUse file_read; preserve quoted \"facts\"."),
+        ] {
+            let mut env = Vec::new();
+            super::super::agent_env::merge(&mut env, &plan, instructions);
+            let expected: Vec<_> = instructions
+                .into_iter()
+                .map(|value| json!({"name": "KARS_AGENT_INSTRUCTIONS", "value": value}))
+                .collect();
+            assert_eq!(env, expected, "{kind}");
+        }
+    }
+}
+
+#[test]
 fn extracted_environment_merge_retains_existing_reserved_prefix_and_precedence_rules() {
     let runtime = serde_json::from_value(json!({
         "kind": "OpenClaw", "openclaw": {"extraEnv": {
@@ -705,7 +747,7 @@ fn extracted_environment_merge_retains_existing_reserved_prefix_and_precedence_r
         json!({"name": "FROM_SECRET", "valueFrom": {"secretKeyRef": {"name": "owned", "key": "key"}}}),
     ];
     let mut env = vec![json!({"name": "EXISTING", "value": "controller"})];
-    super::super::agent_env::merge(&mut env, &plan);
+    super::super::agent_env::merge(&mut env, &plan, None);
     assert_eq!(
         env,
         vec![

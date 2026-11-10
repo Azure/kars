@@ -37,6 +37,8 @@ COPY mesh-plugin/src/ ./mesh-plugin/src/
 COPY mesh-plugin/skills/ ./mesh-plugin/skills/
 COPY runtimes/openclaw/package.json runtimes/openclaw/package-lock.json runtimes/openclaw/tsconfig.json ./runtimes/openclaw/
 COPY runtimes/openclaw/src/ ./runtimes/openclaw/src/
+COPY runtimes/hermes/src/kars_runtime_hermes/plugin/native_github_pr.py ./runtimes/hermes/src/kars_runtime_hermes/plugin/native_github_pr.py
+COPY runtimes/hermes/src/kars_runtime_hermes/plugin/native_python.py ./runtimes/hermes/src/kars_runtime_hermes/plugin/native_python.py
 
 # Older callers may stage the canonical tarball; never replace the locked SDK.
 ARG MESH_PROVIDER=agt
@@ -67,6 +69,9 @@ COPY sandbox-images/openclaw/proxy-bootstrap.js /usr/local/lib/proxy-bootstrap.j
 
 # Copy inference router from pre-built image
 COPY --from=router-bin /usr/local/bin/kars-inference-router /usr/local/bin/kars-inference-router
+
+# A previously packaged base must not retain removed adapter files or dependencies.
+RUN rm -rf /opt/kars-plugin /mesh-plugin
 
 # Copy kars OpenClaw runtime adapter (built from source in cli-builder stage)
 COPY --from=cli-builder /build/runtimes/openclaw/dist/ /opt/kars-plugin/

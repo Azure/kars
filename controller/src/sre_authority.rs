@@ -4,6 +4,7 @@
 //! Registrar-authorized migration and private SRE Kubernetes identity.
 
 mod admission;
+pub(crate) mod api_egress;
 mod bindings;
 mod credential_guard;
 mod credentials;
@@ -12,6 +13,11 @@ mod migration;
 pub(crate) mod pod;
 #[cfg(test)]
 mod privacy_tests;
+#[cfg(test)]
+mod publication_tests;
+#[cfg(test)]
+mod report_tests;
+mod reports;
 #[cfg(test)]
 mod retirement_tests;
 #[cfg(test)]
@@ -77,13 +83,27 @@ fn registration_conditions(
     result
 }
 
+#[derive(Debug, thiserror::Error)]
+enum ReconcileError {
+    #[error("{0}")]
+    Authority(String),
+    #[error("{0}")]
+    Publication(String),
+}
+
+impl From<String> for ReconcileError {
+    fn from(detail: String) -> Self {
+        Self::Authority(detail)
+    }
+}
+
 async fn status(
     client: &Client,
     reg: &KarsSRERegistration,
     phase: &str,
     detail: Option<String>,
     service_account_uid: Option<String>,
-) -> Result<(), String> {
+) -> Result<(), ReconcileError> {
     let api: Api<KarsSRERegistration> = Api::all(client.clone());
     let status = RegistrationStatus {
         phase: phase.into(),
@@ -112,8 +132,10 @@ async fn status(
             .then(|| crate::sre_privacy::REVISION.into()),
         detail,
     };
-    let mut status_value =
-        serde_json::to_value(&status).map_err(|_| "SRE authority status serialization failed")?;
+    let mut status_value = serde_json::to_value(&status).map_err(|_| {
+        ReconcileError::Publication("SRE authority status serialization failed".into())
+    })?;
+    status_value["detail"] = serde_json::json!(status.detail);
     status_value["privacyEpoch"] = serde_json::json!(status.privacy_epoch);
     status_value["privacyRevision"] = serde_json::json!(status.privacy_revision);
     status_value["routerServiceAccountUid"] = serde_json::json!(status.router_service_account_uid);
@@ -126,14 +148,18 @@ async fn status(
         })),
     )
     .await
-    .map_err(|error| api_error("Publish SRE authority status", error))?;
+    .map_err(|error| {
+        ReconcileError::Publication(api_error("Publish SRE authority status", error))
+    })?;
     Ok(())
 }
 
 pub async fn reconcile(client: &Client, reg: &KarsSRERegistration) -> Result<(), String> {
     reg.validate()?;
     let result = reconcile_inner(client, reg).await;
-    if let Err(error) = &result {
+    // A failed status write must retry reconciliation, not retire valid identity.
+    // In particular, a resourceVersion conflict is not failed privacy evidence.
+    if let Err(ReconcileError::Authority(error)) = &result {
         let waiting = migration::is_waiting(error);
         let revocation = if waiting {
             Ok(())
@@ -145,6 +171,14 @@ pub async fn reconcile(client: &Client, reg: &KarsSRERegistration) -> Result<(),
             Err(revocation) => {
                 format!("{error}; owned private authority revocation failed: {revocation}")
             }
+        };
+        let detail = if !waiting {
+            match api_egress::retire(client, reg).await {
+                Ok(()) => detail,
+                Err(error) => format!("{detail}; owned API policy retirement failed: {error}"),
+            }
+        } else {
+            detail
         };
         let detail = if !waiting
             && reg
@@ -168,12 +202,13 @@ pub async fn reconcile(client: &Client, reg: &KarsSRERegistration) -> Result<(),
             Some(detail),
             None,
         )
-        .await?;
+        .await
+        .map_err(|error| error.to_string())?;
     }
-    result
+    result.map_err(|error| error.to_string())
 }
 
-async fn reconcile_inner(client: &Client, reg: &KarsSRERegistration) -> Result<(), String> {
+async fn reconcile_inner(client: &Client, reg: &KarsSRERegistration) -> Result<(), ReconcileError> {
     reg.validate()?;
     if !reg.spec.enabled
         && reg.status.as_ref().is_some_and(|status| {
@@ -183,16 +218,22 @@ async fn reconcile_inner(client: &Client, reg: &KarsSRERegistration) -> Result<(
         })
     {
         migration::stop_registered_consumer_for_retirement(client, reg).await?;
-        return check_secret_denial(client, &reg.spec.runtime_namespace.name).await;
+        api_egress::retire(client, reg).await?;
+        return check_secret_denial(client, &reg.spec.runtime_namespace.name)
+            .await
+            .map_err(Into::into);
     }
     if !reg.spec.enabled {
         migration::stop_registered_consumer_for_retirement(client, reg).await?;
         bindings::revoke_private(client, reg).await?;
+        api_egress::retire(client, reg).await?;
         credentials::retire(client, reg).await?;
         check_secret_denial(client, &reg.spec.runtime_namespace.name).await?;
         return status(client, reg, "Retired", None, None).await;
     }
     let authority = live::verify(client, reg).await?;
+    crate::inference_budget::first_install::verify_registration(client, reg, &authority.sandbox)
+        .await?;
     admission::verify(client).await?;
     credential_guard::scan(client, reg).await?;
     // Validate the full review set before retiring even the first grant.
@@ -221,14 +262,23 @@ async fn reconcile_inner(client: &Client, reg: &KarsSRERegistration) -> Result<(
     if refreshed.metadata.uid != reg.metadata.uid
         || refreshed.metadata.generation != reg.metadata.generation
     {
-        return Err("Registration changed while provisioning private identity".into());
+        return Err(ReconcileError::Authority(
+            "Registration changed while provisioning private identity".into(),
+        ));
     }
     let reg = &refreshed;
+    reports::ensure(client, reg).await?;
     bindings::grant_private(client, reg, &service_account).await?;
     // No private material is minted until the old principal is actually denied.
     check_secret_denial(client, &reg.spec.runtime_namespace.name).await?;
     credential_guard::scan(client, reg).await?;
-    live::verify(client, reg).await?;
+    let current_authority = live::verify(client, reg).await?;
+    crate::inference_budget::first_install::verify_registration(
+        client,
+        reg,
+        &current_authority.sandbox,
+    )
+    .await?;
     credentials::ensure(client, reg, &authority, &service_account).await?;
     migration::rotate_owned_control_credentials(client, reg).await?;
     status(client, reg, "Ready", None, service_account.uid()).await

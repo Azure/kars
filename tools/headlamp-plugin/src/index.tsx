@@ -52,6 +52,7 @@ import {
 } from "@mui/material";
 import * as React from "react";
 import { promQuery, usePromPoll } from "./prometheus";
+import { GrafanaDashboard } from "./grafana";
 
 const GROUP = "kars.azure.com";
 const VERSION = "v1alpha1";
@@ -312,11 +313,6 @@ function phaseChip(phase: string | undefined, reason?: string) {
   );
 }
 
-function chipForItem(item: KubeObject, phaseField: string) {
-  const phase = (getStatus(item) as any)[phaseField] as string | undefined;
-  return phaseChip(phase, readyReason(item));
-}
-
 function urlParams(re: RegExp): RegExpMatchArray | null {
   return window.location.pathname.match(re);
 }
@@ -441,7 +437,7 @@ function reasonChip(reason: string | undefined) {
   return <StatusLabel status={status as any}>{reason}</StatusLabel>;
 }
 
-function RouterPolicyStatusPanel({ crd, item }: { crd: CrdDescriptor; item: KubeObject }) {
+export function RouterPolicyStatusPanel({ crd, item }: { crd: CrdDescriptor; item: KubeObject }) {
   // Only the policy CRDs that the router actually loads carry these
   // fields. KarsSandbox, McpServer, etc. don't participate in the
   // digest-echo loop yet.
@@ -474,8 +470,12 @@ function RouterPolicyStatusPanel({ crd, item }: { crd: CrdDescriptor; item: Kube
       <SimpleTable
         data={[
           { k: "Compiled digest", v: shortDigest(compiled) },
-          { k: "Loaded digest", v: shortDigest(loaded) },
-          { k: "Echo", v: echo },
+          ...(crd.plural === "toolpolicies"
+            ? [{ k: "Controller report", v: ready?.message ?? "No confirmation reported" }]
+            : [
+              { k: "Loaded digest", v: shortDigest(loaded) },
+              { k: "Echo", v: echo },
+            ]),
           { k: "Confirmation", v: reasonChip(ready?.reason as string | undefined) },
         ]}
         columns={[
@@ -489,6 +489,7 @@ function RouterPolicyStatusPanel({ crd, item }: { crd: CrdDescriptor; item: Kube
         the exact compiled digest. While{" "}
         <code>AwaitingRouterEnforcement</code>, the policy is parsed but
         <strong> not</strong> live in the data plane.
+        {crd.plural === "toolpolicies" && " ToolPolicy status reports the controller's confirmation, not a separate loaded digest."}
       </p>
     </SectionBox>
   );
@@ -592,6 +593,20 @@ function channelsFromSecret(s: KubeObject | undefined): Set<string> {
   return found;
 }
 
+export function ChannelDiscovery({ error, loading, empty, children }: {
+  error: Error | null; loading: boolean; empty: boolean; children: React.ReactNode;
+}) {
+  return <>
+    {(error || loading) && <p role={error ? "alert" : "status"}>
+      {error
+        ? "Credential discovery unavailable. Channel configuration may not be visible with your Kubernetes permissions."
+        : "Loading channel credentials…"}
+      {!empty && " Showing channels from the available configuration only."}
+    </p>}
+    {(!(error || loading) || !empty) && children}
+  </>;
+}
+
 function computeMetrics(sandboxes: KubeObject[] | null, secrets: KubeObject[] | null): OverviewMetrics {
   const m: OverviewMetrics = {
     sandboxesByPhase: {},
@@ -651,7 +666,7 @@ function computeMetrics(sandboxes: KubeObject[] | null, secrets: KubeObject[] | 
 
 function Overview() {
   const [sandboxes] = (KarsSandboxClass as any).useList() as [KubeObject[] | null];
-  const [secrets] = (Secret as any).useList() as [KubeObject[] | null];
+  const [secrets, secretsError] = (Secret as any).useList() as [KubeObject[] | null, Error | null];
   const [inferencePolicies] = (CRD_CLASSES.inferencepolicies as any).useList() as [KubeObject[] | null];
   const [toolPolicies] = (CRD_CLASSES.toolpolicies as any).useList() as [KubeObject[] | null];
   const [memories] = (CRD_CLASSES.karsmemories as any).useList() as [KubeObject[] | null];
@@ -794,6 +809,7 @@ function Overview() {
           />
         </SectionBox>
         <SectionBox title="Channels in Use">
+          <ChannelDiscovery error={secretsError} loading={secrets == null} empty={channelRows.length === 0}>
           {channelRows.length === 0 ? (
             <p style={{ padding: "1rem" }}>No channels configured.</p>
           ) : (
@@ -805,6 +821,7 @@ function Overview() {
               ]}
             />
           )}
+          </ChannelDiscovery>
         </SectionBox>
       </div>
 
@@ -1274,7 +1291,7 @@ function SandboxExtras({ item }: { item: KubeObject }) {
   // there with name "<sandbox>-credentials". Channel state lives
   // there (TELEGRAM_BOT_TOKEN, etc.), not in spec.
   const podNs = `kars-${name}`;
-  const [credSecret] = (Secret as any).useGet(`${name}-credentials`, podNs) as [
+  const [credSecret, credentialsError] = (Secret as any).useGet(`${name}-credentials`, podNs) as [
     KubeObject | null,
     Error | null,
   ];
@@ -1332,26 +1349,26 @@ function SandboxExtras({ item }: { item: KubeObject }) {
       </SectionBox>
 
       <SectionBox title="Channels & Integrations">
-        {channelEntries.length === 0 ? (
-          <p style={{ padding: "0.5rem" }}>
-            No channels configured for namespace <code>{podNs}</code>. Use{" "}
-            <code>kars credentials set telegram-token …</code> +{" "}
-            <code>--channels telegram</code>.
-          </p>
-        ) : (
-          <SimpleTable
-            data={channelEntries}
-            columns={[
-              { label: "Channel", getter: (r: any) => r.channel },
-              {
-                label: "Status",
-                getter: (r: any) =>
-                  r.enabled ? <StatusLabel status="success">ENABLED</StatusLabel> : <StatusLabel status="warning">DISABLED</StatusLabel>,
-              },
-              { label: "Source", getter: (r: any) => r.source },
-            ]}
-          />
-        )}
+        <ChannelDiscovery error={credentialsError} loading={credSecret == null} empty={channelEntries.length === 0}>
+          {channelEntries.length === 0 ? (
+            <p style={{ padding: "0.5rem" }}>
+              No channels configured for namespace <code>{podNs}</code>.
+            </p>
+          ) : (
+            <SimpleTable
+              data={channelEntries}
+              columns={[
+                { label: "Channel", getter: (r: any) => r.channel },
+                {
+                  label: "Status",
+                  getter: (r: any) =>
+                    r.enabled ? <StatusLabel status="success">ENABLED</StatusLabel> : <StatusLabel status="warning">DISABLED</StatusLabel>,
+                },
+                { label: "Source", getter: (r: any) => r.source },
+              ]}
+            />
+          )}
+        </ChannelDiscovery>
       </SectionBox>
 
       <SectionBox title="Related Resources">
@@ -1451,42 +1468,19 @@ function SandboxExtras({ item }: { item: KubeObject }) {
         />
       </SectionBox>
 
-      <SandboxBudgetCard sandboxName={name} inferenceRefName={spec.inferenceRef?.name} />
+      <SandboxBudgetCard sandboxName={name} namespace={namespace} inferenceRefName={spec.inferenceRef?.name} />
       <SandboxMetricsCard sandboxName={name} />
     </>
   );
 }
 
 // ──────────────────────────────────────────────────────────────────────
-// Grafana iframe embed for per-sandbox metrics.
-// Anonymous viewer + allow_embedding enabled on the kube-prometheus-stack
-// Grafana so the panel renders without auth. The Grafana base URL is
-// configurable via window.KARS_GRAFANA_URL — defaults to the local
-// port-forward used during dev (http://127.0.0.1:3000).
+// Grafana dashboard access for per-sandbox metrics.
 // ──────────────────────────────────────────────────────────────────────
 function SandboxMetricsCard({ sandboxName }: { sandboxName: string }) {
-  const theme = useTheme();
-  const grafanaTheme = theme.palette.mode === "dark" ? "dark" : "light";
-  const grafanaBase =
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (typeof window !== "undefined" && (window as any).KARS_GRAFANA_URL) ||
-    "http://127.0.0.1:3000";
-  const url =
-    `${grafanaBase}/d/kars-ops?kiosk=tv&refresh=10s&theme=${grafanaTheme}` +
-    `&var-sandbox=${encodeURIComponent(sandboxName)}`;
   return (
     <SectionBox title={`Metrics (Grafana) — ${sandboxName}`}>
-      <div style={{ marginBottom: 8 }}>
-        <a href={url} target="_blank" rel="noopener noreferrer">
-          Open full dashboard in Grafana ↗
-        </a>
-      </div>
-      <iframe
-        src={url}
-        title={`Grafana metrics for ${sandboxName}`}
-        style={{ width: "100%", height: "720px", border: "0" }}
-        loading="lazy"
-      />
+      <GrafanaDashboard sandboxName={sandboxName} />
     </SectionBox>
   );
 }
@@ -1833,39 +1827,30 @@ function MeshTopology() {
 }
 
 // ──────────────────────────────────────────────────────────────────────
-// Per-CRD Prometheus metric cards. These embed a focused Grafana
-// dashboard view (filtered by the relevant entity) instead of duplicating
-// the Grafana queries client-side. The router metrics
-// `kars_inference_*` and `kars_agt_policy_evaluations_total`
-// surface model/policy/decision labels that map naturally to the
-// InferencePolicy and ToolPolicy CRDs.
+// Per-CRD Prometheus metric cards and authenticated Grafana navigation.
 // ──────────────────────────────────────────────────────────────────────
-function grafanaBaseUrl(): string {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return (typeof window !== "undefined" && (window as any).KARS_GRAFANA_URL) || "http://127.0.0.1:3000";
-}
-
-function InferencePolicyMetricsCard({ policyName }: { policyName: string }) {
+export function InferencePolicyMetricsCard({ policyName }: { policyName: string }) {
   const theme = useTheme();
-  const grafanaTheme = theme.palette.mode === "dark" ? "dark" : "light";
   const muted = theme.palette.text.secondary;
   const { data, err, ready } = usePromPoll(
     { byModel: [] as { metric: Record<string,string>; value: number }[],
       bySandbox: [] as { metric: Record<string,string>; value: number }[],
       reqRate: [] as { metric: Record<string,string>; value: number }[],
-      latency: 0 },
+      latency: null as number | null },
     async (base) => {
       const [byModel, bySandbox, reqRate, latency] = await Promise.all([
         promQuery(base, 'sum by (model, direction) (increase(kars_tokens_total[1h]))'),
         promQuery(base, 'sum by (sandbox) (increase(kars_tokens_total[1h]))'),
         promQuery(base, 'sum by (model, status) (rate(kars_inference_requests_total[5m]))'),
-        promQuery(base, 'histogram_quantile(0.95, sum by (le) (rate(kars_inference_latency_seconds_bucket[5m])))'),
+        promQuery(base, 'histogram_quantile(0.95, sum by (le) (rate(kars_inference_latency_seconds_bucket[5m]))) < +Inf'),
       ]);
-      return { byModel, bySandbox, reqRate, latency: latency[0]?.value || 0 };
+      return { byModel, bySandbox, reqRate, latency: latency[0]?.value ?? null };
     }
   );
-  if (!ready) return <PrometheusStatus title={`📊 Inference Metrics (policy: ${policyName})`} err={err} />;
-  const url = `${grafanaBaseUrl()}/d/kars-ops?kiosk=tv&refresh=10s&theme=${grafanaTheme}`;
+  if (!ready) return <>
+    <PrometheusStatus title={`📊 Fleet Inference Metrics (viewing ${policyName})`} err={err} />
+    <GrafanaDashboard />
+  </>;
   const modelRows = data.byModel.map((r) => ({
     model: r.metric.model || "?",
     direction: r.metric.direction || "?",
@@ -1876,12 +1861,12 @@ function InferencePolicyMetricsCard({ policyName }: { policyName: string }) {
     tokens: Math.round(r.value).toLocaleString(),
   })).sort((a, b) => Number(b.tokens.replace(/,/g,"")) - Number(a.tokens.replace(/,/g,"")));
   return (
-    <SectionBox title={`📊 Inference Metrics (policy: ${policyName})`}>
+    <SectionBox title={`📊 Fleet Inference Metrics (viewing ${policyName})`}>
       <div style={{ marginBottom: 8, fontSize: 13, color: muted }}>
-        Live aggregates across all sandboxes routed through this policy class.
+        Fleet-wide aggregates across scraped sandboxes; not filtered to this policy.
       </div>
       <div style={{ display: "flex", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
-        <StatusLabel status="">⏱ p95 latency (5m): <b>{(data.latency * 1000).toFixed(0)} ms</b></StatusLabel>
+        <StatusLabel status="">⏱ p95 latency (5m): <b>{data.latency === null ? "No observations" : `${(data.latency * 1000).toFixed(0)} ms`}</b></StatusLabel>
         <StatusLabel status="">🧮 Models active: <b>{new Set(data.byModel.map((r) => r.metric.model)).size}</b></StatusLabel>
         <StatusLabel status="">🤖 Sandboxes consuming: <b>{sandboxRows.length}</b></StatusLabel>
       </div>
@@ -1903,34 +1888,34 @@ function InferencePolicyMetricsCard({ policyName }: { policyName: string }) {
         </div>
       </div>
       <div style={{ marginTop: 12 }}>
-        <a href={url} target="_blank" rel="noopener noreferrer">Open full Grafana dashboard ↗</a>
+        <GrafanaDashboard />
       </div>
     </SectionBox>
   );
 }
 
-function ToolPolicyMetricsCard({ policyName }: { policyName: string }) {
+export function ToolPolicyMetricsCard({ policyName }: { policyName: string }) {
   const theme = useTheme();
   const muted = theme.palette.text.secondary;
   const { data, err, ready } = usePromPoll(
     { decisions: [] as { metric: Record<string,string>; value: number }[],
       bySandbox: [] as { metric: Record<string,string>; value: number }[],
-      latencyP95: 0 },
+      latencyP95: null as number | null },
     async (base) => {
       const [decisions, bySandbox, latP95] = await Promise.all([
         promQuery(base, 'sum by (decision) (increase(kars_agt_policy_evaluations_total[1h]))'),
         promQuery(base, 'sum by (sandbox, decision) (increase(kars_agt_policy_evaluations_total[1h]))'),
-        promQuery(base, 'histogram_quantile(0.95, sum by (le) (rate(kars_agt_eval_latency_seconds_bucket[5m])))'),
+        promQuery(base, 'histogram_quantile(0.95, sum by (le) (rate(kars_agt_eval_latency_seconds_bucket[5m]))) < +Inf'),
       ]);
-      return { decisions, bySandbox, latencyP95: latP95[0]?.value || 0 };
+      return { decisions, bySandbox, latencyP95: latP95[0]?.value ?? null };
     }
   );
-  if (!ready) return <PrometheusStatus title={`🛡️ Policy Evaluations (policy: ${policyName})`} err={err} />;
-  const total = data.decisions.reduce((s, r) => s + r.value, 0) || 1;
+  if (!ready) return <PrometheusStatus title={`🛡️ Fleet Policy Evaluations (viewing ${policyName})`} err={err} />;
+  const total = data.decisions.length ? data.decisions.reduce((s, r) => s + r.value, 0) : null;
   const decisionRows = data.decisions.map((r) => ({
     decision: r.metric.decision || "?",
     count: Math.round(r.value).toLocaleString(),
-    pct: ((r.value / total) * 100).toFixed(1) + "%",
+    pct: total ? ((r.value / total) * 100).toFixed(1) + "%" : "0.0%",
   }));
   const sandboxRows = data.bySandbox.map((r) => ({
     sandbox: r.metric.sandbox || "?",
@@ -1938,13 +1923,13 @@ function ToolPolicyMetricsCard({ policyName }: { policyName: string }) {
     count: Math.round(r.value).toLocaleString(),
   })).sort((a, b) => Number(b.count.replace(/,/g,"")) - Number(a.count.replace(/,/g,"")));
   return (
-    <SectionBox title={`🛡️ Policy Evaluations (policy: ${policyName})`}>
+    <SectionBox title={`🛡️ Fleet Policy Evaluations (viewing ${policyName})`}>
       <div style={{ marginBottom: 8, fontSize: 13, color: muted }}>
-        AGT policy evaluation counters scoped to all sandboxes referencing this policy.
+        Fleet-wide AGT evaluation counters across scraped sandboxes; not filtered to this policy.
       </div>
       <div style={{ display: "flex", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
-        <StatusLabel status="">⏱ p95 eval latency (5m): <b>{(data.latencyP95 * 1e6).toFixed(0)} µs</b></StatusLabel>
-        <StatusLabel status="">📊 Total evals (1h): <b>{Math.round(total).toLocaleString()}</b></StatusLabel>
+        <StatusLabel status="">⏱ p95 eval latency (5m): <b>{data.latencyP95 === null ? "No observations" : `${(data.latencyP95 * 1e6).toFixed(0)} µs`}</b></StatusLabel>
+        <StatusLabel status="">📊 Total evals (1h): <b>{total === null ? "No samples" : Math.round(total).toLocaleString()}</b></StatusLabel>
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr", gap: 16 }}>
         <div>
@@ -2010,18 +1995,9 @@ function TrustGraphMetricsCard() {
 }
 
 // ──────────────────────────────────────────────────────────────────────
-// Token budget panels — overview-wide aggregate + per-sandbox utilization.
-// Budgets live on InferencePolicy.spec.tokenBudget.dailyTokens; consumption
-// is tracked by the router metric `kars_tokens_total{sandbox,direction}`.
-// Each sandbox references its policy via spec.inferenceRef.name (same ns).
+// Token telemetry and declared policy settings are not effective account limits.
+// A rolling Prometheus window cannot establish calendar-budget headroom.
 // ──────────────────────────────────────────────────────────────────────
-function utilizationTone(pct: number): StatusKind {
-  if (pct >= 90) return "error";
-  if (pct >= 70) return "warning";
-  if (pct > 0) return "success";
-  return "";
-}
-
 function formatTokens(n: number): string {
   if (n >= 1e9) return (n / 1e9).toFixed(2) + "B";
   if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
@@ -2029,22 +2005,8 @@ function formatTokens(n: number): string {
   return Math.round(n).toLocaleString();
 }
 
-function BudgetBar({ used, total, height = 14 }: { used: number; total: number; height?: number }) {
-  const theme = useTheme();
-  const isDark = theme.palette.mode === "dark";
-  const trackBg = isDark ? "#333" : "#eee";
-  const textColor = isDark ? "#eee" : "#333";
-  const pct = total > 0 ? Math.min(100, (used / total) * 100) : 0;
-  const color = pct >= 90 ? "#c62828" : pct >= 70 ? "#ef6c00" : "#2e7d32";
-  return (
-    <div style={{ background: trackBg, borderRadius: 4, height, overflow: "hidden", position: "relative" }}>
-      <div style={{ background: color, height: "100%", width: `${pct}%`, transition: "width .3s ease" }} />
-      <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center",
-        fontSize: 11, fontWeight: 600, color: pct > 50 ? "#fff" : textColor }}>
-        {pct.toFixed(1)}%
-      </div>
-    </div>
-  );
+function policyTokenSetting(value: unknown): string {
+  return typeof value === "number" && value > 0 ? formatTokens(value) : "Not set";
 }
 
 export function TokenBudgetOverview({ sandboxes, inferencePolicies }: { sandboxes: KubeObject[]; inferencePolicies: KubeObject[] }) {
@@ -2057,84 +2019,59 @@ export function TokenBudgetOverview({ sandboxes, inferencePolicies }: { sandboxe
     10000
   );
   if (!ready || data.length === 0) {
-    return <PrometheusStatus title="💰 Token Budget (24h)" err={err} empty={ready} />;
+    return <PrometheusStatus title="💰 Token Usage (24h)" err={err} empty={ready} />;
   }
   const consumedBySandbox: Record<string, number> = {};
   for (const row of data) consumedBySandbox[row.metric.sandbox || "?"] = row.value;
 
-  // Resolve each sandbox → its InferencePolicy daily budget.
-  const ipByName: Record<string, KubeObject> = {};
-  for (const ip of inferencePolicies) ipByName[ip.metadata.name] = ip;
-
   const rows = sandboxes.map((sb) => {
-    const spec = (sb as any).jsonData?.spec || (sb as any).spec || {};
+    const spec = getSpec(sb);
     const refName: string = spec.inferenceRef?.name || "";
-    const ip = ipByName[refName];
-    const dailyBudget = ((ip as any)?.jsonData?.spec || (ip as any)?.spec || {})?.tokenBudget?.dailyTokens || 0;
-    const used = consumedBySandbox[sb.metadata.name] || 0;
+    const ip = inferencePolicies.find(p => p.metadata.name === refName
+      && p.metadata.namespace === sb.metadata.namespace);
     return {
       name: sb.metadata.name,
       policy: refName || "—",
-      budget: dailyBudget,
-      used,
-      pct: dailyBudget > 0 ? (used / dailyBudget) * 100 : 0,
+      setting: ip ? policyTokenSetting(getSpec(ip).tokenBudget?.dailyTokens) : "Unavailable",
+      used: consumedBySandbox[sb.metadata.name],
     };
   });
-
-  const fleetBudget = rows.reduce((s, r) => s + r.budget, 0);
-  const fleetUsed = rows.reduce((s, r) => s + r.used, 0);
-  const fleetPct = fleetBudget > 0 ? (fleetUsed / fleetBudget) * 100 : 0;
-  const atRisk = rows.filter((r) => r.pct >= 70).length;
-  const over = rows.filter((r) => r.pct >= 100).length;
+  const observed = rows.filter(r => r.used !== undefined);
+  const fleetUsed = observed.reduce((sum, row) => sum + row.used, 0);
 
   return (
-    <SectionBox title="💰 Token Budget (24h)">
+    <SectionBox title="💰 Token Usage (24h)">
       <div style={{ marginBottom: 12, fontSize: 13, color: muted }}>
-        Configured daily budgets vs. rolling 24-hour Prometheus consumption estimates.
-        Token policies and calendar accounting are enforced by the inference router, not this chart.
+        Rolling 24-hour Prometheus estimates, not settled accounting. Policy settings are not
+        effective account limits: record-only beta accounting does not enforce a spending ceiling.
+        Remaining budget and expiry cannot be determined from these metrics.
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "1rem", marginBottom: 16 }}>
-        <Stat label="Fleet budget (24h)" value={formatTokens(fleetBudget)} />
-        <Stat label="Fleet consumed (24h)" value={formatTokens(fleetUsed)} tone={utilizationTone(fleetPct)} />
-        <Stat label="Fleet utilization" value={`${fleetPct.toFixed(1)}%`} tone={utilizationTone(fleetPct)} />
-        <Stat label="Sandboxes ≥70% used" value={atRisk} tone={atRisk > 0 ? "warning" : ""} />
-        <Stat label="Sandboxes over budget" value={over} tone={over > 0 ? "error" : ""} />
+        <Stat label="Observed consumed (24h)" value={observed.length ? formatTokens(fleetUsed) : "No samples"} />
+        <Stat label="Sandboxes with samples" value={`${observed.length} / ${rows.length}`} />
       </div>
-      <div style={{ marginBottom: 8, fontSize: 13, fontWeight: 600 }}>Fleet utilization</div>
-      <BudgetBar used={fleetUsed} total={fleetBudget} height={20} />
-      <div style={{ marginTop: 16 }}>
-        <SimpleTable
-          data={rows.sort((a, b) => b.pct - a.pct).map((r) => ({
-            name: r.name,
-            policy: r.policy,
-            budget: formatTokens(r.budget),
-            used: formatTokens(r.used),
-            bar: r,
-          }))}
-          columns={[
-            { label: "Sandbox", getter: (r: { name: string }) => r.name },
-            { label: "Policy", getter: (r: { policy: string }) => r.policy },
-            { label: "Budget", getter: (r: { budget: string }) => r.budget },
-            { label: "Used", getter: (r: { used: string }) => r.used },
-            { label: "Utilization", getter: (r: { bar: { used: number; budget: number } }) => (
-              <div style={{ width: 160 }}><BudgetBar used={r.bar.used} total={r.bar.budget} /></div>
-            )},
-          ]}
-        />
-      </div>
+      <SimpleTable
+        data={rows.map(r => ({ ...r, used: r.used === undefined ? "No samples" : formatTokens(r.used) }))}
+        columns={[
+          { label: "Sandbox", getter: (r: { name: string }) => r.name },
+          { label: "Policy", getter: (r: { policy: string }) => r.policy },
+          { label: "Policy daily setting", getter: (r: { setting: string }) => r.setting },
+          { label: "Consumed (24h estimate)", getter: (r: { used: string }) => r.used },
+        ]}
+      />
     </SectionBox>
   );
 }
 
-export function SandboxBudgetCard({ sandboxName, inferenceRefName }: { sandboxName: string; inferenceRefName?: string }) {
+export function SandboxBudgetCard({ sandboxName, namespace, inferenceRefName }: {
+  sandboxName: string; namespace: string; inferenceRefName?: string;
+}) {
   const theme = useTheme();
   const muted = theme.palette.text.secondary;
-  // Pull both the bound InferencePolicy CR (for the budget) and the live counter.
-  const [policies] = (CRD_CLASSES.inferencepolicies as any).useList() as [KubeObject[] | null];
-  const policy = (policies || []).find((p) => p.metadata.name === inferenceRefName);
-  const spec = (policy as any)?.jsonData?.spec || (policy as any)?.spec || {};
-  const dailyBudget = spec?.tokenBudget?.dailyTokens || 0;
-  const perRequestCap = spec?.tokenBudget?.perRequestTokens || 0;
+  const [policies, policyError] = (CRD_CLASSES.inferencepolicies as any).useList() as [KubeObject[] | null, Error | null];
+  const policy = !policyError && (policies || []).find(p => p.metadata.name === inferenceRefName
+    && p.metadata.namespace === namespace);
+  const spec = policy ? getSpec(policy) : {};
 
   const { data: used24h, err: usageError, ready: usageReady } = usePromPoll<number | undefined>(
     undefined,
@@ -2153,40 +2090,36 @@ export function SandboxBudgetCard({ sandboxName, inferenceRefName }: { sandboxNa
   );
 
   if (!usageReady || !splitReady || used24h === undefined || split.length === 0) {
-    return <PrometheusStatus title={`💰 Token Budget — ${sandboxName}`}
+    return <PrometheusStatus title={`💰 Token Usage — ${sandboxName}`}
       err={usageError || splitError} empty={usageReady && splitReady} />;
   }
 
-  const pct = dailyBudget > 0 ? (used24h / dailyBudget) * 100 : 0;
-  const remaining = Math.max(0, dailyBudget - used24h);
-  const inputTok = split.find((r) => r.metric.direction === "input")?.value || 0;
-  const outputTok = split.find((r) => r.metric.direction === "output")?.value || 0;
+  const inputTok = split.find(r => r.metric.direction === "input")?.value;
+  const outputTok = split.find(r => r.metric.direction === "output")?.value;
 
   return (
-    <SectionBox title={`💰 Token Budget — ${sandboxName}`}>
+    <SectionBox title={`💰 Token Usage — ${sandboxName}`}>
+      <div style={{ color: muted, fontSize: 13, marginBottom: 12 }}>
+        Rolling 24-hour Prometheus estimates, not settled accounting. Policy settings are not
+        effective account limits: record-only beta accounting does not enforce a spending ceiling.
+        Remaining budget and expiry cannot be determined from these metrics.
+      </div>
       {!inferenceRefName && (
-        <div style={{ color: muted, fontSize: 13 }}>No <code>inferenceRef</code> set on this sandbox; no enforced budget.</div>
+        <div style={{ color: muted, fontSize: 13 }}>No <code>inferenceRef</code> set on this sandbox; policy settings unavailable.</div>
       )}
       {inferenceRefName && !policy && (
-        <div style={{ color: "#ef6c00", fontSize: 13 }}>InferencePolicy <code>{inferenceRefName}</code> not found.</div>
+        <div role="status" style={{ color: muted, fontSize: 13 }}>InferencePolicy <code>{inferenceRefName}</code> unavailable in namespace <code>{namespace}</code>.</div>
       )}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "0.75rem", marginBottom: 12 }}>
-        <Stat label="Daily budget" value={dailyBudget > 0 ? formatTokens(dailyBudget) : "unlimited"} />
-        <Stat label="Consumed (24h)" value={formatTokens(used24h)} tone={utilizationTone(pct)} />
-        <Stat label="Remaining" value={dailyBudget > 0 ? formatTokens(remaining) : "—"} tone={utilizationTone(pct)} />
-        <Stat label="Per-request cap" value={perRequestCap > 0 ? formatTokens(perRequestCap) : "unlimited"} />
-        <Stat label="Input tokens" value={formatTokens(inputTok)} />
-        <Stat label="Output tokens" value={formatTokens(outputTok)} />
+        <Stat label="Policy daily setting" value={policy ? policyTokenSetting(spec.tokenBudget?.dailyTokens) : "Unavailable"} />
+        <Stat label="Consumed (24h)" value={formatTokens(used24h)} />
+        <Stat label="Policy per-request setting" value={policy ? policyTokenSetting(spec.tokenBudget?.perRequestTokens) : "Unavailable"} />
+        <Stat label="Input tokens" value={inputTok === undefined ? "No samples" : formatTokens(inputTok)} />
+        <Stat label="Output tokens" value={outputTok === undefined ? "No samples" : formatTokens(outputTok)} />
       </div>
-      {dailyBudget > 0 && (
-        <div>
-          <div style={{ marginBottom: 6, fontSize: 13, fontWeight: 600 }}>Utilization</div>
-          <BudgetBar used={used24h} total={dailyBudget} height={22} />
-        </div>
-      )}
       {inferenceRefName && (
         <div style={{ marginTop: 12, fontSize: 12, color: muted }}>
-          Policy: <Link routeName="inferencepolicies-detail" params={{ namespace: (policy as any)?.metadata?.namespace || "default", name: inferenceRefName }}>
+          Policy: <Link routeName="inferencepolicies-detail" params={{ namespace, name: inferenceRefName }}>
             {inferenceRefName}
           </Link>
         </div>
@@ -2435,7 +2368,11 @@ function SREClusterHealthCard({ sandboxes }: { sandboxes: KubeObject[] | null })
   // or got evicted. A sandbox with phase=Running + ImagePullBackOff
   // pods would otherwise show as green on this card, hiding the
   // exact failure mode the SRE Console is meant to surface.
-  const [deployments] = (Deployment as any).useList() as [KubeObject[] | null];
+  const [deployments, deploymentError] = Deployment.useList();
+
+  if (deploymentError) {
+    return <SREReadError area="workload health" error={deploymentError} />;
+  }
 
   if (!sandboxes) {
     return (
@@ -2628,10 +2565,29 @@ function isSREInstalled(sandboxes: KubeObject[] | null): boolean | null {
   );
 }
 
-function SREConsole() {
-  const [actions] = (KarsSREActionClass as any).useList() as [KubeObject[] | null];
-  const [sandboxes] = (KarsSandboxClass as any).useList() as [KubeObject[] | null];
+function SREReadError({ area, error }: { area: string; error: Error }) {
+  return (
+    <SectionBox title="SRE state unavailable">
+      <div role="alert" style={{ padding: 16, fontSize: 13 }}>
+        <p>Unable to read {area}: {error.message}</p>
+        <p>This does not establish whether SRE is installed or the cluster is healthy.
+          Access uses your Kubernetes identity; check its read permissions or API availability.</p>
+      </div>
+    </SectionBox>
+  );
+}
+
+export function SREConsole() {
+  const [actions, actionsError] = KarsSREActionClass.useList();
+  const [sandboxes, sandboxError] = KarsSandboxClass.useList();
   const installed = isSREInstalled(sandboxes);
+
+  if (sandboxError) {
+    return <SREReadError area="sandbox inventory" error={sandboxError} />;
+  }
+  if (actionsError) {
+    return <SREReadError area="SRE actions" error={actionsError} />;
+  }
 
   // Still loading sandbox list — show nothing rather than the empty
   // state, to avoid a flicker.
@@ -2755,10 +2711,10 @@ const HERMES_LOCAL_PORT = 19119;
 const HERMES_LOCAL_URL = `http://localhost:${HERMES_LOCAL_PORT}/`;
 const HERMES_PORT_FORWARD_CMD = `kubectl port-forward -n kars-sre svc/sre ${HERMES_LOCAL_PORT}:${HERMES_DASHBOARD_PORT}`;
 
-function SREChat() {
+export function SREChat() {
   // Show the install CTA when the kars-sre sandbox isn't deployed —
   // otherwise the iframe would just spin against a missing service.
-  const [sandboxes] = (KarsSandboxClass as any).useList() as [KubeObject[] | null];
+  const [sandboxes, sandboxError] = KarsSandboxClass.useList();
   const installed = isSREInstalled(sandboxes);
 
   // Probe the local port-forward target. We can't `fetch()` it from
@@ -2784,6 +2740,10 @@ function SREChat() {
   const copyCmd = React.useCallback(() => {
     navigator.clipboard?.writeText(HERMES_PORT_FORWARD_CMD).catch(() => {});
   }, []);
+
+  if (sandboxError) {
+    return <SREReadError area="sandbox inventory" error={sandboxError} />;
+  }
 
   if (installed === null) {
     return (

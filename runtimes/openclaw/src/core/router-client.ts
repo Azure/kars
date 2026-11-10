@@ -69,7 +69,10 @@ export async function routerCall(
   body?: unknown,
   timeoutMs = 15000,
   extraHeaders?: Record<string, string>,
+  signal?: AbortSignal,
+  responseOptions: { maxBytes?: number; structuredErrors?: boolean } = {},
 ): Promise<any> {
+  signal?.throwIfAborted();
   const http = await import("node:http");
   const url = new URL(path, routerBase());
   return new Promise((resolve, reject) => {
@@ -78,16 +81,31 @@ export async function routerCall(
       port: url.port,
       path: url.pathname + url.search,
       method,
+      signal,
       headers: { "x-kars-sandbox": "self", ...extraHeaders } as Record<string, string>,
     };
     if (body) {
       opts.headers["content-type"] = "application/json";
     }
     const req = http.request(opts, (res: any) => {
-      let data = "";
-      res.on("data", (chunk: Buffer) => { data += chunk.toString(); });
+      const chunks: Buffer[] = [];
+      let size = 0;
+      res.on("data", (chunk: Buffer) => {
+        size += chunk.length;
+        if (size > (responseOptions.maxBytes ?? Infinity)) res.destroy(new Error("Router response exceeds its bounded envelope"));
+        else chunks.push(chunk);
+      });
+      res.on("error", reject);
+      res.on("aborted", () => reject(new Error("Router response aborted")));
       res.on("end", () => {
-        try { resolve(JSON.parse(data)); } catch { resolve(data); }
+        const data = Buffer.concat(chunks).toString("utf8");
+        let result;
+        try { result = JSON.parse(data); } catch { result = data; }
+        if (responseOptions.structuredErrors) {
+          if (!result || typeof result !== "object" || Array.isArray(result)) result = { error: "Router returned invalid JSON response" };
+          if (res.statusCode >= 400) result = { ...result, error: result.error || "Router request refused", http_status: res.statusCode };
+        }
+        resolve(result);
       });
     });
     req.on("error", reject);
@@ -105,11 +123,14 @@ export async function routerCallStrict(
   body?: unknown,
   timeoutMs = 15000,
   extraHeaders?: Record<string, string>,
+  signal?: AbortSignal,
 ): Promise<any> {
+  signal?.throwIfAborted();
   const http = await import("node:http");
   const url = new URL(path, routerBase());
   return new Promise((resolve, reject) => {
     const opts: any = {
+      signal,
       hostname: url.hostname,
       port: url.port,
       path: url.pathname + url.search,
@@ -282,6 +303,7 @@ export async function callPlatformTool(
   name: string,
   args: Record<string, unknown>,
   timeoutMs = 60000,
+  signal?: AbortSignal,
 ): Promise<{ text: string; isError: boolean }> {
   const rpc = {
     jsonrpc: "2.0",
@@ -290,7 +312,7 @@ export async function callPlatformTool(
     params: { name, arguments: args },
   };
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const resp: any = await routerCall("POST", "/platform/mcp", rpc, timeoutMs, {
+  const resp: any = await routerCallStrict("POST", "/platform/mcp", rpc, timeoutMs, {
     // The router's /platform/mcp is an MCP Streamable-HTTP endpoint: it
     // REQUIRES the Accept header to advertise both JSON and SSE, else it
     // replies 406 "Accept must include both application/json and
@@ -298,7 +320,7 @@ export async function callPlatformTool(
     // spec-mandated negotiation still applies.) Mirrors the maf-python /
     // openai-agents runtimes.
     Accept: "application/json, text/event-stream",
-  });
+  }, signal);
   if (resp && typeof resp === "object" && resp.error) {
     const reason =
       resp.error?.data?.reason || resp.error?.message || "unknown error";

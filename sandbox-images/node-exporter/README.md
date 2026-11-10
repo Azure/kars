@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Node exporter on Azure Linux 3
 
 This retains node exporter `1.11.1`, as selected by the maintained

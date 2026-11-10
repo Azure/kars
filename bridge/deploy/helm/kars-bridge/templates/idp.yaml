@@ -1,6 +1,6 @@
 {{/* Copyright (c) Microsoft Corporation.
 Licensed under the MIT License. */}}
-{{- if not (kindIs "bool" .Values.networkPolicy.dexApiServerIngress) }}
+{{- if and (hasKey .Values.networkPolicy "dexApiServerIngress") (not (kindIs "bool" .Values.networkPolicy.dexApiServerIngress)) }}
 {{- fail "networkPolicy.dexApiServerIngress must be a boolean" }}
 {{- end }}
 {{- if .Values.networkPolicy.dexApiServerIngress }}
@@ -13,6 +13,32 @@ Licensed under the MIT License. */}}
 {{- end }}
 {{- if .Values.idp.enabled }}
 {{- $tls := .Values.idp.dex.tls | default dict }}
+{{- $persistence := .Values.idp.dex.persistence | default dict }}
+{{- if and (hasKey $persistence "enabled") (not (kindIs "bool" $persistence.enabled)) }}
+{{- fail "idp.dex.persistence.enabled must be a boolean" }}
+{{- end }}
+{{- $persistent := $persistence.enabled | default false }}
+{{- if and (hasKey $persistence "existingClaim") (not (kindIs "string" $persistence.existingClaim)) }}
+{{- fail "idp.dex.persistence.existingClaim must be a string" }}
+{{- end }}
+{{- $claim := $persistence.existingClaim | default "" }}
+{{- if and $claim (or (gt (len $claim) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$" $claim))) }}
+{{- fail "idp.dex.persistence.existingClaim must be a valid PVC name" }}
+{{- end }}
+{{- if and $claim (not $persistent) }}
+{{- fail "idp.dex.persistence.existingClaim requires persistence.enabled" }}
+{{- end }}
+{{- if and $persistent (not $claim) }}
+{{- if not (kindIs "string" $persistence.size) }}
+{{- fail "idp.dex.persistence.size must be a nonempty Kubernetes storage quantity" }}
+{{- end }}
+{{- if not (trim $persistence.size) }}
+{{- fail "idp.dex.persistence.size must be a nonempty Kubernetes storage quantity" }}
+{{- end }}
+{{- if and (ne $persistence.storageClass nil) (not (kindIs "string" $persistence.storageClass)) }}
+{{- fail "idp.dex.persistence.storageClass must be a string or null" }}
+{{- end }}
+{{- end }}
 {{- $headlamp := .Values.idp.headlampClient | default dict }}
 {{- range $option := list (dict "name" "idp.dex.tls" "value" $tls) (dict "name" "idp.headlampClient" "value" $headlamp) }}
 {{- if and (hasKey $option.value "enabled") (not (kindIs "bool" $option.value.enabled)) }}
@@ -70,7 +96,14 @@ data:
     # proxy), NOT the in-cluster Service DNS — otherwise the browser could not
     # resolve the authorize/login redirects.
     issuer: {{ .Values.idp.issuer | quote }}
+    {{- if $persistent }}
+    storage:
+      type: sqlite3
+      config:
+        file: /var/lib/dex/dex.db
+    {{- else }}
     storage: { type: memory }
+    {{- end }}
     web:
       http: 0.0.0.0:5556
       {{- if $tls.enabled }}
@@ -110,6 +143,10 @@ metadata:
     app: dex
 spec:
   replicas: 1
+  {{- if $persistent }}
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       app: dex
@@ -125,7 +162,7 @@ spec:
       securityContext:
         runAsNonRoot: true
         runAsUser: 1001
-        {{- if $tls.enabled }}
+        {{- if or $tls.enabled $persistent }}
         fsGroup: 1001
         {{- end }}
         seccompProfile:
@@ -162,6 +199,10 @@ spec:
             allowPrivilegeEscalation: false
             capabilities: { drop: ["ALL"] }
           volumeMounts:
+            {{- if $persistent }}
+            - name: storage
+              mountPath: /var/lib/dex
+            {{- end }}
             - name: config
               mountPath: /etc/dex
               readOnly: true
@@ -171,6 +212,11 @@ spec:
               readOnly: true
             {{- end }}
       volumes:
+        {{- if $persistent }}
+        - name: storage
+          persistentVolumeClaim:
+            claimName: {{ $claim | default "dex-data" | quote }}
+        {{- end }}
         - name: config
           configMap:
             name: dex
@@ -185,6 +231,27 @@ spec:
               - key: tls.key
                 path: tls.key
         {{- end }}
+{{- if and $persistent (not $claim) }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dex-data
+  namespace: {{ include "kars-bridge.namespace" . }}
+  labels:
+    {{- include "kars-bridge.labels" . | nindent 4 }}
+    app: dex
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- if kindIs "string" $persistence.storageClass }}
+  storageClassName: {{ $persistence.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $persistence.size | quote }}
+{{- end }}
 ---
 apiVersion: v1
 kind: Service

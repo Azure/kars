@@ -15,7 +15,7 @@ import { coreSchemaDocuments, isMonitoringCrd, monitoringSchemaFingerprint, plan
 export interface CoreSchemaPreparation extends Partial<SchemaStageOptions> { base365SreMigration?: boolean }
 
 const valueFlags = new Set(["--set", "--set-string", "--set-json", "--set-file", "--set-literal", "--values", "-f"]);
-const ignoredValues = new Set(["--timeout", "--history-max", "--description", "--post-renderer", "--post-renderer-args"]);
+const ignoredValues = new Set(["--timeout", "--history-max", "--description", "--post-renderer", "--post-renderer-args", "--server-side"]);
 
 export function schemaContextExecutor(execute: SchemaExecute, context?: string, kubeconfig?: string): SchemaExecute {
   return (file, args, options) => execute(file, [
@@ -82,7 +82,15 @@ export async function renderCoreSchemaChart(execute: SchemaExecute, args: readon
     { stdio: "pipe", ...(input ? { input } : {}) })).stdout);
   // An existing Core release can also lack a newly enabled dependency's CRDs.
   // Client rendering is only a bootstrap plan; server verification still follows.
-  const client = await render(false);
+  let client: ObjectMap[];
+  try {
+    client = await render(false);
+  } catch (error) {
+    // Installed profiles can require live CNI discovery and sealed lookup state
+    // that a client-only render cannot provide. Keep the server guards intact.
+    if (!upgrading) throw error;
+    return { run, documents: await render(true), release, namespace, upgrading, serverRender: () => render(true) };
+  }
   let bootstrap = !upgrading;
   if (upgrading) {
     for (const object of client.filter(isMonitoringCrd)) {
@@ -103,6 +111,16 @@ export async function planCoreHelmSchemas(
   }
   schemaStep("helm-render");
   const { run, documents: rendered, release, namespace, upgrading, serverRender } = await renderCoreSchemaChart(execute, args);
+  const serverSide = args.flatMap((token, index) => token === "--server-side" ? [args[index + 1]]
+    : token.startsWith("--server-side=") ? [token.slice("--server-side=".length)] : []);
+  if (serverSide.length > 1 || serverSide.some(value => !["true", "false", "auto"].includes(value))) {
+    throw new Error("Select one explicit valid Helm --server-side mode");
+  }
+  const fencedHelmNoop = upgrading && (options.ownership ?? "helm") === "helm" && serverSide[0] === "true";
+  if (fencedHelmNoop && !/^v4\.1\.3(?:\+[0-9A-Za-z.-]+)?$/.test(
+    (await run("helm", ["version", "--template", "{{.Version}}"], { stdio: "pipe" })).stdout.trim())) {
+    throw new Error("Fenced controller no-op preparation requires the inspected Helm 4.1.3 SSA installer");
+  }
   const documents = coreSchemaDocuments(rendered);
   schemaStep("helm-rollback-review");
   const safety = await prepareHelmFailureSafety(run, args, documents, release, namespace, upgrading);
@@ -120,7 +138,8 @@ export async function planCoreHelmSchemas(
   return async () => {
     if (!options.checkOnly) {
       await assertRenderedControllersMutable(run,
-        [...documents, ...(safety.activeDocuments ?? []), ...(safety.rollbackDocuments ?? [])], namespace);
+        documents, namespace, safety.activeDocuments, fencedHelmNoop);
+      if (safety.rollbackDocuments) await assertRenderedControllersMutable(run, safety.rollbackDocuments, namespace);
     }
     await applyMonitoring();
     const prepared = await applySchemas();
@@ -133,7 +152,7 @@ export async function planCoreHelmSchemas(
       throw new Error("Monitoring dependency changed after its schema plan");
     }
     const actual = coreSchemaDocuments(actualRendered);
-    if (!options.checkOnly) await assertRenderedControllersMutable(run, actual, namespace);
+    if (!options.checkOnly) await assertRenderedControllersMutable(run, actual, namespace, safety.activeDocuments, fencedHelmNoop);
     const crds = (items: ObjectMap[]) => items.filter(object => object.kind === "CustomResourceDefinition")
       .map(object => ({ name: object.metadata.name, spec: normalizedCrd(object), metadata: object.metadata }))
       .sort((a, b) => a.name.localeCompare(b.name));

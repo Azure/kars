@@ -1,7 +1,5 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-
-{{- if and .Values.monitoring.enabled .Values.monitoring.prometheus.enabled }}
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}{{- if and .Values.monitoring.enabled .Values.monitoring.prometheus.enabled }}
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:

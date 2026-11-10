@@ -8,16 +8,22 @@
 // stays navigable instead of an unbounded scroll of full-width cards.
 
 import { useMemo, useState } from "react";
-import Link from "next/link";
-import { MissionStatusBadge, missionStatus, type MissionStatus } from "@/components/mission-status";
+import Link from "@/components/navigation-link";
+import { MissionStatusBadge, type MissionStatus } from "@/components/mission-status";
+import { missionSummaryStatus } from "@/lib/mission-presentation";
 import { TIER_LABELS, type TaskSummary } from "@/lib/types";
 import { formatEvidenceTime } from "@/lib/format";
 
-type Filter = "all" | "active" | "delivered" | "failed" | "drafts";
+type Filter = "all" | "active" | "delivered" | "failed" | "drafts" | "attention" | "stopped";
 type Sort = "newest" | "oldest" | "name";
 
-function statusOf(t: TaskSummary): MissionStatus {
-  return missionStatus(t.phase, t.execution_phase, { delivered: t.delivered, failed: t.failed, launched: t.launched });
+function statusFilter(status: MissionStatus): Exclude<Filter, "all"> {
+  if (status === "done") return "delivered";
+  if (status === "failed" || status === "blocked") return "failed";
+  if (status === "drafting") return "drafts";
+  if (status === "stopped") return "stopped";
+  if (status === "unavailable") return "attention";
+  return "active";
 }
 
 export function MissionsList({ tasks }: { tasks: TaskSummary[] }) {
@@ -26,25 +32,15 @@ export function MissionsList({ tasks }: { tasks: TaskSummary[] }) {
   const [sort, setSort] = useState<Sort>("newest");
 
   const counts = useMemo(() => {
-    const c = { all: tasks.length, active: 0, delivered: 0, failed: 0, drafts: 0 };
-    for (const t of tasks) {
-      const s = statusOf(t);
-      if (s === "running" || s === "deploying" || s === "needs_you") c.active++;
-      else if (s === "done") c.delivered++;
-      else if (s === "failed" || s === "blocked") c.failed++;
-      else c.drafts++;
-    }
+    const c = { all: tasks.length, active: 0, delivered: 0, failed: 0, drafts: 0, attention: 0, stopped: 0 };
+    for (const t of tasks) c[statusFilter(missionSummaryStatus(t))]++;
     return c;
   }, [tasks]);
 
   const matches = useMemo(() => {
     const needle = q.trim().toLowerCase();
     return tasks.filter((t) => {
-      const s = statusOf(t);
-      if (filter === "active" && !(s === "running" || s === "deploying" || s === "needs_you")) return false;
-      if (filter === "delivered" && s !== "done") return false;
-      if (filter === "failed" && !(s === "failed" || s === "blocked")) return false;
-      if (filter === "drafts" && !(s === "drafting")) return false;
+      if (filter !== "all" && statusFilter(missionSummaryStatus(t)) !== filter) return false;
       if (!needle) return true;
       return [t.display_name ?? "", t.objective, t.name].join(" ").toLowerCase().includes(needle);
     }).sort((left, right) => {
@@ -63,6 +59,8 @@ export function MissionsList({ tasks }: { tasks: TaskSummary[] }) {
     { id: "delivered", label: "Delivered", n: counts.delivered },
     { id: "failed", label: "Failed", n: counts.failed },
     { id: "drafts", label: "Drafts", n: counts.drafts },
+    { id: "attention", label: "Evidence unavailable", n: counts.attention },
+    { id: "stopped", label: "Stopped", n: counts.stopped },
   ];
 
   return (
@@ -126,7 +124,7 @@ export function MissionsList({ tasks }: { tasks: TaskSummary[] }) {
                     {t.created_at ? ` · Created: ${formatEvidenceTime(t.created_at)}` : ""}
                   </p>
                 </div>
-                <MissionStatusBadge status={statusOf(t)} />
+                <MissionStatusBadge status={missionSummaryStatus(t)} />
               </Link>
             </li>
           ))}

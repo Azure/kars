@@ -113,7 +113,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: mission-dispatcher
-          image: {{ if $mission.image.digest }}{{ $mission.image.repository }}@{{ $mission.image.digest }}{{ else }}{{ $mission.image.repository }}:latest{{ end }}
+          image: {{ $mission.image.repository }}:latest{{ if $mission.image.digest }}@{{ $mission.image.digest }}{{ end }}
           imagePullPolicy: Always
           securityContext:
             allowPrivilegeEscalation: false

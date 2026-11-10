@@ -150,17 +150,25 @@ impl Cluster {
         let ar = ApiResource::from_gvk(&gvk);
         let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
         let obj: DynamicObject = serde_json::from_value(body).map_err(|e| {
-            kube::Error::Api(kube::core::ErrorResponse {
-                status: "Failure".into(),
-                message: e.to_string(),
-                reason: "BadRequest".into(),
-                code: 400,
-            })
+            kube::Error::Api(
+                kube::core::Status {
+                    status: Some(kube::core::response::StatusSummary::Failure),
+                    message: e.to_string(),
+                    reason: "BadRequest".into(),
+                    code: 400,
+                    ..Default::default()
+                }
+                .boxed(),
+            )
         })?;
-        api.create(&kube::api::PostParams {
-            field_manager: (kind == "KarsSkill").then(|| "kars-bridge".into()),
-            ..Default::default()
-        }, &obj).await
+        api.create(
+            &kube::api::PostParams {
+                field_manager: (kind == "KarsSkill").then(|| "kars-bridge".into()),
+                ..Default::default()
+            },
+            &obj,
+        )
+        .await
     }
 
     /// Server-Side Apply a `kars.azure.com` CRD — the Kubernetes-native
@@ -186,12 +194,16 @@ impl Cluster {
         let ar = ApiResource::from_gvk(&gvk);
         let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
         let obj: DynamicObject = serde_json::from_value(body).map_err(|e| {
-            kube::Error::Api(kube::core::ErrorResponse {
-                status: "Failure".into(),
-                message: e.to_string(),
-                reason: "BadRequest".into(),
-                code: 400,
-            })
+            kube::Error::Api(
+                kube::core::Status {
+                    status: Some(kube::core::response::StatusSummary::Failure),
+                    message: e.to_string(),
+                    reason: "BadRequest".into(),
+                    code: 400,
+                    ..Default::default()
+                }
+                .boxed(),
+            )
         })?;
         let name = obj.metadata.name.clone().unwrap_or_default();
         let mut pp = kube::api::PatchParams::apply("kars-bridge");

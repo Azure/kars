@@ -41,8 +41,8 @@ class MeshConfig:
     set this to 500+ to enforce per-tenant trust."""
 
     heartbeat_interval_seconds: float = 30.0
-    """How often to send relay heartbeats so the registry knows this
-    agent is alive. Matches the TS SDK default."""
+    """Interval between relay heartbeats and signed registry presence
+    refreshes. Matches the TS SDK default."""
 
     reconnect_initial_seconds: float = 1.0
     """Initial backoff after a relay disconnect (doubles each retry,

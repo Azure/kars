@@ -158,6 +158,13 @@ describe("sandbox Dockerfile — pinned mesh packaging", () => {
     expect(dockerfile).toContain("cd /build/runtimes/openclaw && npm ci --ignore-scripts && npm run build");
   });
 
+  it("removes stale adapters before copying their rebuilt packages", () => {
+    const cleanup = dockerfile.indexOf("RUN rm -rf /opt/kars-plugin /mesh-plugin");
+    expect(cleanup).toBeGreaterThan(dockerfile.indexOf("FROM ${SANDBOX_BASE_IMAGE}\n"));
+    expect(cleanup).toBeLessThan(dockerfile.indexOf("COPY --from=cli-builder /build/runtimes/openclaw/dist/"));
+    expect(cleanup).toBeLessThan(dockerfile.indexOf("COPY --from=cli-builder /build/mesh-plugin/dist/"));
+  });
+
   it("preserves and verifies the canonical SDK file dependencies", () => {
     expect(dockerfile).toContain("COPY vendor/agt/*.tgz vendor/agt/SHA256SUMS ./vendor/agt/");
     expect(dockerfile).toContain('test "$MESH_PROVIDER" = agt');

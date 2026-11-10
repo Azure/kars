@@ -12,6 +12,8 @@ const PRIVACY_REVISION = "kars.azure.com/sre-privacy/v2";
 
 export interface ApiObject extends OwnershipObject {
   metadata: OwnershipObject["metadata"] & { generation?: number };
+  data?: Record<string, string>;
+  immutable?: boolean;
   spec?: Record<string, any>;
   status?: Record<string, any>;
   roleRef?: { apiGroup: string; kind: string; name: string };
@@ -24,6 +26,14 @@ export interface Enrollment {
   sandbox: { namespace: string; name: string; uid: string };
   runtimeNamespace: { name: string; uid: string };
   enabled: boolean;
+  firstInstallFunding?: {
+    intent: { name: string; uid: string; digest: string };
+    grant: { root: { kind: "KarsSandbox"; resource: { namespace: string; name: string; uid: string };
+      workspaceUid: string; clusterUid: string } } & (
+        { limits: { tokens: number }; expiresAt: string; unboundedTokens?: never }
+        | { limits: { tokens?: never }; unboundedTokens: true; expiresAt?: never }
+      );
+  };
   legacyBindings: Array<{
     kind: string; namespace?: string; name: string; uid: string; resourceVersion: string;
     roleRef: NonNullable<ApiObject["roleRef"]>; subjects: NonNullable<ApiObject["subjects"]>;

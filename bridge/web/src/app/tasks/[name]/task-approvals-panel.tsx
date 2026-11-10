@@ -6,7 +6,8 @@
 // approve/deny for any still pending.
 
 import { ApprovalDecision } from "@/components/approval-decision";
-import { ApprovalPhaseBadge, actionLabel } from "@/components/approval-phase-badge";
+import { ApprovalDetail } from "@/components/approval-detail";
+import { ApprovalPhaseBadge, actionLabel, approvalPhaseLabel } from "@/components/approval-phase-badge";
 import { TIER_LABELS, type Approval } from "@/lib/types";
 
 export function TaskApprovalsPanel({
@@ -57,9 +58,7 @@ export function TaskApprovalsPanel({
                   )}
                 </div>
                 <p className="mt-1.5 text-sm font-medium">{a.summary}</p>
-                {a.detail && (
-                  <p className="mt-0.5 text-xs text-foreground-muted">{a.detail}</p>
-                )}
+                <ApprovalDetail actionKind={a.action_kind} detail={a.detail} />
               </div>
               <ApprovalPhaseBadge phase={a.phase} />
             </div>
@@ -78,8 +77,8 @@ export function TaskApprovalsPanel({
             ) : (
               <p className="mt-2 text-xs text-foreground-muted">
                 {a.decider
-                  ? `${a.phase} by ${a.decider}${a.decided_at ? ` · ${a.decided_at}` : ""}`
-                  : a.phase}
+                  ? `${approvalPhaseLabel(a.phase)} by ${a.decider}${a.decided_at ? ` · ${a.decided_at}` : ""}`
+                  : approvalPhaseLabel(a.phase)}
               </p>
             )}
           </li>

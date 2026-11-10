@@ -48,7 +48,9 @@ use kube::{
     api::{Api, ListParams},
 };
 
-/// Enumerate `KarsSandbox`es in `ns` that satisfy `matches`.
+/// Enumerate non-suspended `KarsSandbox`es in `ns` that satisfy `matches`.
+/// Suspended sandboxes have no running router to confirm policy enforcement.
+/// Clearing suspension includes them again, requiring a fresh router echo.
 ///
 /// Returns the bare sandbox `metadata.name` values. The controller
 /// convention is one router-service per sandbox at
@@ -82,7 +84,7 @@ where
     Ok(list
         .items
         .into_iter()
-        .filter(|cs| matches(cs))
+        .filter(|cs| !cs.spec.suspended.unwrap_or(false) && matches(cs))
         .map(|cs| cs.name_any())
         .collect())
 }
@@ -193,12 +195,96 @@ mod tests {
         cs
     }
 
+    #[tokio::test]
+    async fn discovery_excludes_suspended_but_retains_active_policy_references() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+
+        let server = MockServer::start().await;
+        let client =
+            kube::Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
+        let active = mk_sandbox("active", Some("prod-tools"));
+        let mut resumed = mk_sandbox("resumed", Some("prod-tools"));
+        resumed.spec.suspended = Some(false);
+        let mut suspended = mk_sandbox("suspended", Some("prod-tools"));
+        suspended.spec.suspended = Some(true);
+        Mock::given(method("GET"))
+            .and(path("/apis/kars.azure.com/v1alpha1/namespaces/kars-system/karssandboxes"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "apiVersion": "kars.azure.com/v1alpha1", "kind": "KarsSandboxList",
+                "metadata": {}, "items": [active, resumed, suspended, mk_sandbox("other", Some("dev-tools"))]
+            })))
+            .expect(1)
+            .mount(&server).await;
+        let names = super::list_sandboxes_matching(&client, "kars-system", |cs| {
+            cs.spec
+                .governance
+                .as_ref()
+                .is_some_and(|g| g.tool_policy_ref.name == "prod-tools")
+        })
+        .await
+        .unwrap();
+        assert_eq!(names, ["active", "resumed"]);
+    }
+
+    #[tokio::test]
+    async fn resumed_reference_requires_router_confirmation_again() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        use crate::status::router_confirmation::{
+            ConfirmError, RouterEnforcementState, decide_enforcement_state,
+        };
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+
+        let server = MockServer::start().await;
+        let client =
+            kube::Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
+        for suspended in [true, false] {
+            let mut sandbox = mk_sandbox("memory", Some("prod-tools"));
+            sandbox.spec.suspended = Some(suspended);
+            Mock::given(method("GET"))
+                .and(path(
+                    "/apis/kars.azure.com/v1alpha1/namespaces/kars-system/karssandboxes",
+                ))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "apiVersion": "kars.azure.com/v1alpha1", "kind": "KarsSandboxList",
+                    "metadata": {}, "items": [sandbox]
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let names = super::list_sandboxes_matching(&client, "kars-system", |_| true)
+                .await
+                .unwrap();
+            let outcomes: Vec<_> = names
+                .into_iter()
+                .map(|name| (name, Err(ConfirmError::HttpStatus(0))))
+                .collect();
+            let state = decide_enforcement_state("expected", "InferencePolicy", &outcomes);
+            if suspended {
+                assert_eq!(state, RouterEnforcementState::NoSandboxesReferencing);
+            } else {
+                assert!(matches!(
+                    state,
+                    RouterEnforcementState::Awaiting {
+                        total: 1,
+                        matched: 0,
+                        ..
+                    }
+                ));
+            }
+            server.verify().await;
+            server.reset().await;
+        }
+    }
+
     #[test]
     fn filter_predicate_runs_against_each_item() {
-        // We can't easily run list_sandboxes_matching against a fake
-        // kube API in unit tests (it would need a httpmock-shaped
-        // kube fixture). Instead pin the predicate-shape we
-        // promise to callers so future refactors don't drift.
         let cs_a = mk_sandbox("a", Some("prod-tools"));
         let cs_b = mk_sandbox("b", Some("dev-tools"));
         let cs_c = mk_sandbox("c", None);

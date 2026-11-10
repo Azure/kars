@@ -47,10 +47,13 @@ describe("native Hermes release wiring", () => {
   it("keeps per-architecture pushes and SBOM artifacts separate until merging", () => {
     const push = build.steps.find(step => step.uses?.startsWith("docker/build-push-action"))!.with!;
     expect(push.platforms).toBe("linux/${{ matrix.runtime.arch || 'amd64' }}");
-    expect(String(push.tags).trim().split("\n").every(tag => tag.endsWith("${{ matrix.runtime.suffix }}"))).toBe(true);
+    expect(String(push.tags).trim().split("\n")).toEqual([
+      "${{ env.REGISTRY }}/${{ matrix.runtime.ghcr }}:${{ env.IMAGE_VERSION }}${{ matrix.runtime.suffix }}",
+      "${{ needs.prepare.outputs.prerelease == 'false' && format('{0}/{1}:latest{2}', env.REGISTRY, matrix.runtime.ghcr, matrix.runtime.suffix) || '' }}",
+    ]);
     const sbom = build.steps.find(step => step.name === "Generate SBOM (SPDX JSON)")!.with!;
     const upload = build.steps.find(step => step.name === "Upload SBOM")!.with!;
-    expect(sbom.image).toBe("${{ env.REGISTRY }}/${{ matrix.runtime.ghcr }}:${{ env.VERSION }}${{ matrix.runtime.suffix }}");
+    expect(sbom.image).toBe("${{ env.REGISTRY }}/${{ matrix.runtime.ghcr }}:${{ env.IMAGE_VERSION }}${{ matrix.runtime.suffix }}");
     expect(sbom["output-file"]).toContain("${{ matrix.runtime.suffix }}");
     expect(upload.path).toBe(sbom["output-file"]);
     expect(upload.name).toContain("${{ matrix.runtime.suffix }}");
@@ -71,7 +74,17 @@ describe("native Hermes release wiring", () => {
     expect(merge.steps.find(step => step.name === "Cosign keyless sign manifests")?.run)
       .toContain("kars-runtime-hermes@${{ steps.digests.outputs.hermes }}");
     expect(workflow.jobs.release.needs).toContain("merge-sandbox");
-    expect(workflow.jobs.release.steps.some(step => step.run?.includes("${{ needs.merge-sandbox.outputs.hermes_digest }}"))).toBe(true);
+    expect(merge.steps.find(step => step.name === "Record merged build receipts")?.run)
+      .toContain("kars-runtime-hermes=${{ steps.digests.outputs.hermes }}");
+    expect(merge.steps.find(step => step.with?.name === "image-sandboxes-${{ env.VERSION }}")?.with)
+      .toMatchObject({ path: "image-receipts/*.json", "if-no-files-found": "error" });
+    const pack = workflow.jobs["cli-pack"];
+    expect(pack.needs).toContain("merge-sandbox");
+    expect(pack.steps.find(step => step.with?.pattern === "image-*-${{ env.VERSION }}")?.with)
+      .toMatchObject({ path: "image-receipts", "merge-multiple": true });
+    expect(pack.steps.find(step => step.name === "Bind clean checkout charts to exact published image receipts")?.run)
+      .toBe('node cli/scripts/release-artifacts.mjs prepare . release-packages "$VERSION" image-receipts');
+    expect(workflow.jobs.release.needs).toContain("cli-pack");
   });
 });
 

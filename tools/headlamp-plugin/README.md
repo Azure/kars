@@ -38,6 +38,12 @@ the page a new shift opens to triage cluster health. It bundles:
 Live-updates via Headlamp's `useList()` (watch + long-poll) so the
 Proposed → Approved → Applied → Recovered walk is visible without F5.
 
+SRE views use the signed-in user's Kubernetes permissions. Failed sandbox,
+action, or workload reads appear as **SRE state unavailable**, not an absent
+installation, empty approval queue, or healthy cluster. The install prompt
+requires a successful sandbox inventory read. Signing in through OIDC does not
+grant additional Kubernetes access.
+
 The sibling **`/kars/sre/chat`** page embeds the Hermes WebUI in
 an iframe (local port-forward by default, apiserver service-proxy
 fallback). Run `kars connect sre --web --port 18789` in another
@@ -46,6 +52,11 @@ terminal to populate the iframe.
 Detail panes show `.spec`, `.status`, and a typed Conditions table with
 status colouring (Ready / Provisioned → green, Degraded / Failed → red,
 everything else → amber).
+
+Policy metrics are fleet-wide aggregates, not per-policy attribution.
+ToolPolicy enforcement shows the controller's confirmation and report because
+its status does not expose a separate loaded digest. InferencePolicy and
+KarsMemory retain their compiled-versus-loaded digest comparisons.
 
 > **Status chip semantics.** Chips are **reason-aware**: when the
 > `Ready` condition carries a hard-failure reason
@@ -62,10 +73,74 @@ everything else → amber).
 
 ## Build
 
+Use Node.js 22 for the plugin build toolchain.
+
 ```bash
-npm install
+npm ci
+npm test
 npm run build       # → dist/main.js
 ```
+
+The Headlamp Plugin Build & Test CI job installs this lockfile, runs the tests
+and production bundle build, and audits dependencies. Vitest, its mocker and
+Istanbul coverage provider use paired patched versions through npm overrides.
+Passing these checks does not establish installed Headlamp acceptance.
+
+### Dependency maintenance
+
+Keep Vitest, its mocker and Istanbul coverage provider paired at 4.1.12, with
+Vite 6.4.5 and the Storybook 9.1.21 security override. Refresh compatible
+transitives in the lockfile rather than replacing the Headlamp toolchain.
+Three scoped overrides cross upstream dependency ranges because their current
+major lines have no published fix for the corresponding advisory:
+
+| Consumer | Override | Compatibility contract |
+| --- | --- | --- |
+| React docgen and quick-temp's rimraf 5 | glob 10 → 14.0.2 (`GHSA-3g3m-2fjr-6pw4`) | Retains `globSync`, promise-based `glob`, absolute string results and cancellation; neither consumer uses the removed CLI shell option. |
+| TypeScript ESLint | minimatch 10 → 11.0.1 (`GHSA-g3hv-75wg-m249`) | Retains the named `minimatch` function with `dot`; legacy callable minimatch 3 stays separate. Glob 14 owns its compatible minimatch 11 implementation rather than overriding glob 10's internals. |
+| Storybook webpack builder | webpack-dev-middleware 6 → 7.4.6 (`GHSA-g84c-rxfj-3j2c`) | Retains the webpack 5 middleware and callback lifecycle. Version 7 requires Node ≥18.12 and memfs 4; Node 22 satisfies this. The published 7.4.6 release includes the containment fix. |
+
+Scope the glob overrides to React docgen and `quick-temp → rimraf` explicitly.
+With a broad `glob@^10` override, npm 10.9.9 restores glob 10 under quick-temp
+and rejects this lockfile, while npm 11 accepts it. Validate manifest-only copies
+with the hosted npm version using `npm ci --dry-run --ignore-scripts --no-audit`
+before publishing; do not generate the lock from an existing `node_modules` tree.
+
+`src/dependency-contracts.test.ts` covers those consumer APIs, a real in-memory
+webpack middleware lifecycle, and rejection of the non-slash-terminated
+`publicPath` traversal. Run the clean install, complete tests, production build,
+and all-severity audit on GitHub after any lockfile update; a static comparison
+against previously reported advisories is not a fresh audit.
+
+Two known low-severity advisories currently have **no published patched version**
+and remain unresolved, not suppressed:
+
+- [`GHSA-gcqx-w48m-w2h4`](https://github.com/advisories/GHSA-gcqx-w48m-w2h4):
+  Headlamp → Storybook react-webpack5 → builder-webpack5 →
+  fork-ts-checker-webpack-plugin 8 → deepmerge 4.3.1. The checker merges build
+  configuration; this is development tooling, not a plugin runtime dependency.
+- [`GHSA-848j-6mx2-7j84`](https://github.com/advisories/GHSA-848j-6mx2-7j84):
+  Headlamp → vite-plugin-node-polyfills → node-stdlib-browser → crypto-browserify
+  → browserify-sign/create-ecdh → elliptic 6.6.1. Headlamp's maintained Vite config
+  enables only process, buffer and stream polyfills, not crypto. This reduces
+  current bundle reachability but does not clear the installed dependency finding
+  or establish the security of the separately supplied Headlamp host.
+
+A maintained-release check also found no dependency-removal path: Headlamp
+0.14.0 still declares both Storybook's webpack framework and the Node polyfill
+plugin. Storybook builder-webpack5 9.1.21 retains fork-ts-checker 8; even
+builder-webpack5 10.6.5 retains fork-ts-checker 9.1.0, which still requires
+`deepmerge ^4.2.2`. Vite's polyfill plugin 0.28.0 still requires
+node-stdlib-browser 1.3.1, whose crypto-browserify route still requires elliptic.
+These are ordinary, non-optional dependencies. Polyfill `include`, `exclude`,
+and `overrides` configure bundle aliases, not the installed dependency graph;
+the existing limited `include` setting therefore cannot remove the audit finding.
+
+Neither dependency is removed or replaced with an API-incompatible library to
+make the audit appear clean. Both remain in full dependency audit coverage.
+All-severity clearance requires a maintained upstream release that fixes or
+replaces these dependencies; upgrading the checked toolchain versions alone
+does not achieve it.
 
 The Core Helm installation packages this plugin into the AL3 Headlamp image.
 Build `sandbox-images/headlamp/Dockerfile` from the repository root; update that
@@ -185,10 +260,17 @@ pulse colours per relay-edge:
 Controller → sub-agent edges are dashed (logical hierarchy; the
 actual frames still flow via the relay).
 
-### Token Budget panels
+### Channel discovery
+
+Credential discovery uses the logged-in operator's existing Kubernetes permissions.
+Denied or failed Secret reads are shown as unavailable, never as “No channels
+configured.” Loading is explicit; any known inline channels remain visible with
+an incomplete-discovery notice. The plugin does not grant additional Secret access.
+
+### Token Usage panels
 
 The Overview page and each KarsSandbox detail page also render a
-**💰 Token Budget (24 h)** card that joins:
+**💰 Token Usage (24 h)** card that joins:
 
 - `InferencePolicy.spec.tokenBudget.{dailyTokens,perRequestTokens}`
   (read via Headlamp's Kubernetes client)
@@ -196,11 +278,35 @@ The Overview page and each KarsSandbox detail page also render a
   Prometheus
 
 The sandbox → policy link uses
-`KarsSandbox.spec.inferenceRef.name`.
-The rolling 24-hour Prometheus estimate is not the router's calendar ledger or
-proof of policy enforcement. Loading, failed, malformed and non-finite telemetry
-is displayed as unavailable, not zero consumption. An empty token-query result
-is displayed as missing samples rather than a zero-used budget.
+`KarsSandbox.spec.inferenceRef.name` in the sandbox CR's namespace.
+Declared daily/per-request settings are shown separately from observed usage;
+they do not establish effective account limits. Record-only beta accounting has
+no spending ceiling, and these metrics cannot determine remaining budget or expiry.
+The panels therefore do not compute remaining tokens, utilization or over-budget
+warnings from a rolling window. Production enforcement remains unchanged.
+Loading, failed, malformed and non-finite telemetry is displayed as unavailable,
+not zero consumption. Missing sandbox/direction samples stay unknown; the fleet
+total includes only observed sandboxes and reports its sample coverage.
+
+### Grafana connection
+
+Grafana is optional (`monitoring.grafana.enabled`, disabled by default). Without
+an explicit endpoint, both dashboard entry points check the selected cluster's
+`monitoring/kps-grafana` Service using the operator's existing permissions. Missing,
+loading and forbidden discovery are distinguished; an absent installation does
+not render a broken iframe.
+
+For local Headlamp, the documented `kars headlamp` command starts the Grafana
+forward on port 3000 when that Service exists. For remote or separately managed
+Grafana, set the existing `window.KARS_GRAFANA_URL` override to its browser-reachable
+HTTP(S) base URL (including any subpath). Remote Headlamp never assumes a localhost
+Grafana. URL credentials, query strings, fragments and non-HTTP(S) schemes are
+rejected. Both entry points open Grafana in a separate tab, preserving the selected
+sandbox filter and Grafana's authenticated session. Headlamp does not embed Grafana:
+its default anti-framing policy and browser cookie protections remain unchanged.
+The inference-policy link remains available while telemetry is loading or failing.
+Idle inference and policy-evaluation histograms show **No observations**, not zero
+latency; absent evaluation counters show **No samples**, not a fabricated count.
 
 ### Prometheus connection
 
@@ -216,7 +322,7 @@ For a separately managed endpoint, explicitly set
 intentional local forward). External requests do not receive Kubernetes
 credentials and require the endpoint's normal browser/CORS access.
 
-Core-managed Headlamp does not currently install Prometheus; the separate
-standalone observability installer supplies it. Missing Services, denied proxy
-access and unavailable endpoints remain explicit telemetry failures. There is no
-automatic fallback to a local forward or a different cluster.
+The Core chart's monitoring dependency or the separate standalone observability
+installer supplies Prometheus. Missing Services, denied proxy access and unavailable
+endpoints remain explicit telemetry failures. There is no automatic fallback to a
+local forward or a different cluster.

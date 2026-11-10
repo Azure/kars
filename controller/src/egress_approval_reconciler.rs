@@ -79,7 +79,8 @@ use crate::egress_approval::{
     },
 };
 use crate::egress_approval_compile::{
-    approval_file_key, approvals_configmap_name, compile_approval_file, merged_allowlist_digest,
+    RequestBinding, approval_file_key, approvals_configmap_name, compile_approval_file,
+    merged_allowlist_digest,
 };
 use crate::status::conditions::{self, status as cond_status};
 use crate::status::phase::{PHASE_ACTIVE, PHASE_EXPIRED, PHASE_PENDING, PHASE_SANDBOX_RUNNING};
@@ -116,6 +117,8 @@ enum ReconcileError {
     Kube(#[from] kube::Error),
     #[error("JSON serialization error: {0}")]
     SerdeJson(#[from] serde_json::Error),
+    #[error("Scoped egress control: {0}")]
+    Control(String),
 }
 
 impl ReconcileError {
@@ -124,6 +127,7 @@ impl ReconcileError {
             ReconcileError::Kube(_) => "kube_api",
             ReconcileError::SerdeJson(_) => "serde",
             ReconcileError::NamespaceOwnership(_) => "namespace_ownership",
+            ReconcileError::Control(_) => "scoped_control",
         }
     }
 }
@@ -142,6 +146,7 @@ enum ValidationError {
     TtlInvalid(String),
     TtlExceedsCeiling { requested: u64, ceiling: u64 },
     ReasonInvalid(&'static str),
+    BindingInvalid(&'static str),
 }
 
 impl ValidationError {
@@ -149,7 +154,9 @@ impl ValidationError {
         match self {
             ValidationError::TtlInvalid(_) => TTL_INVALID,
             ValidationError::TtlExceedsCeiling { .. } => TTL_EXCEEDS_CEILING,
-            ValidationError::ReasonInvalid(_) => REASON_INVALID,
+            ValidationError::ReasonInvalid(_) | ValidationError::BindingInvalid(_) => {
+                REASON_INVALID
+            }
         }
     }
 
@@ -162,6 +169,7 @@ impl ValidationError {
                 "spec.ttl {requested}s exceeds cluster ceiling {ceiling}s; re-sign the baseline allowlist instead",
             ),
             ValidationError::ReasonInvalid(s) => format!("spec.reason invalid: {s}"),
+            ValidationError::BindingInvalid(s) => format!("request binding invalid: {s}"),
         }
     }
 }
@@ -263,6 +271,16 @@ fn validate_reason(reason: &str) -> Result<(), ValidationError> {
 
 fn validate(approval: &EgressApproval, ttl_ceiling_seconds: u64) -> Result<u64, ValidationError> {
     validate_reason(&approval.spec.reason)?;
+    if RequestBinding::from_annotations(approval.metadata.annotations.as_ref())
+        .map_err(ValidationError::BindingInvalid)?
+        .is_some()
+        && (approval.spec.hosts.len() != 1
+            || approval.spec.hosts[0].port.is_none_or(|port| port == 0))
+    {
+        return Err(ValidationError::BindingInvalid(
+            "one endpoint with an explicit port is required",
+        ));
+    }
     let ttl_secs =
         parse_iso8601_duration_secs(&approval.spec.ttl).map_err(ValidationError::TtlInvalid)?;
     let effective_ceiling = ttl_ceiling_seconds.min(HARD_TTL_CEILING_SECONDS);
@@ -701,6 +719,13 @@ async fn reconcile(approval: Arc<EgressApproval>, ctx: Arc<Ctx>) -> Result<Actio
                 reason = v.reason(),
                 "EgressApprovalSpecInvalid"
             );
+            drop_approval_cm_key(
+                &configmaps,
+                &approval.spec.sandbox,
+                &name,
+                &approval_field_manager(&name),
+            )
+            .await?;
             let patch = build_status_patch(
                 &prior_conditions,
                 prior_effective_at,
@@ -808,6 +833,14 @@ async fn reconcile(approval: Arc<EgressApproval>, ctx: Arc<Ctx>) -> Result<Actio
         &effective_at,
         &expires_at,
     );
+    let request_binding = RequestBinding::from_annotations(approval.metadata.annotations.as_ref())
+        .map_err(|error| ReconcileError::Control(error.into()))?;
+    let payload = match &request_binding {
+        Some(binding) => binding
+            .compile(payload)
+            .map_err(|error| ReconcileError::Control(error.into()))?,
+        None => payload,
+    };
     let per_approval_fm = approval_field_manager(&name);
     if let Err(e) = ensure_approval_cm_key(
         &configmaps,
@@ -846,7 +879,70 @@ async fn reconcile(approval: Arc<EgressApproval>, ctx: Arc<Ctx>) -> Result<Actio
     }
 
     // ── Compute expected merged digest ──────────────────────────
-    let siblings = list_active_siblings(&api, &approval.spec.sandbox, &name).await?;
+    let mut siblings = list_active_siblings(&api, &approval.spec.sandbox, &name).await?;
+    let needs_scope = request_binding.is_some()
+        || siblings.iter().any(|sibling| {
+            !matches!(
+                RequestBinding::from_annotations(sibling.metadata.annotations.as_ref()),
+                Ok(None)
+            )
+        });
+    let snapshot = if needs_scope {
+        let namespace = Api::<k8s_openapi::api::core::v1::Namespace>::all(ctx.client.clone())
+            .get(&sandbox_pod_ns)
+            .await?;
+        match crate::reconciler::governed_services::access_requests::current(
+            &ctx.client,
+            &sandbox,
+            &namespace,
+        )
+        .await
+        {
+            Ok(snapshot) => snapshot,
+            Err(reason) => {
+                tracing::debug!(egress_approval = %name, reason, "Scoped egress queue confirmation pending");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let applicable = |grant: &EgressApproval| match RequestBinding::from_annotations(
+        grant.metadata.annotations.as_ref(),
+    ) {
+        Ok(None) => true,
+        Ok(Some(_)) => snapshot.as_ref().is_some_and(|snapshot| {
+            crate::reconciler::governed_services::access_requests::authorizes_grant(snapshot, grant)
+        }),
+        Err(_) => false,
+    };
+    siblings.retain(|sibling| {
+        applicable(sibling)
+            && sibling
+                .status
+                .as_ref()
+                .and_then(|status| status.expires_at.as_deref())
+                .and_then(parse_rfc3339)
+                .is_none_or(|expiry| expiry > Utc::now())
+    });
+    if !applicable(&approval) {
+        let patch = build_status_patch(
+            &prior_conditions,
+            Some(effective_at.clone()),
+            prior_usage_count,
+            observed_generation,
+            PHASE_PENDING,
+            AWAITING_ROUTER_ECHO,
+            "Waiting for the current assignment's reviewed queue decision and exact scoped grant",
+            None,
+            host_count,
+            Some(effective_at),
+            Some(expires_at),
+            None,
+        );
+        write_status(&api, &name, patch).await?;
+        return Ok(Action::requeue(REQUEUE_AWAITING));
+    }
     let expected_digest = compute_merged_digest(&baseline, &approval.spec.hosts, &siblings);
 
     // ── Poll router echo ────────────────────────────────────────

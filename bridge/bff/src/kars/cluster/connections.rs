@@ -6,31 +6,72 @@ use k8s_openapi::api::core::v1::ConfigMap;
 use kube::ResourceExt;
 use kube::api::Api;
 
+/// Server-only discovery result; credentials must never be serialized to clients.
+pub struct GithubAppSetup {
+    pub storage_ready: bool,
+    pub credentials: Option<(String, String)>,
+    pub store_identity: Option<(String, String)>,
+}
+
+fn github_app_credentials(secret: k8s_openapi::api::core::v1::Secret) -> Option<(String, String)> {
+    let data = secret.data?;
+    let read = |key: &str| String::from_utf8(data.get(key)?.0.clone()).ok();
+    let id = read("GITHUB_APP_ID")?;
+    let key = read("GITHUB_APP_PRIVATE_KEY")?;
+    if id.trim().is_empty() || key.trim().is_empty() {
+        return None;
+    }
+    Some((id.trim().to_string(), key))
+}
+
 impl Cluster {
     // ── Keyless git write: shared App + per-principal connections (§14) ──────
 
-    /// The cluster-shared kars GitHub App credentials (App id + PEM private key)
-    /// from `Secret kars-github-app` in kars-system. `None` when the operator
-    /// hasn't configured the App — git write is simply off (fail-closed).
+    /// Distinguish missing enrollment from an empty, validated store without
+    /// hiding broken authority or reading Secrets outside the exact grant.
+    pub async fn github_app_setup(&self) -> Result<GithubAppSetup, kube::Error> {
+        let Some((_, secret)) = self
+            .optional_integration_store(&self.core_namespace(), "kars-github-app")
+            .await?
+        else {
+            return Ok(GithubAppSetup {
+                storage_ready: false,
+                credentials: None,
+                store_identity: None,
+            });
+        };
+        Ok(GithubAppSetup {
+            storage_ready: true,
+            store_identity: secret.uid().zip(secret.resource_version()),
+            credentials: github_app_credentials(secret),
+        })
+    }
+
+    /// Both upload and manifest registration use the private authority adapter.
+    /// Registration supplies the empty store's pre-exchange identity; uploads
+    /// retain the existing explicit replacement behavior.
+    pub(crate) async fn save_github_app(
+        &self,
+        app_id: &str,
+        private_key: &str,
+        expected: Option<(&str, &str)>,
+    ) -> Result<(), kube::Error> {
+        self.mutate_integration_checked(
+            &self.core_namespace(),
+            "kars-github-app",
+            expected,
+            |keys| {
+                keys.insert("GITHUB_APP_ID".into(), app_id.into());
+                keys.insert("GITHUB_APP_PRIVATE_KEY".into(), private_key.into());
+            },
+        )
+        .await
+    }
+
+    /// The cluster-shared App credentials; absent or empty enrollment keeps
+    /// git write off. Invalid authority remains an error.
     pub async fn github_app_creds(&self) -> Result<Option<(String, String)>, kube::Error> {
-        let (_, s) = self
-            .integration_store(&self.core_namespace(), "kars-github-app")
-            .await?;
-        let Some(data) = s.data else { return Ok(None) };
-        let read = |k: &str| -> Option<String> {
-            data.get(k)
-                .and_then(|v| String::from_utf8(v.0.clone()).ok())
-        };
-        let Some(id) = read("GITHUB_APP_ID") else {
-            return Ok(None);
-        };
-        let Some(key) = read("GITHUB_APP_PRIVATE_KEY") else {
-            return Ok(None);
-        };
-        if id.trim().is_empty() || key.trim().is_empty() {
-            return Ok(None);
-        }
-        Ok(Some((id.trim().to_string(), key)))
+        Ok(self.github_app_setup().await?.credentials)
     }
 
     /// Read a principal's GitHub connection ConfigMap in the namespace.

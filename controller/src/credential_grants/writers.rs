@@ -191,9 +191,15 @@ pub(super) async fn authority(
     sources: &[SourceMetadata],
 ) -> (KarsCredentialGrant, Option<String>) {
     let result = async {
-        let active = reconcile(client, grant).await?;
+        tracing::info!(target: "kars_controller::credential_grants", stage = "writer-reconcile", phase = "before", "Credential grant lifecycle stage");
+        let result = reconcile(client, grant).await;
+        tracing::info!(target: "kars_controller::credential_grants", stage = "writer-reconcile", phase = "returned", "Credential grant lifecycle stage");
+        let active = result?;
         if !active.spec.writers.is_empty() {
-            super::rbac::apply(client, &active, sources).await?;
+            tracing::info!(target: "kars_controller::credential_grants", stage = "writer-rbac-apply", phase = "before", "Credential grant lifecycle stage");
+            let result = super::rbac::apply(client, &active, sources).await;
+            tracing::info!(target: "kars_controller::credential_grants", stage = "writer-rbac-apply", phase = "returned", "Credential grant lifecycle stage");
+            result?;
         }
         Ok::<_, String>(active)
     }
@@ -206,14 +212,27 @@ pub(super) async fn authority(
         }
         Err(mut error) => {
             for revoked in [
-                super::rbac::revoke(client, grant).await,
-                super::operator::revoke(client, grant).await,
+                {
+                    tracing::info!(target: "kars_controller::credential_grants", stage = "writer-rbac-revoke", phase = "before", "Credential grant lifecycle stage");
+                    let result = super::rbac::revoke(client, grant).await;
+                    tracing::info!(target: "kars_controller::credential_grants", stage = "writer-rbac-revoke", phase = "returned", "Credential grant lifecycle stage");
+                    result
+                },
+                {
+                    tracing::info!(target: "kars_controller::credential_grants", stage = "writer-observer-revoke", phase = "before", "Credential grant lifecycle stage");
+                    let result = super::operator::revoke(client, grant).await;
+                    tracing::info!(target: "kars_controller::credential_grants", stage = "writer-observer-revoke", phase = "returned", "Credential grant lifecycle stage");
+                    result
+                },
             ] {
                 if let Err(revoke) = revoked {
                     error.push_str(&format!("; read authority revocation pending: {revoke}"));
                 }
             }
-            if let Err(held) = release(client, grant).await {
+            tracing::info!(target: "kars_controller::credential_grants", stage = "writer-release", phase = "before", "Credential grant lifecycle stage");
+            let result = release(client, grant).await;
+            tracing::info!(target: "kars_controller::credential_grants", stage = "writer-release", phase = "returned", "Credential grant lifecycle stage");
+            if let Err(held) = result {
                 error.push_str(&format!("; enrolled name holds retained: {held}"));
             }
             let mut active = grant.clone();

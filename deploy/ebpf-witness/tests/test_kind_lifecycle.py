@@ -99,7 +99,7 @@ class KindLifecycleTests(unittest.TestCase):
                                                  "containers": [{"name": "ig", "image": IMAGE}]}}}}
         self.create(legacy)
         legacy_uid = self.uid("ds", "legacy-ig", "witness-lifecycle-models")
-        on_args = ("upgrade", RELEASE, str(CHART), "--set", "enabled=true", "--set", "sandboxes={demo}",
+        on_args = ("upgrade", RELEASE, str(CHART), "--set", "enabled=true", "--set", "scope=selected", "--set", "sandboxes={demo}",
                    "--set", "aggregator.image=" + IMAGE, "--set", "gadget.image=" + IMAGE)
         conflict = self.helm(*on_args, check=False)
         self.assertNotEqual(conflict.returncode, 0)

@@ -21,6 +21,7 @@ export interface IntakeState {
 }
 
 function packageValidationError(error: BffError): string | null {
+  if (error.code === "spending_policy_unavailable") return error.message;
   if ([400, 409, 422].includes(error.status)
     && ["bad_request", "rejected", "conflict"].includes(error.code) && error.message) {
     return error.message;
@@ -30,11 +31,23 @@ function packageValidationError(error: BffError): string | null {
     : null;
 }
 
+async function qualificationAllowed(value: unknown): Promise<boolean> {
+  if (value === undefined) return true;
+  if (typeof value !== "boolean") return false;
+  const { currentPrincipal } = await import("@/lib/session");
+  const principal = await currentPrincipal();
+  return principal.roles.some((role) => role === "operator" || role === "admin");
+}
+
 /** Validate the composed package against the live cluster (the §20 gate). */
 export async function validateMissionAction(
   blueprint: unknown,
   envelope?: Parameters<typeof import("@/lib/bff").validatePackage>[2],
 ): Promise<import("@/lib/types").ValidationResult> {
+  if (!(await qualificationAllowed(envelope?.qualification_run))) {
+    return { ok: false, checks: [{ id: "qualification_authorization", label: "Qualification designation denied",
+      status: "fail", detail: "Only an operator or admin may designate a qualification run." }] };
+  }
   const { validatePackage } = await import("@/lib/bff");
   try {
     return await validatePackage(defaultNamespace(), blueprint, envelope);
@@ -55,17 +68,24 @@ export async function validateMissionAction(
 /** Ask the orchestrator to compose a launch package from a plain objective. */
 export async function composeMissionAction(
   objective: string,
+  qualification_run?: boolean,
+  spending?: import("@/lib/budget-review").CompositionSpending,
 ): Promise<import("@/lib/types").ComposeResponse> {
+  if (!(await qualificationAllowed(qualification_run))) {
+    return { available: false, reason: "Only an operator or admin may designate a qualification run.",
+      proposal: null, rationale: null, source: null };
+  }
   try {
     const { composePackage } = await import("@/lib/bff");
-    return await composePackage(defaultNamespace(), objective);
+    return await composePackage(defaultNamespace(), objective, qualification_run, spending);
   } catch (error) {
     const timedOut = error instanceof Error && error.name === "TimeoutError";
     return {
       available: false,
-      reason: timedOut
-        ? "The orchestrator did not respond within two minutes — compose the package manually below."
-        : "The orchestrator is unavailable — compose the package manually below.",
+      reason: (error instanceof BffError ? packageValidationError(error) : null)
+        ?? (timedOut
+          ? "The orchestrator did not respond within two minutes — compose the package manually below."
+          : "The orchestrator is unavailable — compose the package manually below."),
       proposal: null,
       rationale: null,
       source: null,
@@ -112,6 +132,14 @@ export async function createMissionAction(
   _prev: IntakeState,
   formData: FormData,
 ): Promise<IntakeState> {
+  const qualification = formData.get("qualification_run");
+  if (qualification !== null && qualification !== "on" && qualification !== "off") {
+    return { error: "Review the qualification run designation before creating this Mission." };
+  }
+  const qualification_run = qualification === null ? undefined : qualification === "on";
+  if (!(await qualificationAllowed(qualification_run))) {
+    return { error: "Only an operator or admin may designate a qualification run." };
+  }
   const objective = String(formData.get("objective") ?? "").trim();
   const displayName = String(formData.get("display_name") ?? "").trim();
   const tier = Number(formData.get("tier")) || 3;
@@ -130,9 +158,6 @@ export async function createMissionAction(
   if ((hasBudget && scope !== "GovernedInference") ||
       (scope != null && scope !== "" && scope !== "GovernedInference")) {
     return { error: "Review this new mission with explicit GovernedInference budget scope before creating it." };
-  }
-  if (!hasBudget && scope === "GovernedInference") {
-    return { error: "GovernedInference enrollment requires a positive reviewed limit." };
   }
   const launch = formData.get("launch") === "on";
   // The authority ceiling for delegated sub-roles defaults to one tier below
@@ -170,7 +195,7 @@ export async function createMissionAction(
   }
 
   // Typed plans require mission → role → phase; legacy specialists use only one level.
-  const delegationDepth = blueprint?.execution_plan ? 2 : delegation?.mode === "principal-specialists" ? 1 : 0;
+  const delegationDepth = blueprint?.execution_plan ? (blueprint.execution_plan.roles.length ? 2 : 0) : delegation?.mode === "principal-specialists" ? 1 : 0;
 
   if (objective.length === 0 || objective.length > 4096) {
     return { error: "Describe what you want done (1–4096 characters)." };
@@ -184,6 +209,7 @@ export async function createMissionAction(
   const { currentPrincipal } = await import("@/lib/session");
   const principal = await currentPrincipal();
   const body: CreateTaskRequest = {
+    qualification_run,
     name,
     objective,
     display_name: displayName === "" ? deriveDisplayName(objective) : displayName,
@@ -191,7 +217,7 @@ export async function createMissionAction(
       tier,
       authority_ceiling: authorityCeiling,
       delegation_depth: delegationDepth,
-      budget: hasBudget ? { scope: "GovernedInference", ...limits } : null,
+      budget: scope === "GovernedInference" ? { scope: "GovernedInference", ...limits } : null,
       tool_policy: null,
       egress_allowlist: null,
     },

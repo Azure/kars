@@ -10,6 +10,8 @@ import test from "node:test";
 const ts = createRequire(import.meta.url)("typescript");
 function load(path, imports, globals = {}) {
   const context = { exports: {}, ...globals, require(name) {
+    if (name === "@/lib/budget-review") return load("lib/budget-review.ts", {});
+    if (name === "@/components/role-budget-fields") return { RoleBudgetFields: "RoleBudgetFields" };
     assert.ok(name in imports, `Unexpected import: ${name}`);
     return imports[name];
   } };
@@ -151,21 +153,36 @@ test("create errors explain typed validation without exposing unstructured upstr
   assert.doesNotMatch((await upstream.createMissionAction({}, form())).error, /private/);
 });
 
-test("blank limits are explicit absence, not implicit enrollment", async () => {
-  const api = intake();
-  const body = await create(api, form({ budget_tokens: " ", budget_scope: "" }));
-  assert.equal(body.envelope.budget, null);
-  const result = await api.createMissionAction({}, form({ budget_tokens: "" }));
-  assert.match(result.error, /positive reviewed limit/);
-  assert.equal(api.creates.length, 1);
+test("legacy blank unscoped limits remain explicit absence", async () => {
+  for (const scope of [null, ""]) {
+    const api = intake();
+    const body = await create(api, form({ budget_tokens: " ", budget_scope: scope }));
+    assert.equal(body.envelope.budget, null);
+  }
 });
 
-test("Home preflight forwards exactly the reviewed envelope", async () => {
-  const api = intake();
-  const envelope = { tier: 1, budget_tokens: 2000000, budget_usd_micros: 5000000,
-    budget_scope: "GovernedInference" };
-  await api.validateMissionAction({ model }, envelope);
-  assert.deepEqual(api.validations, [["test-workspace", { model }, envelope]]);
+test("explicit accounting scope survives blank caps for draft and launched Missions", async () => {
+  for (const tokens of [null, "", " "]) {
+    for (const launch of [null, "on"]) {
+      const api = intake();
+      const body = await create(api, form({ budget_tokens: tokens, launch }));
+      assert.deepEqual(body.envelope.budget, {
+        scope: "GovernedInference", tokens: null, usd_micros: null,
+      });
+      assert.equal(body.launch, launch === "on");
+      assert.deepEqual(body.blueprint.model, model);
+    }
+  }
+});
+
+test("Home preflight forwards finite and uncapped reviewed accounting envelopes", async () => {
+  for (const [budget_tokens, budget_usd_micros] of [[2000000, 5000000], [null, null]]) {
+    const api = intake();
+    const envelope = { tier: 1, budget_tokens, budget_usd_micros,
+      budget_scope: "GovernedInference" };
+    await api.validateMissionAction({ model }, envelope);
+    assert.deepEqual(api.validations, [["test-workspace", { model }, envelope]]);
+  }
 });
 
 test("Home preflight renders expected schema and launch errors as failed checks", async () => {
@@ -212,7 +229,8 @@ test("review form explicitly includes scope and describes lifetime and reservati
   for (const name of ["@/components/segmented-tier", "@/components/orchestration-cube",
     "@/components/validation-checks",
     "@/components/icon", "@/components/journey-rail", "@/lib/format", "@/components/repo-access",
-    "../envelope-reveal", "./controls", "./helpers"]) imports[name] = {};
+    "../envelope-reveal", "./controls", "./helpers", "./qualification-choice"]) imports[name] = {};
+  imports["@/components/repo-access"] = { missionGithubWriteEnabled: () => false };
   const { renderReview } = load("app/workspace/new/intake-flow/review.tsx", imports);
   function visit(node) {
     if (Array.isArray(node)) return node.flatMap(visit);
@@ -226,9 +244,14 @@ test("review form explicitly includes scope and describes lifetime and reservati
       modelFallbacks: [], mcp: [], skills: [], egress: [], recommendedStats: null,
       loopDirective: "", executionPlanDraft: "", executionPlanError: null, state: { error: null } }));
     assert.equal(nodes.find(node => node.props?.name === "budget_scope").props.value,
-      tokens ? "GovernedInference" : "");
+      "GovernedInference");
+    assert.match(JSON.stringify(nodes), /usage is always recorded/);
+    assert.match(JSON.stringify(nodes), /Role, profile and workspace limits still apply/);
     assert.equal(nodes.find(node => node.props?.name === "budget_tokens").props.value, tokens);
-    assert.match(JSON.stringify(nodes), /across retries and reruns/);
-    assert.match(JSON.stringify(nodes), /full input bound/);
+    assert.match(JSON.stringify(nodes), /including retries and reruns/);
+    assert.match(JSON.stringify(nodes), /Confirm any limit here, even if you mentioned it in your request/);
+    assert.match(JSON.stringify(nodes), /they are not dollars/);
+    assert.ok(nodes.find(node => node.type === "RoleBudgetFields"));
+    assert.doesNotMatch(JSON.stringify(nodes), /Launch requires the configured broker and model contract/);
   }
 });

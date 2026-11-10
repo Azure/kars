@@ -12,10 +12,12 @@ const entries = [
   { name: "compiled", entry: fileURLToPath(new URL("../dist/schema-hook.js", import.meta.url)) },
   { name: "bundled", entry: fileURLToPath(new URL("../../deploy/helm/kars/files/schema-hook.mjs", import.meta.url)) },
 ];
-const args = ["--release", "kars", "--namespace", "kars-system", "--revision", "1",
+const releaseArgs = ["--release", "kars", "--namespace", "kars-system", "--revision", "1",
   "--operation", "install", "--installer-helm-version", "v4.1.3"];
+const phases = entries.flatMap(entry => ["schemas", "sre"].map(phase => ({ ...entry, phase })));
 
-describe.each(entries)("$name schema hook process", ({ entry }) => {
+describe.each(phases)("$name $phase hook process", ({ entry, phase }) => {
+  const args = [...releaseArgs, "--phase", phase];
   it("executes through a projected ConfigMap symlink instead of silently succeeding", () => {
     const root = mkdtempSync(join(tmpdir(), "kars-schema-projection-"));
     try {

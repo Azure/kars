@@ -58,6 +58,54 @@ fn execution_plan_activation_binds_only_initial_task_launch() {
 }
 
 #[test]
+fn execution_plan_single_agent_needs_no_delegation_and_preserves_team_depth() {
+    let mut task = team();
+    task["kind"] = json!("KarsTask");
+    let mut plan = super::super::task::execution_plan::tests::filesystem_plan();
+    plan.roles.clear();
+    plan.synthesis.execution_mode = Some("native".into());
+    plan.synthesis.capabilities.push("network".into());
+    task["spec"]["blueprint"]["executionPlan"] = json!(plan);
+    validate(&task, true).unwrap();
+    task["kind"] = json!("KarsTeam");
+    assert!(
+        validate(&task, true)
+            .unwrap_err()
+            .contains("ReviewedDelegationDepthInsufficient")
+    );
+}
+
+#[test]
+fn execution_plan_completed_relaunch_requires_a_new_revision() {
+    let mut task = team();
+    task["kind"] = json!("KarsTask");
+    task["spec"]["blueprint"]["executionPlan"] =
+        json!(super::super::task::execution_plan::tests::filesystem_plan());
+    task["spec"]["envelope"]["delegationDepth"] = json!(REVIEWED_TASK_DELEGATION_DEPTH);
+    task["spec"]["execution"] = json!({"launch": false});
+    task["metadata"]["annotations"]["kars.azure.com/run-requested"] = json!("finished-run");
+    task["metadata"]["annotations"]["kars.azure.com/run-completed"] = json!("finished-run");
+    for result in [
+        validate(&task, true),
+        activation_fence(&task, true).map(|_| ()),
+    ] {
+        assert!(result.unwrap_err().contains("CompletedReviewedRun"));
+    }
+    validate(&task, false).unwrap();
+    activation_fence(&task, false).unwrap();
+    ensure_preserved(&task, &task).unwrap();
+
+    task["spec"]["execution"]["launch"] = json!(true);
+    validate(&task, true).unwrap();
+    activation_fence(&task, true).unwrap();
+    task["spec"]["execution"]["launch"] = json!(false);
+    task["metadata"]["annotations"]["kars.azure.com/run-requested"] = json!("requested-revision");
+    validate(&task, true).unwrap();
+    let fence = activation_fence(&task, true).unwrap();
+    assert!(fence.get("annotations").is_none());
+}
+
+#[test]
 fn execution_plans_preserve_root_and_role_plans_and_semantic_defaults() {
     let mut expected = team();
     expected["spec"]["roster"] =

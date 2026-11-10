@@ -10,6 +10,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::error::{AppError, AppResult};
+use crate::eval_builtin_names::BUILTIN_NAMES;
 use crate::eval_names::bounded_name;
 use crate::state::AppState;
 
@@ -110,7 +111,7 @@ pub async fn list_evals(State(state): State<AppState>) -> AppResult<Json<Vec<Eva
 pub struct CreateEvalRequest {
     /// The sandbox to evaluate (spec.targetSandboxRef).
     pub target_sandbox: String,
-    /// Builtin corpus name, e.g. `jailbreak-baseline` (spec.corpus.builtin).
+    /// Builtin corpus name, e.g. `jailbreak-baseline` or `builtin:jailbreak-baseline`.
     pub corpus: String,
     /// Optional cron schedule for a recurring eval; one-shot when omitted.
     pub schedule: Option<String>,
@@ -130,13 +131,29 @@ pub async fn create_eval(
     State(state): State<AppState>,
     Json(req): Json<CreateEvalRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
+    let (name, body) = eval_resource(req)?;
     let cluster = require_cluster(&state)?;
+    cluster
+        .apply_kind("kars-system", "KarsEval", body, true)
+        .await
+        .map_err(upstream)?;
+    Ok(Json(serde_json::json!({ "created": true, "name": name })))
+}
+
+fn eval_resource(req: CreateEvalRequest) -> AppResult<(String, Value)> {
     let sandbox = req.target_sandbox.trim();
     let corpus = req.corpus.trim();
+    let corpus = corpus.strip_prefix("builtin:").unwrap_or(corpus);
     if sandbox.is_empty() || corpus.is_empty() {
         return Err(AppError::BadRequest(
             "target_sandbox and corpus are required".into(),
         ));
+    }
+    if !BUILTIN_NAMES.contains(&corpus) {
+        return Err(AppError::BadRequest(format!(
+            "Unknown built-in corpus; choose one of: {}",
+            BUILTIN_NAMES.join(", ")
+        )));
     }
     // Deterministic, readable name so re-running the same eval updates in place.
     let name = format!("{sandbox}-{}", corpus.replace([':', '_', '/'], "-"));
@@ -176,13 +193,9 @@ pub async fn create_eval(
         "apiVersion": "kars.azure.com/v1alpha1",
         "kind": "KarsEval",
         "metadata": { "name": name, "annotations": annotations },
-        "spec": spec.clone(),
+        "spec": spec,
     });
-    cluster
-        .apply_kind("kars-system", "KarsEval", body, true)
-        .await
-        .map_err(upstream)?;
-    Ok(Json(serde_json::json!({ "created": true, "name": name })))
+    Ok((name, body))
 }
 
 /// A single eval case with what it tests and its latest verdict.
@@ -223,6 +236,41 @@ pub struct EvalReportDto {
     /// then shows the baseline cases without verdicts and invites a re-run.
     pub per_case_available: bool,
     pub cases: Vec<EvalCaseDto>,
+}
+
+fn case_probe(case: &Value) -> Option<String> {
+    let scenario = case.get("scenario")?;
+    if scenario["kind"] == "EgressConnect" {
+        let host = scenario["host"].as_str()?;
+        let port = scenario["port"].as_u64()?;
+        let authority = if host.contains(':') {
+            format!("[{host}]:{port}")
+        } else {
+            format!("{host}:{port}")
+        };
+        return Some(format!("CONNECT {authority}").chars().take(160).collect());
+    }
+    scenario
+        .get("messages")?
+        .as_array()?
+        .iter()
+        .rev()
+        .find(|message| message["role"] == "user")?
+        .get("content")?
+        .as_str()
+        .map(|text| text.chars().take(160).collect())
+}
+
+fn case_reason(case: &Value) -> Option<String> {
+    let verdict = &case["verdict"];
+    let reason = match verdict["result"].as_str() {
+        Some("Errored") => verdict["category"].as_str(),
+        Some("Fail") => verdict["reason"].as_str(),
+        _ => None,
+    };
+    reason
+        .or_else(|| case["actual"]["reason"].as_str())
+        .map(|text| text.chars().take(240).collect())
 }
 
 /// `GET /api/operator/evals/{name}/report` — the DETAILED eval report: every case
@@ -321,18 +369,7 @@ pub async fn eval_report(
                 .and_then(|e| e.get("decision"))
                 .and_then(|v| v.as_str())
                 .map(String::from);
-            // Summarise the probe: the last user message in the scenario.
-            let probe = case
-                .get("scenario")
-                .and_then(|s| s.get("messages"))
-                .and_then(|m| m.as_array())
-                .and_then(|arr| {
-                    arr.iter()
-                        .rev()
-                        .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
-                })
-                .and_then(|m| m.get("content").and_then(|c| c.as_str()))
-                .map(|s| s.chars().take(160).collect::<String>());
+            let probe = case_probe(case);
             let v = verdicts.get(&id);
             let pass = v.and_then(|c| c.get("pass")).and_then(|p| p.as_bool());
             let errored = v
@@ -344,11 +381,7 @@ pub async fn eval_report(
                 .and_then(|a| a.get("decision"))
                 .and_then(|d| d.as_str())
                 .map(String::from);
-            let actual_reason = v
-                .and_then(|c| c.get("actual"))
-                .and_then(|a| a.get("reason"))
-                .and_then(|d| d.as_str())
-                .map(|s| s.chars().take(240).collect::<String>());
+            let actual_reason = v.and_then(case_reason);
             cases.push(EvalCaseDto {
                 id,
                 tags,
@@ -373,4 +406,188 @@ pub async fn eval_report(
         per_case_available,
         cases,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn request(corpus: &str) -> CreateEvalRequest {
+        serde_json::from_value(json!({"target_sandbox": "sre", "corpus": corpus})).unwrap()
+    }
+
+    #[test]
+    fn displayed_builtin_names_round_trip_to_the_same_eval_resource() {
+        for corpus in BUILTIN_NAMES {
+            let (name, body) = eval_resource(request(corpus)).unwrap();
+            let object: DynamicObject = serde_json::from_value(body.clone()).unwrap();
+            let displayed = to_eval(&object).corpus.unwrap();
+            assert_eq!(displayed, format!("builtin:{corpus}"));
+            assert_eq!(name, format!("sre-{corpus}"));
+            assert_eq!(body["spec"]["corpus"]["builtin"], *corpus);
+            assert_eq!(
+                eval_resource(request(&format!("  {displayed}  "))).unwrap(),
+                (name, body)
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_or_malformed_builtin_names_are_rejected_before_resource_creation() {
+        for corpus in [
+            "missing-corpus",
+            "builtin:missing-corpus",
+            "builtin:builtin:jailbreak-baseline",
+            "builtin: jailbreak-baseline",
+            "JAILBREAK-BASELINE",
+            "oci://example.test/corpus",
+            "../jailbreak-baseline",
+        ] {
+            let Err(AppError::BadRequest(message)) = eval_resource(request(corpus)) else {
+                panic!("invalid corpus accepted: {corpus}");
+            };
+            assert!(message.contains(&BUILTIN_NAMES.join(", ")));
+        }
+    }
+
+    #[test]
+    fn empty_eval_inputs_remain_bad_requests() {
+        for corpus in ["", "  ", "builtin:", " builtin:  "] {
+            assert!(matches!(
+                eval_resource(request(corpus)),
+                Err(AppError::BadRequest(_))
+            ));
+        }
+        let mut req = request("jailbreak-baseline");
+        req.target_sandbox = "  ".into();
+        assert!(matches!(eval_resource(req), Err(AppError::BadRequest(_))));
+    }
+
+    #[test]
+    fn canonicalization_preserves_eval_configuration_and_explicit_no_run() {
+        let mut req = request("builtin:jailbreak-baseline");
+        req.target_sandbox = " sre ".into();
+        req.runner_image = Some(" example.test/runner:latest ".into());
+        req.schedule = Some(" 0 * * * * ".into());
+        req.display_name = Some(" SRE safety ".into());
+        req.run_now = Some(false);
+        let (_, body) = eval_resource(req).unwrap();
+        assert_eq!(
+            body["spec"],
+            json!({
+                "targetSandboxRef": {"name": "sre"},
+                "corpus": {"builtin": "jailbreak-baseline"},
+                "runnerImage": "example.test/runner:latest",
+                "schedule": "0 * * * *",
+                "displayName": "SRE safety",
+            })
+        );
+        assert_eq!(body["metadata"]["annotations"], json!({}));
+        for run_now in [None, Some(true)] {
+            let mut req = request("jailbreak-baseline");
+            req.run_now = run_now;
+            let (_, body) = eval_resource(req).unwrap();
+            assert_eq!(
+                body["metadata"]["annotations"]["kars.azure.com/run-now"],
+                "true"
+            );
+            assert!(body["spec"].get("runnerImage").is_none());
+        }
+    }
+
+    #[test]
+    fn malformed_historical_evals_are_reported_without_rewriting_them() {
+        let object: DynamicObject = serde_json::from_value(json!({
+            "apiVersion": "kars.azure.com/v1alpha1",
+            "kind": "KarsEval",
+            "metadata": {"name": "old-malformed-eval"},
+            "spec": {"corpus": {"builtin": "builtin:jailbreak-baseline"}},
+            "status": {"phase": "Degraded"}
+        }))
+        .unwrap();
+        let dto = to_eval(&object);
+        assert_eq!(
+            dto.corpus.as_deref(),
+            Some("builtin:builtin:jailbreak-baseline")
+        );
+        assert_eq!(dto.phase.as_deref(), Some("Degraded"));
+    }
+
+    #[test]
+    fn sanitized_inconclusive_categories_survive_the_detail_projection() {
+        for category in [
+            "Transport",
+            "Timeout",
+            "Authentication",
+            "Upstream",
+            "Protocol",
+            "BodyRead",
+            "BodyTooLarge",
+        ] {
+            let case =
+                json!({"actual": null, "verdict": {"result": "Errored", "category": category}});
+            assert_eq!(case_reason(&case).as_deref(), Some(category));
+            assert!(case["actual"].is_null());
+        }
+    }
+
+    #[test]
+    fn verdict_mismatches_take_precedence_over_an_actual_denial_reason() {
+        for reason in [
+            "DecisionMismatch",
+            "DecisionAtLeastSomeMissing",
+            "ByPolicyKindMismatch",
+            "ReasonContainsMissing",
+        ] {
+            assert_eq!(
+                case_reason(&json!({
+                    "actual": {"decision": "Blocked", "reason": "host not in allowlist"},
+                    "verdict": {"result": "Fail", "reason": reason}
+                }))
+                .as_deref(),
+                Some(reason)
+            );
+        }
+        assert_eq!(
+            case_reason(&json!({"actual": {"reason": "legacy reason"}})).as_deref(),
+            Some("legacy reason")
+        );
+        assert_eq!(case_reason(&json!({"actual": null})), None);
+        assert_eq!(
+            case_reason(&json!({"actual": {"reason": "a".repeat(500)}}))
+                .unwrap()
+                .len(),
+            240
+        );
+    }
+
+    #[test]
+    fn egress_details_identify_the_actual_authority_without_changing_chat_probes() {
+        for (host, port, expected) in [
+            ("exfil.example.test", 443, "CONNECT exfil.example.test:443"),
+            ("api.openai.com", 23, "CONNECT api.openai.com:23"),
+            ("::1", 9000, "CONNECT [::1]:9000"),
+        ] {
+            assert_eq!(
+                case_probe(&json!({"scenario": {
+                    "kind": "EgressConnect", "host": host, "port": port
+                }}))
+                .as_deref(),
+                Some(expected)
+            );
+        }
+        assert_eq!(
+            case_probe(&json!({"scenario": {"kind": "ChatCompletion", "messages": [
+                {"role": "user", "content": "first"}, {"role": "user", "content": "last"},
+                {"role": "assistant", "content": "not a probe"}
+            ]}}))
+            .as_deref(),
+            Some("last")
+        );
+        assert_eq!(
+            case_probe(&json!({"scenario": {"kind": "EgressConnect"}})),
+            None
+        );
+    }
 }

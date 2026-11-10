@@ -1,0 +1,8 @@
+{
+  "name": "kars-native-host-verification",
+  "private": true,
+  "type": "module",
+  "openclaw": {
+    "extensions": ["./index.ts"]
+  }
+}

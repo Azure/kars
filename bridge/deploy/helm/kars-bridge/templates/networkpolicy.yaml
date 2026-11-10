@@ -1,6 +1,6 @@
 {{/* Copyright (c) Microsoft Corporation.
 Licensed under the MIT License. */}}
-{{- if not (kindIs "bool" .Values.networkPolicy.routerApiServerIngress) }}
+{{- if and (hasKey .Values.networkPolicy "routerApiServerIngress") (not (kindIs "bool" .Values.networkPolicy.routerApiServerIngress)) }}
 {{- fail "networkPolicy.routerApiServerIngress must be a boolean" }}
 {{- end }}
 {{- if .Values.networkPolicy.routerApiServerIngress }}

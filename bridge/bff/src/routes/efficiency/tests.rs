@@ -244,6 +244,65 @@ fn approved() -> BTreeMap<String, String> {
 }
 
 #[test]
+fn retained_runtime_labels_require_matching_attempt_not_flat_fields() {
+    use crate::routes::tasks::run_evidence::mission_result_with_attempt;
+    for runtime in ["OpenClaw", "Hermes"] {
+        let (mut data, cm) = terminal_fixture(runtime);
+        data.insert("runtime".into(), "Unrelated current runtime".into());
+        let projected = mission_result_with_attempt(&data, Some(&cm));
+        assert_eq!(
+            projected.run_evidence.unwrap().runtime.as_deref(),
+            Some(runtime)
+        );
+        assert!(
+            mission_result_with_attempt(&data, None)
+                .run_evidence
+                .unwrap()
+                .runtime
+                .is_none()
+        );
+        let original: Value =
+            serde_json::from_str(&cm.data.as_ref().unwrap()["attempt.json"]).unwrap();
+        for pointer in [
+            "/candidate/taskUid",
+            "/candidate/podUid",
+            "/candidate/runNonce",
+            "/candidate/runtime",
+        ] {
+            let mut attempt = original.clone();
+            *attempt.pointer_mut(pointer).unwrap() = serde_json::json!("wrong");
+            let mut changed = cm.clone();
+            changed
+                .data
+                .as_mut()
+                .unwrap()
+                .insert("attempt.json".into(), attempt.to_string());
+            let result = mission_result_with_attempt(&data, Some(&changed));
+            assert!(result.reviewable);
+            assert!(result.run_evidence.unwrap().runtime.is_none(), "{pointer}");
+        }
+        let mut legacy = original;
+        legacy["candidate"]
+            .as_object_mut()
+            .unwrap()
+            .remove("runtime");
+        let mut changed = cm;
+        changed
+            .data
+            .as_mut()
+            .unwrap()
+            .insert("attempt.json".into(), legacy.to_string());
+        assert!(
+            mission_result_with_attempt(&data, Some(&changed))
+                .run_evidence
+                .unwrap()
+                .runtime
+                .is_none()
+        );
+    }
+}
+
+#[test]
 fn modern_producer_projection_recovers_terminal_measurements_and_harness() {
     for runtime in ["OpenClaw", "Hermes"] {
         let (mut data, cm) = terminal_fixture(runtime);
@@ -280,6 +339,39 @@ fn modern_producer_projection_recovers_terminal_measurements_and_harness() {
                 .unwrap()
                 .contains("private objective")
         );
+    }
+}
+
+#[test]
+fn peer_context_efficiency_requires_exact_retained_assignment() {
+    use serde_json::json;
+    let (mut data, mut cm) = terminal_fixture("Hermes");
+    let mut attempt: Value =
+        serde_json::from_str(&cm.data.as_ref().unwrap()["attempt.json"]).unwrap();
+    let peers = json!({"rootUid":"root-uid", "stateName":format!("kars-reviewed-{}", "a".repeat(40)),
+        "slot":"synthesis", "peers":[]});
+    for field in ["candidate", "assignment", "reply"] {
+        attempt[field]["version"] = json!(5);
+        attempt[field]["peerContext"] = peers.clone();
+    }
+    data.insert("evidence.json".into(), attempt["reply"].to_string());
+    cm.data
+        .as_mut()
+        .unwrap()
+        .insert("attempt.json".into(), attempt.to_string());
+    assert_eq!(
+        normalize_run(&data, &approved(), Some(&cm), None).harness,
+        "Hermes"
+    );
+    for field in ["candidate", "assignment"] {
+        let mut changed = attempt.clone();
+        changed[field]["peerContext"]["rootUid"] = json!("different-root");
+        cm.data
+            .as_mut()
+            .unwrap()
+            .insert("attempt.json".into(), changed.to_string());
+        let run = normalize_run(&data, &approved(), Some(&cm), None);
+        assert!(run.harness.is_empty() && run.package.is_empty());
     }
 }
 

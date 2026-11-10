@@ -308,6 +308,9 @@ pub async fn post_review(
 
     let task = require_owned_task(cluster, &ns, &name, &principal).await?;
     require_mission_review(&task)?;
+    if decision != "approve" {
+        crate::routes::qualification_runs::forbid_inherited_run(&task)?;
+    }
     if decision == "retry_revision" {
         return retry::request(cluster, &task, &principal, &body)
             .await

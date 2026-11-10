@@ -49,6 +49,22 @@ The sandbox image (`sandbox-images/langgraph-ts/`) installs the
 already-built `dist/` output. Its builder and production dependency stages both
 use the committed lockfile with `npm ci`.
 
+Azure Identity requires `^4.14.1`, whose maintained parent dependency requires
+MSAL Node `^7.1.0`; the lock currently resolves MSAL 7.2.0. This addresses
+CVE-2026-109461 without an unsupported major override. The minimum is in the
+published library's dependencies, not just a repository-root override, so fresh
+consumer resolution also excludes the affected MSAL range. Node >=22 remains
+required. `tests/identity.test.ts` checks installed and locked versions and runs
+the real Workload Identity → MSAL assertion exchange, cache, and rejection paths
+with a test-only HTTP transport. These are local compatibility checks, not live
+Entra acceptance.
+
+The adapter also supplies LangGraph's supported Zod peer as `^4.6.6` rather than
+allowing the historical Zod 3 resolution. This repairs the additional local-audit
+finding GHSA-mrhx-c7xc-m3w5 (oversized constrained collection validation).
+`tests/schema-compatibility.test.ts` exercises real LangChain structured tools
+and LangGraph schema execution with the supported Zod 4 API.
+
 Telemetry initialization targets the locked OpenTelemetry 2.x SDK APIs. The
 regressions use real SDK providers and a local HTTP collector to verify trace
 and metric exports, resource attributes, endpoint precedence and idempotent

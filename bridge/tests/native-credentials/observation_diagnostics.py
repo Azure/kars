@@ -130,6 +130,9 @@ def resolve_actor(setup, component, target):
     if component == "controller":
         namespace, name, account, container = CORE, "kars-controller", "kars-controller", "controller"
         labels = {"app.kubernetes.io/name": "kars", "app.kubernetes.io/component": "controller"}
+    elif component == "metrics":
+        namespace, name, account, container = CORE, "kars-metrics-server", "kars-metrics-server", "metrics-server"
+        labels = {"app": "kars-metrics-server", "kars.azure.com/metrics-managed": "true"}
     elif component == "bff":
         namespace, name, account, container = BRIDGE, "kars-bridge-bff", WRITER, "bff"
         labels = {"app.kubernetes.io/name": "kars-bridge", "app.kubernetes.io/component": "bff"}

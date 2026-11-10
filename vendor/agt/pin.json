@@ -1,7 +1,7 @@
 {
   "url": "https://github.com/microsoft/agent-governance-toolkit.git",
   "branch": "main",
-  "sha": "f68f2cf312c7e1366d6fd5654c51d8380c815222",
-  "shortSha": "f68f2cf3",
+  "sha": "17595e649abdfa703962c2f8c241826f68318109",
+  "shortSha": "17595e64",
   "_comment": "Selected AGT 5.0.0 source revision. Keep Rust patches and lockfile, the checksum-bound TypeScript SDK archive and npm locks, relay/registry builds, and Python core/CLI/A2A owners plus native ACS wheels on this same revision. Existing checkouts are never reset or switched by the CLI. Retain this source pin until matching published artifacts have completed the same compatibility and installed-runtime acceptance."
 }

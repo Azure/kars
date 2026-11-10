@@ -1,7 +1,7 @@
 {
   "name": "@kars/runtime-openclaw",
   "version": "0.1.0-alpha.1",
-  "description": "kars runtime adapter for OpenClaw \u2014 loaded as an OpenClaw plugin inside the sandbox pod",
+  "description": "kars runtime adapter for OpenClaw — loaded as an OpenClaw plugin inside the sandbox pod",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -20,7 +20,7 @@
   ],
   "type": "module",
   "scripts": {
-    "build": "tsc && cp src/core/task-filesystem.py dist/core/task-filesystem.py",
+    "build": "tsc && cp src/core/task-filesystem.py dist/core/task-filesystem.py && cp src/core/native-github-pr.py dist/core/native-github-pr.py && cp src/core/native-python.py dist/core/native-python.py",
     "dev": "tsx watch src/index.ts",
     "lint": "oxlint .",
     "format": "oxfmt .",
@@ -35,14 +35,14 @@
     "ws": "^8.18.0"
   },
   "optionalDependencies": {
-    "@microsoft/agent-governance-sdk": "file:../../vendor/agt/microsoft-agent-governance-sdk-5.0.0-agt-f68f2cf3.tgz"
+    "@microsoft/agent-governance-sdk": "file:../../vendor/agt/microsoft-agent-governance-sdk-5.0.0-agt-17595e64.tgz"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "oxlint": "^0.16.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
-    "vitest": "^4.1.8"
+    "vitest": "^4.1.12"
   },
   "engines": {
     "node": ">=22.0.0"

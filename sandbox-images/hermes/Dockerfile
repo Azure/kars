@@ -41,7 +41,7 @@
 # runtimes/, sandbox-images/, etc.).
 
 ARG HERMES_RUNTIME_BASE=base
-FROM mcr.microsoft.com/azurelinux/base/python:3.12@sha256:d1a693353b7db0383e66a61416a049f617fdfb89435dcaac543749fb4f14950a AS base
+FROM mcr.microsoft.com/azurelinux/base/python:3.12@sha256:71a1f5a1821f4c56e45aff52e792ed6c0500631e201cfc140c4c9d22886b29f9 AS base
 
 LABEL org.kars.runtime.contract="v1"
 LABEL org.kars.runtime.kind="Hermes"
@@ -121,7 +121,7 @@ RUN git init -q /opt/hermes \
     && test "$(git -C /opt/hermes hash-object pyproject.toml)" = "1a98d5528c88ddc3d4e32439d3e8322487ce31bc" \
     && git -C /opt/hermes apply /opt/hermes-build/hermes-dependency-fixes.patch \
     && cp /opt/hermes-build/hermes-uv.lock /opt/hermes/uv.lock \
-    && echo "2c87202b1566e4daed16b1472bc5d5e3651af9f6fd64acc953412f43432fefb0  /opt/hermes/pyproject.toml" | sha256sum --check - \
+    && echo "c5863a93d8ccf31a8eb0c8bf66a35c638966457d79238a6d9486b600b37aac87  /opt/hermes/pyproject.toml" | sha256sum --check - \
     && printf '%s\n' \
        "6dd85804ac28a0f2d326030e69c4f65a9ae8968478af87d2267d6ad89cc7230a  /opt/hermes/package.json" \
        "2eee7bf49d29e6d0b218dcc960a174b99cc177039f6941f0355ebff9a93e33f7  /opt/hermes/package-lock.json" \
@@ -233,6 +233,24 @@ RUN pip wheel --no-cache-dir --no-deps --wheel-dir /opt/kars-adapter-wheels /opt
 
 FROM ${HERMES_RUNTIME_BASE} AS runtime
 USER 0
+COPY sandbox-images/hermes/hermes-foundry-bounds.patch /tmp/hermes-foundry-bounds.patch
+RUN if echo "e4971c76a209d5dfb70a5dcf9bcbf4f9038c7ebe1f5d21e00984a419e5b2a36a  /opt/hermes/agent/auxiliary_client.py" | sha256sum --check --status -; then :; \
+    else echo "e83807074f3577ac3980f43bfd578ffcc95efb591e38a9427d0e7d33ec7d8e4a  /opt/hermes/agent/auxiliary_client.py" | sha256sum --check - \
+        && git -C /opt/hermes apply --check /tmp/hermes-foundry-bounds.patch \
+        && git -C /opt/hermes apply /tmp/hermes-foundry-bounds.patch; fi \
+    && rm /tmp/hermes-foundry-bounds.patch
+COPY sandbox-images/hermes/hermes-foundry-responses.patch /tmp/hermes-foundry-responses.patch
+RUN if echo "5c1380877a7ef073e2ff0cd94f0b9aa3aca5edfe99d0a1980d7fe068ddf3aa13  /opt/hermes/hermes_cli/models_catalog_static.py" | sha256sum --check --status -; then :; \
+    else echo "4e216ecf44d79e508319e89084c2f5471b051c1ce439231adc797f620976a923  /opt/hermes/hermes_cli/models_catalog_static.py" | sha256sum --check - \
+        && git -C /opt/hermes apply --check /tmp/hermes-foundry-responses.patch \
+        && git -C /opt/hermes apply /tmp/hermes-foundry-responses.patch; fi \
+    && echo "5c1380877a7ef073e2ff0cd94f0b9aa3aca5edfe99d0a1980d7fe068ddf3aa13  /opt/hermes/hermes_cli/models_catalog_static.py" | sha256sum --check - \
+    && rm /tmp/hermes-foundry-responses.patch
+COPY sandbox-images/hermes/azure-foundry-provider.py /tmp/kars-azure-foundry-provider.py
+RUN (python3 -c "from pathlib import Path; import sys; sys.exit(Path('/tmp/kars-azure-foundry-provider.py').read_bytes() != Path('/opt/hermes/plugins/model-providers/azure-foundry/__init__.py').read_bytes())" \
+        || echo "7463d513a89aebcaaead8888038493e5dbbe4e630b49d5b8970b4eef4fddbdb9  /opt/hermes/plugins/model-providers/azure-foundry/__init__.py" | sha256sum --check -) \
+    && install -m 0644 /tmp/kars-azure-foundry-provider.py /opt/hermes/plugins/model-providers/azure-foundry/__init__.py \
+    && rm /tmp/kars-azure-foundry-provider.py
 # Remove obsolete source and discovered-plugin files when reusing a qualified image.
 RUN rm -rf /opt/kars-runtime-hermes /opt/kars-hermes-stage/plugins/kars
 COPY runtimes/hermes/pyproject.toml runtimes/hermes/README.md /opt/kars-runtime-hermes/
@@ -243,6 +261,8 @@ RUN pip install --no-cache-dir --no-index --no-deps --force-reinstall \
     && pip check \
     && rm -rf /tmp/kars-adapter-wheels
 COPY runtimes/hermes/src/kars_runtime_hermes/plugin/ /opt/kars-hermes-stage/plugins/kars/
+# Fail incomplete adapter-refresh contexts instead of silently disabling discovery.
+COPY runtimes/hermes/src/kars_runtime_hermes/plugin/plugin.yaml /opt/kars-hermes-stage/plugins/kars/plugin.yaml
 RUN chmod -R a+rX /opt/kars-hermes-stage
 COPY sandbox-images/hermes/entrypoint.sh /usr/local/bin/kars-hermes-entrypoint.sh
 RUN chmod 0755 /usr/local/bin/kars-hermes-entrypoint.sh

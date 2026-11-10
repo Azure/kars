@@ -1,10 +1,16 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { execFileSync } from "node:child_process";
+import { createHash, randomUUID, X509Certificate } from "node:crypto";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import { applyReviewedGrant, credentialGrantsCommand } from "../commands/credential-grants.js";
 import { continuityFixture, privateAuthoritySnapshot } from "./private-activation-fixtures.js";
-import { PRIVATE_PREFIX as P, canonical, type Execute } from "./private-activation.js";
+import { PRIVATE_PREFIX as P, canonical, digest, type Execute } from "./private-activation.js";
+import { verifyRetiredSealedRoot } from "./private-activation-continuity.js";
+import { reviewLateScope, verifyRetiredLateScope } from "./private-activation-late-scope.js";
 import { PrivateCommandFailure } from "./private-activation-command-diagnostics.js";
 
 const HISTORY = `${P}root-retirement`;
@@ -18,7 +24,28 @@ const SNAPSHOT_MARKER = "KARS_PRIVATE_LATE_SANDBOX_CHECKS ";
 const cliProcess = vi.hoisted(() => ({ execute: vi.fn() }));
 vi.mock("execa", () => ({ execa: cliProcess.execute }));
 
-async function setup(suspended: boolean | null = null) {
+const tlsDirectory = path.join(process.cwd(), `.private-late-tls-${randomUUID()}`);
+const tlsIdentities: { caPem: string; certificatePem: string; privateKeyPem: string; expiresAt: number }[] = [];
+beforeAll(() => {
+  mkdirSync(tlsDirectory);
+  const openssl = (...args: string[]) => execFileSync("openssl", args, { cwd: tlsDirectory, stdio: "pipe" });
+  writeFileSync(path.join(tlsDirectory, "leaf.ext"), "basicConstraints=critical,CA:FALSE\nsubjectAltName=DNS:control-sandbox.kars.internal\nextendedKeyUsage=serverAuth\n");
+  for (let index = 0; index < 2; index++) {
+    openssl("req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes",
+      "-keyout", "ca.key", "-out", "ca.pem", "-days", "2", "-subj", "/CN=Kars test CA", "-addext", "basicConstraints=critical,CA:TRUE");
+    openssl("req", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-keyout", "leaf.key",
+      "-out", "leaf.csr", "-subj", "/CN=Kars test control");
+    openssl("x509", "-req", "-in", "leaf.csr", "-CA", "ca.pem", "-CAkey", "ca.key", "-set_serial", String(index + 1),
+      "-days", "1", "-extfile", "leaf.ext", "-out", "leaf.pem");
+    const pem = (name: string) => readFileSync(path.join(tlsDirectory, name), "utf8");
+    const certificatePem = pem("leaf.pem");
+    tlsIdentities.push({ caPem: pem("ca.pem"), certificatePem, privateKeyPem: pem("leaf.key"),
+      expiresAt: Date.parse(new X509Certificate(certificatePem).validTo) / 1000 });
+  }
+});
+afterAll(() => { rmSync(tlsDirectory, { recursive: true, force: true }); });
+
+async function setup(suspended: boolean | null = null, tls = false, memory = false) {
   const f = continuityFixture();
   await applyReviewedGrant(f.execute, await f.document());
   await applyReviewedGrant(f.execute, await f.document("second"));
@@ -60,6 +87,54 @@ async function setup(suspended: boolean | null = null) {
       }) },
     ], volumeMounts: [{ name: "governed-services-control", mountPath: "/etc/kars/services", readOnly: true }] }] } } },
   status: { observedGeneration: 1, updatedReplicas: suspended ? 0 : 1, availableReplicas: suspended ? 0 : 1 } };
+  const tlsConfiguration = (index: number) => ({ ...tlsIdentities[index], serverName: "control-sandbox.kars.internal",
+    identity: JSON.parse(deployment.spec.template.spec.containers[0].env[0].value) });
+  const setTls = (configuration: unknown) => { secret.data["config.json"] = Buffer.from(JSON.stringify(configuration)).toString("base64"); };
+  if (tls) {
+    const identity = JSON.parse(deployment.spec.template.spec.containers[0].env[0].value);
+    deployment.spec.template.spec.containers[0].env[0].value = JSON.stringify({ ...identity, managed: true,
+      sandbox: { uid: "sandbox", namespace: "work", name: "late" }, namespace_uid: "runtime-ns" });
+    deployment.spec.template.spec.volumes[0].secret.items.push({ key: "config.json", path: "config.json" });
+    setTls(tlsConfiguration(0));
+  }
+  const rawHash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
+  const account = `kars-memory-${rawHash("sandbox").slice(0, 40)}`;
+  const anchor: any = { kind: "Secret", metadata: { name: account, namespace: "kars-memory-system",
+    uid: "memory-anchor-0", resourceVersion: "1", ownerReferences: [{ apiVersion: "v1", kind: "ServiceAccount",
+      name: account, uid: "memory-sa", controller: true, blockOwnerDeletion: false }] } };
+  const memoryAccount: any = { kind: "ServiceAccount", automountServiceAccountToken: false, metadata: {
+    name: account, namespace: "kars-memory-system", uid: "memory-sa", resourceVersion: "1",
+    annotations: { "kars.azure.com/memory-sandbox-uid": "sandbox" }, ownerReferences: [{ apiVersion: "v1",
+      kind: "Namespace", name: "kars-memory-system", uid: "memory-ns", controller: true, blockOwnerDeletion: false }] } };
+  const memoryConfiguration = (index: number) => {
+    const expires = Math.floor(Date.now() / 1000) + 3600;
+    const claims = { sub: `system:serviceaccount:kars-memory-system:${account}`, exp: expires,
+      "kubernetes.io": { namespace: "kars-memory-system", serviceaccount: { name: account, uid: "memory-sa" },
+        secret: { name: account, uid: `memory-anchor-${index}` } } };
+    const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+    return { identity: { namespace: "work", namespace_uid: f.namespace("work").metadata.uid, owner_kind: "KarsTask",
+      owner_name: "task", owner_uid: "task-uid", principal: "principal" }, map_uid: "retained-memory-map",
+    anchor_uid: `memory-anchor-${index}`, epoch: rawHash(Buffer.from(secret.data["control-token"], "base64")),
+    api_url: "https://10.96.0.1:443", ca: tlsIdentities[0]!.caPem, sandbox_uid: "sandbox", expires_at: expires,
+    token: `${part({ alg: "RS256", typ: "JWT" })}.${part(claims)}.${part(`test-signature-${index}`)}` };
+  };
+  const setMemory = (configuration: unknown) => { secret.data["builtin-memory.json"] = Buffer.from(JSON.stringify(configuration)).toString("base64"); };
+  const setVersion = () => {
+    const { "builtin-memory.json": _memory, ...data } = secret.data;
+    deployment.spec.template.metadata.annotations[VERSION] = memory
+      ? `admin-secret:control-v1:${digest(data)}` : `admin-secret:${secret.metadata.resourceVersion}`;
+  };
+  if (memory) {
+    deployment.spec.template.spec.volumes.push({ name: "builtin-memory", secret: { secretName: ADMIN,
+      items: [{ key: "builtin-memory.json", path: "builtin-memory.json" }] } });
+    deployment.spec.template.spec.containers[0].volumeMounts.push({ name: "builtin-memory", mountPath: "/etc/kars/builtin-memory", readOnly: true });
+    f.objects.set(f.key("secret", account, "kars-memory-system"), anchor);
+    f.objects.set(f.key("serviceaccount", account, "kars-memory-system"), memoryAccount);
+    f.objects.set(f.key("namespace", "kars-memory-system"), { kind: "Namespace", metadata: {
+      name: "kars-memory-system", uid: "memory-ns", resourceVersion: "1", labels: { "kars.azure.com/component": "private-memory" } } });
+    setMemory(memoryConfiguration(0));
+    setVersion();
+  }
   const projection = { kind: "Secret", metadata: { name: "projection", uid: "projection-uid", resourceVersion: "8" },
     data: { CUSTOMER_KEY: "preserved-value" } };
   const source = { kind: "Secret", metadata: { name: "source", uid: "source-uid", resourceVersion: "9" },
@@ -84,6 +159,8 @@ async function setup(suspended: boolean | null = null) {
     ...pod("old-terminating"), metadata: { ...pod("old-terminating").metadata, deletionTimestamp: "2026-09-12T01:00:00Z" },
   }]);
   let rotate = true;
+  let rotateTls = true;
+  let rotateMemoryAnchor = true;
   let keepPods = false;
   const updateDeployment = () => {
     deployment.metadata.resourceVersion = String(Number(deployment.metadata.resourceVersion) + 1);
@@ -112,10 +189,15 @@ async function setup(suspended: boolean | null = null) {
       expect(f.pods.get("kars-late")).toEqual([]);
       expect(deployment.spec.replicas).toBe(0);
       if (rotate) secret.data["control-token"] = Buffer.from("B".repeat(64)).toString("base64");
+      if (tls && rotateTls) setTls(tlsConfiguration(1));
+      if (memory) {
+        if (rotateMemoryAnchor) anchor.metadata.uid = "memory-anchor-1";
+        setMemory(memoryConfiguration(rotateMemoryAnchor ? 1 : 0));
+      }
       secret.metadata.resourceVersion = "2";
       secret.metadata.annotations[`${P}epoch`] = namespace.metadata.annotations[`${P}epoch`];
       deployment.spec.template.metadata.annotations[`${P}epoch`] = namespace.metadata.annotations[`${P}epoch`];
-      deployment.spec.template.metadata.annotations[VERSION] = "admin-secret:2";
+      setVersion();
       updateDeployment();
     }
     return result;
@@ -125,7 +207,10 @@ async function setup(suspended: boolean | null = null) {
     otherGrant: f.grant("second"), otherAuthority: f.authority.get(f.grant("second").metadata.uid),
     rootDeployment: f.deployment, rootPods: f.pods.get("core"), source, projection, task });
   f.calls.length = 0;
-  return { ...f, namespace, task, sandbox, secret, deployment, document, execute, preserved,
+  return { ...f, namespace, task, sandbox, secret, deployment, document, execute, preserved, setTls, tlsConfiguration,
+    setMemory, memoryConfiguration, anchor, memoryAccount, setVersion,
+    refuseMemoryAnchorRotation: () => { rotateMemoryAnchor = false; },
+    refuseTlsRotation: () => { rotateTls = false; },
     refuseRotation: () => { rotate = false; }, keepPods: () => { keepPods = true; } };
 }
 
@@ -135,6 +220,211 @@ describe("reviewed late runtime private enrollment", () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
   });
   afterEach(() => { vi.restoreAllMocks(); });
+
+  it("retires real Task token and TLS material before restoring the same owned execution", async () => {
+    const f = await setup(null, true);
+    const preserved = f.preserved();
+    await applyReviewedGrant(f.execute, await f.document());
+    const receipt = JSON.parse(f.namespace.metadata.annotations[HISTORY]);
+    expect(receipt.phase).toBe("Qualified");
+    expect(receipt.baseline.tls.key).not.toBe(receipt.qualified.material.tls.key);
+    expect(receipt.baseline.key).not.toBe(receipt.qualified.material.key);
+    expect(receipt.baseline.object.uid).toBe(receipt.qualified.material.object.uid);
+    expect(JSON.stringify(receipt)).not.toMatch(/BEGIN|privateKeyPem|certificatePem/);
+    expect(f.preserved()).toEqual(preserved);
+    expect(f.sandbox.spec.suspended).toBeUndefined();
+  });
+
+  it("retires TLS and built-in memory bound authority with the maintained control-v1 version", async () => {
+    const f = await setup(null, true, true);
+    const preserved = f.preserved();
+    const document = await f.document();
+    expect(f.calls.filter(args => args[0] === "get" && args[1] === "secret").every(args =>
+      args.includes("jsonpath-as-json={.metadata}"))).toBe(true);
+    await applyReviewedGrant(f.execute, document);
+    const receipt = JSON.parse(f.namespace.metadata.annotations[HISTORY]);
+    expect(receipt.phase).toBe("Qualified");
+    expect(receipt.baseline.memory.anchor).toBe("memory-anchor-0");
+    expect(receipt.qualified.material.memory.anchor).toBe("memory-anchor-1");
+    expect(receipt.qualified.material.memory.binding).toBe(receipt.baseline.memory.binding);
+    expect(receipt.qualified.material.memory.epoch).not.toBe(receipt.baseline.memory.epoch);
+    expect(receipt.qualified.material.memory.key).not.toBe(receipt.baseline.memory.key);
+    expect(receipt.qualified.material.memory.version).toBe(f.deployment.spec.template.metadata.annotations[VERSION]);
+    expect(JSON.stringify(receipt)).not.toMatch(/BEGIN|test-signature|expires_at|kubernetes.io/);
+    expect(f.preserved()).toEqual(preserved);
+    await f.document();
+  });
+
+  it("does not treat a new memory token on the old bound anchor as retirement", async () => {
+    const f = await setup(null, true, true);
+    f.refuseMemoryAnchorRotation();
+    await expect(applyReviewedGrant(f.execute, await f.document())).rejects.toThrow(/not rotated/);
+    expect(f.sandbox.spec.suspended).toBe(true);
+    expect(JSON.parse(f.namespace.metadata.annotations[HISTORY]).phase).toBe("Rotating");
+  });
+
+  it("waits for controller memory reissuance without qualifying the old epoch", async () => {
+    const f = await setup(null, true, true);
+    const old = f.secret.data["builtin-memory.json"];
+    let next: string | undefined;
+    let waited = false;
+    const execute: Execute = async (args, input) => {
+      const result = await f.execute(args, input);
+      if (args[0] === "patch" && args[1] === "namespace" && args[2] === "kars-late"
+        && JSON.parse(f.namespace.metadata.annotations[HISTORY]).phase === "Rotating") {
+        next = f.secret.data["builtin-memory.json"];
+        f.secret.data["builtin-memory.json"] = old;
+      } else if (next && args[0] === "get" && args[1] === "secret" && args[2] === ADMIN && args.includes("json")) {
+        f.secret.data["builtin-memory.json"] = next;
+        next = undefined;
+        waited = true;
+      }
+      return result;
+    };
+    await applyReviewedGrant(execute, await f.document(execute));
+    expect(waited).toBe(true);
+    expect(JSON.parse(f.namespace.metadata.annotations[HISTORY]).phase).toBe("Qualified");
+  });
+
+  it("does not qualify a changed retained memory binding during rotation", async () => {
+    const f = await setup(null, true, true);
+    const execute: Execute = async (args, input) => {
+      const result = await f.execute(args, input);
+      if (args[0] === "patch" && args[1] === "namespace" && args[2] === "kars-late"
+        && JSON.parse(f.namespace.metadata.annotations[HISTORY]).phase === "Rotating") {
+        f.setMemory({ ...f.memoryConfiguration(1), map_uid: "replacement-memory" });
+      }
+      return result;
+    };
+    await expect(applyReviewedGrant(execute, await f.document(execute))).rejects.toThrow(/not rotated/);
+    expect(f.sandbox.spec.suspended).toBe(true);
+  });
+
+  it.each(["identity", "anchor", "token", "account", "owner", "http", "CA", "expiry", "unknown-key", "version"])(
+    "rejects invalid built-in memory authority before retirement: %s", async fault => {
+      const f = await setup(null, true, true);
+      const configuration: any = f.memoryConfiguration(0);
+      if (fault === "identity") configuration.identity.owner_uid = "foreign";
+      if (fault === "anchor") f.anchor.metadata.uid = "replacement";
+      if (fault === "token") configuration.token = "not.a.token";
+      if (fault === "account") f.memoryAccount.automountServiceAccountToken = true;
+      if (fault === "owner") f.memoryAccount.metadata.ownerReferences[0].uid = "foreign";
+      if (fault === "http") configuration.api_url = "http://10.96.0.1:443";
+      if (fault === "CA") configuration.ca += configuration.ca;
+      if (fault === "expiry") configuration.expires_at = 1;
+      if (fault === "unknown-key") configuration.extra = "PRIVATE-DO-NOT-EMIT";
+      f.setMemory(configuration);
+      if (fault === "version") f.secret.data["control-token"] = Buffer.from("C".repeat(64)).toString("base64");
+      await expect(applyReviewedGrant(f.execute, await f.document())).rejects.toThrow(/memory configuration|current control epoch|safely/);
+      expect(f.sandbox.spec.suspended).toBeUndefined();
+      expect(f.namespace.metadata.annotations[HISTORY]).toBeUndefined();
+      expect(JSON.stringify(f.calls)).not.toContain("PRIVATE-DO-NOT-EMIT");
+    });
+
+  it.each(["extra-item", "optional", "agent-mount", "writable", "duplicate"])(
+    "rejects customized memory mounts in metadata-only preview: %s", async fault => {
+      const f = await setup(null, true, true);
+      const spec = f.deployment.spec.template.spec;
+      const volume = spec.volumes.find((v: any) => v.name === "builtin-memory");
+      const router = spec.containers[0];
+      const mount = router.volumeMounts.find((v: any) => v.name === "builtin-memory");
+      if (fault === "extra-item") volume.secret.items.push({ key: "other", path: "other" });
+      if (fault === "optional") volume.secret.optional = true;
+      if (fault === "agent-mount") spec.containers.push({ name: "agent", volumeMounts: [structuredClone(mount)] });
+      if (fault === "writable") mount.readOnly = false;
+      if (fault === "duplicate") spec.volumes.push(structuredClone(volume));
+      f.pods.set("kars-late", []);
+      await expect(f.document()).rejects.toThrow();
+      expect(f.sandbox.spec.suspended).toBeUndefined();
+    });
+
+  it.each(["token", "TLS"])("does not qualify an unchanged %s key using epoch stamps", async unchanged => {
+    const f = await setup(null, true);
+    if (unchanged === "token") f.refuseRotation(); else f.refuseTlsRotation();
+    await expect(applyReviewedGrant(f.execute, await f.document())).rejects.toThrow(/not rotated/);
+    expect(f.sandbox.spec.suspended).toBe(true);
+    expect(JSON.parse(f.namespace.metadata.annotations[HISTORY]).phase).toBe("Rotating");
+  });
+
+  it.each(["identity", "hostname", "private-key", "CA", "expiry", "extra-field", "malformed", "missing-config", "extra-key"])(
+    "rejects mismatched Task TLS material without suspending execution: %s", async fault => {
+      const f = await setup(null, true);
+      const configuration: any = f.tlsConfiguration(0);
+      if (fault === "identity") configuration.identity.task.uid = "foreign-task";
+      if (fault === "hostname") configuration.serverName = "foreign.kars.internal";
+      if (fault === "private-key") configuration.privateKeyPem = tlsIdentities[1]!.privateKeyPem;
+      if (fault === "CA") configuration.caPem = tlsIdentities[1]!.caPem;
+      if (fault === "expiry") configuration.expiresAt = 1;
+      if (fault === "extra-field") configuration.url = "https://foreign.invalid";
+      f.setTls(configuration);
+      if (fault === "malformed") f.secret.data["config.json"] = "not-base64";
+      if (fault === "missing-config") delete f.secret.data["config.json"];
+      if (fault === "extra-key") f.secret.data.extra = "unexpected";
+      await expect(applyReviewedGrant(f.execute, await f.document())).rejects.toThrow(/TLS configuration|credential keys/);
+      expect(f.sandbox.spec.suspended).toBeUndefined();
+      expect(f.namespace.metadata.annotations[HISTORY]).toBeUndefined();
+    });
+
+  it("rejects TLS bound to another Sandbox even when the Deployment and config agree", async () => {
+    const f = await setup(true, true);
+    const configuration = f.tlsConfiguration(0);
+    configuration.identity.sandbox.uid = "foreign";
+    f.deployment.spec.template.spec.containers[0].env[0].value = JSON.stringify(configuration.identity);
+    f.setTls(configuration);
+    await expect(applyReviewedGrant(f.execute, await f.document())).rejects.toThrow(/TLS configuration/);
+    expect(f.sandbox.spec.suspended).toBe(true);
+    expect(f.namespace.metadata.annotations[HISTORY]).toBeUndefined();
+  });
+
+  it("rejects TLS configuration on a token-only runtime rather than ignoring extra authority", async () => {
+    const f = await setup();
+    f.setTls(f.tlsConfiguration(0));
+    await expect(applyReviewedGrant(f.execute, await f.document())).rejects.toThrow(/credential keys/);
+    expect(f.sandbox.spec.suspended).toBeUndefined();
+  });
+
+  it("rejects pre-retirement TLS changes even when the token is unchanged", async () => {
+    const f = await setup(null, true);
+    const execute: Execute = async (args, input) => {
+      const result = await f.execute(args, input);
+      if (args[0] === "patch" && args[1] === "deployments.apps") f.setTls(f.tlsConfiguration(1));
+      return result;
+    };
+    await expect(applyReviewedGrant(execute, await f.document(execute))).rejects.toThrow(/before retirement/);
+    expect(f.sandbox.spec.suspended).toBe(true);
+    expect(JSON.parse(f.namespace.metadata.annotations[HISTORY]).phase).toBe("Pausing");
+  });
+
+  it.each(["retired", "running", "pods", "template", "secret", "namespace", "pending"])(
+    "checks the full late-enrollment proof for migration-retired execution: %s", async fault => {
+      const f = await setup();
+      await applyReviewedGrant(f.execute, await f.document());
+      const activation = f.grant("work").spec.privateActivation;
+      const scope = activation.namespaces.find((value: any) => value.namespace.name === "kars-late");
+      const root = digest(JSON.parse(f.objects.get(f.key("namespace", "core")).metadata.annotations[HISTORY]));
+      f.deployment.spec.replicas = 0;
+      f.pods.set("kars-late", []);
+      if (fault === "running") f.deployment.spec.replicas = 1;
+      if (fault === "pods") f.pods.set("kars-late", [{ metadata: { name: "retained", uid: "retained", resourceVersion: "1" } }]);
+      if (fault === "template") f.deployment.spec.template.spec.containers[0].image = "unreviewed";
+      if (fault === "secret") f.secret.metadata.resourceVersion = "replaced";
+      if (fault === "namespace") f.namespace.metadata.uid = "replaced";
+      if (fault === "pending") {
+        const proof = JSON.parse(f.namespace.metadata.annotations[HISTORY]);
+        proof.phase = "Restoring";
+        f.namespace.metadata.annotations[HISTORY] = canonical(proof);
+      }
+      if (fault === "retired") {
+        await verifyRetiredLateScope(f.execute, activation, scope, root);
+        await expect(reviewLateScope(f.execute, activation, scope, root)).rejects.toThrow();
+        f.objects.get(f.key("deployment", "kars-controller", "core")).spec.replicas = 0;
+        f.objects.set(f.key("deployment", "late", "kars-late"), f.deployment);
+        f.pods.set("core", []);
+        expect(activation.namespaces[0].namespace.name).not.toBe("core");
+        await verifyRetiredSealedRoot(f.execute, activation, [f.deployment.metadata.uid]);
+      } else await expect(verifyRetiredLateScope(f.execute, activation, scope, root)).rejects.toThrow();
+    },
+  );
 
   it.each(["uid", "spec", "task", "template", "namespace", "root", "private-key", "unchanged-version", "deadline"])(
     "does not retry a pause conflict after %s changes or lacks a fresh version", async fault => {

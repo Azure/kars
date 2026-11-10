@@ -3,22 +3,9 @@
 
 "use client";
 
-// kars Bridge Operator Console — the ONE inference-provider wizard. Merges
-// what used to be two separate flows on this page (the plain "Add or switch
-// a provider" form for the cluster's single default, and a second
-// "Additional providers" form for everything beyond it) into a single
-// step-by-step experience: pick a provider kind, decide whether it's the
-// cluster's default or an additional one, authenticate, then pick/discover
-// its models and review before connecting.
-//
-// The two are still genuinely different resources under the hood — the
-// default provider patches the controller's own env (every sandbox's single
-// inherited endpoint; existing missions, envelope generation, and the
-// orchestrator all read it) via `onboardProviderAction`, while an additional
-// provider is an entry in the `kars-inference-providers` Secret mirrored into
-// every sandbox's router via `addAdditionalProviderAction` (only reachable
-// when an InferencePolicy names its tag) — but the OPERATOR shouldn't have
-// to know two different forms to use either one.
+// Bootstrap configuration is separate from named connections. After install,
+// connection edits reuse the provider registry; the Model catalogue selects
+// the default for new work without rewriting existing explicit policies.
 
 import { useActionState, useState, useTransition, type ElementType } from "react";
 import { onboardProviderAction, type ProviderState } from "./provider-actions";
@@ -153,7 +140,7 @@ function StepRail({ step }: { step: number }) {
   );
 }
 
-function ProviderCard({ p, onEditModels }: { p: AdditionalProvider; onEditModels?: () => void }) {
+function ProviderCard({ p, onEditModels, onRefreshModels }: { p: AdditionalProvider; onEditModels?: () => void; onRefreshModels?: () => void }) {
   const isLocal = p.tag.startsWith("local-");
   const isFoundry = p.tag === "foundry";
   const [removeState, removeAction, removePending] = useActionState(removeAdditionalProviderAction, { error: null, ok: null } as AdditionalProviderState);
@@ -176,6 +163,7 @@ function ProviderCard({ p, onEditModels }: { p: AdditionalProvider; onEditModels
           {p.has_key && <Badge tone="muted">key stored</Badge>}
         </span>
         <span className="flex items-center gap-1.5">
+          {onRefreshModels && <button type="button" onClick={onRefreshModels} className="rounded-md border border-border px-2 py-1 text-[11px] font-medium hover:bg-surface-muted">Refresh models</button>}
           {onEditModels && <button type="button" onClick={onEditModels} className="rounded-md border border-border px-2 py-1 text-[11px] font-medium hover:bg-surface-muted">Edit models</button>}
           <form action={removeForm}>
             {!isFoundry && <input type="hidden" name={isLocal ? "name" : "tag"} value={isLocal ? p.tag.replace(/^local-/, "") : p.tag} />}
@@ -212,7 +200,7 @@ export function DefaultProviderCard({ p, onEditModels }: { p: { id: string; labe
           <Badge tone="info">default</Badge>
         </span>
         <span className="flex items-center gap-2 text-[11px] text-foreground-muted">
-          Every mission inherits this
+          Default for new work
           {onEditModels && <button type="button" onClick={onEditModels} className="rounded-md border border-border px-2 py-1 font-medium hover:bg-surface-muted">Edit models</button>}
         </span>
       </div>
@@ -367,6 +355,7 @@ function ProviderWizardSession({
   // stored server-side). Once signed in, the seat's live models are populated
   // and the connect step needs no pasted key.
   const [copilotSignedIn, setCopilotSignedIn] = useState(false);
+  const [editingTag, setEditingTag] = useState<string | null>(null);
 
   // Local (in-cluster) inference: the wizard's "Local" kind connects the AI
   // Runway PROVIDER (one line in the list). Deploying / removing / setting a
@@ -401,6 +390,7 @@ function ProviderWizardSession({
   const isLocal = kind === "local";
   const isFoundry = kind === "foundry";
   const usedTags = new Set(additionalProviders.map((p) => p.tag));
+  const canConfigureBootstrap = cfg.defaultCapable && !hasDefaultProvider && !editingTag;
 
   function selectKind(k: Kind) {
     setKind(k);
@@ -410,7 +400,8 @@ function ProviderWizardSession({
     // "additional", which is fully wired end-to-end.
     if (!c.defaultCapable && target === "default") setTarget("additional");
     setTag(c.tagHint);
-    setEndpoint("");
+    setEndpoint(k === "github-models" ? "https://models.github.ai/inference" : "");
+    setEditingTag(null);
     setKey("");
     setModels("");
     setAuthMode("workload");
@@ -433,14 +424,21 @@ function ProviderWizardSession({
     });
   }
 
-  function editCopilotModels(provider: AdditionalProvider) {
-    selectKind("github-copilot");
+  function editProvider(provider: AdditionalProvider, refresh = false) {
+    const kind: Kind = provider.tag === "github-copilot" ? "github-copilot"
+      : provider.tag === "github-models" ? "github-models"
+        : provider.tag === "azure-openai" || provider.tag === "azure-foundry" ? "azure-openai" : "custom";
+    selectKind(kind);
     setTarget("additional");
-    setCopilotSignedIn(true);
+    setEditingTag(provider.tag);
+    setTag(provider.tag);
+    setEndpoint(provider.endpoint ?? "");
+    setCopilotSignedIn(kind === "github-copilot" && provider.has_key);
     setDiscovered(provider.models.map((id) => ({ id, label: null })));
     setSelectedModels(new Set(provider.models));
-    setStep(3);
+    setStep(refresh || kind === "github-copilot" ? 3 : 1);
     setOpen(true);
+    if (refresh) runDiscover(provider);
   }
 
   const endpointError = cfg.endpointEditable ? providerEndpointError(endpoint) : null;
@@ -449,24 +447,24 @@ function ProviderWizardSession({
     cfg.supportsDiscovery &&
     (kind === "github-models" ||
       (kind === "github-copilot" && copilotSignedIn) ||
-      (kind === "azure-openai" && endpointError === null && (authMode !== "api" || key.trim())));
+      (kind === "azure-openai" && endpointError === null && (!!editingTag || authMode !== "api" || key.trim())));
 
-  function runDiscover() {
+  function runDiscover(provider?: AdditionalProvider) {
+    const savedSelection = provider?.models ?? Array.from(selectedModels);
     setDiscoverError(null);
     startDiscovering(async () => {
-      const result = await discoverModelsAction({ kind, endpoint: endpoint || undefined, key: key || undefined });
+      const result = await discoverModelsAction({ kind: provider ? "azure-openai" : kind, endpoint: (provider?.endpoint ?? endpoint) || undefined, key: provider ? undefined : key || undefined });
       if (result.models === null) {
         setDiscoverError(result.error);
-        setDiscovered(null);
       } else {
         const models = result.models;
-        setDiscovered(models);
+        setDiscovered([...models, ...savedSelection.filter((id) => !models.some((model) => model.id === id)).map((id) => ({ id, label: "Saved selection — not returned by refresh" }))]);
         // Pre-select the recommended pick (currently only Copilot's curated
         // catalog carries this) so the operator isn't forced to hunt for it —
         // mirrors `kars dev`'s picker defaulting to the starred model.
         const recommended = models.filter((m) => m.recommended).map((m) => m.id);
-        setSelectedModels((previous) => previous.size
-          ? new Set(Array.from(previous).filter((id) => models.some((model) => model.id === id)))
+        setSelectedModels((previous) => (provider || editingTag || previous.size)
+          ? new Set(previous)
           : new Set(recommended));
       }
     });
@@ -475,9 +473,11 @@ function ProviderWizardSession({
   const modelsValue = Array.from(new Set([...Array.from(selectedModels), ...models.split(",").map((s) => s.trim()).filter(Boolean)])).join(",");
 
   const step1Valid = isLocal || isFoundry || (endpointError === null && (
-    target === "default" ? cfg.defaultCapable : tagError === null && !usedTags.has(tag.trim())
+    target === "default" ? cfg.defaultCapable : tagError === null && (!usedTags.has(tag.trim()) || editingTag === tag.trim())
   ));
-  const step2Valid = target === "default" ? authMode !== "api" || key.trim().length > 0 : cfg.id === "github-copilot" ? copilotSignedIn : cfg.id === "github-models" || cfg.id === "custom" ? true : key.trim().length > 0;
+  const step2Valid = target === "default" ? authMode !== "api" || key.trim().length > 0
+    : cfg.id === "github-copilot" ? copilotSignedIn
+      : cfg.id === "github-models" ? !!editingTag || key.trim().length > 0 : true;
   const canGoNext = [true, step1Valid, step2Valid, true][step];
 
   if (!open) {
@@ -520,14 +520,15 @@ function ProviderWizardSession({
       || localProviders.length > 0
       || localDeployments.length > 0
       || !!localInferenceStatus?.available;
-    const anyConfigured = !!defaultProvider || additionalToShow.length > 0 || showAiRunway;
-    const copilot = additionalProviders.find((provider) => provider.tag === "github-copilot" && provider.has_key);
+    const anyConfigured = !!defaultProvider || additionalToShow.length > 0 || showAiRunway || foundryStatus.connected;
+    const editable = (provider: AdditionalProvider) => provider.tag !== "foundry" && (provider.tag !== "github-copilot" || provider.has_key);
+    const defaultConnection = additionalProviders.find((provider) => provider.tag === defaultProvider?.id && editable(provider));
     return (
       <div className="mt-4 space-y-3">
         {anyConfigured ? (
           <ul className="space-y-2">
-            {defaultProvider && !defaultIsAiRunway && <DefaultProviderCard p={defaultProvider} onEditModels={defaultProvider.id === "github-copilot" && copilot ? () => editCopilotModels(copilot) : undefined} />}
-            {additionalToShow.map((p) => <ProviderCard key={p.tag} p={p} onEditModels={p.tag === "github-copilot" && p.has_key ? () => editCopilotModels(p) : undefined} />)}
+            {defaultProvider && !defaultIsAiRunway && <DefaultProviderCard p={defaultProvider} onEditModels={defaultConnection ? () => editProvider(defaultConnection) : undefined} />}
+            {additionalToShow.map((p) => <ProviderCard key={p.tag} p={p} onEditModels={editable(p) ? () => editProvider(p) : undefined} onRefreshModels={p.tag === "azure-openai" || p.tag === "azure-foundry" ? () => editProvider(p, true) : undefined} />)}
             {showAiRunway && (
               <AiRunwayCard
                 models={localModels}
@@ -543,6 +544,12 @@ function ProviderWizardSession({
             title="No provider detected"
             detail="This cluster has no inference provider configured yet. Connect one below to serve models to your teams."
           />
+        )}
+        {(foundryStatus.connected || defaultProvider?.id === "azure-foundry" || defaultProvider?.id === "azure-openai" || additionalProviders.some((p) => p.tag === "azure-openai" || p.tag === "azure-foundry")) && (
+          <details open={foundryStatus.connected} className="rounded-lg border border-border p-3">
+            <summary className="cursor-pointer text-sm font-medium">Foundry models & services</summary>
+            <div className="mt-3"><FoundryOnboard status={foundryStatus} /></div>
+          </details>
         )}
         <button type="button" onClick={() => setOpen(true)} className="rounded-lg border border-signal/40 bg-signal/10 px-3 py-1.5 text-xs font-medium text-signal hover:bg-signal/15">
           + Connect a provider
@@ -655,18 +662,16 @@ function ProviderWizardSession({
               <div className="grid gap-2 sm:grid-cols-2">
                 <label
                   className={`flex items-start gap-2 rounded-lg border p-2.5 text-xs ${
-                    !cfg.defaultCapable ? "cursor-not-allowed border-border opacity-50" : target === "default" ? "cursor-pointer border-signal bg-signal/[0.05]" : "cursor-pointer border-border"
+                    !canConfigureBootstrap ? "cursor-not-allowed border-border opacity-50" : target === "default" ? "cursor-pointer border-signal bg-signal/[0.05]" : "cursor-pointer border-border"
                   }`}
                 >
-                  <input type="radio" name="_target" checked={target === "default"} disabled={!cfg.defaultCapable} onChange={() => setTarget("default")} className="mt-0.5" />
+                  <input type="radio" name="_target" checked={target === "default"} disabled={!canConfigureBootstrap} onChange={() => setTarget("default")} className="mt-0.5" />
                   <span>
                     <span className="block font-medium text-foreground">The cluster&rsquo;s default provider</span>
                     <span className="block text-foreground-muted">
-                      {cfg.defaultCapable
-                        ? "Every mission inherits this unless an InferencePolicy says otherwise. Replaces the current default, if any."
-                        : cfg.id === "github-copilot"
-                          ? "Connect Copilot here (sign in below) — it becomes an available provider. Then use \u201cSet as default\u201d on it in the provider list to make every mission inherit it."
-                          : `${cfg.label} is added as an available provider here. After connecting, use \u201cSet as default\u201d on it in the provider list to make it the cluster default.`}
+                      {canConfigureBootstrap
+                        ? "Configures the initial controller bootstrap route."
+                        : "Connect or update this provider here, then use Set as default in the Model catalogue. Existing orchestrator, SRE, and mission policies keep their explicit routes."}
                     </span>
                   </span>
                 </label>
@@ -686,9 +691,9 @@ function ProviderWizardSession({
                 <div className="grid gap-3 sm:grid-cols-2">
                   <label className="block text-xs text-foreground-muted">
                     Tag
-                    <input value={tag} onChange={(e) => setTag(e.target.value)} readOnly={cfg.id !== "custom"} aria-invalid={!!tag.trim() && tagError !== null} aria-describedby={tag.trim() && tagError ? "provider-tag-error" : undefined} placeholder="e.g. foundry-eu" className="mt-1 w-full rounded-lg border border-border bg-surface px-3 py-2 font-mono text-xs read-only:opacity-70" />
+                    <input value={tag} onChange={(e) => setTag(e.target.value)} readOnly={!!editingTag || cfg.id !== "custom"} aria-invalid={!!tag.trim() && tagError !== null} aria-describedby={tag.trim() && tagError ? "provider-tag-error" : undefined} placeholder="e.g. foundry-eu" className="mt-1 w-full rounded-lg border border-border bg-surface px-3 py-2 font-mono text-xs read-only:opacity-70" />
                     {tag.trim() && tagError && <span id="provider-tag-error" className="mt-1 block text-[11px] text-danger">{tagError}</span>}
-                    {usedTags.has(tag.trim()) && <span className="mt-1 block text-[11px] text-danger">Already connected — pick a different tag.</span>}
+                    {usedTags.has(tag.trim()) && editingTag !== tag.trim() && <span className="mt-1 block text-[11px] text-danger">Already connected — pick a different tag.</span>}
                   </label>
                   {cfg.endpointEditable ? (
                     <label className="block text-xs text-foreground-muted">
@@ -758,7 +763,7 @@ function ProviderWizardSession({
                 <legend className="flex items-center gap-1.5 px-1 text-xs font-medium text-foreground-muted"><Icon name="lock" size={13} /> Authentication</legend>
                 <label className="block text-xs text-foreground-muted">
                   {cfg.id === "github-models" ? "GitHub token" : "API key / token (optional)"}
-                  <input value={key} onChange={(e) => setKey(e.target.value)} type="password" placeholder={cfg.id === "github-models" ? "required" : "leave blank to use Workload Identity"} className="mt-1 w-full rounded-lg border border-border bg-surface px-3 py-2 font-mono text-xs" />
+                  <input value={key} onChange={(e) => setKey(e.target.value)} type="password" placeholder={editingTag ? "leave blank to keep the stored credential" : cfg.id === "github-models" ? "required" : "leave blank to use Workload Identity"} className="mt-1 w-full rounded-lg border border-border bg-surface px-3 py-2 font-mono text-xs" />
                 </label>
               </fieldset>
             )}
@@ -773,8 +778,8 @@ function ProviderWizardSession({
               {cfg.supportsDiscovery && (
                 <div className="mb-2 flex items-center justify-between">
                   <span className="text-[11px] text-foreground-muted">Discover the real catalog instead of typing ids.</span>
-                  <button type="button" onClick={runDiscover} disabled={!canDiscover || discovering} className="rounded-md bg-signal px-2.5 py-1 text-[11px] font-semibold text-signal-fg disabled:opacity-40">
-                    {discovering ? "Discovering…" : "Discover models"}
+                  <button type="button" onClick={() => runDiscover()} disabled={!canDiscover || discovering} className="rounded-md bg-signal px-2.5 py-1 text-[11px] font-semibold text-signal-fg disabled:opacity-40">
+                    {discovering ? "Refreshing…" : editingTag ? "Refresh models" : "Discover models"}
                   </button>
                 </div>
               )}
@@ -818,7 +823,7 @@ function ProviderWizardSession({
                 <div><dt className="inline text-foreground-muted">Applies to: </dt><dd className="inline font-medium">{target === "default" ? "Cluster default" : "Additional"}</dd></div>
                 {target === "additional" && <div><dt className="inline text-foreground-muted">Tag: </dt><dd className="inline font-mono">{tag || "—"}</dd></div>}
                 <div className="sm:col-span-2"><dt className="inline text-foreground-muted">Endpoint: </dt><dd className="inline font-mono">{endpoint || (cfg.endpointEditable ? "—" : "built-in")}</dd></div>
-                <div><dt className="inline text-foreground-muted">Auth: </dt><dd className="inline">{target === "default" ? authMode : copilotSignedIn ? "GitHub sign-in (stored on cluster)" : key ? "key/token provided" : "none"}</dd></div>
+                <div><dt className="inline text-foreground-muted">Auth: </dt><dd className="inline">{target === "default" ? authMode : copilotSignedIn ? "GitHub sign-in (stored on cluster)" : key ? "key/token provided" : editingTag ? "stored credential / existing identity" : "workload identity / no key"}</dd></div>
                 <div><dt className="inline text-foreground-muted">Models: </dt><dd className="inline font-mono">{modelsValue || "—"}</dd></div>
               </dl>
             </div>
@@ -830,7 +835,7 @@ function ProviderWizardSession({
             <button type="button" disabled={pending} onClick={() => setStep((s) => s - 1)} className="rounded-lg border border-border px-3 py-1.5 text-xs font-medium hover:bg-surface-muted disabled:opacity-50">← Back</button>
           )}
           {step < ((isLocal || isFoundry) ? 1 : STEPS.length - 1) ? (
-            <button type="button" onClick={() => setStep((s) => s + 1)} disabled={!canGoNext} className="rounded-lg bg-signal px-4 py-1.5 text-xs font-semibold text-signal-fg disabled:opacity-50">Next →</button>
+            <button key="next" type="button" onClick={(event) => { event.preventDefault(); setStep((s) => s + 1); }} disabled={!canGoNext} className="rounded-lg bg-signal px-4 py-1.5 text-xs font-semibold text-signal-fg disabled:opacity-50">Next →</button>
           ) : isFoundry ? (
             // Foundry self-submits via the embedded FoundryOnboard flow —
             // the wizard only offers a way out once it's connected/discovered.
@@ -840,7 +845,7 @@ function ProviderWizardSession({
             // in the Model catalogue, so the wizard just needs a way out.
             <button type="button" onClick={reset} className="rounded-lg border border-signal/40 bg-signal/10 px-4 py-2 text-sm font-medium text-signal hover:bg-signal/15">Done</button>
           ) : (
-            <button type="submit" disabled={pending || !modelsValue} className="rounded-lg border border-border-strong bg-surface px-4 py-2 text-sm font-semibold text-foreground transition hover:bg-surface-muted disabled:opacity-50">
+            <button key="save" type="submit" disabled={pending || !modelsValue} className="rounded-lg border border-border-strong bg-surface px-4 py-2 text-sm font-semibold text-foreground transition hover:bg-surface-muted disabled:opacity-50">
               {pending ? "Saving…" : target === "default" ? "Set as default provider" : kind === "github-copilot" ? "Save model selection" : "Connect provider"}
             </button>
           )}

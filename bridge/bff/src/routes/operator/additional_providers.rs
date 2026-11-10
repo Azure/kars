@@ -10,14 +10,14 @@ use serde::Serialize;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
-use super::{copilot_catalog_cached, is_dns1123_label, require_cluster, upstream};
+use super::{is_dns1123_label, require_cluster, upstream};
 
 // ─── Multi-provider inference (§ inference-provider-wizard) ─────────────────
 //
-// The single "Inference provider" flow above (`put_provider`) sets the ONE
-// default provider every mission inherits. This section manages ADDITIONAL
-// providers that can be configured *at the same time* — e.g. GitHub Copilot
-// as the default, Azure AI Foundry also connected — so an InferencePolicy's
+// `put_provider` configures controller bootstrap settings. This section manages
+// connected providers and the persisted Bridge default for new work without
+// modifying that bootstrap configuration. Multiple providers remain available
+// at the same time — e.g. GitHub Copilot and Azure AI Foundry — so an InferencePolicy's
 // `modelPreference.primary.provider` can route a specific sandbox's calls to
 // whichever one actually serves the model it needs (a sub-agent on gpt-4.1
 // via Foundry, a principal on opus-4.8 via Copilot, in the SAME cluster).
@@ -25,8 +25,9 @@ use super::{copilot_catalog_cached, is_dns1123_label, require_cluster, upstream}
 // Storage: the `kars-inference-providers` Secret in `kars-system`. Its KEYS
 // are the literal env var names `inference-router::config::Config::from_env`
 // already parses generically (`KARS_PROVIDER_<TAG>_ENDPOINT` + optional
-// `_API_KEY`/`_TOKEN`, or the well-known `COPILOT_GITHUB_TOKEN` for the
-// GitHub Copilot special case) — no router-side change needed to support a
+// `_API_KEY`/`_TOKEN`). Copilot also retains `COPILOT_GITHUB_TOKEN` for the
+// legacy default route, but named routes use their own explicit binding.
+// No router-side change is needed to support a
 // provider added here. The controller mirrors this ONE secret into every
 // sandbox's own namespace (the same mechanism already used for
 // `kars-github-app`), and every sandbox's router picks whichever provider a
@@ -34,6 +35,19 @@ use super::{copilot_catalog_cached, is_dns1123_label, require_cluster, upstream}
 // what's merely present in the env.
 pub(super) const INFERENCE_PROVIDERS_SECRET: &str = "kars-inference-providers";
 pub(super) const INFERENCE_PROVIDERS_NS: &str = "kars-system";
+
+pub(super) fn bind_copilot_route(
+    keys: &mut std::collections::BTreeMap<String, String>,
+    token: &str,
+) {
+    keys.insert("COPILOT_GITHUB_TOKEN".into(), token.into());
+    keys.insert(
+        "KARS_PROVIDER_GITHUB_COPILOT_ENDPOINT".into(),
+        "https://api.githubcopilot.com".into(),
+    );
+    keys.insert("KARS_PROVIDER_GITHUB_COPILOT_TOKEN".into(), token.into());
+    keys.remove("KARS_PROVIDER_GITHUB_COPILOT_API_KEY");
+}
 
 /// One additional provider, as surfaced to the operator (never the key/token
 /// itself — `has_key` only tells you whether one is stored).
@@ -55,7 +69,7 @@ pub async fn list_additional_providers(
 ) -> AppResult<Json<Vec<AdditionalProviderDto>>> {
     let cluster = require_cluster(&state)?;
     let keys = cluster
-        .read_secret_all(INFERENCE_PROVIDERS_NS, INFERENCE_PROVIDERS_SECRET)
+        .additional_provider_keys()
         .await
         .map_err(AppError::from)?;
     let mut providers: std::collections::BTreeMap<String, AdditionalProviderDto> =
@@ -94,8 +108,8 @@ pub async fn list_additional_providers(
             })
             .unwrap_or_default();
     }
-    // GitHub Copilot is a special case (well-known endpoint, no
-    // KARS_PROVIDER_*_ENDPOINT needed — see resolve_provider in the router).
+    // Include historical connections before their next explicit save enrolls
+    // the named route. Listing never mutates credentials.
     if keys.contains_key("COPILOT_GITHUB_TOKEN") {
         providers.insert(
             "github-copilot".to_string(),
@@ -189,8 +203,11 @@ pub async fn put_additional_provider(
     cluster
         .mutate_secret_keys(INFERENCE_PROVIDERS_NS, INFERENCE_PROVIDERS_SECRET, |keys| {
             if is_copilot {
-                if let Some(k) = key_val.clone() {
-                    keys.insert("COPILOT_GITHUB_TOKEN".to_string(), k);
+                if let Some(token) = key_val
+                    .clone()
+                    .or_else(|| keys.get("COPILOT_GITHUB_TOKEN").cloned())
+                {
+                    bind_copilot_route(keys, &token);
                 }
                 keys.insert(
                     "KARS_PROVIDER_GITHUB_COPILOT_MODELS".to_string(),
@@ -218,11 +235,11 @@ pub async fn put_additional_provider(
             }
         })
         .await
-        .map_err(upstream)?;
+        .map_err(AppError::from)?;
     Ok(Json(serde_json::json!({
         "configured": true,
         "tag": tag,
-        "note": "Every sandbox's router now has this provider available. Which one a given request actually uses is decided per-sandbox by its InferencePolicy.modelPreference — this alone doesn't make it the default."
+        "note": "Provider configuration saved for new or restarted sandbox routers. InferencePolicy.modelPreference selects each sandbox's route; this does not change the cluster default."
     })))
 }
 
@@ -234,125 +251,32 @@ pub async fn delete_additional_provider(
 ) -> AppResult<Json<serde_json::Value>> {
     let cluster = require_cluster(&state)?;
     let tag = tag.trim().to_ascii_lowercase();
+    if !is_dns1123_label(&tag) {
+        return Err(AppError::BadRequest("Invalid provider tag.".into()));
+    }
     let tag_upper = tag.to_ascii_uppercase().replace('-', "_");
     let is_copilot = tag == "github-copilot";
     cluster
         .mutate_secret_keys(INFERENCE_PROVIDERS_NS, INFERENCE_PROVIDERS_SECRET, |keys| {
             if is_copilot {
                 keys.remove("COPILOT_GITHUB_TOKEN");
-                keys.remove("KARS_PROVIDER_GITHUB_COPILOT_MODELS");
-            } else {
-                keys.remove(&format!("KARS_PROVIDER_{tag_upper}_ENDPOINT"));
-                keys.remove(&format!("KARS_PROVIDER_{tag_upper}_API_KEY"));
-                keys.remove(&format!("KARS_PROVIDER_{tag_upper}_TOKEN"));
-                keys.remove(&format!("KARS_PROVIDER_{tag_upper}_MODELS"));
             }
+            keys.remove(&format!("KARS_PROVIDER_{tag_upper}_ENDPOINT"));
+            keys.remove(&format!("KARS_PROVIDER_{tag_upper}_API_KEY"));
+            keys.remove(&format!("KARS_PROVIDER_{tag_upper}_TOKEN"));
+            keys.remove(&format!("KARS_PROVIDER_{tag_upper}_MODELS"));
         })
         .await
-        .map_err(upstream)?;
+        .map_err(AppError::from)?;
     Ok(Json(serde_json::json!({"removed": true, "tag": tag})))
 }
 
-/// `POST /api/operator/providers/additional/:tag/promote` — make an already-
-/// connected additional provider the cluster's DEFAULT (patches the
-/// controller's own env — every mission that leaves its model unset inherits
-/// this). Reads the tag's endpoint/key/models straight from
-/// `kars-inference-providers` server-side (never exposed to the browser) and
-/// re-points the SAME secret+key via `secretKeyRef` — no key duplication.
-///
-/// `github-copilot` is rejected: it authenticates via `COPILOT_GITHUB_TOKEN`
-/// exchanged for a short-lived Copilot JWT, a completely different mechanism
-/// than the endpoint+key shape every other provider here uses — the same
-/// reason `put_provider` already refuses to set it as default from the other
-/// form (see that handler's comment). Every other tag (Foundry, Azure OpenAI,
-/// Custom, GitHub Models, and a local in-cluster model) is a plain
-/// endpoint(+optional key), which is exactly what `set_controller_catalog`
-/// wires — so promoting any of THOSE genuinely works.
+/// Select the first configured model of a connected provider for new work.
 pub async fn promote_additional_provider(
     State(state): State<AppState>,
     axum::extract::Path(tag): axum::extract::Path<String>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let cluster = require_cluster(&state)?;
-    let tag = tag.trim().to_ascii_lowercase();
-    // GitHub Copilot IS promotable now — the wizard's device sign-in stores a
-    // Copilot-authorized token, which `set_copilot_as_default` wires onto the
-    // controller (KARS_PROVIDER + COPILOT_GITHUB_TOKEN), unlike the endpoint+key
-    // shape every other provider uses.
-    if tag == "github-copilot" {
-        let keys = cluster
-            .read_secret_all(INFERENCE_PROVIDERS_NS, INFERENCE_PROVIDERS_SECRET)
-            .await
-            .map_err(upstream)?;
-        if !keys.contains_key("COPILOT_GITHUB_TOKEN") {
-            return Err(AppError::BadRequest(
-                "Sign in to GitHub Copilot first (Connect a provider → GitHub Copilot) — then it can be set as the cluster default.".into(),
-            ));
-        }
-        let models = keys
-            .get("KARS_PROVIDER_GITHUB_COPILOT_MODELS")
-            .cloned()
-            .unwrap_or_default();
-        let models = if models.trim().is_empty() {
-            // No explicit selection stored — fall back to the live catalog so
-            // the default catalogue isn't empty.
-            copilot_catalog_cached(keys.get("COPILOT_GITHUB_TOKEN").unwrap())
-                .await
-                .into_iter()
-                .map(|(id, _, _)| id)
-                .collect::<Vec<_>>()
-                .join(",")
-        } else {
-            models
-        };
-        cluster
-            .set_copilot_as_default(&models)
-            .await
-            .map_err(upstream)?;
-        return Ok(Json(serde_json::json!({
-            "promoted": true,
-            "tag": tag,
-            "note": "GitHub Copilot is now the cluster default; the controller is rolling to pick it up. Every mission that leaves its model unset now inherits it."
-        })));
-    }
-    let tag_upper = tag.to_ascii_uppercase().replace('-', "_");
-    let keys = cluster
-        .read_secret_all(INFERENCE_PROVIDERS_NS, INFERENCE_PROVIDERS_SECRET)
-        .await
-        .map_err(upstream)?;
-    let endpoint = keys
-        .get(&format!("KARS_PROVIDER_{tag_upper}_ENDPOINT"))
-        .cloned()
-        .ok_or_else(|| AppError::BadRequest(format!("no connected provider tagged {tag:?} with an endpoint (GitHub Models has a well-known endpoint but no explicit one is stored, so it can't be promoted this way either)")))?;
-    let models = keys
-        .get(&format!("KARS_PROVIDER_{tag_upper}_MODELS"))
-        .cloned()
-        .unwrap_or_default();
-    if models.trim().is_empty() {
-        return Err(AppError::BadRequest(format!(
-            "{tag} has no declared models to promote"
-        )));
-    }
-    let key_ref = if keys.contains_key(&format!("KARS_PROVIDER_{tag_upper}_API_KEY")) {
-        Some((
-            INFERENCE_PROVIDERS_SECRET,
-            format!("KARS_PROVIDER_{tag_upper}_API_KEY"),
-        ))
-    } else {
-        None
-    };
-    cluster
-        .set_controller_catalog(
-            &models,
-            Some(&endpoint),
-            key_ref.as_ref().map(|(s, k)| (*s, k.as_str())),
-        )
-        .await
-        .map_err(upstream)?;
-    Ok(Json(serde_json::json!({
-        "promoted": true,
-        "tag": tag,
-        "note": "Cluster default updated; the controller is rolling to pick it up. Every mission that leaves its model unset now inherits this provider."
-    })))
+    save_default_model(require_cluster(&state)?, &tag, None).await
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -363,113 +287,65 @@ pub struct SetDefaultModelRequest {
     pub provider: String,
 }
 
-/// `POST /api/operator/models/default` — make one specific MODEL the cluster
-/// default (what the Model catalogue's "Set as default" does). Promotes the
-/// model's provider AND pins that model as the default (moved to the front of
-/// the catalog, which `set_*_default` treats as KARS_TASK_DEFAULT_MODEL).
+/// Save a provider-qualified default without changing controller bootstrap configuration.
 pub async fn set_default_model(
     State(state): State<AppState>,
     Json(req): Json<SetDefaultModelRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let cluster = require_cluster(&state)?;
-    let deployment = req.deployment.trim().to_string();
-    let provider = req.provider.trim().to_ascii_lowercase();
-    if deployment.is_empty() {
+    if req.deployment.trim().is_empty() {
         return Err(AppError::BadRequest(
             "a model deployment id is required".into(),
         ));
     }
-    if cluster
-        .try_set_inherited_model(&provider, &deployment)
+    save_default_model(
+        require_cluster(&state)?,
+        &req.provider,
+        Some(req.deployment.trim()),
+    )
+    .await
+}
+
+async fn save_default_model(
+    cluster: &crate::kars::cluster::Cluster,
+    provider: &str,
+    deployment: Option<&str>,
+) -> AppResult<Json<serde_json::Value>> {
+    let provider = provider.trim().to_ascii_lowercase();
+    let (_, expected) = cluster
+        .integration_store(&cluster.core_namespace(), INFERENCE_PROVIDERS_SECRET)
         .await
-        .map_err(upstream)?
-    {
-        return Ok(Json(
-            serde_json::json!({"ok": true, "default": deployment, "provider": provider}),
-        ));
-    }
-    let keys = cluster
-        .read_secret_all(INFERENCE_PROVIDERS_NS, INFERENCE_PROVIDERS_SECRET)
-        .await
-        .map_err(upstream)?;
-
-    // Reorder a comma list so `deployment` is first (becomes the default),
-    // deduped; ensures the chosen model is present even if it wasn't listed.
-    let reorder = |csv: &str| -> String {
-        let mut out = vec![deployment.clone()];
-        for m in csv.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-            if m != deployment {
-                out.push(m.to_string());
-            }
-        }
-        out.join(",")
-    };
-
-    if provider == "github-copilot" {
-        if !keys.contains_key("COPILOT_GITHUB_TOKEN") {
-            return Err(AppError::BadRequest(
-                "Sign in to GitHub Copilot first.".into(),
-            ));
-        }
-        let existing = keys
-            .get("KARS_PROVIDER_GITHUB_COPILOT_MODELS")
-            .cloned()
-            .unwrap_or_default();
-        let models = if existing.trim().is_empty() {
-            // fall back to the live catalog so the catalog isn't just one model
-            let mut live = copilot_catalog_cached(keys.get("COPILOT_GITHUB_TOKEN").unwrap())
-                .await
-                .into_iter()
-                .map(|(id, _, _)| id)
-                .collect::<Vec<_>>()
-                .join(",");
-            if live.trim().is_empty() {
-                live = deployment.clone();
-            }
-            reorder(&live)
-        } else {
-            reorder(&existing)
-        };
-        cluster
-            .set_copilot_as_default(&models)
-            .await
-            .map_err(upstream)?;
-        return Ok(Json(
-            serde_json::json!({"ok": true, "default": deployment, "provider": provider}),
-        ));
-    }
-
-    // Endpoint-based providers (foundry, azure-openai, custom, local-*): promote
-    // via set_controller_catalog with the chosen model first.
-    let tag_upper = provider.to_ascii_uppercase().replace('-', "_");
-    let endpoint = keys
-        .get(&format!("KARS_PROVIDER_{tag_upper}_ENDPOINT"))
-        .cloned()
-        .ok_or_else(|| AppError::BadRequest(format!(
-            "no connected provider {provider:?} with an endpoint serves {deployment:?} — connect it first"
-        )))?;
-    let existing = keys
-        .get(&format!("KARS_PROVIDER_{tag_upper}_MODELS"))
-        .cloned()
-        .unwrap_or_default();
-    let models = reorder(&existing);
-    let key_ref = if keys.contains_key(&format!("KARS_PROVIDER_{tag_upper}_API_KEY")) {
-        Some((
-            INFERENCE_PROVIDERS_SECRET,
-            format!("KARS_PROVIDER_{tag_upper}_API_KEY"),
-        ))
-    } else {
-        None
+        .map_err(default_selection_error)?;
+    // Read the available catalogue independently of a possibly removed saved default,
+    // so operators can repair a stale selection through this same action.
+    let options = crate::routes::options::build_available_options(cluster).await?;
+    let selected = options.models.iter().find(|model|
+        model.provider == provider && deployment.is_none_or(|id| id == model.deployment)
+    ).ok_or_else(|| AppError::BadRequest(
+        "Choose a model from the connected provider's configured catalogue; the default was not changed.".into()
+    ))?;
+    let model = crate::kars::task::TaskModel {
+        provider: selected.provider.clone(),
+        deployment: selected.deployment.clone(),
     };
     cluster
-        .set_controller_catalog(
-            &models,
-            Some(&endpoint),
-            key_ref.as_ref().map(|(s, k)| (*s, k.as_str())),
-        )
+        .write_model_default(&model, &expected)
         .await
-        .map_err(upstream)?;
-    Ok(Json(
-        serde_json::json!({"ok": true, "default": deployment, "provider": provider}),
-    ))
+        .map_err(default_selection_error)?;
+    Ok(Json(serde_json::json!({
+        "ok": true, "promoted": true, "default": model.deployment,
+        "provider": model.provider, "tag": provider,
+        "note": "Default saved. Inheriting Orchestrator and SRE policies reconcile automatically; check their applied status. Explicit and reviewed model routes are unchanged."
+    })))
+}
+
+fn default_selection_error(error: kube::Error) -> AppError {
+    match error {
+        kube::Error::Api(status) if status.code == 409 || status.code == 422 => AppError::Rejected(
+            "Provider configuration or its enrolled identity changed. Refresh Configuration and try again; the default was not saved.".into()
+        ),
+        kube::Error::Api(status) if status.code == 403 => AppError::Rejected(
+            "The enrolled provider registry is not writable. Restore its credential grant before changing the default.".into()
+        ),
+        error => upstream(error),
+    }
 }

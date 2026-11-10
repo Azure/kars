@@ -1,0 +1,9 @@
+| case_bounded_alias | false | false |
+| case_bounded_annotated | false | false |
+| case_bounded_bytes | false | false |
+| case_bounded_str | false | false |
+| case_custom_deserialize | true | true |
+| case_generic | true | true |
+| case_mixed_sinks | false | false |
+| case_mixed_sinks | true | true |
+| case_unbounded | true | true |

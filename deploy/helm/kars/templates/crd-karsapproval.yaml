@@ -91,6 +91,18 @@ spec:
                       verbatim into status and, for granted approvals, into the receipt.
                     maxLength: 320
                     type: string
+                  deciderRoles:
+                    description: Roles recorded at decision time, not a grant of authority to consumers.
+                    items:
+                      maxLength: 320
+                      type: string
+                    maxItems: 64
+                    type: array
+                  deciderSubject:
+                    description: Stable subject of the deciding principal. Optional for legacy decisions.
+                    maxLength: 320
+                    nullable: true
+                    type: string
                   reason:
                     description: Optional justification, surfaced to auditors.
                     maxLength: 8192
@@ -103,6 +115,22 @@ spec:
                 required:
                 - decider
                 - verdict
+                type: object
+              requestedBy:
+                description: Requester identity, immutable when supplied. Omitted on legacy requests.
+                nullable: true
+                properties:
+                  name:
+                    description: Human-readable requester name.
+                    maxLength: 320
+                    type: string
+                  subject:
+                    description: Stable subject used by the Bridge's self-approval guard.
+                    maxLength: 320
+                    type: string
+                required:
+                - name
+                - subject
                 type: object
               taskRef:
                 description: |-
@@ -140,6 +168,9 @@ spec:
             - message: spec.ttl is immutable
               reason: FieldValueForbidden
               rule: '(!has(self.ttl) && !has(oldSelf.ttl)) || (has(self.ttl) && has(oldSelf.ttl) && self.ttl == oldSelf.ttl)'
+            - message: spec.requestedBy is immutable
+              reason: FieldValueForbidden
+              rule: '(!has(self.requestedBy) && !has(oldSelf.requestedBy)) || (has(self.requestedBy) && has(oldSelf.requestedBy) && self.requestedBy == oldSelf.requestedBy)'
             - message: spec.decision is immutable once recorded
               reason: FieldValueForbidden
               rule: '!has(oldSelf.decision) || (has(self.decision) && self.decision == oldSelf.decision)'
@@ -158,7 +189,7 @@ spec:
                 type: string
               boundRequest:
                 description: |-
-                  Controller snapshot of taskRef/action/ttl, excluding the later decision.
+                  Controller snapshot of taskRef/action/ttl/requestedBy, excluding the later decision.
                   Prevents request mutation even on clusters with outdated admission rules.
                 nullable: true
                 type: string

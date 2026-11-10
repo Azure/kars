@@ -54,10 +54,243 @@ pub(crate) fn fixture() -> (KarsTask, ConfigMap, Value) {
 }
 
 #[test]
+fn stopped_progress_preserves_custody_and_never_becomes_a_terminal_result() {
+    for (runtime, halted) in [
+        ("OpenClaw", false),
+        ("Hermes", false),
+        ("OpenClaw", true),
+        ("Hermes", true),
+    ] {
+        let (task, cm, mut attempt) = fixture();
+        assert!(from_stopped_attempt(&cm, &task).is_none());
+        let mut value = serde_json::to_value(task).unwrap();
+        if halted {
+            value["metadata"]["annotations"]["kars.azure.com/halted"] =
+                json!("Operator halted this run");
+        }
+        value["spec"]["execution"] = json!({"launch":false});
+        let stopped: KarsTask = serde_json::from_value(value.clone()).unwrap();
+        attempt["candidate"]["runtime"] = json!(runtime);
+        let record = record(&cm, &attempt);
+        let projected = from_stopped_attempt(&record, &stopped).unwrap();
+        assert_eq!(projected.runtime.as_deref(), Some(runtime));
+        assert_eq!(projected.progress_sequence, 2);
+        let dto = serde_json::to_value(projected).unwrap();
+        for forbidden in [
+            "result",
+            "output",
+            "artifacts",
+            "usage",
+            "source",
+            "candidate",
+        ] {
+            assert!(dto.get(forbidden).is_none(), "{forbidden}");
+        }
+        for (path, replacement) in [
+            ("/spec/execution/launch", json!(true)),
+            ("/spec/execution", json!(null)),
+            (
+                "/metadata/annotations/kars.azure.com~1run-requested",
+                json!(""),
+            ),
+            ("/metadata/uid", json!("replaced-task")),
+            (
+                "/metadata/annotations/kars.azure.com~1run-requested",
+                json!("another-run"),
+            ),
+        ] {
+            let mut changed = value.clone();
+            *changed.pointer_mut(path).unwrap() = replacement;
+            let changed = serde_json::from_value(changed).unwrap();
+            assert!(from_stopped_attempt(&record, &changed).is_none(), "{path}");
+        }
+        value["metadata"]["annotations"]["kars.azure.com/run-completed"] = json!("run-1");
+        assert!(from_stopped_attempt(&record, &serde_json::from_value(value).unwrap()).is_none());
+        let mut changed = record.clone();
+        changed.metadata.owner_references.as_mut().unwrap()[0].uid = "replaced-task".into();
+        assert!(from_stopped_attempt(&changed, &stopped).is_none());
+    }
+}
+
+#[test]
+fn stopped_uncertain_dispatch_retains_only_validated_observations() {
+    for runtime in ["OpenClaw", "Hermes"] {
+        let (task, cm, mut attempt) = fixture();
+        let mut value = serde_json::to_value(task).unwrap();
+        value["spec"]["execution"] = json!({"launch":true});
+        let mut task: KarsTask = serde_json::from_value(value).unwrap();
+        attempt["candidate"]["runtime"] = json!(runtime);
+        attempt["phase"] = json!("uncertain");
+        attempt["error"] = json!("Run changed before annotation");
+        let retained = record(&cm, &attempt);
+        assert!(from_attempt(&retained, &task).is_none());
+        assert!(from_stopped_attempt(&retained, &task).is_none());
+        task.spec.execution.as_mut().unwrap().launch = false;
+        assert!(from_attempt(&retained, &task).is_none());
+        let projected = from_stopped_attempt(&retained, &task).unwrap();
+        assert_eq!(projected.runtime.as_deref(), Some(runtime));
+        let dto = serde_json::to_value(projected).unwrap();
+        for key in ["error", "output", "artifacts", "result", "usage", "source"] {
+            assert!(dto.get(key).is_none(), "{key}");
+        }
+        assert_eq!(attempt["phase"], "uncertain");
+        assert!(attempt.get("error").is_some());
+        for (path, replacement) in [
+            ("/phase", json!("succeeded")),
+            ("/phase", json!("failed")),
+            ("/reply/status", json!("succeeded")),
+            ("/candidate/taskUid", json!("another-task")),
+            ("/assignment/runNonce", json!("another-run")),
+            ("/error", json!({"message":"not a recorded error"})),
+        ] {
+            let mut changed = attempt.clone();
+            *changed.pointer_mut(path).unwrap() = replacement;
+            assert!(
+                from_stopped_attempt(&record(&cm, &changed), &task).is_none(),
+                "{path}"
+            );
+        }
+        for field in ["output", "artifacts", "error"] {
+            let mut changed = attempt.clone();
+            changed["reply"][field] = json!("uncommitted content");
+            assert!(
+                from_stopped_attempt(&record(&cm, &changed), &task).is_none(),
+                "{field}"
+            );
+        }
+    }
+}
+
+#[test]
+fn live_runtime_labels_use_pinned_candidate_and_revoke_on_change() {
+    for runtime in ["OpenClaw", "Hermes"] {
+        let (task, cm, mut attempt) = fixture();
+        assert!(from_attempt(&cm, &task).unwrap().runtime.is_none());
+        attempt["candidate"]["runtime"] = json!(runtime);
+        let activity = from_attempt(&record(&cm, &attempt), &task).unwrap();
+        assert_eq!(activity.runtime.as_deref(), Some(runtime));
+        let mut pin = StreamPin::default();
+        assert!(matches!(
+            pin.observe(Some(activity)),
+            StreamUpdate::Snapshot(_)
+        ));
+        attempt["candidate"]["runtime"] = json!(if runtime == "Hermes" {
+            "OpenClaw"
+        } else {
+            "Hermes"
+        });
+        assert_eq!(
+            pin.observe(from_attempt(&record(&cm, &attempt), &task)),
+            StreamUpdate::Revoked
+        );
+        attempt["candidate"]["runtime"] = json!("unrecognized");
+        assert!(
+            from_attempt(&record(&cm, &attempt), &task)
+                .unwrap()
+                .runtime
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn peer_context_progress_requires_candidate_assignment_and_reply_agreement() {
+    let (task, cm, mut attempt) = fixture();
+    let peer = super::super::contract_tests::peer_reply();
+    for key in ["reviewedPhase", "requiredOutputs", "peerContext"] {
+        attempt["candidate"][key] = peer[key].clone();
+        attempt["assignment"][key] = peer[key].clone();
+        attempt["reply"][key] = peer[key].clone();
+    }
+    for key in ["version", "phaseDigest"] {
+        attempt["assignment"][key] = peer[key].clone();
+        attempt["reply"][key] = peer[key].clone();
+    }
+    attempt["reply"]["evidence"]["phase"] = peer["evidence"]["phase"].clone();
+    attempt["events"][1]["evidence"] = attempt["reply"]["evidence"].clone();
+    assert!(from_attempt(&record(&cm, &attempt), &task).is_some());
+    for source in ["candidate", "assignment", "reply"] {
+        let mut changed = attempt.clone();
+        changed[source]["peerContext"]["rootUid"] = json!("different-root");
+        assert!(from_attempt(&record(&cm, &changed), &task).is_none());
+        let mut changed = attempt.clone();
+        changed[source]
+            .as_object_mut()
+            .unwrap()
+            .remove("peerContext");
+        assert!(from_attempt(&record(&cm, &changed), &task).is_none());
+    }
+}
+
+#[test]
+fn native_memory_progress_keeps_revision_binding_and_producer_evidence() {
+    let (task, cm, mut attempt) = fixture();
+    let mut peer = super::super::contract_tests::peer_reply();
+    peer["reviewedPhase"]["capabilities"] =
+        json!(["filesystem-read", "filesystem-write", "memory", "network"]);
+    let phase = serde_json::from_value(peer["reviewedPhase"].clone()).unwrap();
+    peer["phaseDigest"] = json!(contract::phase_digest(&phase).unwrap());
+    for source in ["candidate", "assignment", "reply"] {
+        for key in ["reviewedPhase", "requiredOutputs", "peerContext"] {
+            attempt[source][key] = peer[key].clone();
+        }
+    }
+    for source in ["assignment", "reply"] {
+        for key in ["version", "phaseDigest"] {
+            attempt[source][key] = peer[key].clone();
+        }
+    }
+    attempt["reply"]["evidence"]["phase"] = peer["evidence"]["phase"].clone();
+    attempt["events"][1]["evidence"] = attempt["reply"]["evidence"].clone();
+    let projected = from_attempt(&record(&cm, &attempt), &task).unwrap();
+    assert_eq!(projected.progress_sequence, 2);
+    for source in ["candidate", "assignment", "reply"] {
+        let mut changed = attempt.clone();
+        changed[source]["reviewedPhase"]["capabilities"] =
+            json!(["filesystem-read", "filesystem-write", "network"]);
+        assert!(from_attempt(&record(&cm, &changed), &task).is_none());
+    }
+}
+
+#[test]
+fn native_progress_beyond_legacy_event_window_retains_exact_evidence() {
+    let (task, cm, mut attempt) = fixture();
+    let mut peer = super::super::contract_tests::peer_reply();
+    peer["reviewedPhase"]["maxToolCalls"] = json!(128);
+    peer["evidence"]["phase"]["maxToolCalls"] = json!(128);
+    let phase = serde_json::from_value(peer["reviewedPhase"].clone()).unwrap();
+    peer["phaseDigest"] = json!(contract::phase_digest(&phase).unwrap());
+    for source in ["candidate", "assignment", "reply"] {
+        for key in ["reviewedPhase", "requiredOutputs", "peerContext"] {
+            attempt[source][key] = peer[key].clone();
+        }
+    }
+    for source in ["assignment", "reply"] {
+        for key in ["version", "phaseDigest"] {
+            attempt[source][key] = peer[key].clone();
+        }
+    }
+    attempt["reply"]["evidence"]["phase"] = peer["evidence"]["phase"].clone();
+    attempt["events"][1]["evidence"] = attempt["reply"]["evidence"].clone();
+    let event = attempt["events"][1].clone();
+    for _ in 0..260 {
+        attempt["events"]
+            .as_array_mut()
+            .unwrap()
+            .push(event.clone());
+    }
+    let projected = from_attempt(&record(&cm, &attempt), &task).unwrap();
+    assert_eq!(projected.progress_sequence, 262);
+    attempt["events"][200]["evidence"]["phase"]["successfulToolCalls"] = json!(129);
+    assert!(from_attempt(&record(&cm, &attempt), &task).is_none());
+}
+
+#[test]
 fn latest_progress_is_projected_without_raw_content_or_result_authority() {
     let (task, cm, _) = fixture();
     let projected = serde_json::to_value(from_attempt(&cm, &task).unwrap()).unwrap();
-    assert_eq!(projected.as_object().unwrap().len(), 12);
+    assert_eq!(projected.as_object().unwrap().len(), 13);
+    assert!(projected["runtime"].is_null());
     assert_eq!(projected["assignment_id"], "assignment-1");
     assert_eq!(projected["progress_sequence"], 2);
     assert_eq!(projected["observations"]["state"], "unavailable");
@@ -133,7 +366,7 @@ fn rejects_deleted_recreated_completed_or_unowned_records() {
     assert!(from_attempt(&changed, &task).is_none());
     changed = cm.clone();
     changed.metadata.deletion_timestamp = Some(
-        k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(chrono::Utc::now()),
+        k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(k8s_openapi::jiff::Timestamp::now()),
     );
     assert!(from_attempt(&changed, &task).is_none());
     let mut changed_task = task.clone();
@@ -208,7 +441,8 @@ fn actual_observed_fixture_is_sanitized_without_promoting_provisional_authority(
     observations["trace"]["events"][0]["output"] = json!("secret output");
     attempt["reply"]["routerObservations"] = json!(observations.to_string());
     let projected = serde_json::to_value(projected(&attempt)).unwrap();
-    assert_eq!(projected.as_object().unwrap().len(), 12);
+    assert_eq!(projected.as_object().unwrap().len(), 13);
+    assert!(projected["runtime"].is_null());
     assert_eq!(projected["observations"], observed());
     assert!(!projected.to_string().contains("secret"));
     assert!(projected.get("source").is_none());
@@ -467,6 +701,53 @@ fn pin_rejects_regression_equal_sequence_mutation_and_scope_replacement_or_loss(
             "{case}"
         );
         assert_eq!(pin.observe(None), StreamUpdate::Revoked);
+    }
+}
+
+#[test]
+fn pin_uses_native_tool_count_and_rejects_coverage_switches() {
+    let (_, _, attempt) = fixture();
+    let native = |count| {
+        router_activity::parse(&json!({
+        "version":1,"source":"runtime-forwarded-router-observations",
+        "coverage":"native-tool-correlated-only","correlated_tools":count,
+        "scope_id":"scope-a","rounds":[1],"state":"unavailable",
+        "reason":"Native tool-correlated observations unavailable (reset, expiry, truncation or read failure)"
+    }).to_string()).unwrap()
+    };
+    for (count, allowed) in [(1, false), (2, true), (3, true)] {
+        let mut pin = StreamPin::default();
+        let mut first = projected(&attempt);
+        first.observations = native(2);
+        assert!(matches!(
+            pin.observe(Some(first)),
+            StreamUpdate::Snapshot(_)
+        ));
+        let mut next = projected(&attempt);
+        next.progress_sequence += 1;
+        next.observations = native(count);
+        assert_eq!(
+            matches!(pin.observe(Some(next)), StreamUpdate::Snapshot(_)),
+            allowed
+        );
+    }
+    for native_first in [false, true] {
+        let mut pin = StreamPin::default();
+        let mut first = projected(&attempt);
+        first.observations = if native_first {
+            native(3)
+        } else {
+            router_activity::parse(&observed().to_string()).unwrap()
+        };
+        pin.observe(Some(first));
+        let mut next = projected(&attempt);
+        next.progress_sequence += 1;
+        next.observations = if native_first {
+            router_activity::parse(&observed().to_string()).unwrap()
+        } else {
+            native(3)
+        };
+        assert_eq!(pin.observe(Some(next)), StreamUpdate::Revoked);
     }
 }
 

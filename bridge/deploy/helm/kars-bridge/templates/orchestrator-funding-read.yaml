@@ -1,0 +1,126 @@
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}
+{{- $selection := .Values.rbac.fundedOrchestratorAccount | default dict -}}
+{{- if and (hasKey $selection "enabled") (not (kindIs "bool" $selection.enabled)) -}}
+{{- fail "rbac.fundedOrchestratorAccount.enabled must be a boolean" -}}
+{{- end -}}
+{{- if $selection.enabled -}}
+{{- $sourceNamespace := $selection.sandboxNamespace | default (include "kars-bridge.coreNamespace" .) -}}
+{{- $core := include "kars-bridge.coreNamespace" . -}}
+{{- $sandboxUid := required "fundedOrchestratorAccount requires the explicit Sandbox UID" $selection.sandboxUid -}}
+{{- $accountUid := required "fundedOrchestratorAccount requires the explicit account UID" $selection.accountUid -}}
+{{- range $uid := list $sandboxUid $accountUid -}}
+{{- if or (not (kindIs "string" $uid)) (not (regexMatch "^[A-Za-z0-9-]{1,128}$" (toString $uid))) -}}
+{{- fail "fundedOrchestratorAccount UIDs must be explicit valid UID strings" -}}
+{{- end -}}
+{{- end -}}
+{{- $accountName := printf "inference-budget-%s" $sandboxUid -}}
+{{- $source := lookup "kars.azure.com/v1alpha1" "KarsSandbox" $sourceNamespace "bridge-orchestrator" | default dict -}}
+{{- if or (ne (dig "metadata" "uid" "" $source) $sandboxUid) (dig "metadata" "deletionTimestamp" "" $source) -}}
+{{- fail "fundedOrchestratorAccount requires the live exact Sandbox UID; cluster-connected Helm is required" -}}
+{{- end -}}
+{{- $pin := dig "spec" "inferenceBudgetRef" (dict) $source -}}
+{{- if or (ne (dig "scope" "" $pin) "GovernedInference")
+    (ne (dig "account" "namespace" "" $pin) $core)
+    (ne (dig "account" "name" "" $pin) $accountName)
+    (ne (dig "account" "uid" "" $pin) $accountUid)
+    (ne (dig "taskUid" "" $pin) $sandboxUid)
+    (ne (dig "rootTaskUid" "" $pin) $sandboxUid)
+    (get $pin "parentTaskUid") -}}
+{{- fail "fundedOrchestratorAccount refuses a missing or changed source/account pin" -}}
+{{- end -}}
+{{- $account := lookup "kars.azure.com/v1alpha1" "KarsBudgetAccount" $core $accountName | default dict -}}
+{{- $root := dig "spec" "root" (dict) $account -}}
+{{- if or (ne (dig "metadata" "uid" "" $account) $accountUid)
+    (dig "metadata" "deletionTimestamp" "" $account)
+    (ne (dig "spec" "scope" "" $account) "GovernedInference")
+    (ne (dig "metadata" "annotations" "kars.azure.com/inference-budget-bootstrap" "" $account) "sealed")
+    (ne (dig "kind" "" $root) "KarsSandbox")
+    (ne (dig "resource" "name" "" $root) "bridge-orchestrator")
+    (ne (dig "resource" "namespace" "" $root) $sourceNamespace)
+    (ne (dig "resource" "uid" "" $root) $sandboxUid)
+    (ne (toJson $root) (toJson (get $pin "root"))) -}}
+{{- fail "fundedOrchestratorAccount refuses an absent, replaced, unsealed or different-root account" -}}
+{{- end -}}
+{{- range $check := list (dict "namespace" $sourceNamespace "uid" (get $root "workspaceUid")) (dict "namespace" "kube-system" "uid" (get $root "clusterUid")) -}}
+{{- $namespace := lookup "v1" "Namespace" "" $check.namespace | default dict -}}
+{{- if or (not $check.uid) (ne (dig "metadata" "uid" "" $namespace) $check.uid) (dig "metadata" "deletionTimestamp" "" $namespace) -}}
+{{- fail "fundedOrchestratorAccount refuses missing or replaced workspace/cluster identity" -}}
+{{- end -}}
+{{- end -}}
+{{- $name := printf "%s-orchestrator-funding-read" .Release.Name -}}
+{{- $subjectName := include "kars-bridge.serviceAccountName" . -}}
+{{- $subjectNamespace := include "kars-bridge.namespace" . -}}
+{{- $rules := list (dict "apiGroups" (list "kars.azure.com") "resources" (list "karsbudgetaccounts") "resourceNames" (list $accountName) "verbs" (list "get")) -}}
+{{- range $kind := list "Role" "RoleBinding" -}}
+{{- $live := lookup "rbac.authorization.k8s.io/v1" $kind $core $name | default dict -}}
+{{- if $live -}}
+{{- if or (dig "metadata" "deletionTimestamp" "" $live)
+    (ne (dig "metadata" "labels" "app.kubernetes.io/managed-by" "" $live) "Helm")
+    (ne (dig "metadata" "annotations" "meta.helm.sh/release-name" "" $live) $.Release.Name)
+    (ne (dig "metadata" "annotations" "meta.helm.sh/release-namespace" "" $live) $.Release.Namespace) -}}
+{{- fail "fundedOrchestratorAccount refuses to adopt an existing or terminating delegation" -}}
+{{- end -}}
+{{- $owners := dig "metadata" "ownerReferences" (list) $live -}}
+{{- if ne (len $owners) 1 -}}
+{{- fail "fundedOrchestratorAccount delegation has no unique account owner" -}}
+{{- end -}}
+{{- $owner := first $owners -}}
+{{- if or (ne ($owner.apiVersion | default "") "kars.azure.com/v1alpha1")
+    (ne ($owner.kind | default "") "KarsBudgetAccount")
+    (ne ($owner.name | default "") $accountName)
+    (ne ($owner.uid | default "") $accountUid) -}}
+{{- fail "fundedOrchestratorAccount refuses to rebind an existing delegation; retire it explicitly first" -}}
+{{- end -}}
+{{- if eq $kind "Role" -}}
+{{- if ne (toJson ($live.rules | default list)) (toJson $rules) -}}
+{{- fail "fundedOrchestratorAccount refuses to overwrite changed delegation rules" -}}
+{{- end -}}
+{{- else -}}
+{{- $subjects := $live.subjects | default list -}}
+{{- if or (ne (len $subjects) 1)
+    (ne (dig "roleRef" "apiGroup" "" $live) "rbac.authorization.k8s.io")
+    (ne (dig "roleRef" "kind" "" $live) "Role")
+    (ne (dig "roleRef" "name" "" $live) $name) -}}
+{{- fail "fundedOrchestratorAccount delegation role/subject changed" -}}
+{{- end -}}
+{{- $subject := first $subjects -}}
+{{- if or (ne ($subject.kind | default "") "ServiceAccount")
+    ($subject.apiGroup | default "")
+    (ne ($subject.name | default "") $subjectName)
+    (ne ($subject.namespace | default "") $subjectNamespace) -}}
+{{- fail "fundedOrchestratorAccount refuses to rebind a delegation subject" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: {{ $kind }}
+metadata:
+  name: {{ $name | quote }}
+  namespace: {{ $core | quote }}
+  labels:
+    {{- include "kars-bridge.labels" $ | nindent 4 }}
+  annotations:
+    meta.helm.sh/release-name: {{ $.Release.Name | quote }}
+    meta.helm.sh/release-namespace: {{ $.Release.Namespace | quote }}
+  ownerReferences:
+    - apiVersion: kars.azure.com/v1alpha1
+      kind: KarsBudgetAccount
+      name: {{ $accountName | quote }}
+      uid: {{ $accountUid | quote }}
+{{ if eq $kind "Role" -}}
+rules:
+  {{- toYaml $rules | nindent 2 }}
+{{ else -}}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name | quote }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $subjectName | quote }}
+    namespace: {{ $subjectNamespace | quote }}
+{{ end -}}
+{{- end -}}
+{{- end -}}

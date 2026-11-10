@@ -301,9 +301,9 @@ export const TASK_TOOLS: any[] = [
  * at decode time, eliminating the multi-KB escape-corruption failures that
  * affect mesh_send, file_write, and foundry_code_execute. Disabled in slim
  * mode because not every upstream provider behind GitHub Models / Copilot
- * implements strict mode consistently. Default OFF; flip the env var to opt
- * in. Backward compatible — when the flag is unset the behaviour is
- * byte-identical to the pre-strict release.
+ * implements strict mode consistently. Default OFF except for file_write in
+ * required-output missions, which uses the same provider/model compatibility
+ * gate. Calls without a required-output contract retain the opt-in behavior.
  */
 // Tools that go strict by simply adding the flag + `additionalProperties:false`
 // (every property already in `required`, no free-form objects).
@@ -443,11 +443,11 @@ function applyStrict(tool: any): any {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function getTaskTools(): any[] {
+export function getTaskTools(requiredExports = false): any[] {
   const provider = process.env.KARS_PROVIDER;
   const slim = provider === "github-models" || provider === "github-copilot";
-  // Strict mode is opt-in (env-flag) AND only applied on the Foundry path
-  // because slim-mode providers vary in strict-schema support.
+  // Strict mode is opt-in, except for file_write when a mission requires named
+  // exports. Both use the same provider/model gate; slim providers vary in support.
   // Additionally, only enable when the configured model is a known
   // OpenAI-family deployment that supports strict mode — Anthropic /
   // Claude / Gemini / Mistral models exposed via Foundry's OpenAI-compat
@@ -457,9 +457,10 @@ export function getTaskTools(): any[] {
   const model = (process.env.KARS_MODEL || process.env.OPENCLAW_MODEL || process.env.OPENAI_MODEL || "").toLowerCase();
   const STRICT_MODEL_RE = /^(gpt-4o|gpt-4\.1|gpt-5|o1|o3|o4)/;
   const modelOk = STRICT_MODEL_RE.test(model);
-  const strict = !slim && modelOk && process.env.KARS_STRICT_TOOLS === "1";
+  const supportsStrict = !slim && modelOk;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const maybeStrict = (t: any) => (strict ? applyStrict(t) : t);
+  const maybeStrict = (t: any) => (supportsStrict && (process.env.KARS_STRICT_TOOLS === "1"
+    || (requiredExports && t.function.name === "file_write")) ? applyStrict(t) : t);
 
   if (slim) {
     const FOUNDRY = new Set([

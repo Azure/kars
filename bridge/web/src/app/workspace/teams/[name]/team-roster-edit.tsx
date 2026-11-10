@@ -12,8 +12,11 @@
 import { useState, useTransition } from "react";
 import { MEMBER_ARCHETYPES } from "@/lib/member-archetypes";
 import { useRouter } from "next/navigation";
-import type { Options, TeamRole } from "@/lib/types";
+import type { ExecutionCapability, ExecutionPlan, ExecutionRole, Options, TeamRole } from "@/lib/types";
+import { newMemberPlan, phaseObjectiveError, rosterExecutionPlan } from "@/lib/team-roster-plan";
 import { ViewportPortal } from "@/components/viewport-portal";
+import { TeamRoleResourcePicker } from "@/components/team-role-resources";
+import type { TeamRoleResources } from "@/lib/types/teams";
 
 type EditRole = {
   id: number;
@@ -22,7 +25,19 @@ type EditRole = {
   runtime: string;
   model: string;
   skills: string[];
+  resources?: TeamRoleResources | null;
+  plan?: ExecutionRole;
 };
+
+const phasePermissions: [ExecutionCapability, string][] = [
+  ["filesystem-read", "Read shared knowledge and previous work"],
+  ["filesystem-write", "Write findings and deliverables"],
+  ["network", "Use approved network destinations"],
+  ["python-execute", "Run Python applications and tests (requires read, write and network permissions)"],
+  ["mcp", "Use selected connected services"],
+  ["memory", "Use a separately selected runtime memory store"],
+  ["github-pr", "Propose changes in approved repositories"],
+];
 
 let RID = 1;
 
@@ -31,15 +46,19 @@ export function TeamRosterEdit({
   name,
   roster,
   options,
+  resources,
+  executionPlan,
+  paused,
 }: {
   ns: string;
   name: string;
   roster: TeamRole[];
   options: Options;
+  resources: TeamRoleResources;
+  executionPlan: ExecutionPlan | null;
+  paused: boolean;
 }) {
-  const [open, setOpen] = useState(false);
-  const [roles, setRoles] = useState<EditRole[]>(() =>
-    roster.map((r) => {
+  const initialRoles = (): EditRole[] => roster.map((r) => {
       const opt = r.model
         ? options.models.find((m) =>
             r.model?.includes("::")
@@ -52,47 +71,70 @@ export function TeamRosterEdit({
         name: r.name,
         system_prompt: r.system_prompt ?? "",
         runtime: r.runtime ?? "",
-        model: opt ? `${opt.provider}::${opt.deployment}` : "",
+        model: opt ? `${opt.provider}::${opt.deployment}` : (r.model ?? ""),
         skills: r.skills,
+        resources: r.resources,
+        plan: executionPlan?.roles.find((role) => role.name === r.name),
       };
-    }),
-  );
+    });
+  const [open, setOpen] = useState(false);
+  const [roles, setRoles] = useState<EditRole[]>(initialRoles);
   const [pending, start] = useTransition();
   const [error, setError] = useState<string | null>(null);
   const router = useRouter();
 
   const patch = (id: number, p: Partial<EditRole>) =>
-    setRoles((rs) => rs.map((r) => (r.id === id ? { ...r, ...p } : r)));
-  const add = () =>
-    setRoles((rs) => [...rs, { id: RID++, name: "", system_prompt: "", runtime: "", model: "", skills: [] }]);
-  const remove = (id: number) => setRoles((rs) => rs.filter((r) => r.id !== id));
+    setRoles((rs) => {
+      const previous = rs.find((r) => r.id === id);
+      return rs.map((r) => {
+        const updated = r.id === id ? { ...r, ...p } : r;
+        if (p.name === undefined || !previous || !updated.plan) return updated;
+        return { ...updated, plan: { ...updated.plan,
+          name: r.id === id ? p.name : updated.plan.name,
+          depends_on: updated.plan.depends_on.map((dependency) => dependency === previous.name ? p.name! : dependency),
+        } };
+      });
+    });
+  const add = () => {
+    if (!executionPlan) return;
+    setRoles((rs) => [...rs, { id: RID++, name: "", system_prompt: "", runtime: "", model: "", skills: [],
+      resources: { mcp_servers: [], egress: [] }, plan: newMemberPlan("", executionPlan) }]);
+  };
+  const remove = (id: number) => {
+    const member = roles.find((r) => r.id === id);
+    const dependants = roles.filter((r) => member && r.plan?.depends_on.includes(member.name));
+    if (dependants.length) {
+      setError(`First update “Wait for” on ${dependants.map((r) => r.name).join(", ")}; they still need this member's output.`);
+      return;
+    }
+    setRoles((rs) => rs.filter((r) => r.id !== id));
+  };
   const availableSkills = new Set((options.skills ?? []).map((s) => s.name));
   const addFromArchetype = (aid: string) => {
     const a = MEMBER_ARCHETYPES.find((x) => x.id === aid);
-    if (!a) return;
+    if (!a || !executionPlan) return;
     setRoles((rs) => [
       ...rs,
-      { id: RID++, name: a.id, system_prompt: a.system_prompt, runtime: "", model: "", skills: a.suggestedSkills.filter((s) => availableSkills.has(s)) },
+      { id: RID++, name: a.id, system_prompt: a.system_prompt, runtime: "", model: "", skills: a.suggestedSkills.filter((s) => availableSkills.has(s)), resources: { mcp_servers: [], egress: [] }, plan: newMemberPlan(a.id, executionPlan) },
     ]);
   };
 
   const save = () =>
     start(async () => {
       setError(null);
-      const payload = roles
-        .filter((r) => r.name.trim())
-        .map(({ name, system_prompt, runtime, model, skills }) => ({
-          name,
-          system_prompt,
-          runtime: runtime || undefined,
-          model: model || undefined,
-          skills,
-        }));
       try {
+        if (!paused) throw new Error("Pause new runs and let current work finish before changing members or the work plan. Authority changes can stop active work.");
+        if (!executionPlan || roles.some((role) => !role.plan)) {
+          throw new Error("This Team needs a matching reviewed work plan before its members can be edited.");
+        }
+        const plan = rosterExecutionPlan(executionPlan, roles.map((role) => role.plan!));
+        const payload = roles.map(({ name, system_prompt, runtime, model, skills, resources }) => ({
+          name, system_prompt, runtime: runtime || undefined, model: model || undefined, skills, resources,
+        }));
         const res = await fetch(`/api/namespaces/${ns}/teams/${name}`, {
           method: "PATCH",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ roles: payload }),
+          body: JSON.stringify({ roles: payload, execution_plan: plan }),
         });
         if (!res.ok) {
           const body = await res.json().catch(() => null);
@@ -110,7 +152,7 @@ export function TeamRosterEdit({
   if (!open) {
     return (
       <button
-        onClick={() => setOpen(true)}
+        onClick={() => { setRoles(initialRoles()); setError(null); setOpen(true); }}
         className="rounded-lg border border-border px-3 py-1.5 text-xs font-medium hover:bg-surface-muted"
       >
         Edit org
@@ -137,8 +179,19 @@ export function TeamRosterEdit({
       </div>
       <p className="mt-0.5 text-xs text-foreground-muted">
         A visual org: the team leads; each card is a member reporting to it. Edit a card in place, add
-        from an archetype, or remove. Saving reconciles the running org.
+        from an archetype, or remove. Members and their work plan are saved together, for future runs.
+        Saving does not start work or change an already admitted run.
       </p>
+      <p className="mt-2 text-sm text-foreground-muted">
+        New members automatically receive approved shared Team knowledge on their first assignment.
+        Each run gets a checked snapshot; work already running does not receive later changes instantly.
+        Private runtime memory is separate. New members start with reading and writing permission;
+        tool-call headroom starts from this Team&apos;s existing plan. Review permissions and work order below.
+        Administrator policies and shared spending limits still apply. Pause stops new runs only;
+        let current work finish before saving because authority changes can stop active work.
+      </p>
+      {!paused && <p role="alert" className="mt-2 text-sm text-danger">Pause the Team from Overview before saving member changes.</p>}
+      {!executionPlan && <p role="alert" className="mt-2 text-sm text-danger">This Team needs a reviewed work plan before members can be added.</p>}
 
       {/* Visual org tree — principal on top, a spine, then member cards. */}
       <div className="mt-4 flex flex-col items-center">
@@ -156,6 +209,7 @@ export function TeamRosterEdit({
               <div className="w-60 rounded-xl border border-border bg-surface p-3 shadow-sm">
                 <div className="flex items-center gap-2">
                   <input
+                    aria-label={`${r.name || "New member"} name`}
                     value={r.name}
                     onChange={(e) => patch(r.id, { name: e.target.value })}
                     placeholder="role name (e.g. researcher)"
@@ -170,6 +224,7 @@ export function TeamRosterEdit({
                   </button>
                 </div>
                 <textarea
+                  aria-label={`${r.name || "New member"} instructions`}
                   value={r.system_prompt}
                   onChange={(e) => patch(r.id, { system_prompt: e.target.value })}
                   rows={2}
@@ -178,16 +233,20 @@ export function TeamRosterEdit({
                 />
                 <div className="mt-2 grid grid-cols-1 gap-1.5">
                   <select
+                    aria-label={`${r.name || "Member"} model`}
                     value={r.model}
                     onChange={(e) => patch(r.id, { model: e.target.value })}
                     className="rounded-lg border border-border bg-surface px-2 py-1 text-[11px]"
                   >
                     <option value="">model: team default</option>
+                    {r.model && !options.models.some((m) => `${m.provider}::${m.deployment}` === r.model) &&
+                      <option value={r.model}>{r.model} (currently unavailable)</option>}
                     {options.models.map((m) => (
-                      <option key={`${m.provider}::${m.deployment}`} value={`${m.provider}::${m.deployment}`}>{m.deployment}</option>
+                      <option key={`${m.provider}::${m.deployment}`} value={`${m.provider}::${m.deployment}`}>{m.deployment} · {m.provider}</option>
                     ))}
                   </select>
                   <select
+                    aria-label={`${r.name || "Member"} harness`}
                     value={r.runtime}
                     onChange={(e) => patch(r.id, { runtime: e.target.value })}
                     className="rounded-lg border border-border bg-surface px-2 py-1 text-[11px]"
@@ -201,6 +260,56 @@ export function TeamRosterEdit({
                     <p className="text-[10px] text-foreground-muted">skills: {r.skills.join(", ")}</p>
                   )}
                 </div>
+                {r.plan && <fieldset className="mt-3 space-y-2 border-t border-border pt-2">
+                  <legend className="text-xs font-medium">Work plan</legend>
+                  <p className="text-xs text-foreground-muted">Wait for these members&apos; output before starting:</p>
+                  {roles.filter((other) => other.id !== r.id && other.name).map((other) => (
+                    <label key={other.id} className="flex gap-2 text-xs">
+                      <input type="checkbox" aria-label={`${r.name || "New member"} waits for ${other.name}`}
+                        checked={r.plan!.depends_on.includes(other.name)}
+                        onChange={(event) => patch(r.id, { plan: { ...r.plan!, depends_on: event.target.checked
+                          ? [...r.plan!.depends_on, other.name]
+                          : r.plan!.depends_on.filter((name) => name !== other.name) } })} />
+                      {other.name}
+                    </label>
+                  ))}
+                  {r.plan.phases.map((phase, phaseIndex) => {
+                    const objectiveError = phaseObjectiveError(phase.objective);
+                    const objectiveHintId = `member-${r.id}-phase-${phaseIndex}-objective-hint`;
+                    const update = (change: Partial<typeof phase>) => patch(r.id, { plan: { ...r.plan!,
+                      phases: r.plan!.phases.map((value, index) => index === phaseIndex ? { ...value, ...change } : value),
+                    } });
+                    return <fieldset key={phase.name} className="space-y-2 rounded border border-border p-2">
+                      <legend className="text-xs">{phase.name}</legend>
+                      <label className="block text-xs">Expected work
+                        <textarea aria-label={`${r.name} / ${phase.name} expected work`} value={phase.objective}
+                          aria-invalid={!!objectiveError} aria-describedby={objectiveHintId}
+                          onChange={(event) => update({ objective: event.target.value })}
+                          className="mt-1 w-full rounded border border-border bg-surface p-1 text-xs" />
+                      </label>
+                      <p id={objectiveHintId} className={`text-xs ${objectiveError ? "text-danger" : "text-foreground-muted"}`}>
+                        {objectiveError ?? "Briefly describe the result. Put longer guidance in the member's instructions."}
+                      </p>
+                      {phasePermissions.map(([capability, label]) => <label key={capability} className="flex gap-2 text-xs">
+                        <input type="checkbox" aria-label={`${label} for ${r.name} / ${phase.name}`}
+                          checked={phase.capabilities.includes(capability)}
+                          onChange={(event) => update({ capabilities: event.target.checked
+                            ? [...phase.capabilities, capability] : phase.capabilities.filter((value) => value !== capability) })} />
+                        {label}
+                      </label>)}
+                      <label className="block text-xs">Maximum tool calls
+                        <input type="number" min={0} max={2147483647} step={1}
+                          aria-label={`Maximum tool calls for ${r.name} / ${phase.name}`} value={phase.max_tool_calls}
+                          onChange={(event) => update({ max_tool_calls: Number(event.target.value) })}
+                          className="mt-1 w-full rounded border border-border bg-surface p-1 text-xs" />
+                      </label>
+                    </fieldset>;
+                  })}
+                  <p className="text-xs text-foreground-muted">{r.plan.budget_tokens == null
+                    ? "Uses the Team's shared spending limit."
+                    : `Existing role limit: ${r.plan.budget_tokens.toLocaleString()} tokens (preserved).`}</p>
+                </fieldset>}
+                <TeamRoleResourcePicker name={r.name} value={r.resources} available={resources} onChange={(resources) => patch(r.id, { resources })} />
               </div>
             </li>
           ))}
@@ -230,13 +339,13 @@ export function TeamRosterEdit({
       <div className="mt-4 flex items-center">
         <button
           onClick={save}
-          disabled={pending}
+          disabled={pending || !paused || !executionPlan}
           className="ml-auto rounded-lg bg-signal px-4 py-1.5 text-xs font-semibold text-signal-fg disabled:opacity-50"
         >
           {pending ? "Saving…" : "Save org"}
         </button>
       </div>
-      {error && <p className="mt-2 text-xs text-danger">{error}</p>}
+      {error && <p role="alert" className="mt-2 text-xs text-danger">{error}</p>}
       </div>
     </ViewportPortal>
   );

@@ -160,6 +160,168 @@ mod tests {
         assert!(!matches_policy(&wanted, &selector_bypass));
     }
 
+    fn runtime_policy() -> Value {
+        let bundle: Value = serde_json::from_str(BUNDLE).unwrap();
+        bundle["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|policy| policy["name"] == "kars-inference-budget-runtime-binding")
+            .unwrap()["spec"]
+            .clone()
+    }
+
+    fn variable(policy: &Value, name: &str) -> String {
+        policy["variables"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|variable| variable["name"] == name)
+            .unwrap()["expression"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn runtime_lifecycle_projection_covers_every_generated_spec_field() {
+        use kube::CustomResourceExt;
+        let crd = serde_json::to_value(crate::crd::KarsSandbox::crd()).unwrap();
+        let properties = crd
+            .pointer("/spec/versions/0/schema/openAPIV3Schema/properties/spec/properties")
+            .unwrap()
+            .as_object()
+            .unwrap();
+        let expression = variable(&runtime_policy(), "suspensionOnly");
+        let expected = format!(
+            "oldObject != null && {}",
+            properties
+                .keys()
+                .filter(|field| *field != "suspended")
+                .map(|field| format!("dyn(object.spec).?{field} == dyn(oldObject.spec).?{field}"))
+                .collect::<Vec<_>>()
+                .join(" && ")
+        );
+        let clauses = |expression: &str| {
+            expression
+                .split(" && ")
+                .map(str::to_string)
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        assert_eq!(
+            clauses(&expression),
+            clauses(&expected),
+            "Every new spec field must be frozen before native schema expansion"
+        );
+    }
+
+    #[test]
+    fn runtime_lifecycle_exception_retains_controller_and_source_authority_fences() {
+        let policy = runtime_policy();
+        let expression = policy["validations"][0]["expression"].as_str().unwrap();
+        assert_eq!(
+            expression,
+            "request.userInfo.username == 'system:serviceaccount:__ACCOUNTING_NAMESPACE__:kars-controller' || (!has(object.spec.inferenceBudgetRef) && (oldObject == null || !has(oldObject.spec.inferenceBudgetRef))) || (variables.builtinSource && variables.sourceMetadataUnchanged && variables.suspensionOnly)"
+        );
+        let source = variable(&policy, "builtinSource");
+        for fence in [
+            "request.operation == 'UPDATE'",
+            "oldObject != null",
+            "has(oldObject.spec.inferenceBudgetRef)",
+            "oldObject.metadata.name == 'bridge-orchestrator'",
+            "dyn(oldObject.spec.inferenceBudgetRef).scope == 'GovernedInference'",
+            "dyn(oldObject.spec.inferenceBudgetRef).root.kind == 'KarsSandbox'",
+            "dyn(oldObject.spec.inferenceBudgetRef).root.resource.name == oldObject.metadata.name",
+            "dyn(oldObject.spec.inferenceBudgetRef).root.resource['namespace'] == dyn(oldObject.metadata)['namespace']",
+            "dyn(oldObject.spec.inferenceBudgetRef).root.resource.uid == oldObject.metadata.uid",
+            "dyn(oldObject.spec.inferenceBudgetRef).taskUid == oldObject.metadata.uid",
+            "dyn(oldObject.spec.inferenceBudgetRef).rootTaskUid == oldObject.metadata.uid",
+            "dyn(oldObject.spec.inferenceBudgetRef).?parentTaskUid.orValue(null) == null",
+            "oldObject.metadata.?ownerReferences.orValue([]).size() == 0",
+            "object.metadata.?ownerReferences.orValue([]).size() == 0",
+        ] {
+            assert!(
+                source.split(" && ").any(|clause| clause == fence),
+                "{fence}"
+            );
+        }
+        assert!(!source.contains(" || "));
+        let metadata = variable(&policy, "sourceMetadataUnchanged");
+        for field in ["generateName", "deletionTimestamp", "labels", "finalizers"] {
+            assert!(metadata.contains(&format!(
+                "object.metadata.?{field} == oldObject.metadata.?{field}"
+            )));
+        }
+        for field in ["name", "uid"] {
+            assert!(metadata.contains(&format!(
+                "object.metadata.{field} == oldObject.metadata.{field}"
+            )));
+        }
+        assert!(
+            metadata.contains(
+                "dyn(object.metadata)['namespace'] == dyn(oldObject.metadata)['namespace']"
+            )
+        );
+        assert_eq!(metadata.matches(" || ").count(), 2);
+        assert_eq!(
+            metadata
+                .matches("k == 'kars.azure.com/orchestrator-model-revision' ||")
+                .count(),
+            2
+        );
+        assert!(metadata.contains("object.metadata.?annotations.orValue({}).all(k,"));
+        assert!(metadata.contains("oldObject.metadata.?annotations.orValue({}).all(k,"));
+        assert!(metadata.contains("object.metadata.?annotations.orValue({})[?k] == oldObject.metadata.?annotations.orValue({})[?k]"));
+        assert!(metadata.contains("oldObject.metadata.?annotations.orValue({})[?k] == object.metadata.?annotations.orValue({})[?k]"));
+    }
+
+    const FUND_AUTHORIZATION: &str = "authorizer.group('kars.azure.com').resource('karsbudgetaccounts').namespace(request.namespace).check('fund').allowed()";
+    const PRIVATE_MAINTENANCE_AUTHORIZATION: &str = "authorizer.group('kars.azure.com').resource('karscredentialgrants').namespace('__ACCOUNTING_NAMESPACE__').name('workspace').check('manage').allowed()";
+
+    fn has_unreviewed_namespace_accessor(expression: &str) -> bool {
+        // Native admission accepts these exact ResourceCheck calls. Keep the
+        // conservative schema-field guard for every other namespace accessor.
+        expression
+            .replace(FUND_AUTHORIZATION, "")
+            .replace(PRIVATE_MAINTENANCE_AUTHORIZATION, "")
+            .contains(".namespace")
+    }
+
+    #[test]
+    fn namespace_guard_only_exempts_reviewed_native_authorization() {
+        assert!(!has_unreviewed_namespace_accessor(FUND_AUTHORIZATION));
+        assert!(!has_unreviewed_namespace_accessor(
+            PRIVATE_MAINTENANCE_AUTHORIZATION
+        ));
+        for (from, to) in [
+            ("karscredentialgrants", "secrets"),
+            ("__ACCOUNTING_NAMESPACE__", "other-namespace"),
+            ("name('workspace')", "name('other-grant')"),
+            ("check('manage')", "check('update')"),
+            (".namespace('__ACCOUNTING_NAMESPACE__')", ".namespace()"),
+        ] {
+            assert!(has_unreviewed_namespace_accessor(
+                &PRIVATE_MAINTENANCE_AUTHORIZATION.replace(from, to)
+            ));
+        }
+        assert!(has_unreviewed_namespace_accessor(&format!(
+            "{PRIVATE_MAINTENANCE_AUTHORIZATION} || object.spec.namespace == 'workspace'"
+        )));
+        assert!(!has_unreviewed_namespace_accessor(
+            "object.spec.__namespace__ == 'workspace'"
+        ));
+        for expression in [
+            "object.spec.namespace == 'workspace'".to_string(),
+            FUND_AUTHORIZATION.replace(".namespace(request.namespace)", ".namespace"),
+            FUND_AUTHORIZATION.replace(".namespace(request.namespace)", ".namespace()"),
+            FUND_AUTHORIZATION.replace("request.namespace", "object.metadata.namespace"),
+            FUND_AUTHORIZATION.replace("check('fund')", "check('update')"),
+            format!("{FUND_AUTHORIZATION} || object.spec.namespace == 'workspace'"),
+        ] {
+            assert!(has_unreviewed_namespace_accessor(&expression));
+        }
+    }
+
     #[test]
     fn shared_bundle_has_no_duplicate_names_or_cel_namespace_accessors() {
         let bundle: Value = serde_json::from_str(BUNDLE).unwrap();
@@ -167,8 +329,21 @@ mod tests {
         for policy in bundle["items"].as_array().unwrap() {
             assert!(seen.insert(policy["name"].as_str().unwrap()));
             assert_eq!(policy["spec"]["failurePolicy"], "Fail");
-            assert!(!policy.to_string().contains(".namespace"));
+            assert!(!has_unreviewed_namespace_accessor(&policy.to_string()));
         }
-        assert_eq!(seen.len(), 8);
+        assert_eq!(
+            seen,
+            std::collections::BTreeSet::from([
+                "kars-inference-budget-token-top-ups",
+                "kars-inference-budget-public-ca",
+                "kars-inference-budget-store",
+                "kars-inference-budget-status",
+                "kars-inference-budget-runtime-binding",
+                "kars-inference-budget-namespace",
+                "kars-inference-budget-workloads",
+                "kars-inference-budget-token",
+                "kars-inference-budget-private-connect",
+            ])
+        );
     }
 }

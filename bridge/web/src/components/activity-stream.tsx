@@ -189,6 +189,7 @@ export function ActivityStream({
         <div>
           <h2 className="text-sm font-semibold">{title}</h2>
           <p className="mt-0.5 text-xs text-foreground-muted">{detail}</p>
+          <p className="mt-1 text-xs text-foreground-muted">Newest activity first within producer-and-round groups; groups follow their latest timestamped record. Ties use producer and sequence order; unavailable timestamps follow without implying chronology between producers.</p>
         </div>
         {hasActivity ? (
           <div className="flex flex-wrap items-center justify-end gap-2">
@@ -245,11 +246,24 @@ export function ActivityStream({
  *  round), not a flat interleave. Only round/tool spans are shown because those
  *  are the only spans the router actually emits; mesh/policy spans are not
  *  fabricated. */
+const agentKey = (event: ActivityEvent) =>
+  event.agentInstance
+  ?? event.agent
+  ?? (event.agentRole === "subagent" ? "subagent" : "principal");
+
+export function newestActivityEvents<T extends ActivityEvent>(events: T[]): T[] {
+  return events.map((event, index) => ({ event, index })).sort((a, b) => {
+    const left = Date.parse(a.event.ts);
+    const right = Date.parse(b.event.ts);
+    if (Number.isFinite(left) && Number.isFinite(right) && left !== right) return right - left;
+    if (Number.isFinite(left) !== Number.isFinite(right)) return Number.isFinite(left) ? -1 : 1;
+    return agentKey(a.event).localeCompare(agentKey(b.event))
+      || (b.event.seq ?? -1) - (a.event.seq ?? -1)
+      || b.event.round - a.event.round || b.index - a.index;
+  }).map(({ event }) => event);
+}
+
 function SpanTree({ events }: { events: ActivityEvent[] }) {
-  const agentKey = (event: ActivityEvent) =>
-    event.agentInstance
-    ?? event.agent
-    ?? (event.agentRole === "subagent" ? "subagent" : "principal");
   const roundKey = (event: ActivityEvent) => `${agentKey(event)}\u0000${event.round ?? 0}`;
   // Every sandbox owns an independent round counter. Group by emitting sandbox
   // plus round so principal/worker round 0 records can never merge.
@@ -280,35 +294,28 @@ function SpanTree({ events }: { events: ActivityEvent[] }) {
     displayOrdinal.set(key, index + 1)
   );
 
+  const newestGroups = [...new Set(newestActivityEvents(events).map(roundKey))];
   return (
     <ol className="space-y-2">
-      {rounds.map(([key, round]) => (
-        <li key={`r-${key}`}>
-          <RoundRow
-            e={round}
-            display={displayOrdinal.get(key) ?? round.round + 1}
-            agentLabel={agentKey(round)}
-          />
-          <RoundTools
-            tools={toolsByRound.get(key) ?? []}
-            display={displayOrdinal.get(key) ?? round.round + 1}
-          />
-        </li>
-      ))}
-      {extra.map((key) => {
+      {newestGroups.map((key) => {
+        const round = roundsByKey.get(key);
         const tools = toolsByRound.get(key) ?? [];
-        const first = tools[0];
+        const first = round ?? tools[0];
+        const display = displayOrdinal.get(key) ?? 1;
         return (
-        <li key={`x-${key}`}>
-          <div className="flex items-center gap-2 px-3 py-1.5 text-xs">
-            <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-border" aria-hidden />
-            <span className="font-medium">Model round {displayOrdinal.get(key) ?? 1}</span>
-            {first && <span className="font-mono text-[10px] text-foreground-muted">· {agentKey(first)}</span>}
-            <span className="text-foreground-muted">· round record unavailable</span>
-          </div>
-          <RoundTools tools={tools} display={displayOrdinal.get(key) ?? 1} />
-        </li>
-      )})}
+          <li key={key}>
+            {round ? <RoundRow e={round} display={display} agentLabel={agentKey(round)} /> : (
+              <div className="flex items-center gap-2 px-3 py-1.5 text-xs">
+                <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-border" aria-hidden />
+                <span className="font-medium">Model round {display}</span>
+                {first && <span className="font-mono text-[10px] text-foreground-muted">· {agentKey(first)}</span>}
+                <span className="text-foreground-muted">· round record unavailable</span>
+              </div>
+            )}
+            <RoundTools tools={tools} display={display} />
+          </li>
+        );
+      })}
     </ol>
   );
 }
@@ -318,7 +325,7 @@ function RoundTools({ tools, display }: { tools: Extract<ActivityEvent, { kind: 
   if (tools.length === 0) return null;
   return (
     <ol className="ml-[7px] mt-1 space-y-1 border-l border-border pl-3">
-      {tools.map((e, i) => (
+      {newestActivityEvents(tools).map((e, i) => (
         <li key={e.seq ?? `${e.agentInstance ?? e.agent ?? "agent"}-${e.round}-${e.ts}-${i}`}>
           <ToolRow e={e} display={display} />
         </li>

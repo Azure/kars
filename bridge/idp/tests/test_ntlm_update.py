@@ -2,11 +2,14 @@
 # Licensed under the MIT License.
 
 import hashlib
+import json
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
+from unittest import mock
 
-from contracts import LOCK_FILES
+from contracts import LOCK_FILES, check_modules, json_stream
 from test_baselines import artifact_log, import_locks
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,12 +17,34 @@ NTLM_REQUEST = "github.com/Azure/go-ntlmssp@v0.1.1"
 
 
 class NTLMSecurityUpdateContracts(unittest.TestCase):
-    def test_exact_ntlm_update_does_not_change_crypto_or_other_pins(self):
+    def test_ntlm_fix_and_reviewed_crypto_keep_pinned_compiler(self):
         requested = (ROOT / "locks/requests.txt").read_text().splitlines()
         self.assertEqual(requested.count(NTLM_REQUEST), 1)
-        self.assertIn("golang.org/x/crypto@v0.56.0", requested)
-        self.assertIn("GO_VERSION=go1.26.8", (ROOT / "locks/inputs.lock").read_text())
+        self.assertIn("golang.org/x/crypto@v0.58.1-0.20261009181718-2f1f834330b2", requested)
+        self.assertIn("golang.org/x/net@v0.62.0", requested)
+        self.assertIn("golang.org/x/text@v0.43.0", requested)
+        self.assertIn("GO_VERSION=go1.27.3", (ROOT / "locks/inputs.lock").read_text())
         self.assertEqual(len(requested), len(set(requested)))
+
+    def test_nested_api_rejects_stale_network_dependencies_with_valid_checksums(self):
+        for dependency in ("golang.org/x/net", "golang.org/x/crypto", "golang.org/x/text"):
+            with self.subTest(dependency=dependency), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                shutil.copytree(ROOT / "locks", root / "locks")
+                generated = root / "locks/generated"
+                inventory = generated / "api-modules.json"
+                modules = list(json_stream(inventory.read_text()))
+                selected = next(module for module in modules if module["Path"] == dependency)
+                selected["Version"] = "v0.1.0"
+                inventory.write_text("\n".join(json.dumps(module) for module in modules) + "\n")
+                digest = hashlib.sha256(inventory.read_bytes()).hexdigest()
+                checksums = generated / "SHA256SUMS"
+                checksums.write_text("\n".join(
+                    f"{digest}  ./api-modules.json" if line.endswith("  ./api-modules.json") else line
+                    for line in checksums.read_text().splitlines()
+                ) + "\n")
+                with self.assertRaisesRegex(ValueError, "nested API unreviewed selection"):
+                    check_modules(root)
 
     def test_runtime_inventory_is_retained_and_checked_without_filtering_packages(self):
         build = (ROOT / "scripts/build.sh").read_text()
@@ -46,7 +71,9 @@ class NTLMSecurityUpdateContracts(unittest.TestCase):
         self.assertNotIn("-vet=off", script)
 
     def test_review_import_never_overwrites_an_existing_output(self):
-        with tempfile.TemporaryDirectory(prefix="kars-ntlm-review-contract-") as temporary:
+        with tempfile.TemporaryDirectory(prefix=".ntlm-review-contract-", dir=ROOT) as temporary, \
+                mock.patch.object(import_locks, "ROOT", Path(temporary) / "source"):
+            (import_locks.ROOT / ".git").mkdir(parents=True)
             target = Path(temporary) / "reviewed"
             target.mkdir()
             marker = target / "keep"
@@ -62,7 +89,13 @@ class NTLMSecurityUpdateContracts(unittest.TestCase):
         files["requests.txt"] = "\n".join(
             line for line in files["requests.txt"].decode().splitlines() if line != NTLM_REQUEST
         ).encode() + b"\n"
-        with tempfile.TemporaryDirectory(prefix="kars-ntlm-staging-contract-") as temporary:
+        files["inputs.lock"] = (ROOT / "locks/inputs.lock").read_bytes()
+        with tempfile.TemporaryDirectory(prefix=".ntlm-staging-contract-", dir=ROOT) as temporary, \
+                mock.patch.object(import_locks, "ROOT", Path(temporary) / "source"):
+            (import_locks.ROOT / ".git").mkdir(parents=True)
+            (import_locks.ROOT / "locks").mkdir()
+            for name in ("inputs.lock", "requests.txt"):
+                shutil.copyfile(ROOT / "locks" / name, import_locks.ROOT / "locks" / name)
             directory = Path(temporary)
             log = directory / "stale.log"
             log.write_text(artifact_log(files))
@@ -70,7 +103,7 @@ class NTLMSecurityUpdateContracts(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "resolver input drift: requests.txt"):
                 import_locks.import_artifact(log, target)
             self.assertFalse(target.exists())
-            self.assertEqual(sorted(path.name for path in directory.iterdir()), ["stale.log"])
+            self.assertEqual(sorted(path.name for path in directory.iterdir()), ["source", "stale.log"])
         after = {name: hashlib.sha256((generated / name).read_bytes()).hexdigest() for name in LOCK_FILES}
         self.assertEqual(after, before)
 

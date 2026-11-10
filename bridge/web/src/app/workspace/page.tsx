@@ -6,11 +6,12 @@
 // you. Honest empty state on a fresh cluster (no zeroed cards that imply
 // measurement).
 
-import Link from "next/link";
+import Link from "@/components/navigation-link";
 import { IntentEntry } from "@/components/intent-entry";
 import { HowItWorksSteps } from "@/components/how-it-works";
 import { Stat } from "@/components/ui";
-import { MissionStatusBadge, missionStatus } from "@/components/mission-status";
+import { MissionStatusBadge } from "@/components/mission-status";
+import { missionSummaryStatus } from "@/lib/mission-presentation";
 import {
   BffError,
   getArtifacts,
@@ -37,7 +38,8 @@ export const dynamic = "force-dynamic";
 
 function teamHealthDot(health: string | null, paused: boolean, phase: string): string {
   if (phase === "Degraded") return "bg-rose-500";
-  const h = paused ? "Hibernating" : (health ?? "");
+  if (paused) return "bg-foreground-muted";
+  const h = health ?? "";
   if (h === "Healthy") return "bg-emerald-500";
   if (h === "Stalled") return "bg-rose-500";
   if (h === "Unproductive") return "bg-amber-500";
@@ -359,7 +361,7 @@ export default async function WorkspaceHome() {
                     </p>
                     <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border bg-surface-muted/60 px-2 py-0.5 text-[11px] font-medium text-foreground-muted">
                       <span className={`h-1.5 w-1.5 rounded-full ${teamHealthDot(t.health, t.paused, t.phase)}`} />
-                      {t.phase === "Degraded" ? "Degraded" : t.paused ? "Hibernating" : (t.health ?? t.phase)}
+                      {t.phase === "Degraded" ? "Degraded" : t.paused ? "Scheduling paused" : (t.health ?? t.phase)}
                     </span>
                   </div>
                   <p className="mt-1.5 line-clamp-1 text-xs text-foreground-muted">{t.charter}</p>
@@ -451,7 +453,7 @@ export default async function WorkspaceHome() {
           </div>
           <ul className="grid gap-3 sm:grid-cols-2">
             {standaloneTasks.map((t) => {
-              const st = missionStatus(t.phase, null, { delivered: t.delivered });
+              const st = missionSummaryStatus(t);
               return (
                 <li key={t.name} className="min-w-0">
                   <Link

@@ -7,7 +7,7 @@ set -eu
 # native AL3 libraries; image tests qualify that combination on each CPU.
 case "$(uname -m)" in
     aarch64) export PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-arm64 ;;
-    x86_64) export PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04 ;;
+    x86_64) export PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64 ;;
     *) echo "Unsupported managed browser architecture" >&2; exit 1 ;;
 esac
 exec "$@"

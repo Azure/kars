@@ -300,7 +300,9 @@ spec:
                 nullable: true
                 type: array
               lastCompiledAt:
-                description: Last time the policy was compiled to an AGT profile and pushed.
+                description: |-
+                  Last time a changed compilation result was published to status.
+                  Unchanged periodic verification preserves this timestamp.
                 nullable: true
                 type: string
               observedGeneration:

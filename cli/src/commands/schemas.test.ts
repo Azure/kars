@@ -38,6 +38,23 @@ describe("public operator schema preparation command", () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
+  it("accepts the explicit Helm SSA mode without introducing a different schema path", async () => {
+    const f = schemaFixture();
+    execute.mockImplementation(f.execute);
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    await schemasCommand().parseAsync(["node", "schemas", "prepare", "--chart", "/exact/chart",
+      "--release", "kars", "--namespace", "kars-system", "--server-side", "true"]);
+    expect(f.writes).toHaveLength(1);
+  });
+
+  it.each([["--server-side", "invalid"], ["--ownership", "template", "--server-side", "true"]])(
+    "rejects unsupported server-side arguments before commands: %j", async (...flags) => {
+      execute.mockClear();
+      await expect(schemasCommand().parseAsync(["node", "schemas", "prepare",
+        "--release", "kars", "--namespace", "kars-system", ...flags])).rejects.toThrow("--server-side");
+      expect(execute).not.toHaveBeenCalled();
+    });
+
   it("requires atomic rollback retention for direct Helm/native callers before schema writes", async () => {
     const f = schemaFixture();
     const old = crd();

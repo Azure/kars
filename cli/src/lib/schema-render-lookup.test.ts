@@ -77,7 +77,12 @@ describe("actual Helm lookup/capabilities rendering", () => {
       const chart = join(directory, "chart");
       mkdirSync(join(chart, "templates"), { recursive: true });
       const actual = fileURLToPath(new URL("../../../deploy/helm/kars", import.meta.url));
-      for (const file of ["Chart.yaml", "values.yaml", "templates/sre.yaml"]) copyFileSync(join(actual, file), join(chart, file));
+      // Exercise the maintained SRE templates without unrelated Core subchart lookups.
+      writeFileSync(join(chart, "Chart.yaml"), "apiVersion: v2\nname: kars\nversion: 0.1.0\n");
+      for (const file of ["values.yaml", "templates/sre.yaml", "templates/_sre-resources.tpl",
+        "templates/_sre-private-continuity.tpl", "templates/_sre-first-install.tpl", "templates/_sre-first-install-allowance.tpl"]) {
+        copyFileSync(join(actual, file), join(chart, file));
+      }
       writeFileSync(join(chart, "templates/capabilities.yaml"), [
         "apiVersion: v1", "kind: ConfigMap", "metadata: {name: fixture-capabilities}", "data:",
         '  version: {{ .Capabilities.KubeVersion.Version | quote }}',
@@ -93,11 +98,11 @@ describe("actual Helm lookup/capabilities rendering", () => {
         users: [{ name: "operator", user: {} }],
       }));
       await expect(execa("helm", ["template", "kars", chart, "-n", "kars-system", "--dry-run=client",
-        "--is-upgrade", "--set", "sre.enabled=true", "--set", "sre.authorityStage=true"], { stdio: "pipe" }))
+        "--is-upgrade", "--set", "sre.enabled=true,sre.provider=azure-openai,sre.model=gpt-4o-mini", "--set", "sre.authorityStage=true"], { stdio: "pipe" }))
         .rejects.toThrow("Authority staging cannot CREATE");
       const execute: SchemaExecute = async (file, args, options) => {
         if (file === "helm" && args[0] === "list") return { stdout: '[{"name":"kars","namespace":"kars-system"}]' };
-        if (file === "helm" && args[0] === "get" && args[1] === "values") return { stdout: '{"sre":{"enabled":true}}' };
+        if (file === "helm" && args[0] === "get" && args[1] === "values") return { stdout: '{"sre":{"enabled":true,"provider":"azure-openai","model":"gpt-4o-mini"}}' };
         return execa(file, args, { ...options, env: { KUBECONFIG: kubeconfig }, timeout: 20_000 });
       };
       const rendered = await renderCoreSchemaChart(execute, ["upgrade", "kars", chart, "-n", "kars-system",

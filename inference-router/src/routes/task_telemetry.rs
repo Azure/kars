@@ -32,6 +32,8 @@ struct Since {
     #[serde(default)]
     since: u64,
     rounds: Option<String>,
+    #[serde(default)]
+    after: u64,
 }
 async fn trace(
     State(state): State<AppState>,
@@ -52,14 +54,43 @@ async fn trace(
         };
         if query.since != 0
             || rounds.is_empty()
-            || rounds.len() > 32
+            || rounds.len() > crate::task_telemetry::MAX_OBSERVATION_ROUNDS
             || rounds.contains(&0)
             || rounds.windows(2).any(|pair| pair[0] >= pair[1])
         {
             return axum::http::StatusCode::BAD_REQUEST.into_response();
         }
-        state.services.telemetry.selected_snapshot(scope, &rounds)
+        state
+            .services
+            .telemetry
+            .selected_snapshot(scope, &rounds)
+            .map(|mut trace| {
+                // Page the same bounded selection; never select an ambient time window.
+                let events = trace["events"].as_array().unwrap();
+                let high_water = events
+                    .last()
+                    .and_then(|event| event["seq"].as_u64())
+                    .unwrap_or(0);
+                let page: Vec<_> = events
+                    .iter()
+                    .filter(|event| event["seq"].as_u64().is_some_and(|seq| seq > query.after))
+                    .take(256)
+                    .cloned()
+                    .collect();
+                let cursor = page
+                    .last()
+                    .and_then(|event| event["seq"].as_u64())
+                    .unwrap_or(high_water);
+                trace["cursor"] = json!(cursor);
+                trace["high_water"] = json!(high_water);
+                trace["has_more"] = json!(cursor < high_water);
+                trace["events"] = json!(page);
+                trace
+            })
     } else {
+        if query.after != 0 {
+            return axum::http::StatusCode::BAD_REQUEST.into_response();
+        }
         state.services.telemetry.snapshot(scope, query.since)
     };
     match snapshot {
@@ -98,23 +129,27 @@ async fn budget(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if state.services.telemetry.cursor().0 != scope {
         return error(Error::StaleScope);
     }
-    let (daily, monthly) = match state.budget.observed_usage(&state.sandbox_name).await {
-        Ok(usage) => usage,
-        Err(error) => {
-            tracing::warn!(error = %error, "Calendar usage telemetry is unavailable");
-            return (
-                error.status(),
-                Json(json!({"error":{"code":error.code(),"message":error.to_string()}})),
-            )
-                .into_response();
-        }
-    };
+    let ((daily, monthly), calendar_policy, pending_requests) =
+        match state.budget.observed_accounting(&state.sandbox_name).await {
+            Ok(usage) => usage,
+            Err(error) => {
+                tracing::warn!(error = %error, "Calendar usage telemetry is unavailable");
+                return (
+                    error.status(),
+                    Json(json!({"error":{"code":error.code(),"message":error.to_string()}})),
+                )
+                    .into_response();
+            }
+        };
     let policy = crate::inference_policy_loader::current_snapshot(&state.inference_policy).await;
     let daily_limit = policy
         .daily_tokens
         .unwrap_or(state.config.token_budget_daily);
     Json(
         json!({"scope_id":scope,"daily_observed_tokens":daily,"monthly_observed_tokens":monthly,
+        "calendar_policy":calendar_policy.as_str(),
+        "inflight_or_unresolved_requests":pending_requests,
+        "calendar_ceilings_enforced":calendar_policy == crate::inference_budget_contract::calendar::Policy::Enforce,
         "daily_limit":(daily_limit>0).then_some(daily_limit),
         "monthly_limit":policy.monthly_tokens.filter(|limit|*limit>0),
         "shared_task_budget_enforced":false,"coverage":"existing-per-sandbox-counter-only",

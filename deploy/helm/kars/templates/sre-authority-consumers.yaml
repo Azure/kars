@@ -178,6 +178,12 @@ spec:
     {{- if eq $kind "workloads" }}
     - name: replication-controller-template-present
       expression: "object.kind != 'ReplicationController' || has(object.spec.template)"
+    # Keep the registrar check in the independently budgeted match phase:
+    # three authorization checks can exceed Kubernetes' per-expression limit.
+    - name: non-registrar
+      expression: >-
+        request.namespace != 'kars-sre' ||
+        !authorizer.group('kars.azure.com').resource('karssreregistrations').name('canonical').check('use').allowed()
     {{- end }}
   variables:
     - name: pod
@@ -198,7 +204,9 @@ spec:
   validations:
     - expression: >-
         !variables.privateMaterial ||
+        {{- if eq $kind "cronjobs" }}
         authorizer.group('kars.azure.com').resource('karssreregistrations').name('canonical').check('use').allowed() ||
+        {{- end }}
         authorizer.group('').resource('pods').check('create').allowed()
         {{- if eq $kind "workloads" }}
         || (request.resource.group == 'apps' && request.resource.resource == 'replicasets' &&

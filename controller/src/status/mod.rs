@@ -414,6 +414,23 @@ pub fn build_degraded_status_patch(
     reason_value: &'static str,
     message: &str,
 ) -> Value {
+    build_unready_status_patch(sandbox, reason_value, message, false)
+}
+
+pub fn build_pending_status_patch(
+    sandbox: &KarsSandbox,
+    reason_value: &'static str,
+    message: &str,
+) -> Value {
+    build_unready_status_patch(sandbox, reason_value, message, true)
+}
+
+fn build_unready_status_patch(
+    sandbox: &KarsSandbox,
+    reason_value: &'static str,
+    message: &str,
+    pending: bool,
+) -> Value {
     let generation = sandbox.metadata.generation;
     let prior_conditions = sandbox
         .status
@@ -423,7 +440,11 @@ pub fn build_degraded_status_patch(
     let degraded = conditions::preserve_transition_time(
         conditions::find(prior_conditions, conditions::TYPE_DEGRADED),
         conditions::TYPE_DEGRADED,
-        conditions::status::TRUE,
+        if pending {
+            conditions::status::FALSE
+        } else {
+            conditions::status::TRUE
+        },
         reason_value,
         message,
         generation,
@@ -436,24 +457,23 @@ pub fn build_degraded_status_patch(
         message,
         generation,
     );
-    // Phase 2 S7.B: Degraded path stamps `Progressing=False` so
-    // `kubectl wait --for=condition=Progressing=False` resolves
-    // identically across the success / overlay / degraded / adapter-
-    // missing paths. The reason mirrors the degraded reason so
-    // operators see the same "why" on both conditions.
-    let not_progressing = conditions::preserve_transition_time(
+    let progressing = conditions::preserve_transition_time(
         conditions::find(prior_conditions, conditions::TYPE_PROGRESSING),
         conditions::TYPE_PROGRESSING,
-        conditions::status::FALSE,
+        if pending {
+            conditions::status::TRUE
+        } else {
+            conditions::status::FALSE
+        },
         reason_value,
         message,
         generation,
     );
-    let mut conditions_vec = vec![degraded, not_ready, not_progressing];
+    let mut conditions_vec = vec![degraded, not_ready, progressing];
     retain_unrelated_conditions(prior_conditions, &mut conditions_vec);
     json!({
         "status": {
-            "phase": "Degraded",
+            "phase": if pending { "Pending" } else { "Degraded" },
             "observedGeneration": generation,
             "conditions": conditions_vec,
         }

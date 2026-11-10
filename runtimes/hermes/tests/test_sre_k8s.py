@@ -5,9 +5,11 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import httpx
+import pytest
 
 
 def test_register_registers_five_slice2_tools() -> None:
@@ -31,6 +33,211 @@ def test_describe_resource_unknown_kind() -> None:
     result = sre_k8s._impl_sre_describe_resource(kind="UnknownKind", name="x")
     assert "error" in result
     assert "supported_kinds" in result
+
+
+def test_describe_resource_karseval() -> None:
+    from kars_runtime_hermes.plugin import sre_k8s
+
+    condition = {
+        "type": "Degraded", "status": "True", "reason": "Inconclusive",
+        "message": "One case could not be exercised", "observedGeneration": 3,
+        "lastTransitionTime": "2026-11-04T08:00:00Z",
+    }
+    result_summary = {
+        "schemaVersion": "1", "corpusDigest": "sha256:corpus",
+        "total": 3, "passed": 2, "failed": 0, "errored": 1,
+        "corpusLabel": "jailbreak-baseline", "jobName": "eval-job",
+        "firstFailingCases": [],
+    }
+    eval_doc = {
+        "metadata": {
+            "namespace": "kars-system", "name": "check", "generation": 3,
+            "annotations": {"private": "do-not-return"},
+        },
+        "spec": {
+            "targetSandboxRef": {"name": "research", "private": "do-not-return"},
+            "corpus": {"builtin": "jailbreak-baseline", "private": "do-not-return"},
+            "schedule": "0 * * * *", "failSandboxOnDrift": False,
+            "private": "do-not-return",
+        },
+        "status": {
+            "phase": "Degraded", "observedGeneration": 3, "conditions": [condition],
+            "lastRunAt": "2026-11-04T08:00:00Z",
+            "lastResult": {**result_summary, "private": "do-not-return"},
+            "reportConfigMapRef": {"name": "eval-report", "private": "do-not-return"},
+            "reportConfigMapUid": "report-uid", "reportEvidenceDigest": "sha256:evidence",
+            "private": "do-not-return",
+        },
+    }
+    mock_client = MagicMock()
+    mock_client.get.side_effect = [eval_doc, {"items": []}]
+    with patch.object(sre_k8s.sre_kube, "client", return_value=mock_client):
+        result = sre_k8s._impl_sre_describe_resource(
+            kind="KarsEval", namespace="kars-system", name="check",
+        )
+    assert mock_client.get.call_args_list[0].args == (
+        "/apis/kars.azure.com/v1alpha1/namespaces/kars-system/karsevals/check",
+    )
+    assert mock_client.get.call_args_list[1].kwargs["params"] == {
+        "fieldSelector": (
+            "involvedObject.kind=KarsEval,involvedObject.name=check,"
+            "involvedObject.namespace=kars-system"
+        ),
+        "limit": 25,
+    }
+    assert result["kind"] == "KarsEval"
+    assert result["phase"] == "Degraded"
+    assert result["conditions"] == [condition]
+    assert result["generation"] == result["observedGeneration"] == 3
+    assert result["targetSandboxRef"] == {"name": "research"}
+    assert result["schedule"] == "0 * * * *"
+    assert result["failSandboxOnDrift"] is False
+    assert result["lastResult"] == result_summary
+    assert result["lastRunAt"] == "2026-11-04T08:00:00Z"
+    assert result["reportConfigMapRef"] == {"name": "eval-report"}
+    assert result["reportConfigMapUid"] == "report-uid"
+    assert result["reportEvidenceDigest"] == "sha256:evidence"
+    assert result["recent_events"] == []
+    assert "do-not-return" not in str(result)
+
+
+def test_describe_resource_karseval_requires_namespace() -> None:
+    from kars_runtime_hermes.plugin import sre_k8s
+
+    with patch.object(sre_k8s.sre_kube, "client") as client:
+        result = sre_k8s._impl_sre_describe_resource(kind="KarsEval", name="check")
+    assert result == {"error": "KarsEval is namespaced — provide namespace"}
+    client.assert_not_called()
+
+
+@pytest.mark.parametrize("status", [{}, {"phase": "Pending", "lastResult": None}])
+def test_describe_resource_karseval_no_result_is_not_a_pass(status) -> None:
+    from kars_runtime_hermes.plugin import sre_k8s
+
+    mock_client = MagicMock()
+    mock_client.get.side_effect = [
+        {"metadata": {"name": "check", "namespace": "kars-system"}, "status": status},
+        {"items": []},
+    ]
+    with patch.object(sre_k8s.sre_kube, "client", return_value=mock_client):
+        result = sre_k8s._impl_sre_describe_resource(
+            kind="KarsEval", namespace="kars-system", name="check",
+        )
+    assert result["phase"] == status.get("phase")
+    assert result["lastResult"] is None
+    assert result["lastRunAt"] is None
+
+
+@pytest.mark.parametrize("code,reason", [(403, "Forbidden"), (404, "Not Found")])
+def test_describe_resource_karseval_api_failure(code, reason) -> None:
+    from kars_runtime_hermes.plugin import sre_k8s
+
+    mock_client = MagicMock()
+    response = httpx.Response(code, request=httpx.Request("GET", "https://localhost/"))
+    mock_client.get.side_effect = httpx.HTTPStatusError(
+        reason, request=response.request, response=response,
+    )
+    with patch.object(sre_k8s.sre_kube, "client", return_value=mock_client):
+        result = sre_k8s._impl_sre_describe_resource(
+            kind="KarsEval", namespace="kars-system", name="check",
+        )
+    assert result["error"] == f"{code} {reason}"
+    assert result["kind"] == "KarsEval"
+    mock_client.get.assert_called_once()
+
+
+def test_describe_resource_egress_approval() -> None:
+    from kars_runtime_hermes.plugin import sre_k8s
+
+    condition = {
+        "type": "Ready", "status": "True", "reason": "RouterConfirmed",
+        "message": "Router reported the merged digest", "observedGeneration": 2,
+        "lastTransitionTime": "2026-11-04T08:00:00Z",
+    }
+    status = {
+        "phase": "Active", "observedGeneration": 2, "conditions": [condition],
+        "effectiveAt": "2026-11-04T08:00:00Z", "expiresAt": "2026-11-04T08:15:00Z",
+        "mergedDigest": "sha256:merged", "hostCount": 1, "usageCount": 0,
+    }
+    client = MagicMock()
+    client.get.side_effect = [{
+        "metadata": {
+            "name": "temporary", "namespace": "kars-system", "generation": 3,
+            "annotations": {"private": "do-not-return"},
+        },
+        "spec": {
+            "sandbox": "research", "ttl": "PT15M",
+            "hosts": [{"host": "example.com", "port": 443, "private": "do-not-return"}],
+            "reason": "do-not-return", "ticket": "do-not-return",
+        },
+        "status": {**status, "private": "do-not-return"},
+    }, {"items": []}]
+    with patch.object(sre_k8s.sre_kube, "client", return_value=client):
+        result = sre_k8s._impl_sre_describe_resource(
+            kind="EgressApproval", namespace="kars-system", name="temporary",
+        )
+    assert client.get.call_args_list[0].args == (
+        "/apis/kars.azure.com/v1alpha1/namespaces/kars-system/egressapprovals/temporary",
+    )
+    assert result == {
+        "kind": "EgressApproval", "namespace": "kars-system", "name": "temporary",
+        "generation": 3, "sandbox": "research", "ttl": "PT15M",
+        "hosts": [{"host": "example.com", "port": 443}], "recent_events": [], **status,
+    }
+    assert client.get.call_args_list[1].kwargs["params"] == {
+        "fieldSelector": (
+            "involvedObject.kind=EgressApproval,involvedObject.name=temporary,"
+            "involvedObject.namespace=kars-system"
+        ), "limit": 25,
+    }
+    assert "do-not-return" not in str(result)
+
+
+@pytest.mark.parametrize("status", [None, {}, {"conditions": None, "phase": "Pending"}])
+@pytest.mark.parametrize("kind", ["KarsEval", "EgressApproval"])
+def test_describe_resource_cr_missing_observation(kind, status) -> None:
+    from kars_runtime_hermes.plugin import sre_k8s
+
+    client = MagicMock()
+    client.get.side_effect = [
+        {"metadata": {"name": "check", "namespace": "kars-system"}, "status": status},
+        {"items": []},
+    ]
+    with patch.object(sre_k8s.sre_kube, "client", return_value=client):
+        result = sre_k8s._impl_sre_describe_resource(kind=kind, namespace="kars-system", name="check")
+    assert "error" not in result
+    assert result["conditions"] == []
+    assert result["observedGeneration"] is None
+    if kind == "EgressApproval":
+        assert result["expiresAt"] is None
+        assert result["usageCount"] is None
+        assert result["hostCount"] is None
+        assert result["hosts"] is None
+
+
+def test_describe_resource_egress_approval_requires_namespace() -> None:
+    from kars_runtime_hermes.plugin import sre_k8s
+
+    with patch.object(sre_k8s.sre_kube, "client") as client:
+        result = sre_k8s._impl_sre_describe_resource(kind="EgressApproval", name="check")
+    assert result == {"error": "EgressApproval is namespaced — provide namespace"}
+    client.assert_not_called()
+
+
+@pytest.mark.parametrize("code,reason", [(403, "Forbidden"), (404, "Not Found")])
+def test_describe_resource_egress_approval_api_failure(code, reason) -> None:
+    from kars_runtime_hermes.plugin import sre_k8s
+
+    client = MagicMock()
+    response = httpx.Response(code, request=httpx.Request("GET", "https://localhost/"))
+    client.get.side_effect = httpx.HTTPStatusError(reason, request=response.request, response=response)
+    with patch.object(sre_k8s.sre_kube, "client", return_value=client):
+        result = sre_k8s._impl_sre_describe_resource(
+            kind="EgressApproval", namespace="kars-system", name="check",
+        )
+    assert result["error"] == f"{code} {reason}"
+    assert result["kind"] == "EgressApproval"
+    client.get.assert_called_once()
 
 
 def test_describe_resource_resource_quota() -> None:
@@ -161,7 +368,16 @@ def test_describe_resource_handles_404_gracefully() -> None:
     assert "404" in result["error"]
 
 
-def test_what_changed_filters_to_failure_reasons() -> None:
+@pytest.fixture
+def event_clock():
+    from kars_runtime_hermes.plugin import sre_k8s
+
+    with patch.object(sre_k8s, "datetime", wraps=datetime) as clock:
+        clock.now.return_value = datetime(2026, 6, 9, 11, 0, tzinfo=timezone.utc)
+        yield clock
+
+
+def test_what_changed_filters_to_failure_reasons(event_clock) -> None:
     """Only events with reasons in WHAT_CHANGED_REASONS surface."""
     from kars_runtime_hermes.plugin import sre_k8s
 
@@ -191,6 +407,108 @@ def test_what_changed_filters_to_failure_reasons() -> None:
     assert len(result["events_core"]) == 1
     assert result["events_core"][0]["reason"] == "FailedCreate"
     assert "exceeded quota" in result["events_core"][0]["message"]
+
+
+@pytest.mark.parametrize("api", ["core", "new"])
+@pytest.mark.parametrize(
+    "timestamps,included,undated",
+    [
+        ({"lastTimestamp": "2026-06-09T10:45:00Z"}, True, 0),
+        ({"lastTimestamp": "2026-06-09T11:00:00Z"}, True, 0),
+        ({"lastTimestamp": "2026-06-09T10:44:59.999999Z"}, False, 0),
+        ({"lastTimestamp": "2026-06-09T11:00:00.000001Z"}, False, 0),
+        ({"eventTime": "2026-06-09T12:50:00+02:00"}, True, 0),
+        ({"eventTime": None, "deprecatedLastTimestamp": "2026-06-09T10:50:00Z"}, True, 0),
+        ({"eventTime": "2026-06-09T10:00:00Z",
+          "series": {"lastObservedTime": "2026-06-09T10:55:00Z"}}, True, 0),
+        ({"eventTime": "2026-06-09T10:00:00Z",
+          "series": {"lastObservedTime": "2026-06-09T10:40:00Z"}}, False, 0),
+        ({"firstTimestamp": "2026-06-09T10:50:00Z"}, True, 0),
+        ({"deprecatedFirstTimestamp": "2026-06-09T10:50:00Z"}, True, 0),
+        ({"eventTime": "invalid", "lastTimestamp": "2026-06-09T10:50:00Z"}, True, 0),
+        ({"lastTimestamp": "2026-06-09T10:50:00"}, False, 1),
+        ({"eventTime": "invalid"}, False, 1),
+        ({"metadata": {"creationTimestamp": "2026-06-09T10:50:00Z"}}, False, 1),
+        ({}, False, 1),
+    ],
+)
+def test_what_changed_enforces_observation_window(event_clock, api, timestamps, included, undated):
+    from kars_runtime_hermes.plugin import sre_k8s
+
+    event = {"reason": "Unhealthy", **timestamps}
+    docs = [{"items": [event]}, {"items": []}]
+    if api == "new":
+        docs.reverse()
+    client = MagicMock()
+    client.get.side_effect = docs
+    with patch.object(sre_k8s.sre_kube, "client", return_value=client):
+        result = sre_k8s._impl_sre_what_changed()
+    key = f"events_{api}"
+    assert len(result[key]) == int(included)
+    assert result["excluded_undated"][key] == undated
+    assert result["as_of"] == "2026-06-09T11:00:00+00:00"
+    assert result["since"] == "2026-06-09T10:45:00+00:00"
+    if included:
+        observed = datetime.fromisoformat(result[key][0]["lastObservedTime"])
+        assert datetime.fromisoformat(result["since"]) <= observed <= datetime.fromisoformat(result["as_of"])
+
+
+@pytest.mark.parametrize("api", ["core", "new"])
+def test_what_changed_follows_all_event_pages(event_clock, api):
+    from kars_runtime_hermes.plugin import sre_k8s
+
+    pages = [
+        {"items": [{"reason": "Unhealthy", "lastTimestamp": "2026-06-09T10:00:00Z"}],
+         "metadata": {"continue": "next-page"}},
+        {"items": [{"reason": "Unhealthy", "lastTimestamp": "2026-06-09T10:50:00Z"}]},
+    ]
+    empty = {"items": []}
+    client = MagicMock()
+    client.get.side_effect = [*pages, empty] if api == "core" else [empty, *pages]
+    with patch.object(sre_k8s.sre_kube, "client", return_value=client):
+        result = sre_k8s._impl_sre_what_changed(namespace="kars-sre")
+    assert len(result[f"events_{api}"]) == 1
+    calls = client.get.call_args_list
+    page_call = calls[1 if api == "core" else 2]
+    assert page_call.kwargs["params"] == {"limit": 200, "continue": "next-page"}
+    assert "/namespaces/kars-sre/events" in page_call.args[0]
+
+
+@pytest.mark.parametrize("broken", [{}, {"items": None}, {"items": {}}])
+def test_what_changed_invalid_inventory_is_error_not_healthy(event_clock, broken):
+    from kars_runtime_hermes.plugin import sre_k8s
+
+    client = MagicMock()
+    client.get.side_effect = [broken, {"items": []}]
+    with patch.object(sre_k8s.sre_kube, "client", return_value=client):
+        result = sre_k8s._impl_sre_what_changed()
+    assert "error" in result["events_core"]
+    assert result["events_new"] == []
+
+
+def test_what_changed_repeated_page_token_is_error(event_clock):
+    from kars_runtime_hermes.plugin import sre_k8s
+
+    page = {"items": [], "metadata": {"continue": "repeated"}}
+    client = MagicMock()
+    client.get.side_effect = [page, page, {"items": []}]
+    with patch.object(sre_k8s.sre_kube, "client", return_value=client):
+        result = sre_k8s._impl_sre_what_changed()
+    assert "repeated continuation token" in result["events_core"]["error"]
+    assert client.get.call_count == 3
+
+
+@pytest.mark.parametrize("requested,minutes", [(-2, 1), (0, 1), (60, 60), (90, 60)])
+def test_what_changed_clamps_lookback(event_clock, requested, minutes):
+    from kars_runtime_hermes.plugin import sre_k8s
+
+    client = MagicMock()
+    client.get.return_value = {"items": []}
+    with patch.object(sre_k8s.sre_kube, "client", return_value=client):
+        result = sre_k8s._impl_sre_what_changed(minutes=requested)
+    assert result["since_minutes"] == minutes
+    duration = datetime.fromisoformat(result["as_of"]) - datetime.fromisoformat(result["since"])
+    assert duration.total_seconds() == minutes * 60
 
 
 def test_endpoints_inspect_zero_endpoints_finding() -> None:
@@ -243,6 +561,47 @@ def test_endpoints_inspect_pod_selector_mismatch() -> None:
     with patch.object(sre_k8s.sre_kube, "client", return_value=mock_client):
         result = sre_k8s._impl_sre_endpoints_inspect(namespace="kars-research", service="research")
     assert "No pods match" in result["finding"]
+
+
+@pytest.mark.parametrize("slice_fields", [{}, {"endpoints": None}, {"endpoints": []}])
+def test_empty_endpoint_slice_is_a_valid_outage(slice_fields) -> None:
+    from kars_runtime_hermes.plugin import sre_k8s
+
+    kube = MagicMock()
+    kube.get.side_effect = [
+        {"spec": {"selector": {"app": "recovery-check"}}},
+        {"items": []},
+        {"items": [{"metadata": {"name": "empty"}, **slice_fields}]},
+    ]
+    with patch.object(sre_k8s.sre_kube, "client", return_value=kube):
+        result = sre_k8s._impl_sre_endpoints_inspect(namespace="example", service="recovery-check")
+    assert result["endpoint_slices"][0]["endpoints"] == []
+    assert result.get("coverage") != "incomplete"
+    assert "No pods match" in result["finding"]
+
+
+@pytest.mark.parametrize("endpoints", [{}, "", 0])
+def test_malformed_endpoint_slice_remains_unknown(endpoints) -> None:
+    from kars_runtime_hermes.plugin import sre_k8s
+
+    kube = MagicMock()
+    kube.get.side_effect = [
+        {"spec": {"selector": {"app": "recovery-check"}}},
+        {"items": []}, {"items": [{"endpoints": endpoints}]},
+    ]
+    with patch.object(sre_k8s.sre_kube, "client", return_value=kube):
+        result = sre_k8s._impl_sre_endpoints_inspect(namespace="example", service="recovery-check")
+    assert result["coverage"] == "incomplete"
+    assert "unknown" in result["finding"]
+
+
+@pytest.mark.parametrize("desired,observed", [(0, None), (3, 1)])
+def test_workload_separates_desired_and_observed_replicas(desired, observed) -> None:
+    from kars_runtime_hermes.plugin import sre_k8s
+
+    result = sre_k8s._summarise_workload({"spec": {"replicas": desired}, "status": {"replicas": observed}})
+    assert result["desiredReplicas"] == desired
+    assert result["replicas"] == observed
 
 
 def test_image_probe_parses_canonical_image_string() -> None:

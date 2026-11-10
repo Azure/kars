@@ -69,7 +69,7 @@ class SchemaPreparationTests(unittest.TestCase):
             return {"schemas": 12, "published": True}
         def command(*args, **_kwargs):
             calls.append(args)
-            return ""
+            return "{}"
         with patch.object(boot, "prepare_schemas", side_effect=prepared), \
              patch.object(boot, "command", side_effect=command), \
              patch.object(boot, "private_file") as private_file, \
@@ -78,10 +78,11 @@ class SchemaPreparationTests(unittest.TestCase):
             boot.install_core(setup)
         values = json.loads(private_file.call_args.args[1])
         self.assertEqual(values.get("azure", {}).get("workloadIdentity"), {"enabled": False})
-        self.assertEqual(calls[0], ("prepare", ".native/core-values.json", "kind-bridge-native"))
-        self.assertEqual(calls[1][:4], ("helm", "install", "kars", ".native/core/deploy/helm/kars"))
-        self.assertIn(".native/core-values.json", calls[1])
-        self.assertEqual(calls[1][-2:], ("--kube-context", "kind-bridge-native"))
+        self.assertEqual(calls[0], ("node", "tests/native-credentials/metrics-trust.mjs"))
+        self.assertEqual(calls[1], ("prepare", ".native/core-values.json", "kind-bridge-native"))
+        self.assertEqual(calls[2][:4], ("helm", "install", "kars", ".native/core/deploy/helm/kars"))
+        self.assertIn(".native/core-values.json", calls[2])
+        self.assertEqual(calls[2][-2:], ("--kube-context", "kind-bridge-native"))
 
     def test_preparation_failure_prevents_helm_install(self):
         setup = types.SimpleNamespace(
@@ -89,11 +90,12 @@ class SchemaPreparationTests(unittest.TestCase):
             admin=types.SimpleNamespace(patch=lambda *_: None),
         )
         with patch.object(boot, "prepare_schemas", side_effect=Failure("Preparation refused")), \
-             patch.object(boot, "command") as command, patch.object(boot, "private_file"), \
+             patch.object(boot, "command", return_value="{}") as command, \
+             patch.object(boot, "private_file"), \
              patch.object(boot, "loaded_image", side_effect=lambda name: name + ":latest"), \
              self.assertRaisesRegex(Failure, "Preparation refused"):
             boot.install_core(setup)
-        command.assert_not_called()
+        command.assert_called_once_with("node", "tests/native-credentials/metrics-trust.mjs")
 
 
 if __name__ == "__main__":

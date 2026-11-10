@@ -3,21 +3,11 @@
 
 //! Chat ↔ Responses API body translation helpers.
 //!
-//! Extracted from `routes/inference.rs` in `phase1/hotspot-pass2-inference-split`
-//! to bring that file under the §4.2 Phase 1 LOC cap (1500). No behaviour
-//! change — this module is a literal lift of the three translation helpers
-//! plus their unit tests.
-//!
-//! ## Public surface
-//! - `uuid_v4()` — best-effort UUIDv4-like string for synthetic message IDs.
-//! - `chat_to_responses_body(&Bytes) -> Bytes` — converts a `/v1/chat/completions`
-//!   request body to `/v1/responses` shape.
-//! - `responses_to_chat_body(&Bytes) -> Bytes` — converts a `/v1/responses`
-//!   response body back to chat-completions shape.
-//!
-//! Both translators are tolerant of malformed input (return the original
-//! bytes on parse failure) — they're not validators, they're shape-mappers.
+//! Request translation operates on retained JSON, keeping the original request
+//! for rollback when a shape cannot be translated. Response translation still
+//! accepts provider bytes and returns them unchanged on parse failure.
 
+use crate::proxy::RequestBody;
 use bytes::Bytes;
 
 #[allow(dead_code)]
@@ -33,8 +23,8 @@ pub(super) fn uuid_v4() -> String {
 
 /// Convert a chat/completions request body to Responses API format.
 /// messages[] → input, max_completion_tokens → max_output_tokens
-pub(super) fn chat_to_responses_body(chat_body: &Bytes) -> Bytes {
-    let Ok(mut body) = serde_json::from_slice::<serde_json::Value>(chat_body) else {
+pub(super) fn chat_to_responses_request(chat_body: &RequestBody) -> RequestBody {
+    let Some(mut body) = chat_body.json().cloned() else {
         return chat_body.clone();
     };
     let obj = match body.as_object_mut() {
@@ -194,6 +184,55 @@ pub(super) fn chat_to_responses_body(chat_body: &Bytes) -> Bytes {
         obj.entry("max_output_tokens").or_insert(max);
     }
 
+    if let Some(effort) = obj.remove("reasoning_effort") {
+        if !effort.is_string() {
+            return chat_body.clone();
+        }
+        let reasoning = obj
+            .entry("reasoning")
+            .or_insert_with(|| serde_json::json!({}));
+        let Some(reasoning) = reasoning.as_object_mut() else {
+            return chat_body.clone();
+        };
+        if reasoning
+            .get("effort")
+            .is_some_and(|existing| existing != &effort)
+        {
+            return chat_body.clone();
+        }
+        reasoning.insert("effort".into(), effort);
+    }
+
+    // Responses moves Chat's output format under text.format and flattens schemas.
+    if let Some(mut format) = obj.remove("response_format") {
+        if format.get("type").and_then(|value| value.as_str()) == Some("json_schema") {
+            if let Some(schema) = format
+                .get("json_schema")
+                .and_then(|value| value.as_object())
+            {
+                if format.as_object().is_some_and(|outer| outer.len() != 2)
+                    || schema.contains_key("type")
+                {
+                    return chat_body.clone();
+                }
+                let mut schema = schema.clone();
+                schema.insert("type".into(), serde_json::json!("json_schema"));
+                format = serde_json::Value::Object(schema);
+            }
+        }
+        let text = obj.entry("text").or_insert_with(|| serde_json::json!({}));
+        let Some(text) = text.as_object_mut() else {
+            return chat_body.clone();
+        };
+        if text
+            .get("format")
+            .is_some_and(|existing| existing != &format)
+        {
+            return chat_body.clone();
+        }
+        text.insert("format".into(), format);
+    }
+
     // Convert tools format: chat uses {type, function:{name, parameters, ...}}
     // Responses API uses flattened {type, name, parameters, ...}
     if let Some(tools) = obj.remove("tools") {
@@ -251,11 +290,15 @@ pub(super) fn chat_to_responses_body(chat_body: &Bytes) -> Bytes {
     obj.remove("top_logprobs");
     obj.remove("n");
 
-    serde_json::to_vec(&body)
-        .map(Bytes::from)
-        .unwrap_or_else(|_| chat_body.clone())
+    RequestBody::from_value(body)
 }
 
+#[cfg(test)]
+fn chat_to_responses_body(chat_body: &Bytes) -> Bytes {
+    chat_to_responses_request(&RequestBody::from_bytes(chat_body.clone()))
+        .to_bytes()
+        .unwrap()
+}
 /// Convert a Responses API response back to chat/completions format.
 /// output[].content[].text → choices[].message.content
 /// output[] function_call items → choices[].message.tool_calls
@@ -317,8 +360,23 @@ pub(super) fn responses_to_chat_body(resp_body: &Bytes) -> Bytes {
         }
     }
 
-    // Build chat/completions-shaped response
-    let usage = resp.get("usage").cloned().unwrap_or(serde_json::json!({}));
+    // Translate provider-reported usage without filling missing evidence with zeroes.
+    let mut usage = resp
+        .get("usage")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    if let Some(fields) = usage.as_object_mut() {
+        for (responses, chat) in [
+            ("input_tokens", "prompt_tokens"),
+            ("output_tokens", "completion_tokens"),
+            ("input_tokens_details", "prompt_tokens_details"),
+            ("output_tokens_details", "completion_tokens_details"),
+        ] {
+            if let Some(value) = fields.remove(responses) {
+                fields.insert(chat.into(), value);
+            }
+        }
+    }
     let mut message = serde_json::json!({
         "role": "assistant",
     });
@@ -358,6 +416,76 @@ mod tests {
     use bytes::Bytes;
 
     #[test]
+    fn retained_translation_preserves_large_generated_extensions_and_source_state() {
+        let original = serde_json::json!({
+            "model":"selected", "messages":[{"role":"user","content":"hello"}],
+            "max_tokens":123, "stream":true, "stream_options":{"include_usage":true},
+            "extension":"x".repeat(2 * 1024 * 1024),
+        });
+        let body = RequestBody::from_value(original.clone());
+        let translated = chat_to_responses_request(&body);
+        let value = translated.json().unwrap();
+        assert_eq!(value["extension"], original["extension"]);
+        assert_eq!(value["model"], "selected");
+        assert_eq!(value["max_output_tokens"], 123);
+        assert_eq!(value["input"][0]["content"][0]["text"], "hello");
+        for field in ["messages", "max_tokens", "stream", "stream_options"] {
+            assert!(value.get(field).is_none());
+        }
+        assert!(translated.to_bytes().unwrap().len() > 2 * 1024 * 1024);
+        assert_eq!(body.json(), Some(&original));
+    }
+
+    #[test]
+    fn retained_translation_rolls_back_exact_original_bytes_and_generated_json() {
+        let bytes = Bytes::from_static(b" {\"model\":\"first\",\"model\":\"last\", \"messages\":[], \"max_tokens\":10, \"reasoning_effort\":null} \n");
+        let value = crate::routes::request_json::parse(&bytes).unwrap();
+        let original = RequestBody::from_validated(bytes.clone(), value);
+        assert_eq!(
+            chat_to_responses_request(&original).to_bytes().unwrap(),
+            bytes
+        );
+        for raw in ["{broken", " [1, 2] "] {
+            let bytes = Bytes::copy_from_slice(raw.as_bytes());
+            let body = RequestBody::from_bytes(bytes.clone());
+            assert_eq!(chat_to_responses_request(&body).to_bytes().unwrap(), bytes);
+        }
+        let value = serde_json::json!({
+            "model":"selected", "messages":[], "max_tokens":10,
+            "response_format":{"type":"json_object"}, "text":{"format":{"type":"text"}},
+            "extension":"x".repeat(2 * 1024 * 1024),
+        });
+        let body = RequestBody::from_value(value.clone());
+        assert_eq!(chat_to_responses_request(&body).json(), Some(&value));
+    }
+
+    #[test]
+    fn added_translation_container_keeps_the_historical_raw_depth_fallback() {
+        let mut nested = serde_json::json!(0);
+        for _ in 0..125 {
+            nested = serde_json::json!([nested]);
+        }
+        let format = serde_json::json!({"type":"json_object", "nested":nested});
+        let original = serde_json::json!({"model":"selected", "response_format":format.clone()});
+        let bytes = Bytes::from(serde_json::to_vec(&original).unwrap());
+        let parsed = crate::routes::request_json::parse(&bytes).unwrap();
+        let translated = chat_to_responses_request(&RequestBody::from_validated(bytes, parsed));
+        let expected =
+            serde_json::to_vec(&serde_json::json!({"model":"selected", "text":{"format":format}}))
+                .unwrap();
+        assert!(serde_json::from_slice::<serde_json::Value>(&expected).is_err());
+        assert!(translated.json().is_none());
+        assert_eq!(
+            translated
+                .with_model("fallback")
+                .to_bytes()
+                .unwrap()
+                .as_ref(),
+            expected
+        );
+    }
+
+    #[test]
     fn test_chat_to_responses_simple_message() {
         let chat = serde_json::json!({
             "model": "gpt-5.4-pro",
@@ -380,6 +508,109 @@ mod tests {
         assert_eq!(input[0]["role"], "user");
         assert_eq!(input[0]["content"][0]["type"], "input_text");
         assert_eq!(input[0]["content"][0]["text"], "Hello");
+    }
+
+    #[test]
+    fn test_chat_to_responses_preserves_reasoning_effort() {
+        for reasoning in [
+            None,
+            Some(serde_json::json!({"summary": "auto"})),
+            Some(serde_json::json!({"effort": "medium", "summary": "auto"})),
+        ] {
+            let mut value = serde_json::json!({"model": "gpt-6-astra",
+                "messages": [{"role": "user", "content": "Compare the proposals"}],
+                "max_tokens": 128000, "parallel_tool_calls": false, "reasoning_effort": "medium"});
+            if let Some(reasoning) = reasoning {
+                value["reasoning"] = reasoning;
+            }
+            let original_reasoning = value.get("reasoning").cloned();
+            let body = Bytes::from(serde_json::to_vec(&value).unwrap());
+            let translated: serde_json::Value =
+                serde_json::from_slice(&chat_to_responses_body(&body)).unwrap();
+            assert_eq!(translated["reasoning"]["effort"], "medium");
+            assert_eq!(translated["max_output_tokens"], 128000);
+            assert_eq!(translated["parallel_tool_calls"], false);
+            assert!(translated.get("reasoning_effort").is_none());
+            if original_reasoning.is_some() {
+                assert_eq!(translated["reasoning"]["summary"], "auto");
+            }
+        }
+    }
+
+    #[test]
+    fn test_chat_to_responses_does_not_weaken_conflicting_reasoning() {
+        for extra in [
+            serde_json::json!({"reasoning_effort": null}),
+            serde_json::json!({"reasoning_effort": 1}),
+            serde_json::json!({"reasoning_effort": "medium", "reasoning": "invalid"}),
+            serde_json::json!({"reasoning_effort": "medium", "reasoning": {"effort": "high"}}),
+        ] {
+            let mut value = serde_json::json!({"model": "gpt-6-astra", "messages": []});
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let body = Bytes::from(serde_json::to_vec(&value).unwrap());
+            assert_eq!(chat_to_responses_body(&body), body);
+        }
+    }
+
+    #[test]
+    fn test_chat_to_responses_preserves_response_format() {
+        for format in [
+            serde_json::json!({"type": "text"}),
+            serde_json::json!({"type": "json_object"}),
+            serde_json::json!({"type": "json_schema", "json_schema": {
+                "name": "proposal", "strict": true,
+                "schema": {"type": "object", "properties": {}, "additionalProperties": false}
+            }}),
+        ] {
+            let chat = serde_json::json!({
+                "model": "gpt-5.4-mini",
+                "messages": [{"role": "system", "content": "Return a JSON object."}],
+                "response_format": format,
+                "text": {"verbosity": "low"},
+                "max_completion_tokens": 4096
+            });
+            let result = chat_to_responses_body(&Bytes::from(chat.to_string()));
+            let translated: serde_json::Value = serde_json::from_slice(&result).unwrap();
+            assert!(translated.get("response_format").is_none());
+            assert_eq!(translated["text"]["verbosity"], "low");
+            assert_eq!(translated["text"]["format"]["type"], format["type"]);
+            assert_eq!(translated["max_output_tokens"], 4096);
+            if format["type"] == "json_schema" {
+                for field in ["name", "strict", "schema"] {
+                    assert_eq!(
+                        translated["text"]["format"][field],
+                        format["json_schema"][field]
+                    );
+                }
+                assert!(translated["text"]["format"].get("json_schema").is_none());
+            } else {
+                assert_eq!(translated["text"]["format"], format);
+            }
+        }
+    }
+
+    #[test]
+    fn test_chat_to_responses_does_not_weaken_conflicting_formats() {
+        for fields in [
+            serde_json::json!({"response_format": {"type": "json_object"}, "text": "invalid"}),
+            serde_json::json!({"response_format": {"type": "json_object"},
+                "text": {"format": {"type": "json_schema", "name": "proposal", "schema": {}}}}),
+            serde_json::json!({"response_format": {"type": "json_schema", "strict": true,
+                "json_schema": {"name": "proposal", "schema": {}}}}),
+            serde_json::json!({"response_format": {"type": "json_schema",
+                "json_schema": {"type": "json_object", "name": "proposal", "schema": {}}}}),
+        ] {
+            let mut chat = serde_json::json!({"model": "gpt-5.4-mini",
+                "messages": [{"role": "user", "content": "Return JSON."}]});
+            chat.as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            let body = Bytes::from(chat.to_string());
+            assert_eq!(chat_to_responses_body(&body), body);
+        }
     }
 
     #[test]
@@ -433,7 +664,7 @@ mod tests {
             "output": [
                 {"type": "function_call", "call_id": "call_456", "name": "search", "arguments": "{\"q\":\"dogs\"}"}
             ],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+            "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
         });
         let body = Bytes::from(serde_json::to_vec(&resp).unwrap());
         let result = responses_to_chat_body(&body);
@@ -443,6 +674,64 @@ mod tests {
         let tc = &v["choices"][0]["message"]["tool_calls"];
         assert_eq!(tc[0]["id"], "call_456");
         assert_eq!(tc[0]["function"]["name"], "search");
+        assert_eq!(
+            v["usage"],
+            serde_json::json!({
+                "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15
+            })
+        );
+    }
+
+    #[test]
+    fn responses_usage_preserves_cached_and_reasoning_tokens() {
+        let response = serde_json::json!({"usage": {
+            "input_tokens": 100, "output_tokens": 25, "total_tokens": 125,
+            "input_tokens_details": {"cached_tokens": 90},
+            "output_tokens_details": {"reasoning_tokens": 20}
+        }});
+        let body = responses_to_chat_body(&Bytes::from(response.to_string()));
+        let chat: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            chat["usage"],
+            serde_json::json!({
+                "prompt_tokens": 100, "completion_tokens": 25, "total_tokens": 125,
+                "prompt_tokens_details": {"cached_tokens": 90},
+                "completion_tokens_details": {"reasoning_tokens": 20}
+            })
+        );
+        let usage = crate::inference_budget::usage::buffered(
+            &body,
+            crate::inference_budget_contract::tariffs::Operation::ChatCompletions,
+        )
+        .unwrap();
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.cached_input_tokens, 90);
+        assert_eq!(usage.output_tokens, 25);
+        assert_eq!(usage.reasoning_output_tokens, 20);
+    }
+
+    #[test]
+    fn responses_usage_never_fabricates_missing_or_repairs_invalid_evidence() {
+        for usage in [
+            serde_json::Value::Null,
+            serde_json::json!({}),
+            serde_json::json!({"input_tokens": 10}),
+            serde_json::json!({"input_tokens": "10", "output_tokens": 5, "total_tokens": 15}),
+            serde_json::json!({"input_tokens": 10, "output_tokens": 5, "total_tokens": 99}),
+        ] {
+            let response = serde_json::json!({"usage": usage});
+            let body = responses_to_chat_body(&Bytes::from(response.to_string()));
+            assert!(
+                crate::inference_budget::usage::buffered(
+                    &body,
+                    crate::inference_budget_contract::tariffs::Operation::ChatCompletions,
+                )
+                .is_none()
+            );
+        }
+        let body = responses_to_chat_body(&Bytes::from_static(b"{}"));
+        let chat: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(chat["usage"].is_null());
     }
 
     #[test]

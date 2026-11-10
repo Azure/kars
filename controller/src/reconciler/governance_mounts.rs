@@ -28,15 +28,16 @@
 //!
 //! - Source not found → mirror is **skipped**, mount is **omitted**, and
 //!   the reconciler emits a warning event. The sandbox pod still starts;
-//!   the router falls back to the no-CR default (e.g. empty policy
-//!   engine, no JWKS, no AgentCard served).
+//!   the router's capability-specific required-binding checks still apply
+//!   (memory access fails closed; no JWKS or AgentCard is served).
 //! - Source malformed → same behavior; logged at `warn`.
 //! - Mirror write conflict → propagated up; reconciler requeues.
 //!
-//! This intentionally biases toward **availability** over strict
-//! enforcement: a user mistyping `mcpServerRef.name` should not crash
-//! the sandbox pod. The inference-router surfaces "no policy loaded" /
-//! "JWKS missing" via its own metrics + status endpoints.
+//! Pod startup does not imply capability availability. In particular,
+//! `memoryRef` sets `MEMORY_BINDING_REQUIRED=true` independently of the
+//! mount: a missing or malformed memory binding must fail closed, never
+//! fall back to a convention-based store or scope. The inference-router
+//! surfaces loading failures via its metrics + status endpoints.
 
 use anyhow::Result;
 use k8s_openapi::api::core::v1::{ConfigMap, Secret};
@@ -480,6 +481,56 @@ mod tests {
         })
     }
 
+    #[tokio::test]
+    async fn memory_binding_required_survives_missing_configmap() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/api/v1/namespaces/control/configmaps/karsmemory-demo-binding",
+            ))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+                "apiVersion":"v1", "kind":"Status", "status":"Failure",
+                "reason":"NotFound", "message":"missing binding", "code":404
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
+        let mut spec = empty_router_pod_spec();
+        inject_container_env(
+            &mut spec,
+            "inference-router",
+            "MEMORY_BINDING_REQUIRED",
+            "true",
+        );
+        let outcome = mirror_configmap(
+            &client,
+            "karsmemory-demo-binding",
+            "control",
+            "kars-demo",
+            "demo",
+            "KarsMemory",
+        )
+        .await
+        .unwrap();
+        assert!(matches!(outcome, MirrorOutcome::Skipped(_)));
+        assert!(spec.get("volumes").is_none());
+        assert!(spec["containers"][0].get("volumeMounts").is_none());
+        assert!(
+            spec["containers"][0]["env"]
+                .as_array()
+                .unwrap()
+                .contains(&json!({"name":"MEMORY_BINDING_REQUIRED", "value":"true"}))
+        );
+        assert!(spec["containers"][1].get("env").is_none());
+    }
+
     #[test]
     fn injects_volume_and_mount_into_router_only() {
         let mut spec = empty_router_pod_spec();
@@ -536,6 +587,33 @@ mod tests {
             openclaw.get("volumeMounts").is_none(),
             "non-router container must not get the mount"
         );
+    }
+
+    #[test]
+    fn selected_skill_catalog_mounts_into_both_runtime_containers() {
+        use crate::skill_delivery::{CATALOG_DIGEST_ENV, CATALOG_NAME, CATALOG_PATH};
+
+        for agent_container_name in ["openclaw", "agent"] {
+            let mut spec = json!({"containers": [
+                {"name": agent_container_name}, {"name": "inference-router"}
+            ]});
+            inject_configmap_mount(
+                &mut spec,
+                agent_container_name,
+                CATALOG_NAME,
+                "approved-skills",
+                CATALOG_PATH,
+                Some((CATALOG_DIGEST_ENV, "sha256:reviewed-catalog")),
+            );
+            assert_eq!(spec["volumes"][0]["configMap"]["name"], CATALOG_NAME);
+            let agent = &spec["containers"][0];
+            assert_eq!(agent["volumeMounts"][0]["mountPath"], CATALOG_PATH);
+            assert_eq!(agent["volumeMounts"][0]["readOnly"], true);
+            assert_eq!(agent["env"][0]["name"], CATALOG_DIGEST_ENV);
+            assert_eq!(agent["env"][0]["value"], "sha256:reviewed-catalog");
+            assert!(spec["containers"][1].get("volumeMounts").is_none());
+            assert!(spec["containers"][1].get("env").is_none());
+        }
     }
 
     #[test]

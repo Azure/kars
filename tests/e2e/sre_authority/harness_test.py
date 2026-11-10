@@ -17,11 +17,12 @@ from unittest.mock import patch
 
 from sre_authority.common import (
     CLAIM_VERSION, NAMESPACE_UID, RUNTIME, SOURCE_NAME, SOURCE_NS, SOURCE_UID, SYSTEM,
-    Harness, assert_claim, assert_denial, authority_failure_site, enrollment_json, printed_object, review_args,
+    Harness, assert_claim, assert_denial, authority_failure_site, control_consumer_facts,
+    enrollment_json, printed_object, review_args,
 )
 from sre_authority.fixtures import seed_control_consumer
 from sre_authority.admission import reserved_source_probe
-from sre_authority.proxy import MARKER, assert_filtered, log_reader_facts, secret_list_wire_facts
+from sre_authority.proxy import MARKER, assert_filtered, log_reader_facts, pending_proposal, secret_list_wire_facts
 from sre_authority.credential_paths import assert_token_type_immutable, assert_watch_result
 
 
@@ -35,6 +36,27 @@ class Response:
 
 
 class HarnessTests(unittest.TestCase):
+    def test_pending_proposal_uses_the_name_from_created_and_reused_hermes_results(self):
+        for newly_created in (True, False):
+            calls = []
+            persisted = {"metadata": {"name": "sre-action-fixture"},
+                         "spec": {"approval": {"state": "Pending"}}}
+            def get(kind, name, namespace):
+                self.assertEqual((kind, name, namespace), ("karssreaction", "sre-action-fixture", RUNTIME))
+                return persisted
+            def propose(**kwargs):
+                calls.append(kwargs)
+                return "sre-action-fixture", newly_created
+            with self.subTest(created=newly_created):
+                h = types.SimpleNamespace(get=get)
+                sre = types.SimpleNamespace(_create_karssreaction_cr=propose)
+                self.assertEqual(pending_proposal(h, sre), ("sre-action-fixture", persisted))
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0]["action"]["type"], "RolloutRestart")
+                persisted["spec"]["approval"]["state"] = "Approved"
+                with self.assertRaisesRegex(AssertionError, "did not persist Pending"):
+                    pending_proposal(h, sre)
+
     def test_real_failed_command_relays_sanitized_preparation_facts_without_its_output(self):
         facts = {"step": "data-returned-identity", "source": "cli/src/lib/sre-migration-data.ts",
                  "kind": "KarsTask", "category": "local-check"}
@@ -89,6 +111,20 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(command_error_category(
             "SRE-STAGE-FAILURE action-schema-review\nSRE-STAGE-FAILURE helm-server-dry-run"),
             "sre-stage:ambiguous")
+
+    def test_discovery_failure_retains_only_known_api_types_not_resource_names(self):
+        from sre_authority.common import command_error_category
+        private = "DO-NOT-EMIT-PRIVATE-DATA"
+        error = f'resource mapping not found for name: "{private}": no matches for kind "ServiceMonitor" in version "monitoring.coreos.com/v1"'
+        self.assertEqual(command_error_category(error), "api-discovery:ServiceMonitor@monitoring.coreos.com/v1")
+        self.assertEqual(command_error_category(error + "\n" + error), command_error_category(error))
+        self.assertNotIn(private, command_error_category(error))
+        for kind, version in ((private, "monitoring.coreos.com/v1"), ("ServiceMonitor", private),
+                              ("Deployment", "kars.azure.com/v1alpha1")):
+            self.assertEqual(command_error_category(f'no matches for kind "{kind}" in version "{version}"'),
+                             "api-discovery:unclassified-type")
+        self.assertEqual(command_error_category('no matches for kind "KarsBudgetAccount" in version "kars.azure.com/v1alpha1"'),
+                         "api-discovery:KarsBudgetAccount@kars.azure.com/v1alpha1")
 
     def test_hermes_runtime_assertion_verifies_exact_pin_and_runtime_without_blanket_standin_acceptance(self):
         helper = Path(__file__).resolve().parents[1] / "sre-authority.sh"
@@ -306,6 +342,257 @@ class HarnessTests(unittest.TestCase):
                        "Retire reviewed SRE ClusterRoleBinding: Kubernetes status 403 " + MARKER):
             self.assertEqual(authority_failure_site(root, unsafe), {"category": "unclassified"})
 
+    def test_blocked_authority_diagnostics_classify_first_install_and_public_policy_failures(self):
+        root = Path(__file__).resolve().parents[3]
+        for detail in (
+            "First-install funding configuration is invalid",
+            "First-install funding requires the governed broker",
+            "First-install funding catalog is unavailable",
+            "First-install SRE intent, identity, catalog or funding authorization failed verification",
+        ):
+            with self.subTest(detail=detail):
+                result = authority_failure_site(root, detail)
+                self.assertEqual(result["source"], "controller/src/inference_budget/first_install.rs")
+                self.assertNotIn(detail, json.dumps(result))
+        from sre_authority.common import POLICIES
+        for name in POLICIES:
+            detail = f"SRE admission policy kars-sre-{name} is not observed, type-checked, and enforced; no privilege may be issued"
+            result = authority_failure_site(root, detail)
+            self.assertEqual(result["source"], "controller/src/sre_authority/admission.rs")
+            self.assertNotIn(detail, json.dumps(result))
+        for name in (MARKER, "kars-sre-unknown", "kars-sre-source-authority " + MARKER):
+            detail = f"SRE admission policy {name} is not observed, type-checked, and enforced; no privilege may be issued"
+            self.assertEqual(authority_failure_site(root, detail), {"category": "unclassified"})
+
+    def test_blocked_authority_diagnostics_cover_shared_issuance_and_retirement_errors(self):
+        root = Path(__file__).resolve().parents[3]
+        cases = [
+            ("Private capability is unqualified; regenerate and apply the reviewed grant activation",
+             "controller/src/private_activation.rs"),
+            ("Private target namespace requires reviewed grant activation before issuance or reuse",
+             "controller/src/private_activation/runtime.rs"),
+            ("SRE CA issuance failed", "controller/src/providers/sre_tls.rs"),
+            ("Discover Cilium policy API: Kubernetes status 403",
+             "controller/src/reconciler/sre_egress.rs"),
+            ("Installed Cilium policy API has an unsupported resource contract",
+             "controller/src/reconciler/sre_egress.rs"),
+        ]
+        for detail, source in cases:
+            with self.subTest(source=source):
+                result = authority_failure_site(root, detail)
+                self.assertEqual(result.get("source"), source)
+                self.assertGreater(result["line"], 0)
+                self.assertNotIn(detail, json.dumps(result))
+                for unsafe in (MARKER + detail, detail + MARKER, detail + "\n" + MARKER):
+                    self.assertEqual(authority_failure_site(root, unsafe), {"category": "unclassified"})
+        primary = "Reviewed SRE consumer was changed or replaced"
+        cleanup = "Discover Cilium policy API: Kubernetes status 403"
+        result = authority_failure_site(root, primary + "; owned API policy retirement failed: " + cleanup)
+        self.assertEqual(result["category"], "controller-rejection-chain")
+        self.assertEqual(result["failures"], [
+            {"operation": "authority", **authority_failure_site(root, primary)},
+            {"operation": "API policy retirement", **authority_failure_site(root, cleanup)},
+        ])
+
+    def test_blocked_authority_diagnostics_preserve_all_checked_cleanup_failure_sites(self):
+        root = Path(__file__).resolve().parents[3]
+        primary = "Reviewed SRE consumer was changed or replaced"
+        cleanups = [
+            ("private authority revocation", "Retire private SRE binding: Kubernetes status 403"),
+            ("API policy retirement", "Read retiring SRE API policy: Kubernetes transport/serialization failure"),
+            ("private credential retirement", "Retire private SRE identity: Kubernetes status 409"),
+        ]
+        for mask in range(1, 8):
+            selected = [entry for index, entry in enumerate(cleanups) if mask & (1 << index)]
+            detail = primary + "".join(f"; owned {operation} failed: {message}" for operation, message in selected)
+            with self.subTest(mask=mask):
+                result = authority_failure_site(root, detail)
+                self.assertEqual(result["category"], "controller-rejection-chain")
+                self.assertEqual(result["failures"], [
+                    {"operation": "authority", **authority_failure_site(root, primary)},
+                    *[{"operation": operation, **authority_failure_site(root, message)} for operation, message in selected],
+                ])
+                for _, message in selected:
+                    self.assertNotIn(message, json.dumps(result))
+                for unsafe in (MARKER + detail, detail + MARKER, detail + "\n" + MARKER):
+                    self.assertEqual(authority_failure_site(root, unsafe), {"category": "unclassified"})
+
+    def test_blocked_authority_diagnostics_reject_unknown_or_malformed_cleanup_chains(self):
+        root = Path(__file__).resolve().parents[3]
+        primary = "Reviewed SRE consumer was changed or replaced"
+        rejection = "Retire private SRE binding: Kubernetes status 403"
+        first = f"; owned private authority revocation failed: {rejection}"
+        second = f"; owned API policy retirement failed: {rejection}"
+        for detail in (
+            primary + first + first, primary + second + first,
+            primary + first * 4, primary + "; owned unknown failed: " + rejection,
+            primary + "; owned private authority revocation failed: " + MARKER,
+            primary + "; owned private authority revocation failed: ",
+            primary + first + "; owned API policy retirement failed: " + MARKER,
+            MARKER + first, "x" * 8193,
+        ):
+            with self.subTest(detail=detail[:100]):
+                self.assertEqual(authority_failure_site(root, detail), {"category": "unclassified"})
+
+    def test_exit_trap_collects_safe_failure_evidence_before_cleanup_and_preserves_exit(self):
+        root = Path(__file__).resolve().parents[3]
+        source = (root / "tests/e2e/run.sh").read_text()
+        teardown = "teardown() {" + source.split("teardown() {", 1)[1].split("\n}", 1)[0] + "\n}"
+        for status, diagnostic_status, cleanup_status in ((0, 0, 0), (7, 0, 0), (7, 3, 0), (7, 3, 4)):
+            with self.subTest(status=status, diagnostics=diagnostic_status, cleanup=cleanup_status), \
+                    tempfile.TemporaryDirectory() as directory:
+                config = Path(directory) / "kubeconfig"
+                config.write_text("disposable-test-config")
+                script = '''set -euo pipefail
+ROOT_DIR=/fixture
+CLUSTER_NAME=kars-e2e
+E2E_KUBECONFIG="$1"
+python3() { printf 'capture:%s\\n' "$*"; return CAPTURE_STATUS; }
+sre_authority_cleanup() { echo authority-cleanup; return CLEANUP_STATUS; }
+kind() { printf 'kind:%s\\n' "$*"; }
+info() { :; }
+warn() { echo bounded-capture-unavailable; }
+'''.replace("CAPTURE_STATUS", str(diagnostic_status)).replace("CLEANUP_STATUS", str(cleanup_status))
+                result = subprocess.run(["bash", "-c", script + teardown + "\ntrap teardown EXIT\nexit " + str(status),
+                                         "test", str(config)], capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, status, result.stderr)
+                self.assertFalse(config.exists())
+                events = result.stdout.splitlines()
+                cleanup_index = events.index("authority-cleanup")
+                self.assertLess(cleanup_index, events.index("kind:delete cluster --name kars-e2e"))
+                captures = [index for index, event in enumerate(events) if event.startswith("capture:")]
+                if status:
+                    self.assertEqual(len(captures), 1)
+                    self.assertLess(captures[0], cleanup_index)
+                    self.assertEqual(events[captures[0]], "capture:-m sre_authority.bootstrap_probe --diagnostics-only")
+                    self.assertEqual("bounded-capture-unavailable" in events, diagnostic_status != 0)
+                else:
+                    self.assertEqual(captures, [])
+        workflow = (root / ".github/workflows/ci.yml").read_text()
+        self.assertFalse("Collect cluster diagnostics on failure" in workflow,
+                         "Post-teardown collection cannot observe the deleted cluster")
+        self.assertIn("e2e-sre-schema-diag/bootstrap-*.json", workflow)
+
+    def test_control_consumer_writes_keep_manager_and_identity_fences(self):
+        root = Path(__file__).resolve().parents[3]
+        migration = (root / "controller/src/sre_authority/migration.rs").read_text()
+        credentials = (root / "controller/src/reconciler/governed_services/credentials.rs").read_text()
+        rotation = migration.split("async fn rotate_owned_control_credentials(", 1)[1]
+        quarantine = credentials.split("async fn quarantine(", 1)[1].split("async fn checked_epoch(", 1)[0]
+        stop = migration.split("async fn stop_legacy_consumer(", 1)[1].split("pub(crate) fn controller_managed(", 1)[0]
+        canonical = "field_manager:Some(crate::field_managers::CLAWSANDBOX.into())"
+        for source, writer, count in ((rotation, "deployments.patch(name,&params,", 3),
+                                      (quarantine, ".patch(name,&params,", 1),
+                                      (stop, 'api.patch("sre",&params,', 1)):
+            compact = re.sub(r"\s+", "", source)
+            writes = compact.split(writer)[1:]
+            self.assertEqual(len(writes), count)
+            for write in writes:
+                payload = write.split(".await", 1)[0]
+                self.assertIn("&Patch::Merge(json!", payload)
+                self.assertIn('"uid":deployment.metadata.uid', payload)
+                self.assertIn('"resourceVersion":deployment.metadata.resource_version', payload)
+            if source != stop:
+                self.assertIn(canonical, compact)
+        self.assertLess(rotation.index("if !controller_managed(&deployment, name)"),
+                        rotation.index("let params = PatchParams"))
+        self.assertLess(quarantine.index("review_consumer(client, namespace, name).await?"),
+                        quarantine.index("let params = PatchParams"))
+        self.assertIn('field_manager:controller_managed(&deployment,"sre").then(||crate::field_managers::CLAWSANDBOX.into())',
+                      re.sub(r"\s+", "", stop))
+        self.assertIn("validate_consumer(client, reg).await?", stop)
+
+    def test_control_consumer_diagnostics_project_ownership_without_workload_payloads(self):
+        epoch = "a" * 64
+        obj = {"metadata": {"name": "consumer", "namespace": "kars-consumer", "uid": "consumer-uid",
+            "resourceVersion": "42", "generation": 3, "deletionTimestamp": None,
+            "labels": {"kars.azure.com/sandbox": "consumer", "private": MARKER},
+            "annotations": {"kars.azure.com/sre-control-drain": epoch + ":3", "private": MARKER},
+            "ownerReferences": [{"apiVersion": "apps/v1", "kind": "Deployment", "name": "owner",
+                                 "uid": "owner-uid", "controller": True, "private": MARKER}],
+            "managedFields": [{"manager": "kars-controller/karssandbox", "operation": "Apply",
+                "apiVersion": "apps/v1", "fieldsV1": {"f:spec": {"f:replicas": {}, "f:template": {
+                    "f:spec": {"f:containers": {'k:{"name":"' + MARKER + '"}': {}}}}}}},
+                {"manager": "unknown", "operation": "Update", "fieldsV1": {"f:spec": {"f:replicas": {}}}}]},
+            "spec": {"replicas": 0, "template": {"spec": {"containers": [{"env": [{"value": MARKER}]}]}}},
+            "status": {"observedGeneration": 3, "replicas": 0, "conditions": [{"message": MARKER}]},
+            "data": {"control-token": MARKER}}
+        before = copy.deepcopy(obj)
+        facts = control_consumer_facts(obj)
+        self.assertEqual(facts["uid"], "consumer-uid")
+        self.assertEqual(facts["resourceVersion"], "42")
+        self.assertEqual(facts["generation"], 3)
+        self.assertEqual(facts["replicas"], 0)
+        self.assertEqual(facts["status"]["observedGeneration"], 3)
+        self.assertEqual(facts["drain"], {"present": True, "valid": True, "epoch": epoch, "restoreReplicas": 3})
+        self.assertEqual(facts["ownerReferences"][0]["uid"], "owner-uid")
+        self.assertEqual(facts["managedFields"][0]["fieldPaths"],
+                         ["f:spec", "f:spec/f:replicas", "f:spec/f:template"])
+        self.assertEqual(facts["managedFields"][1]["fieldPaths"], ["f:spec", "f:spec/f:replicas"])
+        self.assertNotIn(MARKER, json.dumps(facts))
+        self.assertEqual(obj, before)
+        obj["metadata"]["managedFields"][0]["fieldsV1"] = {"f:metadata": {"f:annotations": {}}}
+        self.assertEqual(control_consumer_facts(obj)["managedFields"][0]["fieldPaths"], [])
+
+    def test_control_consumer_diagnostics_never_echo_malformed_drain_markers(self):
+        self.assertEqual(control_consumer_facts({})["drain"], {"present": False, "valid": False})
+        for marker in (None, {}, MARKER, "a" * 64 + ":0", "a" * 64 + ":-1",
+                       "a" * 64 + ":2147483648", "a" * 64 + ":1:" + MARKER):
+            with self.subTest(marker=marker):
+                facts = control_consumer_facts({"metadata": {"annotations": {
+                    "kars.azure.com/sre-control-drain": marker}}})
+                self.assertEqual(facts["drain"], {"present": True, "valid": False})
+                self.assertNotIn(MARKER, json.dumps(facts))
+
+    def test_control_consumer_capture_requests_managed_fields_and_survives_missing_or_failed_reads(self):
+        from sre_authority.fixtures import CONTROL, CONTROL_NS
+        for first in ("", RuntimeError(MARKER), "{malformed " + MARKER):
+            h = Harness.__new__(Harness)
+            responses = iter([first, json.dumps({"metadata": {"name": "sre", "namespace": RUNTIME,
+                "uid": "live-sre", "resourceVersion": "2", "managedFields": [{"manager": "kube-client",
+                    "operation": "Update", "fieldsV1": {"f:spec": {"f:replicas": {}}}}]},
+                "spec": {"replicas": 0, "template": {"private": MARKER}}})])
+            calls = []
+            def read(*args, **kwargs):
+                calls.append((args, kwargs))
+                value = next(responses)
+                if isinstance(value, Exception):
+                    raise value
+                return value
+            h.k = read
+            with patch("builtins.print") as printed:
+                h.control_consumer_diagnostics()
+            self.assertEqual(len(calls), 2)
+            for (name, namespace), (args, kwargs) in zip(((CONTROL, CONTROL_NS), ("sre", RUNTIME)), calls):
+                self.assertEqual(args, ("get", "deployment", name, "-n", namespace, "--ignore-not-found",
+                                        "--show-managed-fields=true", "-o", "json"))
+                self.assertEqual(kwargs, {"timeout": 10})
+            facts = [json.loads(call.args[1]) for call in printed.call_args_list]
+            self.assertEqual(facts[0]["availability"], "absent" if first == "" else "unavailable")
+            self.assertEqual(facts[1]["uid"], "live-sre")
+            self.assertEqual(facts[1]["replicas"], 0)
+            self.assertEqual(facts[1]["managedFields"][0]["manager"], "kube-client")
+            self.assertEqual(facts[1]["managedFields"][0]["fieldPaths"], ["f:spec", "f:spec/f:replicas"])
+            self.assertNotIn(MARKER, json.dumps(facts))
+
+    def test_failure_diagnostics_retain_blocked_registration_and_capture_control_consumers(self):
+        h = Harness.__new__(Harness)
+        h.root = Path(__file__).resolve().parents[3]
+        h.deadline = time.monotonic() + 30
+        h.get = lambda kind, *_args: ({"metadata": {"uid": "registration", "generation": 3},
+            "status": {"phase": "Blocked", "observedGeneration": 3,
+                       "detail": "Control credential consumer is not controller-owned"}}
+            if kind == "karssreregistrations.kars.azure.com" else None)
+        h.k = lambda *_args, **_kwargs: '{"items": []}'
+        with patch("sre_authority.common.collect_stage_workloads"), \
+                patch.object(h, "control_consumer_diagnostics") as capture, patch("builtins.print") as printed:
+            h.diagnostics()
+        capture.assert_called_once_with()
+        facts = json.loads(printed.call_args_list[0].args[1])
+        self.assertEqual(facts["phase"], "Blocked")
+        self.assertEqual(facts["generation"], 3)
+        self.assertEqual(facts["authorityFailure"]["source"], "controller/src/sre_authority/migration.rs")
+
     def test_control_consumer_fixture_satisfies_required_sandbox_fields(self):
         captured = []
         class Captured(Exception):
@@ -509,6 +796,40 @@ class HarnessTests(unittest.TestCase):
                         fixture.index('h.cli("authority", "stage"'))
         from sre_authority.common import POLICIES
         self.assertIn("no-legacy-tokens", POLICIES)
+
+    def test_final_upgrade_preserves_saved_values_only_for_prepared_legacy_release(self):
+        root = Path(__file__).resolve().parents[3]
+        source = (root / "tests/e2e/run.sh").read_text()
+        install = "install_crds() {" + source.split("install_crds() {", 1)[1].split("\nteardown()", 1)[0]
+        script = '''
+set -eu
+ROOT_DIR="$1"
+SRE_LEGACY_PREPARED="$2"
+source "$ROOT_DIR/tests/e2e/sre-authority.sh"
+info() { :; }
+helm() {
+    if [ "$1" = version ]; then printf '%s\\n' "$HELM_VERSION";
+    else printf '%s\\0' "$@"; fi
+}
+''' + install + '\nHELM_VERSION="$3"; install_crds\n'
+        for prepared in ("0", "1"):
+            for version, wait in (("v3.16.4", "--wait"), ("v4.2.4", "--wait=legacy")):
+                with self.subTest(prepared=prepared, version=version):
+                    result = subprocess.run(
+                        ["bash", "-c", script, "saved-helm-values-test", str(root), prepared, version],
+                        capture_output=True, check=True, timeout=5)
+                    args = result.stdout.decode().rstrip("\0").split("\0")
+                    self.assertEqual(args[:3], ["upgrade", "--install", "kars"])
+                    self.assertEqual(args.count("--reset-then-reuse-values"), int(prepared))
+                    self.assertNotIn("--reset-values", args)
+                    self.assertNotIn("--reuse-values", args)
+                    self.assertNotIn("sre.enabled=false", args)
+                    self.assertEqual("sre.authorityStage=true" in args, prepared == "1")
+                    self.assertIn(wait if prepared == "1" else "--wait", args)
+                    self.assertEqual(args[args.index("--timeout") + 1], "5m")
+                    self.assertEqual(args[args.index("--values") + 1], str(root / ".e2e-addon-values.json"))
+                    self.assertIn("controller.replicas=1", args)
+                    self.assertIn("inferenceRouter.image.pullPolicy=Never", args)
 
     def test_staged_setup_waits_for_builtins_without_skipping_migration_readiness(self):
         root = Path(__file__).resolve().parents[3]

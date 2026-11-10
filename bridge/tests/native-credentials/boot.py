@@ -19,6 +19,7 @@ from schema_preparation import prepare_schemas
 
 
 def install_core(setup):
+    metrics_trust = json.loads(command("node", "tests/native-credentials/metrics-trust.mjs"))
     namespace = setup.namespace(CORE)
     setup.admin.patch(f"/api/v1/namespaces/{CORE}", {
         "metadata": {"labels": {"app.kubernetes.io/managed-by": "Helm"},
@@ -32,7 +33,8 @@ def install_core(setup):
                       "tag": "latest", "pullPolicy": "IfNotPresent"},
             "resources": {"requests": {"cpu": "100m", "memory": "256Mi"},
                           "limits": {"cpu": "2", "memory": "2Gi"}},
-            "extraEnv": [{"name": "RUST_LOG", "value": "warn"},
+            "extraEnv": [{"name": "RUST_LOG",
+                          "value": "warn,kars_controller::credential_grants=info"},
                          {"name": "LEADER_ELECTION_ENABLED", "value": "true"}],
         },
         "sandbox": {
@@ -40,6 +42,12 @@ def install_core(setup):
             "nodeSelector": {"kubernetes.io/hostname": "bridge-native-worker"},
         },
         "inferenceRouter": {"image": loaded_image("kars-native-router")},
+        "metricsServer": {
+            **metrics_trust,
+            "enabled": True,
+            "image": {"repository": "docker.io/library/kars-native-metrics-server",
+                      "tag": "latest", "pullPolicy": "Never"},
+        },
         # Kind has no Azure Workload Identity mutating webhook.
         "azure": {"workloadIdentity": {"enabled": False}},
         "observationPrivacyRpc": {"enabled": True},

@@ -1,6 +1,42 @@
 {
   "items": [
     {
+      "name": "kars-inference-budget-token-top-ups",
+      "spec": {
+        "failurePolicy": "Fail",
+        "matchConstraints": {
+          "matchPolicy": "Equivalent",
+          "resourceRules": [{
+            "apiGroups": [""], "apiVersions": ["v1"],
+            "operations": ["CREATE", "UPDATE", "DELETE"], "resources": ["configmaps"]
+          }]
+        },
+        "variables": [{
+          "name": "oldFunding",
+          "expression": "oldObject == null ? '' : oldObject.?data.orValue({})[?'token-top-ups.json'].orValue('')"
+        }, {
+          "name": "newFunding",
+          "expression": "object == null ? '' : object.?data.orValue({})[?'token-top-ups.json'].orValue('')"
+        }, {
+          "name": "oldUnbounded",
+          "expression": "oldObject == null ? '' : oldObject.?data.orValue({})[?'unbounded-token-allowances.json'].orValue('')"
+        }, {
+          "name": "newUnbounded",
+          "expression": "object == null ? '' : object.?data.orValue({})[?'unbounded-token-allowances.json'].orValue('')"
+        }, {
+          "name": "oldCalendarPolicy",
+          "expression": "oldObject == null ? 'enforce' : oldObject.?data.orValue({})[?'calendar-policy'].orValue('enforce')"
+        }, {
+          "name": "newCalendarPolicy",
+          "expression": "object == null ? 'enforce' : object.?data.orValue({})[?'calendar-policy'].orValue('enforce')"
+        }],
+        "validations": [{
+          "expression": "((variables.oldFunding == variables.newFunding || (variables.oldFunding == '' && variables.newFunding == '[]')) && (variables.oldUnbounded == variables.newUnbounded || (variables.oldUnbounded == '' && variables.newUnbounded == '[]')) && variables.oldCalendarPolicy == variables.newCalendarPolicy) || authorizer.group('kars.azure.com').resource('karsbudgetaccounts').namespace(request.namespace).check('fund').allowed()",
+          "message": "Token top-ups, unbounded allowances and calendar policy changes require the explicit operator fund permission; workload ConfigMap write access is not funding authority"
+        }]
+      }
+    },
+    {
       "name": "kars-inference-budget-public-ca",
       "spec": {
         "failurePolicy": "Fail",
@@ -63,9 +99,19 @@
             "operations": ["CREATE", "UPDATE"], "resources": ["karssandboxes"]
           }]
         },
+        "variables": [{
+          "name": "builtinSource",
+          "expression": "request.operation == 'UPDATE' && oldObject != null && has(oldObject.spec.inferenceBudgetRef) && oldObject.metadata.name == 'bridge-orchestrator' && dyn(oldObject.spec.inferenceBudgetRef).scope == 'GovernedInference' && dyn(oldObject.spec.inferenceBudgetRef).root.kind == 'KarsSandbox' && dyn(oldObject.spec.inferenceBudgetRef).root.resource.name == oldObject.metadata.name && dyn(oldObject.spec.inferenceBudgetRef).root.resource['namespace'] == dyn(oldObject.metadata)['namespace'] && dyn(oldObject.spec.inferenceBudgetRef).root.resource.uid == oldObject.metadata.uid && dyn(oldObject.spec.inferenceBudgetRef).taskUid == oldObject.metadata.uid && dyn(oldObject.spec.inferenceBudgetRef).rootTaskUid == oldObject.metadata.uid && dyn(oldObject.spec.inferenceBudgetRef).?parentTaskUid.orValue(null) == null && oldObject.metadata.?ownerReferences.orValue([]).size() == 0 && object.metadata.?ownerReferences.orValue([]).size() == 0"
+        }, {
+          "name": "sourceMetadataUnchanged",
+          "expression": "oldObject != null && object.metadata.name == oldObject.metadata.name && dyn(object.metadata)['namespace'] == dyn(oldObject.metadata)['namespace'] && object.metadata.uid == oldObject.metadata.uid && object.metadata.?generateName == oldObject.metadata.?generateName && object.metadata.?deletionTimestamp == oldObject.metadata.?deletionTimestamp && object.metadata.?labels == oldObject.metadata.?labels && object.metadata.?finalizers == oldObject.metadata.?finalizers && object.metadata.?annotations.orValue({}).all(k, k == 'kars.azure.com/orchestrator-model-revision' || object.metadata.?annotations.orValue({})[?k] == oldObject.metadata.?annotations.orValue({})[?k]) && oldObject.metadata.?annotations.orValue({}).all(k, k == 'kars.azure.com/orchestrator-model-revision' || oldObject.metadata.?annotations.orValue({})[?k] == object.metadata.?annotations.orValue({})[?k])"
+        }, {
+          "name": "suspensionOnly",
+          "expression": "oldObject != null && dyn(object.spec).?runtime == dyn(oldObject.spec).?runtime && dyn(object.spec).?sandbox == dyn(oldObject.spec).?sandbox && dyn(object.spec).?inferenceRef == dyn(oldObject.spec).?inferenceRef && dyn(object.spec).?memoryRef == dyn(oldObject.spec).?memoryRef && dyn(object.spec).?credentialsRef == dyn(oldObject.spec).?credentialsRef && dyn(object.spec).?credentialBindings == dyn(oldObject.spec).?credentialBindings && dyn(object.spec).?githubBinding == dyn(oldObject.spec).?githubBinding && dyn(object.spec).?inferenceBudgetRef == dyn(oldObject.spec).?inferenceBudgetRef && dyn(object.spec).?networkPolicy == dyn(oldObject.spec).?networkPolicy && dyn(object.spec).?agent == dyn(oldObject.spec).?agent && dyn(object.spec).?governance == dyn(oldObject.spec).?governance && dyn(object.spec).?azureServices == dyn(oldObject.spec).?azureServices && dyn(object.spec).?resources == dyn(oldObject.spec).?resources && dyn(object.spec).?a2a == dyn(oldObject.spec).?a2a && dyn(object.spec).?upstreamCompatibility == dyn(oldObject.spec).?upstreamCompatibility && dyn(object.spec).?meshAuth == dyn(oldObject.spec).?meshAuth"
+        }],
         "validations": [{
-          "expression": "request.userInfo.username == 'system:serviceaccount:__ACCOUNTING_NAMESPACE__:kars-controller' || (!has(object.spec.inferenceBudgetRef) && (oldObject == null || !has(oldObject.spec.inferenceBudgetRef)))",
-          "message": "Finite runtime authority and pod configuration are controller-only; edit the owning Task instead"
+          "expression": "request.userInfo.username == 'system:serviceaccount:__ACCOUNTING_NAMESPACE__:kars-controller' || (!has(object.spec.inferenceBudgetRef) && (oldObject == null || !has(oldObject.spec.inferenceBudgetRef))) || (variables.builtinSource && variables.sourceMetadataUnchanged && variables.suspensionOnly)",
+          "message": "Finite runtime authority and pod configuration are controller-only; self-rooted bridge-orchestrator permits only suspension and model-revision metadata updates, otherwise edit the owning Task"
         }]
       }
     },
@@ -111,9 +157,25 @@
             "operations": ["CREATE", "UPDATE"], "resources": ["deployments", "replicasets"]
           }]
         },
+        "variables": [{
+          "name": "privateAnnotations",
+          "expression": "namespaceObject.metadata.?annotations.orValue({})"
+        }, {
+          "name": "privateOperator",
+          "expression": "request.operation == 'UPDATE' && request.resource.resource == 'deployments' && request.?subResource.orValue('') == '' && oldObject != null && object.metadata.uid == oldObject.metadata.uid && variables.privateAnnotations[?'kars.azure.com/private-enabled'].orValue('') == 'true' && variables.privateAnnotations[?'kars.azure.com/private-namespace-uid'].orValue('') == dyn(namespaceObject.metadata).uid && variables.privateAnnotations[?'kars.azure.com/private-root-namespace'].orValue('') == '__ACCOUNTING_NAMESPACE__' && authorizer.group('kars.azure.com').resource('karscredentialgrants').namespace('__ACCOUNTING_NAMESPACE__').name('workspace').check('manage').allowed()"
+        }, {
+          "name": "privatePause",
+          "expression": "variables.privateOperator && variables.privateAnnotations[?'kars.azure.com/private-state'].orValue('') == 'Pending' && object.spec.replicas == 0 && object.spec.template == oldObject.spec.template"
+        }, {
+          "name": "privateEpoch",
+          "expression": "variables.privateOperator && variables.privateAnnotations[?'kars.azure.com/private-state'].orValue('') == 'Qualified' && variables.privateAnnotations[?'kars.azure.com/private-epoch'].orValue('') != '' && variables.privateAnnotations[?('kars.azure.com/private-parent-' + object.metadata.uid)].orValue('') == variables.privateAnnotations[?'kars.azure.com/private-epoch'].orValue('') && object.spec.replicas == 0 && oldObject.spec.replicas == 0 && object.spec.template.spec == oldObject.spec.template.spec && object.spec.template.metadata.?labels == oldObject.spec.template.metadata.?labels && dyn(object.spec.template.metadata).all(k, k == 'annotations' || dyn(object.spec.template.metadata)[?k] == dyn(oldObject.spec.template.metadata)[?k]) && dyn(oldObject.spec.template.metadata).all(k, k == 'annotations' || dyn(object.spec.template.metadata)[?k] == dyn(oldObject.spec.template.metadata)[?k]) && object.spec.template.metadata.?annotations.orValue({})[?'kars.azure.com/private-epoch'].orValue('') == variables.privateAnnotations[?'kars.azure.com/private-epoch'].orValue('') && object.spec.template.metadata.?annotations.orValue({}).all(k, k == 'kars.azure.com/private-epoch' || object.spec.template.metadata.?annotations.orValue({})[?k] == oldObject.spec.template.metadata.?annotations.orValue({})[?k]) && oldObject.spec.template.metadata.?annotations.orValue({}).all(k, k == 'kars.azure.com/private-epoch' || object.spec.template.metadata.?annotations.orValue({})[?k] == oldObject.spec.template.metadata.?annotations.orValue({})[?k])"
+        }, {
+          "name": "privateMaintenance",
+          "expression": "(variables.privatePause || variables.privateEpoch) && dyn(object.spec).all(k, k in ['replicas', 'template'] || dyn(object.spec)[?k] == dyn(oldObject.spec)[?k]) && dyn(oldObject.spec).all(k, k in ['replicas', 'template'] || dyn(object.spec)[?k] == dyn(oldObject.spec)[?k]) && dyn(object.metadata).all(k, k in ['resourceVersion', 'generation', 'managedFields'] || dyn(object.metadata)[?k] == dyn(oldObject.metadata)[?k]) && dyn(oldObject.metadata).all(k, k in ['resourceVersion', 'generation', 'managedFields'] || dyn(object.metadata)[?k] == dyn(oldObject.metadata)[?k])"
+        }],
         "validations": [{
-          "expression": "request.userInfo.username == 'system:serviceaccount:__ACCOUNTING_NAMESPACE__:kars-controller' || (request.resource.resource != 'deployments' && request.?subResource.orValue('') != 'ephemeralcontainers' && request.userInfo.username in ['system:kube-controller-manager', 'system:serviceaccount:kube-system:deployment-controller', 'system:serviceaccount:kube-system:replicaset-controller'])",
-          "message": "Budget runtime workloads may be produced only by the core controller and Kubernetes Deployment/ReplicaSet controllers"
+          "expression": "request.userInfo.username == 'system:serviceaccount:__ACCOUNTING_NAMESPACE__:kars-controller' || (request.resource.resource != 'deployments' && request.?subResource.orValue('') != 'ephemeralcontainers' && request.userInfo.username in ['system:kube-controller-manager', 'system:serviceaccount:kube-system:deployment-controller', 'system:serviceaccount:kube-system:replicaset-controller']) || variables.privateMaintenance",
+          "message": "Budget runtime workloads require the core or Kubernetes controllers; credential-grant operators may only pause unchanged reviewed workloads or qualify their stopped private epoch"
         }]
       }
     },

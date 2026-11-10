@@ -10,9 +10,9 @@
 //! decision path that dominates p50 reconcile latency in production
 //! profiling: hash-map lookup of existing children + status diff.
 //!
-//! Baseline values are committed to `controller/benches/baselines.json`.
-//! CI's `Bench Regression` job fails the PR if median latency exceeds
-//! baseline + 25%.
+//! Historical values and the benchmark inventory live in `benches/baselines.json`.
+//! CI compares base and candidate on the same runner and compiler/profile,
+//! failing above +25%; historical timings are not cross-machine ceilings.
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::collections::HashMap;

@@ -15,6 +15,11 @@ import pytest
 from kars_runtime_hermes.plugin import discover, spawn
 
 
+@pytest.fixture(autouse=True)
+def isolated_spawn_roster(monkeypatch):
+    monkeypatch.setattr(spawn, "_SPAWNED_ROSTER", {})
+
+
 def _mock_response(status: int, body: Any | None = None, text: str = "") -> httpx.Response:
     if body is not None:
         return httpx.Response(
@@ -283,13 +288,13 @@ def test_discover_by_name_searches_registry() -> None:
     def fake_call(method: str, path: str, **kwargs: Any) -> httpx.Response:
         captured["path"] = path
         captured["params"] = kwargs.get("params")
-        return _mock_response(200, {"agents": [{"display_name": "writer", "did": "did:mesh:x"}]})
+        return _mock_response(200, {"results": [{"capabilities": ["writer"], "did": "did:mesh:x"}], "total": 1})
 
     with mock.patch.object(discover.router_client, "call", side_effect=fake_call):
         result = discover._kars_discover({"name": "writer"})
 
-    assert captured["path"] == "/agt/registry/v1/agents"
-    assert captured["params"] == {"display_name": "writer"}
+    assert captured["path"] == "/agt/registry/v1/discover"
+    assert captured["params"] == {"capability": "writer", "limit": 50}
     parsed = json.loads(result)
     assert parsed["count"] == 1
 
@@ -298,7 +303,7 @@ def test_discover_no_matches_returns_empty() -> None:
     with mock.patch.object(
         discover.router_client,
         "call",
-        return_value=_mock_response(200, {"agents": []}),
+        return_value=_mock_response(200, {"results": [], "total": 0}),
     ):
         result = discover._kars_discover({"name": "nonexistent"})
     parsed = json.loads(result)

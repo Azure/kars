@@ -7,6 +7,7 @@ use super::{
 };
 use crate::sre_registration::{EPOCH, KarsSRERegistration};
 use base64::{Engine, engine::general_purpose::STANDARD};
+use k8s_openapi::api::core::v1::Secret;
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
@@ -19,6 +20,8 @@ const SECRETS: &str = "/api/v1/namespaces/kars-normal/secrets";
 const REG: &str = "/apis/kars.azure.com/v1alpha1/karssreregistrations/canonical";
 const DEPLOY: &str = "/apis/apps/v1/namespaces/kars-normal/deployments/normal";
 
+#[path = "control_transport_credential_tests.rs"]
+mod control_transport_credential_tests;
 #[path = "private_purpose_tests.rs"]
 mod private_purpose_tests;
 
@@ -95,6 +98,7 @@ struct State {
     allow_verb: Option<String>,
     sar_error: bool,
     revoke_on_consumer_read: bool,
+    pending_after_registration_read: bool,
     conflict: bool,
     fail_policy: bool,
     alias: bool,
@@ -146,6 +150,13 @@ async fn fixture() -> (MockServer, Client, Arc<Mutex<State>>) {
                 }}));
         }
         if method == "GET" {
+            if path == REG && state.pending_after_registration_read {
+                state.pending_after_registration_read = false;
+                let registration = state.objects.get_mut(REG).unwrap();
+                let ready = registration.clone();
+                registration["status"]["phase"] = "Migrating".into();
+                return ResponseTemplate::new(200).set_body_json(ready);
+            }
             if path == DEPLOY && state.revoke_on_consumer_read {
                 state.allow_verb = Some("watch".into());
             }
@@ -223,6 +234,95 @@ async fn fixture() -> (MockServer, Client, Arc<Mutex<State>>) {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
     (server, client, state)
+}
+
+#[tokio::test]
+async fn private_control_reader_validates_independent_privacy_and_consumption_epochs() {
+    use wiremock::matchers::{method, path};
+
+    for enrolled in [false, true] {
+        for scenario in [
+            "valid",
+            "private-stale",
+            "privacy-stale",
+            "retired",
+            "foreign",
+            "missing",
+        ] {
+            let (server, client, state) = fixture().await;
+            let (namespace, expected) = {
+                let mut state = state.lock().unwrap();
+                let privacy_epoch = enrolled.then(|| enroll(&mut state));
+                crate::private_activation::test_support::install(
+                    &mut state.objects,
+                    "private-root",
+                    "private-root-namespace",
+                    "private-root-account",
+                    &[(NS, "namespace")],
+                );
+                let namespace: Namespace = serde_json::from_value(
+                    state.objects[&format!("/api/v1/namespaces/{NS}")].clone(),
+                )
+                .unwrap();
+                let consumption_epoch =
+                    namespace.annotations()[crate::private_activation::EPOCH].clone();
+                assert_ne!(privacy_epoch.as_deref(), Some(consumption_epoch.as_str()));
+                let mut value = secret(privacy_epoch.as_deref(), true);
+                value["metadata"]["annotations"][crate::private_activation::EPOCH] =
+                    consumption_epoch.into();
+                match scenario {
+                    "private-stale" => {
+                        value["metadata"]["annotations"][crate::private_activation::EPOCH] =
+                            "old".into()
+                    }
+                    "privacy-stale" => {
+                        value["metadata"]["annotations"][if enrolled { EPOCH } else { REVISION }] =
+                            "old".into()
+                    }
+                    "retired" => value["metadata"]["annotations"][RETIRED] = "true".into(),
+                    "foreign" => value["metadata"]["annotations"][SOURCE_UID] = "foreign".into(),
+                    _ => {}
+                }
+                if scenario != "missing" {
+                    state
+                        .objects
+                        .insert(format!("{SECRETS}/{SECRET}"), value.clone());
+                }
+                (namespace, value)
+            };
+            Mock::given(method("POST"))
+                .and(path("/apis/authentication.k8s.io/v1/selfsubjectreviews"))
+                .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                    "apiVersion":"authentication.k8s.io/v1","kind":"SelfSubjectReview",
+                    "status":{"userInfo":{"username":"system:serviceaccount:private-root:kars-controller",
+                        "uid":"private-root-account"}}
+                })))
+                .with_priority(1)
+                .mount(&server).await;
+            let result =
+                credentials::existing_secret(&client, &source(), &namespace, credentials::ADMIN)
+                    .await;
+            if scenario == "valid" {
+                let actual = result
+                    .unwrap()
+                    .expect("independently qualified control credential");
+                assert_eq!(actual.uid().as_deref(), Some("secret"));
+                assert_eq!(serde_json::to_value(actual.data).unwrap(), expected["data"]);
+            } else if scenario == "foreign" {
+                assert!(result.is_err(), "{scenario}, enrolled={enrolled}");
+            } else {
+                assert!(result.unwrap().is_none(), "{scenario}, enrolled={enrolled}");
+            }
+            let state = state.lock().unwrap();
+            assert_eq!(secret_writes(&state), 0);
+            assert!(
+                state
+                    .calls
+                    .iter()
+                    .all(|(method, _, _)| method == "GET" || method == "POST")
+            );
+        }
+    }
 }
 
 fn enroll(state: &mut State) -> String {
@@ -308,7 +408,8 @@ async fn legacy_secret_authority_or_indeterminate_reviews_prevent_any_control_is
             .await
             .err()
             .unwrap();
-        assert!(!error.contains("PRIVATE_RESPONSE_SENTINEL"));
+        assert!(matches!(error, credentials::IssuanceError::Rejected(_)));
+        assert!(!error.to_string().contains("PRIVATE_RESPONSE_SENTINEL"));
         assert_eq!(secret_writes(&state.lock().unwrap()), 0);
     }
 }
@@ -334,7 +435,7 @@ async fn current_ready_epoch_is_required_and_recorded_before_control_token_creat
             .map(|(_, path, _)| path)
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
-        14
+        15
     );
     assert_eq!(
         state
@@ -345,7 +446,7 @@ async fn current_ready_epoch_is_required_and_recorded_before_control_token_creat
             .map(|(_, path, _)| path)
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
-        14
+        15
     );
 }
 
@@ -467,6 +568,32 @@ async fn unqualified_owned_control_token_rotates_with_cas_and_preserves_customer
 }
 
 #[tokio::test]
+async fn privacy_becoming_pending_before_control_rotation_preserves_existing_material() {
+    let (_server, client, state) = fixture().await;
+    let key = format!("{SECRETS}/{SECRET}");
+    let original = secret(None, false);
+    {
+        let mut state = state.lock().unwrap();
+        enroll(&mut state);
+        state.objects.insert(key.clone(), original.clone());
+        state.objects.insert(DEPLOY.into(), deployment());
+        state.pending_after_registration_read = true;
+        state.calls.clear();
+    }
+    let error = credentials::ensure(&client, &source(), &namespace())
+        .await
+        .err()
+        .expect("Pending privacy must block credential rotation");
+    assert!(matches!(error, credentials::IssuanceError::PrivacyPending));
+    let state = state.lock().unwrap();
+    assert_eq!(state.objects[REG]["status"]["phase"], "Migrating");
+    assert_eq!(state.objects[&key], original);
+    assert_eq!(state.objects[DEPLOY]["spec"]["replicas"], 1);
+    assert_eq!(secret_writes(&state), 0);
+    assert!(state.calls.iter().all(|(method, _, _)| method != "PATCH"));
+}
+
+#[tokio::test]
 async fn already_qualified_control_is_reused_without_reissuing_or_touching_foreign_workloads() {
     let (_server, client, state) = fixture().await;
     state
@@ -481,6 +608,136 @@ async fn already_qualified_control_is_reused_without_reissuing_or_touching_forei
             .version,
         "secret:7"
     );
+    assert_eq!(secret_writes(&state.lock().unwrap()), 0);
+}
+
+#[test]
+fn memory_bearing_control_version_tracks_control_material_not_memory_renewal() {
+    use crate::sre_registration::control_credential_version as version;
+
+    let mut value = secret(None, true);
+    let legacy: Secret = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(version(&legacy).unwrap(), "secret:7");
+    value["data"]["builtin-memory.json"] = STANDARD.encode("memory-token-one").into();
+    value["data"]["config.json"] = STANDARD.encode("control-tls-one").into();
+    let baseline: Secret = serde_json::from_value(value.clone()).unwrap();
+    let expected = version(&baseline).unwrap();
+    assert!(expected.starts_with("secret:control-v1:"));
+
+    let mut renewed = value.clone();
+    renewed["metadata"]["resourceVersion"] = "8".into();
+    renewed["data"]["builtin-memory.json"] = STANDARD.encode("memory-token-two").into();
+    assert_eq!(
+        version(&serde_json::from_value(renewed).unwrap()).unwrap(),
+        expected
+    );
+    for key in [
+        "control-token",
+        "config.json",
+        "additional-control-material",
+    ] {
+        let mut changed = value.clone();
+        changed["data"][key] = STANDARD.encode("changed-control-material").into();
+        assert_ne!(
+            version(&serde_json::from_value(changed).unwrap()).unwrap(),
+            expected,
+            "{key} must invalidate cached control consumers"
+        );
+    }
+    for key in ["config.json", "builtin-memory.json"] {
+        let mut changed = value.clone();
+        changed["data"].as_object_mut().unwrap().remove(key);
+        assert_ne!(
+            version(&serde_json::from_value(changed).unwrap()).unwrap(),
+            expected
+        );
+    }
+    let mut replaced = baseline;
+    replaced.metadata.uid = Some("replacement-secret".into());
+    assert_ne!(version(&replaced).unwrap(), expected);
+}
+
+#[test]
+fn memory_bearing_control_version_frames_keys_and_values_and_tracks_removal() {
+    use crate::sre_registration::control_credential_version as version;
+
+    let mut value = secret(None, true);
+    value["data"]["builtin-memory.json"] = STANDARD.encode("memory-token").into();
+    let baseline: Secret = serde_json::from_value(value).unwrap();
+    let mut first = baseline.clone();
+    first
+        .data
+        .as_mut()
+        .unwrap()
+        .insert("ab".into(), k8s_openapi::ByteString(b"c".to_vec()));
+    let mut second = baseline.clone();
+    second
+        .data
+        .as_mut()
+        .unwrap()
+        .insert("a".into(), k8s_openapi::ByteString(b"bc".to_vec()));
+    assert_ne!(version(&first).unwrap(), version(&second).unwrap());
+    assert_ne!(version(&first).unwrap(), version(&baseline).unwrap());
+    first.data.as_mut().unwrap().remove("ab");
+    assert_eq!(version(&first).unwrap(), version(&baseline).unwrap());
+}
+
+#[test]
+fn memory_bearing_control_version_requires_live_identity_and_control_token() {
+    use crate::sre_registration::control_credential_version as version;
+
+    let mut value = secret(None, true);
+    value["data"]["builtin-memory.json"] = STANDARD.encode("memory-token").into();
+    for field in ["uid", "resourceVersion"] {
+        for missing in [true, false] {
+            let mut invalid = value.clone();
+            if missing {
+                invalid["metadata"].as_object_mut().unwrap().remove(field);
+            } else {
+                invalid["metadata"][field] = "".into();
+            }
+            assert!(version(&serde_json::from_value(invalid).unwrap()).is_err());
+        }
+    }
+    for missing in [true, false] {
+        let mut invalid = value.clone();
+        if missing {
+            invalid["data"]
+                .as_object_mut()
+                .unwrap()
+                .remove("control-token");
+        } else {
+            invalid["data"]["control-token"] = "".into();
+        }
+        assert!(version(&serde_json::from_value(invalid).unwrap()).is_err());
+    }
+}
+
+#[tokio::test]
+async fn memory_renewal_preserves_control_projection_without_reissuing_credentials() {
+    let (_server, client, state) = fixture().await;
+    let key = format!("{SECRETS}/{SECRET}");
+    let mut original = secret(None, true);
+    original["data"]["builtin-memory.json"] = STANDARD.encode("memory-token-one").into();
+    state.lock().unwrap().objects.insert(key.clone(), original);
+    let before = credentials::ensure(&client, &source(), &namespace())
+        .await
+        .unwrap();
+    let mut consumer: Deployment = serde_json::from_value(deployment()).unwrap();
+    before.decorate(&mut consumer);
+    let original_template = consumer.spec.as_ref().unwrap().template.clone();
+    {
+        let mut state = state.lock().unwrap();
+        let secret = state.objects.get_mut(&key).unwrap();
+        secret["metadata"]["resourceVersion"] = "8".into();
+        secret["data"]["builtin-memory.json"] = STANDARD.encode("memory-token-two").into();
+    }
+    let after = credentials::ensure(&client, &source(), &namespace())
+        .await
+        .unwrap();
+    after.decorate(&mut consumer);
+    assert_eq!(after.version, before.version);
+    assert_eq!(consumer.spec.unwrap().template, original_template);
     assert_eq!(secret_writes(&state.lock().unwrap()), 0);
 }
 
@@ -580,7 +837,7 @@ async fn privacy_revoked_during_consumer_inventory_retires_cache_without_issuing
 
 #[tokio::test]
 async fn standalone_privacy_loss_quarantines_then_rotates_instead_of_reusing_exposed_cache() {
-    let (_server, client, state) = fixture().await;
+    let (server, client, state) = fixture().await;
     {
         let mut state = state.lock().unwrap();
         state
@@ -594,6 +851,21 @@ async fn standalone_privacy_loss_quarantines_then_rotates_instead_of_reusing_exp
             .await
             .is_err()
     );
+    let requests = server.received_requests().await.unwrap();
+    let patches: Vec<_> = requests
+        .iter()
+        .filter(|request| request.method == "PATCH" && request.url.path() == DEPLOY)
+        .collect();
+    assert_eq!(patches.len(), 1);
+    assert!(
+        patches[0].url.query_pairs().any(
+            |(key, value)| key == "fieldManager" && value == crate::field_managers::CLAWSANDBOX
+        )
+    );
+    let body: Value = patches[0].body_json().unwrap();
+    assert_eq!(body["metadata"]["uid"], "deployment");
+    assert_eq!(body["metadata"]["resourceVersion"], "3");
+    assert_eq!(body["spec"]["replicas"], 0);
     {
         let mut state = state.lock().unwrap();
         assert_eq!(state.objects[DEPLOY]["spec"]["replicas"], 0);
@@ -619,6 +891,62 @@ async fn standalone_privacy_loss_quarantines_then_rotates_instead_of_reusing_exp
 }
 
 #[tokio::test]
+async fn control_quarantine_rejects_unowned_consumers_and_preserves_conflicting_deployments() {
+    for ownership in ["unowned", "conflict"] {
+        let (server, client, state) = fixture().await;
+        let mut before = deployment();
+        if ownership == "unowned" {
+            before["metadata"]["managedFields"] = json!([]);
+        }
+        {
+            let mut state = state.lock().unwrap();
+            state
+                .objects
+                .insert(format!("{SECRETS}/{SECRET}"), secret(None, true));
+            state.objects.insert(DEPLOY.into(), before.clone());
+            state.allow_verb = Some("watch".into());
+        }
+        if ownership == "conflict" {
+            Mock::given(wiremock::matchers::method("PATCH"))
+                .and(wiremock::matchers::path(DEPLOY))
+                .respond_with(failure(409))
+                .expect(1)
+                .with_priority(1)
+                .mount(&server)
+                .await;
+        }
+        let error = credentials::ensure(&client, &source(), &namespace())
+            .await
+            .err()
+            .unwrap();
+        assert!(!error.to_string().contains("PRIVATE_RESPONSE_SENTINEL"));
+        assert_eq!(state.lock().unwrap().objects[DEPLOY], before);
+        assert_eq!(token_issuances(&state.lock().unwrap()), 0);
+        let requests = server.received_requests().await.unwrap();
+        let patches: Vec<_> = requests
+            .iter()
+            .filter(|request| request.method == "PATCH" && request.url.path() == DEPLOY)
+            .collect();
+        assert_eq!(patches.len(), usize::from(ownership == "conflict"));
+        for request in patches {
+            assert!(
+                request
+                    .url
+                    .query_pairs()
+                    .any(|(key, value)| key == "fieldManager"
+                        && value == crate::field_managers::CLAWSANDBOX)
+            );
+            let body: Value = request.body_json().unwrap();
+            assert_eq!(body["metadata"]["uid"], before["metadata"]["uid"]);
+            assert_eq!(
+                body["metadata"]["resourceVersion"],
+                before["metadata"]["resourceVersion"]
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn control_cas_conflicts_and_mismatched_write_results_are_not_reported_as_applied() {
     for conflict in [true, false] {
         let (_server, client, state) = fixture().await;
@@ -635,9 +963,63 @@ async fn control_cas_conflicts_and_mismatched_write_results_are_not_reported_as_
             .await
             .err()
             .unwrap();
-        assert!(!error.contains("PRIVATE_RESPONSE_SENTINEL"));
+        assert!(matches!(error, credentials::IssuanceError::Rejected(_)));
+        assert!(!error.to_string().contains("PRIVATE_RESPONSE_SENTINEL"));
         assert_eq!(secret_writes(&state.lock().unwrap()), 1);
     }
+}
+
+#[tokio::test]
+async fn verified_privacy_epoch_is_projected_before_the_first_consumer_starts() {
+    let (_server, client, state) = fixture().await;
+    let epoch = enroll(&mut state.lock().unwrap());
+    let projection = credentials::ensure(&client, &source(), &namespace())
+        .await
+        .unwrap();
+    let mut deployment: Deployment = serde_json::from_value(deployment()).unwrap();
+    let original_spec = deployment.spec.as_ref().unwrap().template.spec.clone();
+    projection.decorate(&mut deployment);
+    let template = &deployment.spec.as_ref().unwrap().template;
+    let annotations = template
+        .metadata
+        .as_ref()
+        .unwrap()
+        .annotations
+        .as_ref()
+        .unwrap();
+    assert_eq!(annotations[EPOCH], epoch);
+    assert_eq!(annotations[VERSION], projection.version);
+    assert_eq!(annotations["customer"], "preserve");
+    assert_eq!(template.spec, original_spec);
+    let projected = deployment.clone();
+    projection.decorate(&mut deployment);
+    assert_eq!(deployment, projected);
+
+    let current = json!({"metadata":{"name":"current",
+        "annotations":{VERSION:projection.version,EPOCH:epoch}}});
+    for stamp in [None, Some("stale"), Some(epoch.as_str())] {
+        let mut consumer = json!({"metadata":{"name":"terminating",
+            "deletionTimestamp":"2026-09-08T00:00:00Z",
+            "annotations":{VERSION:projection.version}}});
+        if let Some(stamp) = stamp {
+            consumer["metadata"]["annotations"][EPOCH] = stamp.into();
+        }
+        state.lock().unwrap().pods = vec![current.clone(), consumer];
+        assert_eq!(
+            projection
+                .consumers_current(&client, NS, "normal")
+                .await
+                .unwrap(),
+            stamp == Some(epoch.as_str())
+        );
+    }
+    state.lock().unwrap().pods = vec![current];
+    assert!(
+        projection
+            .consumers_current(&client, NS, "normal")
+            .await
+            .unwrap()
+    );
 }
 
 #[tokio::test]
@@ -675,6 +1057,20 @@ async fn cached_old_and_terminating_consumers_block_completion_until_they_are_go
             .image
             .as_deref(),
         Some("customer:pinned")
+    );
+    assert!(
+        !deployment
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .metadata
+            .as_ref()
+            .unwrap()
+            .annotations
+            .as_ref()
+            .unwrap()
+            .contains_key(EPOCH)
     );
     let old = json!({"metadata":{"name":"old","deletionTimestamp":"2026-09-08T00:00:00Z",
         "annotations":{VERSION:"old"}}});

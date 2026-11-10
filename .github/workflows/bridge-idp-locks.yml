@@ -1,0 +1,75 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+name: Bridge IdP lock candidate
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/bridge-idp-locks.yml'
+      - 'bridge/idp/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    name: Resolve reviewed crypto fix (no image publish)
+    runs-on: ubuntu-24.04
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      CONTEXT: artifacts/dex-lock-candidate/context
+      EVIDENCE: artifacts/dex-lock-candidate/evidence
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Bind the candidate to reviewed source and exact version inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          python3 bridge/idp/scripts/hosted-locks.py prepare --context "$CONTEXT" --evidence "$EVIDENCE"
+      - name: Check hosted candidate and importer contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s bridge/idp/tests -p 'test_hosted_locks.py' \
+            2>&1 | tee "$EVIDENCE/contracts.log"
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - name: Resolve using the existing pinned Linux Dockerfile.locks
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx build --no-cache --progress=plain --platform linux/amd64 \
+            --target lock-artifact --file "$CONTEXT/Dockerfile.locks" \
+            --output "type=local,dest=$EVIDENCE/resolved" "$CONTEXT" \
+            2>&1 | tee "$EVIDENCE/resolver.log"
+      - name: Verify generated locks and retain input-output digest binding
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 bridge/idp/scripts/hosted-locks.py seal --evidence "$EVIDENCE" \
+            2>&1 | tee "$EVIDENCE/verification.log"
+      - name: Record outcome and reject source mutation even after failure
+        if: always()
+        shell: bash
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE"
+          printf '%s\n' "$JOB_STATUS" > "$EVIDENCE/job-status.txt"
+          git diff --exit-code -- bridge/idp .github/workflows/bridge-idp-locks.yml \
+            2>&1 | tee "$EVIDENCE/source-diff.log"
+      - name: Retain successful and failed resolver evidence (never publish a container)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: dex-lock-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/dex-lock-candidate/evidence/
+          if-no-files-found: error
+          retention-days: 30

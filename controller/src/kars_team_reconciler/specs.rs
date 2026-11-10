@@ -8,7 +8,8 @@ use crate::kars_team::{KarsTeam, TeamRole};
 use crate::mcp_server::LocalObjectRef;
 
 /// Matches the existing KarsTask objective CEL rule; covered by a drift test.
-pub(crate) const MAX_OBJECTIVE_CHARS: usize = 4096;
+#[cfg(test)]
+pub(crate) use super::work::contract::MAX_OBJECTIVE_CHARS;
 
 /// Positive ceilings require the explicit governed-inference capability.
 pub(crate) fn has_positive_budget(envelope: &TaskEnvelope) -> bool {
@@ -75,6 +76,7 @@ pub(crate) fn principal_spec(team: &KarsTeam) -> KarsTaskSpec {
         execution: None,
         blueprint: team.spec.blueprint.clone(),
         display_name: Some(format!("{} — principal", display_name(team))),
+        requested_tier: None,
     }
 }
 
@@ -94,24 +96,24 @@ pub(crate) fn member_spec(team: &KarsTeam, role: &TeamRole) -> KarsTaskSpec {
         execution: None,
         blueprint: member_blueprint(team, role),
         display_name: Some(format!("{} — {}", display_name(team), role.name)),
+        requested_tier: None,
     }
 }
 
 fn run_objective_prefix(team: &KarsTeam) -> String {
-    format!(
-        "Standing-operation run for team '{}'. Charter: {}",
-        display_name(team),
-        team.spec.charter,
-    )
+    super::work::contract::run_objective_prefix(&display_name(team), &team.spec.charter)
 }
 
 pub(crate) fn run_knowledge_budget(team: &KarsTeam) -> Result<usize, String> {
-    let fixed_chars = run_objective_prefix(team).chars().count();
-    MAX_OBJECTIVE_CHARS.checked_sub(fixed_chars).ok_or_else(|| {
-        format!(
-            "cadence objective fixed prefix (team identity and charter) is {fixed_chars} characters, exceeding the KarsTask limit of {MAX_OBJECTIVE_CHARS}; shorten the charter or team display name"
-        )
-    })
+    run_history_budget(team, "")
+}
+
+pub(crate) fn run_history_budget(team: &KarsTeam, assigned: &str) -> Result<usize, String> {
+    super::work::contract::remaining_objective_chars(
+        &display_name(team),
+        &team.spec.charter,
+        assigned,
+    )
 }
 
 pub(crate) fn run_spec(team: &KarsTeam, knowledge: &str) -> Result<KarsTaskSpec, String> {
@@ -135,6 +137,7 @@ pub(crate) fn run_spec(team: &KarsTeam, knowledge: &str) -> Result<KarsTaskSpec,
         }),
         blueprint: team.spec.blueprint.clone(),
         display_name: Some(format!("{} — standing run", display_name(team))),
+        requested_tier: None,
     })
 }
 

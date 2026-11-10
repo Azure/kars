@@ -130,6 +130,10 @@ pub(crate) fn route_validation_note() -> Result<Option<&'static str>, String> {
     ))
 }
 
+pub(super) fn per_run_qualification_available() -> bool {
+    route_validation_note().is_ok_and(|note| note.is_none())
+}
+
 pub(super) fn configured_records(
     mode: RouteQualificationMode,
     primary: Option<&str>,

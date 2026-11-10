@@ -94,6 +94,56 @@ fn context(client: Client) -> Arc<Context> {
     })
 }
 
+pub(crate) async fn reconcile_rebind_projection_failure(client: Client, sandbox: KarsSandbox) {
+    let mut ctx = context(client);
+    Arc::get_mut(&mut ctx).unwrap().sandbox_image = "openclaw-sandbox:latest".into();
+    let sandbox = Arc::new(sandbox);
+    fn future_size<F: std::future::Future>(_: impl FnOnce() -> F) -> usize {
+        std::mem::size_of::<F>()
+    }
+    let preflight_size =
+        future_size(|| crate::reconciler::reconcile_inner(sandbox.clone(), ctx.clone()));
+    let provisioning_size = future_size(|| {
+        crate::reconciler::reconcile_provisioning(
+            sandbox.clone(),
+            ctx.clone(),
+            None,
+            false,
+            None,
+            crate::reconciler::credential_sources::Mode::Legacy,
+        )
+    });
+    assert!(
+        provisioning_size <= 1024,
+        "provisioning handle embeds {provisioning_size} bytes"
+    );
+    eprintln!(
+        "native-rebind-regression: sandbox-future-bytes preflight={preflight_size} provisioning-handle={provisioning_size}"
+    );
+    let future = reconcile(sandbox.clone(), ctx.clone());
+    let measured = crate::metrics::observe_reconcile("KarsSandbox", future);
+    eprintln!("native-rebind-regression: sandbox-parent-poll");
+    let error = measured.await.unwrap_err();
+    eprintln!("native-rebind-regression: sandbox-parent-returned");
+    assert!(matches!(
+        &error,
+        crate::reconciler::ReconcileError::Credentials(
+            crate::reconciler::credential_sources::Error::Invalid(
+                "Sandbox identity/reference changed"
+            )
+        )
+    ));
+    assert_ne!(error_policy(sandbox, &error, ctx), Action::await_change());
+    eprintln!("native-rebind-regression: sandbox-parent-error-policy");
+}
+
+fn memory_account_path(sandbox_uid: &str) -> String {
+    format!(
+        "/api/v1/namespaces/kars-memory-system/serviceaccounts/kars-memory-{}",
+        &crate::builtin_memory::digest(sandbox_uid)[..40]
+    )
+}
+
 fn response(code: u16, body: Value) -> ResponseTemplate {
     ResponseTemplate::new(code).set_body_json(body)
 }
@@ -138,6 +188,12 @@ impl Respond for Server {
                 }),
             ),
             ("GET", "/apis/apps/v1/namespaces/kars-demo/deployments/demo") => failure(404),
+            ("GET", path)
+                if path
+                    == memory_account_path(state.sandbox["metadata"]["uid"].as_str().unwrap()) =>
+            {
+                failure(404)
+            }
             (
                 "DELETE",
                 "/apis/rbac.authorization.k8s.io/v1/clusterrolebindings/kars-spawner-demo",
@@ -227,7 +283,10 @@ async fn setup(state: State) -> (MockServer, Client, Arc<StdMutex<State>>) {
         .mount(&server)
         .await;
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
+    let config = crate::kube_client_config::preserve_request_semantics(kube::Config::new(
+        server.uri().parse().unwrap(),
+    ));
+    let client = Client::try_from(config).unwrap();
     (server, client, state)
 }
 
@@ -238,6 +297,290 @@ fn only_finalizer_io(requests: &[Request]) {
             ("GET", CR_PATH) | ("GET", NS_PATH) | ("PATCH", CR_PATH)
         )
     }));
+}
+
+mod provisioning {
+    use super::*;
+    use std::time::Duration;
+
+    const SKILLS: &str = "/api/v1/namespaces/kars-demo/configmaps/kars-approved-skills";
+    const INFERENCE: &str =
+        "/apis/kars.azure.com/v1alpha1/namespaces/kars-demo/inferencepolicies/demo-inference";
+    const ACCOUNT: &str = "/api/v1/namespaces/kars-demo/serviceaccounts/sandbox";
+    const SPAWNER: &str =
+        "/apis/rbac.authorization.k8s.io/v1/clusterrolebindings/kars-spawner-demo";
+    const GATEWAY: &str = "/api/v1/namespaces/kars-demo/secrets/gateway-token";
+    const ADMIN: &str = "/api/v1/namespaces/kars-demo/secrets/router-admin-token";
+    const NETWORK: &str =
+        "/apis/networking.k8s.io/v1/namespaces/kars-demo/networkpolicies/sandbox-policy";
+    const ALLOWLIST: &str =
+        "/api/v1/namespaces/kars-demo/configmaps/karssandbox-demo-egress-allowlist";
+    const AUTH: &str = "/apis/kars.azure.com/v1alpha1/karsauthconfigs/default";
+    const STATUS: &str =
+        "/apis/kars.azure.com/v1alpha1/namespaces/kars-demo/karssandboxes/demo/status";
+
+    #[derive(Clone, Copy)]
+    enum Stop {
+        MissingInference,
+        AccessDenied,
+        McpUnavailable,
+        RecreatedSource,
+    }
+
+    struct ProvisioningServer {
+        sandbox: Value,
+        stop: Stop,
+        source_reads: StdMutex<usize>,
+    }
+
+    impl Respond for ProvisioningServer {
+        fn respond(&self, request: &Request) -> ResponseTemplate {
+            match (request.method.as_str(), request.url.path()) {
+                ("GET", SKILLS | AUTH) => failure(404),
+                ("GET", INFERENCE) => if matches!(self.stop, Stop::MissingInference) {
+                    failure(404)
+                } else {
+                    response(
+                        200,
+                        json!({
+                            "apiVersion":"kars.azure.com/v1alpha1", "kind":"InferencePolicy",
+                            "metadata":{"name":"demo-inference","namespace":"kars-demo"},
+                            "spec":{"appliesTo":{},"modelPreference":{"primary":{
+                                "provider":"azure-openai","deployment":"test-model"
+                            }}}
+                        }),
+                    )
+                }
+                .set_delay(Duration::from_millis(1)),
+                ("GET", GATEWAY | ADMIN) => response(
+                    200,
+                    json!({
+                        "apiVersion":"v1", "kind":"Secret", "metadata":{},
+                        "data":{"token": if request.url.path() == GATEWAY {
+                            "Z2F0ZXdheS10b2tlbg=="
+                        } else {
+                            "YWRtaW4tdG9rZW4="
+                        }}
+                    }),
+                ),
+                ("GET", CR_PATH) if matches!(self.stop, Stop::McpUnavailable) => failure(503),
+                ("GET", CR_PATH) => {
+                    let mut reads = self.source_reads.lock().unwrap();
+                    *reads += 1;
+                    let mut live = self.sandbox.clone();
+                    // The first read derives MCP egress; the second is the
+                    // governed-service identity fence inside pod assembly.
+                    if *reads > 1 {
+                        live["metadata"]["uid"] = json!("recreated-sandbox");
+                    }
+                    response(200, live)
+                }
+                ("PATCH", ACCOUNT) if matches!(self.stop, Stop::AccessDenied) => failure(403),
+                ("PATCH", ACCOUNT | SPAWNER | GATEWAY | ADMIN | NETWORK | ALLOWLIST) => {
+                    response(200, serde_json::from_slice::<Value>(&request.body).unwrap())
+                }
+                ("PATCH", STATUS) => {
+                    if matches!(self.stop, Stop::MissingInference) {
+                        // Status failures remain best-effort; they must not
+                        // turn a missing policy into resource provisioning.
+                        failure(503)
+                    } else {
+                        response(200, self.sandbox.clone())
+                    }
+                }
+                _ => failure(500),
+            }
+        }
+    }
+
+    async fn run(
+        stop: Stop,
+        runtime: &str,
+    ) -> (
+        Result<Action, crate::reconciler::ReconcileError>,
+        Vec<Request>,
+    ) {
+        let mut state = State::legacy(Fault::None);
+        state.sandbox["metadata"]
+            .as_object_mut()
+            .unwrap()
+            .remove("deletionTimestamp");
+        state.namespace["metadata"]
+            .as_object_mut()
+            .unwrap()
+            .remove("deletionTimestamp");
+        state.namespace["status"] = json!({"phase":"Active"});
+        state.sandbox["spec"]["governance"] = json!({"enabled":false});
+        state.sandbox["spec"]["runtime"] = match runtime {
+            "Hermes" => json!({"kind":"Hermes","hermes":{}}),
+            _ => json!({"kind":"OpenClaw","openclaw":{}}),
+        };
+        let observed = state.observed();
+        let namespace: Namespace = serde_json::from_value(state.namespace.clone()).unwrap();
+        let (server, client, _) = setup(state).await;
+        server.reset().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ProvisioningServer {
+                sandbox: serde_json::to_value(&*observed).unwrap(),
+                stop,
+                source_reads: StdMutex::new(0),
+            })
+            .mount(&server)
+            .await;
+        let mut ctx = context(client);
+        let settings = Arc::get_mut(&mut ctx).unwrap();
+        settings.sandbox_image = "openclaw-sandbox:latest".into();
+        settings.openai_endpoint = "https://inference.example.test".into();
+        settings.foundry_project_endpoint = "https://project.example.test".into();
+
+        // Construct AND poll the real provisioning path on the default Tokio
+        // worker, not the test's block_on thread or the finalizer-only entry.
+        // No future-size assertion stands in for measuring its poll frame.
+        let result = tokio::spawn(async move {
+            crate::metrics::observe_reconcile(
+                "KarsSandbox",
+                crate::reconciler::reconcile_provisioning(
+                    observed,
+                    ctx,
+                    Some(namespace),
+                    false,
+                    None,
+                    crate::reconciler::credential_sources::Mode::Legacy,
+                ),
+            )
+            .await
+        })
+        .await
+        .unwrap();
+        (result, server.received_requests().await.unwrap())
+    }
+
+    fn calls(requests: &[Request]) -> Vec<(&str, &str)> {
+        requests
+            .iter()
+            .map(|r| (r.method.as_str(), r.url.path()))
+            .collect()
+    }
+
+    fn assert_degraded(request: &Request, reason: &str) {
+        let patch: Value = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(request.url.path(), STATUS);
+        assert!(
+            patch["status"]["conditions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| {
+                    c["type"] == "Degraded" && c["status"] == "True" && c["reason"] == reason
+                })
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn default_worker_preserves_missing_policy_requeue() {
+        let (result, requests) = run(Stop::MissingInference, "OpenClaw").await;
+        assert_eq!(result.unwrap(), Action::requeue(Duration::from_secs(60)));
+        assert_eq!(
+            calls(&requests),
+            [("GET", SKILLS), ("GET", INFERENCE), ("PATCH", STATUS)]
+        );
+        assert_degraded(requests.last().unwrap(), "InferencePolicyNotFound");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn default_worker_preserves_access_api_error() {
+        let (result, requests) = run(Stop::AccessDenied, "OpenClaw").await;
+        assert!(
+            matches!(result, Err(crate::reconciler::ReconcileError::Kube(
+            kube::Error::Api(ref status)
+        )) if status.code == 403)
+        );
+        assert_eq!(
+            calls(&requests),
+            [("GET", SKILLS), ("GET", INFERENCE), ("PATCH", ACCOUNT)]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn default_worker_preserves_network_failure_requeue() {
+        let (result, requests) = run(Stop::McpUnavailable, "OpenClaw").await;
+        assert_eq!(result.unwrap(), Action::requeue(Duration::from_secs(15)));
+        assert_eq!(
+            calls(&requests),
+            [
+                ("GET", SKILLS),
+                ("GET", INFERENCE),
+                ("PATCH", ACCOUNT),
+                ("PATCH", SPAWNER),
+                ("GET", GATEWAY),
+                ("PATCH", GATEWAY),
+                ("GET", ADMIN),
+                ("PATCH", ADMIN),
+                ("GET", CR_PATH),
+            ]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn default_worker_reaches_pod_assembly_and_preserves_identity_fence() {
+        for runtime in ["OpenClaw", "Hermes"] {
+            let (result, requests) = run(Stop::RecreatedSource, runtime).await;
+            assert_eq!(result.unwrap(), Action::requeue(Duration::from_secs(60)));
+            assert_eq!(
+                calls(&requests),
+                [
+                    ("GET", SKILLS),
+                    ("GET", INFERENCE),
+                    ("PATCH", ACCOUNT),
+                    ("PATCH", SPAWNER),
+                    ("GET", GATEWAY),
+                    ("PATCH", GATEWAY),
+                    ("GET", ADMIN),
+                    ("PATCH", ADMIN),
+                    ("GET", CR_PATH),
+                    ("PATCH", NETWORK),
+                    ("PATCH", ALLOWLIST),
+                    ("GET", AUTH),
+                    ("GET", CR_PATH),
+                    ("PATCH", STATUS),
+                ]
+            );
+            assert_degraded(requests.last().unwrap(), "GovernedServicePrivacyNotReady");
+            for (path, token) in [(GATEWAY, "gateway-token"), (ADMIN, "admin-token")] {
+                let request = requests
+                    .iter()
+                    .find(|r| r.method == "PATCH" && r.url.path() == path)
+                    .unwrap();
+                let patch: Value = serde_json::from_slice(&request.body).unwrap();
+                assert_eq!(patch["stringData"]["token"], token);
+            }
+            let request = requests.iter().find(|r| r.url.path() == NETWORK).unwrap();
+            let patch: Value = serde_json::from_slice(&request.body).unwrap();
+            assert_eq!(patch["spec"]["policyTypes"], json!(["Egress", "Ingress"]));
+            assert!(!patch["spec"]["egress"].as_array().unwrap().is_empty());
+            assert!(!patch["spec"]["ingress"].as_array().unwrap().is_empty());
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn reconciler_entry_stays_heap_bounded_on_a_default_worker_stack() {
+    let initial = State::legacy(Fault::None);
+    let observed = initial.observed();
+    let (server, client, _) = setup(initial).await;
+    let future = reconcile(observed, context(client));
+    let size = std::mem::size_of_val(&future);
+    assert!(size <= 1024, "sandbox entry future embeds {size} bytes");
+    let measured = crate::metrics::observe_reconcile("KarsSandbox", future);
+    let size = std::mem::size_of_val(&measured);
+    assert!(size <= 1024, "metrics wrapper embeds {size} bytes");
+    assert_eq!(
+        tokio::spawn(measured).await.unwrap().unwrap(),
+        Action::await_change()
+    );
+    let requests = server.received_requests().await.unwrap();
+    only_finalizer_io(&requests);
+    assert_eq!(requests.len(), 3);
 }
 
 #[tokio::test]
@@ -334,6 +677,24 @@ async fn reconciler_entry_cancels_prestage_when_deletion_races_binding_after_fin
         );
     }
     let requests = server.received_requests().await.unwrap();
+    let account_path = memory_account_path(sandbox_uid.as_str().unwrap());
+    let account_reads = requests
+        .iter()
+        .enumerate()
+        .filter(|(_, request)| request.url.path() == account_path)
+        .collect::<Vec<_>>();
+    assert_eq!(account_reads.len(), 1);
+    assert_eq!(account_reads[0].1.method, "GET");
+    let finalizer_removal = requests
+        .iter()
+        .rposition(|request| request.method == "PATCH" && request.url.path() == CR_PATH)
+        .unwrap();
+    assert!(account_reads[0].0 < finalizer_removal);
+    let final_patch: Value = serde_json::from_slice(&requests[finalizer_removal].body).unwrap();
+    assert_eq!(
+        final_patch["metadata"]["finalizers"],
+        json!([OTHER_FINALIZER])
+    );
     assert!(requests.iter().all(|request| {
         !(request.url.path().contains("/deployments/")
             || request.method == "DELETE" && request.url.path() == NS_PATH)

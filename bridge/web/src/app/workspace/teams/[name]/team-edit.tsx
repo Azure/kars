@@ -7,7 +7,7 @@ import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { RepoAccess } from "@/components/repo-access";
 import { loginPath } from "@/lib/auth-return";
-import type { ExecutionPlan, TeamLifecycleMode } from "@/lib/types";
+import type { ExecutionPlan, ExecutionSynthesis } from "@/lib/types";
 
 type McpOption = { name: string; summary?: string | null };
 type MemoryOption = { name: string };
@@ -42,12 +42,9 @@ export function TeamEdit({
   charter,
   paused,
   everyMinutes,
-  lifecycleMode,
-  warmIdleSeconds,
   mcpServers,
   availableMcp,
   egress,
-  egressMode,
   model,
   modelFallbacks,
   models,
@@ -61,12 +58,9 @@ export function TeamEdit({
   charter: string;
   paused: boolean;
   everyMinutes: number | null;
-  lifecycleMode: TeamLifecycleMode;
-  warmIdleSeconds: number | null;
   mcpServers: string[];
   availableMcp: McpOption[];
   egress: string[];
-  egressMode: string | null;
   model: string | null;
   modelFallbacks: string[];
   models: { provider: string; deployment: string; is_default?: boolean }[];
@@ -78,12 +72,7 @@ export function TeamEdit({
   const [open, setOpen] = useState(false);
   const [ch, setCh] = useState(charter);
   const [cad, setCad] = useState(everyMinutes ?? 0);
-  const [lifecycle, setLifecycle] = useState<TeamLifecycleMode>(lifecycleMode);
-  const [warmIdle, setWarmIdle] = useState(warmIdleSeconds ?? 900);
   const [mcp, setMcp] = useState(mcpServers);
-  const [networkMode, setNetworkMode] = useState<"learning" | "strict">(
-    egressMode?.toLowerCase().startsWith("strict") ? "strict" : "learning",
-  );
   const [egressText, setEgressText] = useState(egress.join("\n"));
   const [modelRoute, setModelRoute] = useState(() => {
     const option = model
@@ -93,7 +82,7 @@ export function TeamEdit({
             : entry.deployment === model,
         )
       : undefined;
-    return option ? `${option.provider}::${option.deployment}` : "";
+    return option ? `${option.provider}::${option.deployment}` : (model ?? "");
   });
   const [fallbackRoutes, setFallbackRoutes] = useState(modelFallbacks);
   const [memoryBinding, setMemoryBinding] = useState(memory ?? "");
@@ -105,6 +94,30 @@ export function TeamEdit({
   const [error, setError] = useState<string | null>(null);
   const [signInRequired, setSignInRequired] = useState(false);
   const router = useRouter();
+  let parsedExecutionPlan: ExecutionPlan | undefined;
+  let executionPlanError = false;
+  try {
+    parsedExecutionPlan = executionPlanText.trim() ? JSON.parse(executionPlanText) as ExecutionPlan : undefined;
+  } catch {
+    executionPlanError = true;
+  }
+  const inputPhases = parsedExecutionPlan && Array.isArray(parsedExecutionPlan.roles)
+    && parsedExecutionPlan.roles.every((role) => Array.isArray(role?.phases)
+      && role.phases.every((phase) => Array.isArray(phase?.capabilities)))
+    && Array.isArray(parsedExecutionPlan.synthesis?.capabilities)
+    ? [
+      ...parsedExecutionPlan.roles.flatMap((role, roleIndex) => role.phases.map((phase, phaseIndex) => ({
+        label: `${role.name} / ${phase.name}`, roleIndex, phaseIndex, phase,
+      }))),
+      { label: "Principal synthesis", roleIndex: -1, phaseIndex: -1, phase: parsedExecutionPlan.synthesis },
+    ] : [];
+  function updateInputPhase(roleIndex: number, phaseIndex: number, change: Partial<ExecutionSynthesis>) {
+    if (!parsedExecutionPlan) return;
+    const plan = structuredClone(parsedExecutionPlan);
+    const phase = roleIndex < 0 ? plan.synthesis : plan.roles[roleIndex].phases[phaseIndex];
+    Object.assign(phase, change);
+    setExecutionPlanText(JSON.stringify(plan, null, 2));
+  }
   // PATCH with EXACTLY the given body — so Pause/Resume never smuggles an
   // unsaved charter/cadence edit into the request (that was a silent commit).
   const patch = (body: object) => start(async () => {
@@ -156,24 +169,14 @@ export function TeamEdit({
             <label className="text-xs text-foreground-muted">Cadence minutes (0 = passive)
               <input type="number" min={0} value={cad} onChange={(e) => setCad(Number(e.target.value))} className="mt-1 w-full rounded border border-border bg-surface px-2 py-1.5 text-xs" />
             </label>
-            <label className="text-xs text-foreground-muted">Runtime lifecycle
-              <select value={lifecycle} onChange={(event) => setLifecycle(event.target.value as TeamLifecycleMode)} className="mt-1 w-full rounded border border-border bg-surface px-2 py-1.5 text-xs">
-                <option value="resourceOptimized">Resource optimized (recommended)</option>
-                <option value="persistent">Persistent</option>
-                <option value="ephemeral">Ephemeral</option>
-              </select>
-            </label>
-            {lifecycle === "resourceOptimized" && (
-              <label className="text-xs text-foreground-muted">Warm idle window (seconds)
-                <input type="number" min={0} value={warmIdle} onChange={(event) => setWarmIdle(Number(event.target.value))} className="mt-1 w-full rounded border border-border bg-surface px-2 py-1.5 text-xs" />
-              </label>
-            )}
-            <label className="text-xs text-foreground-muted">Egress mode
-              <select value={networkMode} onChange={(event) => setNetworkMode(event.target.value as "learning" | "strict")} className="mt-1 w-full rounded border border-border bg-surface px-2 py-1.5 text-xs">
-                <option value="learning">Learning · observe new public hosts</option>
-                <option value="strict">Strict · enforce reviewed hosts only</option>
-              </select>
-            </label>
+            <p className="text-xs text-foreground-muted">
+              The Team persists across isolated runs; agent pods are created on demand.
+              Warm and always-on agent runtimes are not currently supported.
+            </p>
+            <p className="text-xs text-foreground-muted">
+              Egress: Strict · reviewed hosts only. New destinations require approved access.
+              Datapath observations do not grant access.
+            </p>
             <label className="text-xs text-foreground-muted">Principal/default model
               <select value={modelRoute} onChange={(event) => {
                 const route = event.target.value;
@@ -181,6 +184,9 @@ export function TeamEdit({
                 setFallbackRoutes((current) => current.filter((fallback) => fallback !== route));
               }} className="mt-1 w-full rounded border border-border bg-surface px-2 py-1.5 text-xs">
                 <option value="">cluster default</option>
+                {modelRoute && !models.some((entry) => `${entry.provider}::${entry.deployment}` === modelRoute) && (
+                  <option value={modelRoute}>{modelRoute} (not in current catalog)</option>
+                )}
                 {models.map((entry) => (
                   <option key={`${entry.provider}::${entry.deployment}`} value={`${entry.provider}::${entry.deployment}`}>
                     {entry.deployment} · {entry.provider}{entry.is_default ? " (default)" : ""}
@@ -250,14 +256,64 @@ export function TeamEdit({
             </div>
           </fieldset>
           <RepoAccess
+            plan={parsedExecutionPlan ?? executionPlan}
             ns={ns}
             initialSelected={gitWriteRepos}
             onSelectionChange={setSelectedGitWriteRepos}
           />
+          {inputPhases.length > 0 && (
+            <fieldset className="space-y-3 rounded border border-border p-3">
+              <legend className="text-xs font-medium">Reading previous work</legend>
+              <p className="text-xs text-foreground-muted">
+                Revisions and approved Team knowledge supply previous work to every phase, including independent researchers.
+                Allow each phase to read previous work and give it enough tool calls. Review only the needed changes.
+                If an administrator tool policy blocks reading, ask the administrator to review it; these controls cannot override that policy.
+                No host, network or credential access is added. Pause stops new runs only;
+                let current work finish before saving because permission changes can stop active work.
+              </p>
+              {!paused && <p className="text-xs text-warning">Pause the Team before updating retained input permissions.</p>}
+              {inputPhases.map(({ label, roleIndex, phaseIndex, phase }) => (
+                <div key={`${roleIndex}:${phaseIndex}`} className="space-y-1 text-xs">
+                  <p className="font-medium">{label}</p>
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      aria-label={`Read previous work for ${label}`}
+                      checked={phase.capabilities.includes("filesystem-read")}
+                      disabled={!paused || pending}
+                      onChange={(event) => updateInputPhase(roleIndex, phaseIndex, {
+                        capabilities: event.target.checked
+                          ? [...phase.capabilities.filter((cap) => cap !== "filesystem-read"), "filesystem-read"]
+                          : phase.capabilities.filter((cap) => cap !== "filesystem-read"),
+                      })}
+                    />
+                    Read previous work
+                  </label>
+                  <label className="flex items-center gap-2">
+                    Maximum tool calls
+                    <input
+                      type="number" min={0} step={1}
+                      aria-label={`Maximum tool calls for ${label}`}
+                      value={phase.max_tool_calls}
+                      disabled={!paused || pending}
+                      onChange={(event) => updateInputPhase(roleIndex, phaseIndex, { max_tool_calls: Number(event.target.value) })}
+                      className="w-24 rounded border border-border bg-surface px-2 py-1"
+                    />
+                  </label>
+                </div>
+              ))}
+              <button type="button" disabled={!paused || pending || executionPlanError}
+                onClick={() => patch({ execution_plan: parsedExecutionPlan })}
+                className="rounded bg-signal px-3 py-1.5 text-xs font-semibold text-signal-fg disabled:opacity-50">
+                Save input permissions
+              </button>
+              <p className="text-xs text-foreground-muted">Saves only the reviewed plan. Resume afterwards, then confirm Run now or allow the reviewed cadence to proceed.</p>
+            </fieldset>
+          )}
           <label className="block text-xs text-foreground-muted">
             Typed execution plan
             <span className="ml-1 text-[11px]">
-              Adjust role token budgets without changing role names or capabilities.
+              Review phase capabilities and role token budgets. Role names must match the roster.
             </span>
             <textarea
               value={executionPlanText}
@@ -270,25 +326,18 @@ export function TeamEdit({
           <div className="flex justify-end">
             <button
               onClick={() => {
-                let parsedExecutionPlan: ExecutionPlan | undefined;
-                try {
-                  parsedExecutionPlan = executionPlanText.trim()
-                    ? JSON.parse(executionPlanText) as ExecutionPlan
-                    : undefined;
-                } catch {
+                if (executionPlanError) {
                   setError("Typed execution plan must be valid JSON.");
                   return;
                 }
                 patch({
                   charter: ch,
                   cadence_minutes: Number(cad),
-                  lifecycle_mode: lifecycle,
-                  warm_idle_seconds: lifecycle === "resourceOptimized" ? warmIdle : undefined,
                   mcp_servers: mcp,
                   model: modelRoute,
                   model_fallbacks: fallbackRoutes,
                   memory: memoryBinding,
-                  egress_mode: networkMode,
+                  egress_mode: "strict",
                   egress: parseEgress(egressText),
                   git_write_repos: selectedGitWriteRepos,
                   execution_plan: parsedExecutionPlan,

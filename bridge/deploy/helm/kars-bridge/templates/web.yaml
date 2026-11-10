@@ -1,6 +1,6 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}{{- include "kars-bridge.externalOIDCCA.validate" . }}
+{{- $oidcCA := (.Values.web.oidc | default dict).caConfigMap | default "" }}
 {{- $headlamp := .Values.headlamp | default dict }}
 {{- if $headlamp.url }}
 {{- if not (regexMatch "^https?://[^[:space:]]+$" $headlamp.url) }}
@@ -100,6 +100,10 @@ spec:
                   name: {{ .Values.auth.principalSecretName }}
                   key: {{ .Values.auth.principalSecretKey }}
             {{- end }}
+            {{- if $oidcCA }}
+            - name: NODE_EXTRA_CA_CERTS
+              value: /etc/bridge-oidc-ca/ca.crt
+            {{- end }}
             {{- with .Values.web.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -112,6 +116,11 @@ spec:
             readOnlyRootFilesystem: true
             capabilities: { drop: ["ALL"] }
           volumeMounts:
+            {{- if $oidcCA }}
+            - name: oidc-ca
+              mountPath: /etc/bridge-oidc-ca
+              readOnly: true
+            {{- end }}
             - name: web-cache
               mountPath: /app/.next/cache
             - name: web-tmp
@@ -119,6 +128,16 @@ spec:
           resources:
             {{- toYaml .Values.web.resources | nindent 12 }}
       volumes:
+        {{- if $oidcCA }}
+        - name: oidc-ca
+          configMap:
+            name: {{ $oidcCA | quote }}
+            optional: false
+            defaultMode: 0444
+            items:
+              - key: ca.crt
+                path: ca.crt
+        {{- end }}
         - name: web-cache
           emptyDir:
             sizeLimit: 256Mi

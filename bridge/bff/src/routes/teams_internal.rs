@@ -207,6 +207,16 @@ pub async fn teams_decision(
         ));
     }
 
+    if matches!(req.verdict.as_str(), "deny" | "request-changes") {
+        super::teams::preflight_checkpoint_rejection(
+            cluster,
+            &req.approval_namespace,
+            &current,
+            req.reason.as_deref(),
+        )
+        .await?;
+    }
+
     // ── Apply decision ────────────────────────────────────────────────────────
     let decision = ApprovalDecision {
         verdict: if req.verdict == "request-changes" {
@@ -306,7 +316,8 @@ pub async fn teams_command(
     let team_name = &req.team_name;
 
     // Enforce team ownership — same as browser handlers
-    let owned_team = crate::routes::teams::require_owned_team(cluster, ns, team_name, &principal).await?;
+    let owned_team =
+        crate::routes::teams::require_owned_team(cluster, ns, team_name, &principal).await?;
 
     match req.command.as_str() {
         "status" => {
@@ -376,7 +387,8 @@ pub async fn teams_command(
                     title: title.clone(),
                     ..Default::default()
                 }),
-            ).await?;
+            )
+            .await?;
             let task_id = task.id;
             Ok((
                 StatusCode::OK,
