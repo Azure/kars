@@ -55,7 +55,7 @@ spec:
       ports:
         - port: {{ .Values.bff.port }}
           protocol: TCP
-    {{- with .Values.web.oidc.localDexNamespace }}
+    {{- with (default dict .Values.web.oidc).localDexNamespace }}
     {{- if or (ne . "kars-local-idp") (ne $.Values.global.installationProfile "kind-beta") }}
     {{- fail "web.oidc.localDexNamespace is reserved for the Kind beta local IdP" }}
     {{- end }}

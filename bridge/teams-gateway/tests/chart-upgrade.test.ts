@@ -92,11 +92,15 @@ describe("BASE105 private release-value compatibility",()=>{
   it("actually omits the new maps in its historical values fixture",()=>{
     const values=loadYaml(readFileSync(oldValues,"utf8")) as any;
     expect(values.core).toBeUndefined();
+    expect(values.web.oidc).toBeUndefined();
     expect(values.networkPolicy.observations).toBeUndefined();
   });
   it.each([[],["--set","core.namespace="]].map(args=>({args})))("defaults BFF/web workspace and observations off with old values $args",async({args})=>{
     const {objects}=await legacyRender(args);
     expect(objects.some(item=>item.metadata?.name==="kars-bridge-observation-egress")).toBe(false);
+    const webPolicy=objects.find(item=>item.kind==="NetworkPolicy"&&item.metadata.name==="kars-bridge-web");
+    expect(webPolicy.spec.egress.some((rule:any)=>rule.to?.some((peer:any)=>
+      peer.namespaceSelector?.matchLabels?.["kubernetes.io/metadata.name"]==="kars-local-idp"))).toBe(false);
     for(const name of ["kars-bridge-bff","kars-bridge-web"]){
       const env=objects.find(item=>item.kind==="Deployment"&&item.metadata.name===name).spec.template.spec.containers[0].env;
       expect(env.find((item:any)=>item.name==="BRIDGE_DEFAULT_NAMESPACE").value).toBe("kars-system");
