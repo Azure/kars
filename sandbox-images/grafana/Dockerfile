@@ -7,7 +7,8 @@ ARG TARGETARCH
 RUN tdnf install -y ca-certificates curl golang python3 tar gzip findutils \
     && tdnf clean all
 ENV CGO_ENABLED=0 GOMAXPROCS=2 GOMEMLIMIT=3GiB GOGC=50 \
-    GOTOOLCHAIN=go1.27.2 GOPATH=/build/go GOCACHE=/build/cache GOTMPDIR=/build/tmp
+    GOTOOLCHAIN=go1.27.2 MS_GOTOOLCHAIN_ALLOW_NON_LOCAL=1 \
+    GOPATH=/build/go GOCACHE=/build/cache GOTMPDIR=/build/tmp
 WORKDIR /build
 ADD --checksum=sha256:7172f17ec16650d86c41dd2aa6b54afbb6cbab3e0906b10d973f72f0c942e0e0 https://codeload.github.com/grafana/grafana/tar.gz/952c9f4a26f5fa9be8dd49e979328966e8f1ee24 /inputs/source.tar.gz
 COPY sandbox-images/grafana/build-backend.sh sandbox-images/grafana/no-cache.py sandbox-images/grafana/patch-parser.py /inputs/

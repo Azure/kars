@@ -14,6 +14,23 @@ FILES = {
 }
 
 
+class ToolchainContractTests(unittest.TestCase):
+    def test_pinned_toolchain_is_explicitly_allowed_only_in_builder(self):
+        builder, runtime = (HERE / "Dockerfile").read_text().split(
+            "FROM ${AZURELINUX_DISTROLESS}", 1)
+        self.assertIn("GOTOOLCHAIN=go1.27.2", builder)
+        self.assertIn("MS_GOTOOLCHAIN_ALLOW_NON_LOCAL=1", builder)
+        self.assertNotIn("GOTOOLCHAIN", runtime)
+        self.assertIn("FROM mcr.microsoft.com/azurelinux/base/core:3.0 AS build", builder)
+
+    def test_backend_retains_exact_version_and_module_verification(self):
+        script = (HERE / "build-backend.sh").read_text()
+        self.assertIn('test "$(go env GOVERSION)" = go1.27.2', script)
+        self.assertIn("GOSUMDB=sum.golang.org", script)
+        self.assertEqual(script.count("go mod verify"), 2)
+        self.assertNotIn("GOTOOLCHAIN=auto", script)
+
+
 class ParserMigrationTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()

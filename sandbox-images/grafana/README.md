@@ -8,6 +8,14 @@ Licensed under the MIT License. -->
 Azure Linux 3. Grafana stays optional; this target does not change the default
 monitoring installation or enable it in an existing Core release.
 
+The AL3 builder's Microsoft Go package rejects non-local toolchain selection
+unless explicitly allowed. The build stage opts in with
+`MS_GOTOOLCHAIN_ALLOW_NON_LOCAL=1` to select the already-qualified upstream
+`go1.27.2` toolchain, not an automatically selected newer compiler. The exact
+version assertion and module checksum verification remain enforced. This
+build-only setting does not enter the distroless runtime, which contains
+neither Go nor a runtime toolchain download path.
+
 The backend uses fixed x/net, Tempo, Prometheus and Loki dependencies.
 Promlib 0.0.11 supplies the matching PromQL parser migration; two Grafana
 call sites use the instance-based parser with the same default options.
