@@ -47,12 +47,20 @@ if [ -z "$added_audit" ]; then
   exit 1
 fi
 
-# One explicit maintainer decision, not an environment-configurable waiver.
+# Explicit source-bound maintainer decisions, not environment-configurable waivers.
 beta_approval_exception() {
-  local audit="$1" approval_text
-  local approved_head=28ff64372ca97e6bdd6db833d68afa90239cde7c
-  local approved_base=b2ec2094cc663d5b747fec7f3c9d37cce667a24a
-  [[ "$audit" == docs/security-audits/2026-11-04-beta-publication.md ]] || return 1
+  local audit="$1" approval_text approved_head approved_base approved_pr
+  case "$audit" in
+    docs/security-audits/2026-11-04-beta-publication.md)
+      approved_head=28ff64372ca97e6bdd6db833d68afa90239cde7c
+      approved_base=b2ec2094cc663d5b747fec7f3c9d37cce667a24a
+      approved_pr=593 ;;
+    docs/security-audits/2026-11-10-overlay-package-update.md)
+      approved_head=187ada4b45203bc831e7976961ffcb2f92160886
+      approved_base=ab78d11d66b626b4a176603643011ebc1cca1dff
+      approved_pr=606 ;;
+    *) return 1 ;;
+  esac
   [[ "$(git rev-parse --verify "${BASE_REF}^{commit}")" == "$approved_base" ]] || return 1
   git merge-base --is-ancestor "$approved_base" "$approved_head" || return 1
   git merge-base --is-ancestor "$approved_head" HEAD || return 1
@@ -61,16 +69,16 @@ beta_approval_exception() {
     ':(exclude)ci/security-audit-required.sh' \
     ':(exclude)ci/tests/security_audit_gate_test.py' \
     ':(exclude)docs/security-audits/README.md' \
-    ':(exclude)docs/security-audits/2026-11-04-beta-publication.md' || return 1
+    ":(exclude)$audit" || return 1
   if [[ "${GITHUB_ACTIONS:-}" == true ]]; then
     [[ "${GITHUB_REPOSITORY:-}" == Azure/kars ]] || return 1
     case "${GITHUB_EVENT_NAME:-}:${GITHUB_REF:-}" in
-      pull_request:refs/pull/593/merge|push:refs/heads/kars-bridge) ;;
+      "pull_request:refs/pull/$approved_pr/merge"|push:refs/heads/kars-bridge) ;;
       *) return 1 ;;
     esac
   fi
   approval_text=$(git show "HEAD:$audit") || return 1
-  grep -Fxq "Beta-approval-exception: Azure/kars#593; source=$approved_head; base=$approved_base" \
+  grep -Fxq "Beta-approval-exception: Azure/kars#$approved_pr; source=$approved_head; base=$approved_base" \
     <<< "$approval_text" || return 1
   grep -Fxq 'Signed-off-by: Pal Lakatos-Toth <lakatos.toth.pal@gmail.com>' <<< "$approval_text"
 }
@@ -86,7 +94,7 @@ while IFS= read -r audit; do
   )
   if [ "${#signers[@]}" -lt 2 ]; then
     if beta_approval_exception "$audit"; then
-      echo "pass: $audit uses the explicit, source-bound single-maintainer beta exception (Azure/kars#593)."
+      echo "pass: $audit uses its explicit, source-bound single-maintainer beta exception."
     else
       echo "fail: $audit has ${#signers[@]} distinct Signed-off-by emails; need 2 (author + independent reviewer)." >&2
       fail=1

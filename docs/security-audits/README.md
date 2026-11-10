@@ -35,7 +35,7 @@ must cite that authorization and disclose its actual participants and limits
 in the record, never imply that AI review was a second human review or that
 technical gates were waived. No delegation is inferred by default.
 
-## One-time beta approval exception
+## Source-bound beta approval exceptions
 
 For Azure/kars#593 only, maintainer `pallakatos` explicitly authorized a
 single-maintainer approval of source `28ff64372ca97e6bdd6db833d68afa90239cde7c`
@@ -45,12 +45,20 @@ one genuine sign-off are recorded in
 **No second human sign-off is claimed.** This is an exception to, not fulfillment
 or replacement of, the normal author-plus-independent-reviewer policy.
 
-The gate requires that exact committed record, signer and source/base marker,
+Separately, for Azure/kars#606, the maintainer explicitly authorized the combined
+OverlayFS and Grafana build repair at source
+`187ada4b45203bc831e7976961ffcb2f92160886` against integration base
+`ab78d11d66b626b4a176603643011ebc1cca1dff`. Its current-PR record is
+[`2026-11-10-overlay-package-update.md`](2026-11-10-overlay-package-update.md).
+This additional approval does not repoint or extend the older PR593 approval.
+
+For each exception, the gate requires its exact committed record, signer and source/base marker,
 the exact review base, and the approved source as an ancestor. Every tracked
 file must match that source except the four explicitly reviewed approval-plumbing
 paths: the gate, its regression test, this README and the approval record.
-GitHub CI additionally restricts this exception to Azure/kars#593's PR merge
-or its unchanged integration on `kars-bridge`. Synthetic merge commits are allowed;
+GitHub CI additionally restricts each exception to its specified Azure/kars PR merge
+or its unchanged integration on `kars-bridge`. The other exception's audit record
+is not excluded from the source comparison. Synthetic merge commits are allowed;
 changed base, implementation, workflows, unrelated documents or new files are not.
 There is no configurable source SHA, signer or waiver environment variable.
 
