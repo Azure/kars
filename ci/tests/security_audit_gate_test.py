@@ -99,6 +99,7 @@ class SecurityAuditGateTests(GitFixture):
         self.assertIn("cannot determine the reviewed capability diff", result.stderr)
 
     audit = "docs/security-audits/2026-11-04-beta-publication.md"
+    pr_number = "593"
     signer = "Signed-off-by: Pal Lakatos-Toth <lakatos.toth.pal@gmail.com>"
     source_head = "28ff64372ca97e6bdd6db833d68afa90239cde7c"
     source_base = "b2ec2094cc663d5b747fec7f3c9d37cce667a24a"
@@ -111,7 +112,7 @@ class SecurityAuditGateTests(GitFixture):
         self.commit()
         self.approved_head = self.git("rev-parse", "HEAD").strip()
         self.approval = ("# Explicit single-maintainer beta approval\n"
-                         f"Beta-approval-exception: Azure/kars#593; "
+                         f"Beta-approval-exception: Azure/kars#{self.pr_number}; "
                          f"source={self.approved_head}; base={self.base}\n{self.signer}\n")
         self.write(self.audit, self.approval)
         self.commit()
@@ -157,7 +158,7 @@ class SecurityAuditGateTests(GitFixture):
     def test_wrong_or_missing_approval_fields_fail_closed(self):
         self.approved_beta()
         for old, new in ((self.signer, ""), (self.signer, "Signed-off-by: Other <other@example.invalid>"),
-                         ("Azure/kars#593", "Azure/kars#594"),
+                         (f"Azure/kars#{self.pr_number}", "Azure/kars#594"),
                          (self.approved_head, "0" * 40), (self.base, "1" * 40)):
             with self.subTest(field=old):
                 self.write(self.audit, self.approval.replace(old, new))
@@ -192,7 +193,7 @@ class SecurityAuditGateTests(GitFixture):
     def test_wrong_ci_repository_event_or_pr_fails(self):
         self.approved_beta()
         context = {"GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": "Azure/kars",
-                   "GITHUB_EVENT_NAME": "pull_request", "GITHUB_REF": "refs/pull/593/merge"}
+                   "GITHUB_EVENT_NAME": "pull_request", "GITHUB_REF": f"refs/pull/{self.pr_number}/merge"}
         for key, value in (("GITHUB_REPOSITORY", "other/kars"),
                            ("GITHUB_REF", "refs/pull/594/merge"),
                            ("GITHUB_EVENT_NAME", "workflow_dispatch")):
@@ -206,7 +207,7 @@ class SecurityAuditGateTests(GitFixture):
         self.git("merge", "--no-ff", "--no-edit", candidate)
         self.assertEqual(self.beta_gate(GITHUB_ACTIONS="true", GITHUB_REPOSITORY="Azure/kars",
                                        GITHUB_EVENT_NAME="pull_request",
-                                       GITHUB_REF="refs/pull/593/merge").returncode, 0)
+                                       GITHUB_REF=f"refs/pull/{self.pr_number}/merge").returncode, 0)
         self.assertEqual(self.beta_gate(BASE_REF="HEAD~1", GITHUB_ACTIONS="true",
                                        GITHUB_REPOSITORY="Azure/kars", GITHUB_EVENT_NAME="push",
                                        GITHUB_REF="refs/heads/kars-bridge").returncode, 0)
@@ -221,12 +222,33 @@ class SecurityAuditGateTests(GitFixture):
 
     def test_exact_pr_and_unchanged_integration_contexts_pass(self):
         self.approved_beta()
-        for event, ref in (("pull_request", "refs/pull/593/merge"),
+        for event, ref in (("pull_request", f"refs/pull/{self.pr_number}/merge"),
                            ("push", "refs/heads/kars-bridge")):
             with self.subTest(event=event):
                 result = self.beta_gate(GITHUB_ACTIONS="true", GITHUB_REPOSITORY="Azure/kars",
                                         GITHUB_EVENT_NAME=event, GITHUB_REF=ref)
                 self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_other_beta_record_cannot_be_changed_as_policy_plumbing(self):
+        other = ("docs/security-audits/2026-11-10-overlay-package-update.md"
+                 if self.pr_number == "593"
+                 else "docs/security-audits/2026-11-04-beta-publication.md")
+        self.assert_unapproved_change_rejected(other)
+
+    def test_other_beta_pr_cannot_use_this_approval(self):
+        self.approved_beta()
+        other = "606" if self.pr_number == "593" else "593"
+        result = self.beta_gate(GITHUB_ACTIONS="true", GITHUB_REPOSITORY="Azure/kars",
+                                GITHUB_EVENT_NAME="pull_request",
+                                GITHUB_REF=f"refs/pull/{other}/merge")
+        self.assertEqual(result.returncode, 1)
+
+
+class ReleaseRepairAuditGateTests(SecurityAuditGateTests):
+    audit = "docs/security-audits/2026-11-10-overlay-package-update.md"
+    pr_number = "606"
+    source_head = "187ada4b45203bc831e7976961ffcb2f92160886"
+    source_base = "ab78d11d66b626b4a176603643011ebc1cca1dff"
 
 
 if __name__ == "__main__":
