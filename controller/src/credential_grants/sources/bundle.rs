@@ -32,6 +32,28 @@ pub(super) async fn verify_task_caller(
     task::verify_caller(client, consumer, target_object, target, bindings).await
 }
 
+pub(super) async fn verify_task_refresh(
+    client: &Client,
+    consumer: TaskConsumer<'_>,
+    before: &DynamicObject,
+    after: &DynamicObject,
+    target: &CredentialTarget,
+    bindings: &CredentialBindings,
+) -> Result<(), String> {
+    let metadata = |object: &DynamicObject| {
+        let mut metadata = object.metadata.clone();
+        metadata.resource_version = None;
+        metadata.managed_fields = None;
+        metadata
+    };
+    // Unlike anchor recovery, an ordinary refresh must retain the bound bundle UID.
+    if metadata(before) != metadata(after) {
+        return Err("Credential target changed before bundle write".into());
+    }
+    task::verify_transition(before, after, target, bindings)?;
+    verify_task_caller(client, consumer, after, target, bindings).await
+}
+
 pub(super) const UID_ANNOTATION: &str = "kars.azure.com/credential-bundle-uid";
 pub(super) const RECOVERY_PATCHES: usize = 2;
 pub(super) const RECONCILE_REQUIRED: &str =

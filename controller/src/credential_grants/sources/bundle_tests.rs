@@ -116,6 +116,25 @@ async fn ordinary_sandbox_task_and_team_creation_keep_existing_value_fences_and_
     }
 }
 
+#[tokio::test]
+async fn ordinary_bundle_refresh_keeps_exact_target_revisions_without_a_task_consumer() {
+    for kind in ["KarsSandbox", "KarsTask", "KarsTeam"] {
+        let f = fixture::setup(kind).await;
+        let original = f.prepare().await.unwrap();
+        f.state.lock().unwrap().after_bundle_read = Some("target-rv");
+        assert_eq!(
+            f.prepare().await.unwrap_err(),
+            "Credential target changed before bundle write"
+        );
+        let state = f.state.lock().unwrap();
+        assert_eq!((state.creates, state.anchors, state.writes), (1, 1, 1));
+        assert_eq!(
+            state.objects[&state.bundle_path]["data"],
+            json!(original.data)
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn governed_sandbox_bundles_stay_heap_bounded_on_a_default_worker_stack() {
     let f = fixture::setup("KarsSandbox").await;
