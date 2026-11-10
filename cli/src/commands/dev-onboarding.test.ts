@@ -51,6 +51,12 @@ describe("standalone dev onboarding help", () => {
     expect(renderHelp()).toContain("--beta-config <file>");
   });
 
+  it("routes a bare beta flag into managed setup with a fresh unique cluster name", async () => {
+    await devCommand().parseAsync(["--release", "--target", "local-k8s", "--beta-config"], { from: "user" });
+    expect(local).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ betaConfig: true, clusterName: expect.stringMatching(/^kars-beta-[a-f0-9]{8}$/), noBuild: true }));
+    expect(renderHelp()).toContain("--beta-config [file]");
+  });
+
   it.each([
     ["--target", "local-k8s"],
     ["--release", "--target", "docker"],

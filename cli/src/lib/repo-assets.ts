@@ -11,15 +11,16 @@
  * repo — the Helm chart (`deploy/helm/kars`), the AgentMesh manifest
  * (`deploy/agentmesh-agt.yaml`), monitoring manifests, etc. Those are
  * **bundled into the published package** (copied into `dist/deploy/…` at build
- * time; see cli/package.json `build`), so this resolver checks, in order:
+ * time; see cli/package.json `build`). The development resolver checks:
  *
  *   1. A kars repo checkout, by walking up from `process.cwd()`.
  *   2. The assets bundled alongside the compiled CLI (`<dist>/<relPath>`).
  *
- * Returns an absolute path, or null when the asset is found in neither place.
+ * Released Kind beta bootstrap uses requirePackagedAsset instead: it requires
+ * the installed bundle and cannot silently select a dirty source checkout.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -31,6 +32,17 @@ function bundleRoot(): string {
   // This module compiles to `dist/lib/repo-assets.js`, so `dist/` is one up.
   const here = path.dirname(fileURLToPath(import.meta.url));
   return path.resolve(here, "..");
+}
+
+/** Release installs must never select checkout assets, even when invoked inside a repository. */
+export function requirePackagedAsset(relPath: string, root = bundleRoot()): string {
+  const base = realpathSync(root);
+  const candidate = path.resolve(base, relPath);
+  if (path.isAbsolute(relPath) || !candidate.startsWith(`${base}${path.sep}`)
+    || !existsSync(candidate) || !realpathSync(candidate).startsWith(`${base}${path.sep}`)) {
+    throw new Error(`Release asset '${relPath}' is absent from the installed CLI package; install the signed released CLI. Checkout assets are not a release fallback.`);
+  }
+  return candidate;
 }
 
 /** Find the nearest kars repo checkout root above `start`, or null. */

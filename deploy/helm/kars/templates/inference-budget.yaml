@@ -28,7 +28,8 @@ identities are guessed. Old/reused values without this block render no broker.
 {{- end -}}
 {{- if ($budget.enabled | default false) -}}
 {{- $version := required "inferenceBudget.catalogVersion is required" $budget.catalogVersion -}}
-{{- $contracts := required "inferenceBudget.contracts is required" $budget.contracts -}}
+{{- include "kars.inferenceBudget.contracts.validate" . -}}
+{{- $contracts := $budget.contracts -}}
 {{- $ca := required "inferenceBudget.caBundle is required" $budget.caBundle -}}
 {{- $tls := required "inferenceBudget.tlsSecretName is required" $budget.tlsSecretName -}}
 {{- $routerDigest := required "inferenceBudget.routerImageDigest is required" $budget.routerImageDigest -}}

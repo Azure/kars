@@ -35,6 +35,7 @@ function render(values: any, timeZone?: string, upgrade = false, receipts = fals
     writeFileSync(join(directory, "Chart.yaml"), "apiVersion: v2\nname: profile-test\nversion: 0.1.0\n");
     writeFileSync(join(directory, "values.yaml"), JSON.stringify(values));
     writeFileSync(join(directory, "templates/_sre-resources.tpl"), readFileSync(join(root, "deploy/helm/kars/templates/_sre-resources.tpl")));
+    writeFileSync(join(directory, "templates/_inference-budget-tls.tpl"), readFileSync(join(root, "deploy/helm/kars/templates/_inference-budget-tls.tpl")));
     let template = readFileSync(join(root, "deploy/helm/kars/templates/kind-beta.yaml"), "utf8");
     if (providerSecret !== undefined) template = template.replace(
       'lookup "v1" "Secret" .Release.Namespace "kars-inference-providers"',
@@ -56,6 +57,22 @@ function render(values: any, timeZone?: string, upgrade = false, receipts = fals
   } finally { rmSync(directory, { recursive: true, force: true }); }
 }
 describe("Kind beta runtime pull coverage", () => {
+  it("accepts an explicitly empty catalogue only for record-only unbounded funding", () => {
+    const values = fixture();
+    values.inferenceBudget.contracts = [];
+    values.inferenceBudget.calendarPolicy = "record-only";
+    expect(() => render(values)).not.toThrow();
+    values.inferenceBudget.calendarPolicy = "enforce";
+    expect(() => render(values)).toThrow(/empty inferenceBudget.contracts list requires kind-beta/);
+  });
+  it("does not exempt adopted finite-funding repairs from the empty-catalogue guard", () => {
+    const values = fixture();
+    values.schemaHook.enabled = false;
+    values.inferenceBudget.contracts = [];
+    values.inferenceBudget.calendarPolicy = "record-only";
+    values.sre.firstInstallFunding = { tokens: 1000, expiresAt: "2020-01-01T00:00:00Z" };
+    expect(() => render(values, "UTC", true, true)).toThrow(/finite or monetary budgets require genuine provider contracts/);
+  });
   it.each(["UTC", "Etc/GMT-2", "Etc/GMT+7"])("requires non-expiring beta funding in %s", timeZone => {
     expect(() => render(fixture(), timeZone)).not.toThrow();
     for (const minutes of [-30, 30]) {

@@ -163,8 +163,9 @@
 {{- end -}}
 {{- end -}}
 {{- end -}}
-{{- if or (not .Values.inferenceBudget.catalogVersion) (not (kindIs "slice" .Values.inferenceBudget.contracts)) (not .Values.inferenceBudget.contracts) (not .Values.inferenceBudget.caBundle) (not .Values.inferenceBudget.tlsSecretName) .Values.inferenceBudget.tls.privateKey -}}
-{{- fail "kind-beta requires genuine finite provider contracts and an existing operator budget TLS Secret/CA" -}}
+{{- include "kars.inferenceBudget.contracts.validate" . -}}
+{{- if or (not .Values.inferenceBudget.catalogVersion) (not .Values.inferenceBudget.caBundle) (not .Values.inferenceBudget.tlsSecretName) .Values.inferenceBudget.tls.privateKey -}}
+{{- fail "kind-beta requires an explicit provider catalogue version and an existing operator budget TLS Secret/CA" -}}
 {{- end -}}
 {{/* An adopted repair is checked against the sealed intent in sre.yaml; rendering
      compatible readers neither renews funding nor makes expired authority live. */}}

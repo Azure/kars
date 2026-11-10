@@ -57,6 +57,25 @@ describe("existing kind core installation target", () => {
     expect(execute).toHaveBeenCalledExactlyOnceWith("kind", ["get", "clusters"], { env: {} });
   });
 
+  it.each([false, true])("captures managed custody immediately after Kind creation, including retained failure (%s)", async failed => {
+    const order: string[] = [];
+    execute.mockImplementation(async (_file, args, options) => {
+      order.push(args.join(" "));
+      if (failed && args[0] === "create") throw new Error("retained create failure");
+      if (args[0] === "inspect") return { stdout: `${"a".repeat(64)} chosen` };
+      if (args[0] === "exec") return { stdout: String(options?.input ?? "") };
+      return { stdout: args[0] === "get" && args[1] === "clusters" ? "" : "chosen-control-plane" };
+    });
+    const attempt = ensureCluster("kind", "chosen", {}, "docker", {
+      config: "kind.yaml", kubeconfig: "dedicated", image: "reviewed", onCreated: async () => { order.push("capture custody"); },
+    });
+    if (failed) await expect(attempt).rejects.toThrow("retained create failure");
+    else await attempt;
+    expect(order[2]).toBe("capture custody");
+    expect(order[1]).toContain("create cluster");
+    if (failed) expect(order).toHaveLength(3);
+  });
+
   it("gives the migration journal sole ownership of protected publication", async () => {
     publishCore.mockResolvedValue(undefined);
     await installLocalCoreChart("/tools/helm", "/tools/kubectl", "chosen", "kars", "/exact/chart",

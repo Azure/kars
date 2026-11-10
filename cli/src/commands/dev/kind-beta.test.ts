@@ -367,6 +367,19 @@ describe("Kind creation and cold ordering", () => {
     expect(config.nodes[0].extraMounts?.[0].readOnly).toBe(true);
     expect(JSON.stringify(config)).not.toMatch(/insecure|skip-tls/);
   });
+  it.each([false, true])("wires owned custody and the Dex prerequisite before Core (failure=%s)", async failed => {
+    const f = installation();
+    const attempt = installKindBeta(f.plan, tools, { ...f.hooks,
+      ensureCluster: async (_kind, _cluster, _env, _runtime, cold) => { f.calls.push("kind create"); await cold?.onCreated?.(); },
+      afterCluster: async () => { f.calls.push("capture custody"); },
+      beforeCore: async () => { f.calls.push("install local Dex"); if (failed) throw new Error("Dex prerequisite failed"); },
+    }, f.execute, f.directory);
+    if (failed) await expect(attempt).rejects.toThrow("Dex prerequisite failed"); else await attempt;
+    expect(f.calls.indexOf("capture custody")).toBe(f.calls.indexOf("kind create") + 1);
+    expect(f.calls.indexOf("install local Dex")).toBeGreaterThan(f.calls.findIndex(call => call.includes("install cilium")));
+    if (failed) expect(f.calls).not.toContain("core install");
+    else expect(f.calls.indexOf("install local Dex")).toBeLessThan(f.calls.indexOf("core install"));
+  });
   it("creates Cilium before prerequisites/Core, then Bridge, with dedicated kubeconfig/context and stdin-only credentials", async () => {
     const f = installation(); const result = await f.install();
     expect(readFileSync(path.join(f.directory, ".gitignore"), "utf8")).toBe("*\n");

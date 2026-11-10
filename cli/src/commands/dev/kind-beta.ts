@@ -4,11 +4,12 @@
 import { createPrivateKey, randomBytes, X509Certificate } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { get as httpsGet } from "node:https";
-import { createServer, isIPv4 } from "node:net";
+import { createConnection, createServer, isIPv4 } from "node:net";
 import * as path from "node:path";
 import { execa } from "execa";
 import { parse, parseAllDocuments, stringify } from "yaml";
-import { requireBundledAsset } from "../../lib/repo-assets.js";
+import { requireBundledAsset, requirePackagedAsset } from "../../lib/repo-assets.js";
+import { beginBetaState, betaDirectory, captureBetaNode, pinnedBetaTools, writeBetaState } from "./kind-beta-state.js";
 import { kindBetaKubeletTrust } from "../../lib/kind-kubelet-trust.js";
 export { kindBetaKubeletTrust } from "../../lib/kind-kubelet-trust.js";
 import type { ensureCluster, installLocalCoreChart } from "./local-k8s.js";
@@ -17,7 +18,8 @@ import { prepareKindBetaInference } from "./kind-beta-inference.js";
 type ObjectMap = Record<string, any>;
 export type BetaExecute = (file: string, args: string[], options?: { input?: string; stdio?: "pipe" | "inherit"; env?: NodeJS.ProcessEnv }) => Promise<{ stdout: string }>;
 export interface BetaTools { kind: string; kubectl: string; helm: string; runtime: string; env: NodeJS.ProcessEnv }
-interface Hooks { ensureCluster: typeof ensureCluster; installLocalCoreChart: typeof installLocalCoreChart; openBrowser?: (url: string) => Promise<void> }
+interface Hooks { ensureCluster: typeof ensureCluster; installLocalCoreChart: typeof installLocalCoreChart; openBrowser?: (url: string) => Promise<void>;
+  afterCluster?: () => Promise<void>; beforeCore?: () => Promise<void> }
 const object = (value: any, label: string): ObjectMap => {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be a YAML object`);
   return value;
@@ -192,7 +194,7 @@ export function loadKindBetaPlan(file: string, cluster: string, asset = requireB
     coreChart: asset("deploy/helm/kars"), bridgeChart: asset("bridge/deploy/helm/kars-bridge"),
     issuer, clientID, oidc, ca, resources, web, headlamp, core, inference: {} as ObjectMap };
 }
-export type KindBetaPlan = ReturnType<typeof loadKindBetaPlan>;
+export type KindBetaPlan = ReturnType<typeof loadKindBetaPlan> & { localDex?: boolean };
 
 export function kindBetaClusterConfig(plan: KindBetaPlan, caPath?: string) {
   const args: ObjectMap = { "oidc-issuer-url": plan.issuer, "oidc-client-id": plan.clientID,
@@ -200,7 +202,7 @@ export function kindBetaClusterConfig(plan: KindBetaPlan, caPath?: string) {
     "oidc-groups-claim": plan.oidc.groupsClaim, "oidc-groups-prefix": plan.oidc.groupsPrefix };
   if (caPath) args["oidc-ca-file"] = "/etc/kars/oidc-ca.crt";
   return { kind: "Cluster", apiVersion: "kind.x-k8s.io/v1alpha4", networking: { disableDefaultCNI: true },
-    nodes: [{ role: "control-plane", ...(caPath ? { extraMounts: [{ hostPath: caPath, containerPath: "/etc/kars/oidc-ca.crt", readOnly: true }] } : {}),
+    nodes: [{ role: "control-plane", ...(plan.localDex ? { extraPortMappings: [{ containerPort: 30443, hostPort: 443, listenAddress: "127.0.0.1", protocol: "TCP" }] } : {}), ...(caPath ? { extraMounts: [{ hostPath: caPath, containerPath: "/etc/kars/oidc-ca.crt", readOnly: true }] } : {}),
       // Kind patches its v1beta3 template before kubeadm performs any API conversion.
       kubeadmConfigPatches: [stringify({ apiVersion: "kubeadm.k8s.io/v1beta3", kind: "ClusterConfiguration", apiServer: { extraArgs: args,
         ...(caPath ? { extraVolumes: [{ name: "kars-oidc-ca", hostPath: "/etc/kars/oidc-ca.crt", mountPath: "/etc/kars/oidc-ca.crt", readOnly: true, pathType: "File" }] } : {}) } })] }] };
@@ -246,7 +248,9 @@ export function kindBetaApiDestinations(service: ObjectMap, slices: ObjectMap) {
 }
 
 export async function installKindBeta(plan: KindBetaPlan, tools: BetaTools, hooks: Hooks, execute: BetaExecute, directory: string) {
-  writeFileSync(path.join(directory, ".gitignore"), "*\n", { mode: 0o600, flag: "wx" });
+  const ignore = path.join(directory, ".gitignore");
+  if (!existsSync(ignore)) writeFileSync(ignore, "*\n", { mode: 0o600, flag: "wx" });
+  else if (readFileSync(ignore, "utf8") !== "*\n") throw new Error("Private beta attempt has an unexpected ignore policy");
   const context = `kind-${plan.cluster}`, kubeconfig = path.join(directory, "kubeconfig");
   const kube = (args: string[], input?: string) => execute(tools.kubectl, ["--kubeconfig", kubeconfig, "--context", context, ...args], { env: tools.env, stdio: "pipe", ...(input ? { input } : {}) });
   const helm = (args: string[]) => execute(tools.helm, ["--kubeconfig", kubeconfig, "--kube-context", context, ...args], { env: tools.env, stdio: "pipe" });
@@ -260,7 +264,8 @@ export async function installKindBeta(plan: KindBetaPlan, tools: BetaTools, hook
   if (caPath) writeFileSync(caPath, plan.ca!, { mode: 0o600, flag: "wx" });
   const config = path.join(directory, "kind.yaml");
   writeFileSync(config, stringify(kindBetaClusterConfig(plan, caPath)), { mode: 0o600, flag: "wx" });
-  await hooks.ensureCluster(tools.kind, plan.cluster, tools.env, tools.runtime, { config, kubeconfig, image: plan.nodeImage });
+  await hooks.ensureCluster(tools.kind, plan.cluster, tools.env, tools.runtime, { config, kubeconfig, image: plan.nodeImage,
+    ...(hooks.afterCluster ? { onCreated: hooks.afterCluster } : {}) });
   const server = JSON.parse((await kube(["version", "-o", "json"])).stdout);
   if (!(server.serverVersion?.gitVersion ?? "").startsWith("v1.35.")) throw new Error("Kind beta requires Kubernetes 1.35; retained the mismatched cluster for inspection");
   const apiServers = JSON.parse((await kube(["-n", "kube-system", "get", "pods", "-l", "component=kube-apiserver", "-o", "json"])).stdout);
@@ -293,6 +298,7 @@ export async function installKindBeta(plan: KindBetaPlan, tools: BetaTools, hook
   // Read only public certificates from the node we just created; never disable kubelet TLS verification.
   const chain = (await execute(tools.runtime, ["exec", nodeName, "cat", "/var/lib/kubelet/pki/kubelet.crt"], { env: tools.env, stdio: "pipe" })).stdout;
   const metricsServer = kindBetaKubeletTrust(plan.cluster, node, containers[0], chain);
+  await hooks.beforeCore?.();
   await kube(["create", "--validate=strict", "-f", "-"], namespace.stdout);
   // CREATE only: no adoption, overwrite, rollback or credential logging.
   for (const resource of plan.resources) await kube(["create", "--validate=strict", "-f", "-"], JSON.stringify(resource));
@@ -321,6 +327,16 @@ export async function installKindBeta(plan: KindBetaPlan, tools: BetaTools, hook
 }
 
 async function assertPortAvailable(port: number) {
+  if (port === 443) {
+    // The runtime publishes this privileged port, not the unprivileged CLI.
+    await new Promise<void>((resolve, reject) => {
+      const socket = createConnection({ host: "127.0.0.1", port });
+      socket.once("connect", () => { socket.destroy(); reject(new Error("Local HTTPS port 443 is already in use")); });
+      socket.once("error", (error: NodeJS.ErrnoException) => { socket.destroy(); error.code === "ECONNREFUSED" ? resolve() : reject(error); });
+      socket.setTimeout(3000, () => { socket.destroy(); reject(new Error("Cannot verify local HTTPS port 443 availability")); });
+    });
+    return;
+  }
   await new Promise<void>((resolve, reject) => {
     const server = createServer(); server.once("error", reject);
     server.listen(port, "127.0.0.1", () => server.close(error => error ? reject(error) : resolve()));
@@ -451,8 +467,10 @@ export async function assertFreshKindBetaCluster(cluster: string, tools: BetaToo
   }
 }
 
-export async function runKindBeta(file: string, cluster: string, tools: BetaTools, hooks: Hooks) {
-  const plan = loadKindBetaPlan(file, cluster);
+export async function runKindBeta(file: string | boolean, cluster: string, tools: BetaTools, hooks: Hooks) {
+  if (file === true) return runManagedKindBeta(cluster, tools, hooks);
+  if (typeof file !== "string") throw new Error("Provide a beta config filename or use bare --beta-config interactively");
+  const plan = loadKindBetaPlan(file, cluster, requirePackagedAsset);
   const directory = path.resolve(`.kars-kind-beta-${cluster}`);
   if (existsSync(directory)) throw new Error(`Retained attempt exists at ${directory}; inspect it rather than replaying its identities`);
   await assertFreshKindBetaCluster(cluster, tools, async (tool, args, options) => {
@@ -466,4 +484,46 @@ export async function runKindBeta(file: string, cluster: string, tools: BetaTool
     catch { throw new Error(`${path.basename(tool)} ${args.includes("create") ? "bootstrap CREATE" : "Kind beta operation"} failed; inspect the retained cluster and Helm state. Credentials are not echoed.`); }
   }, directory);
   await kindBetaAccess(plan, tools, installed, { spawn: execa, probe: probeKindBetaUI, open: hooks.openBrowser });
+}
+
+async function runManagedKindBeta(cluster: string, tools: BetaTools, hooks: Hooks) {
+  const { prepareLocalBeta, promptLocalBetaAccount, installLocalDex } = await import("./kind-beta-local.js");
+  // Resolve both packaged charts before asking for credentials or changing the host.
+  requirePackagedAsset("deploy/helm/kars"); requirePackagedAsset("bridge/deploy/helm/kars-bridge");
+  const directory = betaDirectory(cluster);
+  if (existsSync(directory)) throw new Error(`Retained attempt exists at ${directory}; no identities will be replayed`);
+  const execute: BetaExecute = async (tool, args, options) => {
+    try { const result = await execa(tool, args, options); return { stdout: result.stdout ?? "" }; }
+    catch { throw new Error(`${path.basename(tool)} local beta operation failed; inspect retained private state. Credentials are not echoed.`); }
+  };
+  const state = await beginBetaState(cluster, tools, execute);
+  tools = pinnedBetaTools(tools, state);
+  await assertFreshKindBetaCluster(cluster, tools, execute);
+  await Promise.all([443, 3000, 4466].map(assertPortAvailable));
+  const account = await promptLocalBetaAccount(`${cluster}-${state.owner.slice(0, 8)}.kars.test`);
+  mkdirSync(directory, { mode: 0o700 });
+  writeFileSync(path.join(directory, ".gitignore"), "*\n", { mode: 0o600, flag: "wx" });
+  writeBetaState(directory, state);
+  try {
+    const plan = await prepareLocalBeta(directory, state, account, execute);
+    account.password = "";
+    plan.inference = await prepareKindBetaInference(plan.core, plan.resources, undefined, true);
+    writeFileSync(path.join(directory, "installed-resources.yaml"), plan.resources.map(resource => stringify(resource)).join("---\n"), { mode: 0o600, flag: "wx" });
+    state.phase = "installing"; writeBetaState(directory, state);
+    const installed = await installKindBeta(plan, tools, { ...hooks,
+      afterCluster: async () => { await captureBetaNode(state, tools, execute); writeBetaState(directory, state); },
+      beforeCore: () => installLocalDex(plan, directory, state, tools, execute),
+    }, execute, directory);
+    state.phase = "ready"; writeBetaState(directory, state);
+    console.log(`Owned local beta: ${cluster}. To delete this cluster and its local trust: kars dev down --cluster-name ${cluster}. Private receipts are retained at ${directory}.`);
+    await kindBetaAccess(plan, tools, installed, { spawn: execa, probe: probeKindBetaUI, open: hooks.openBrowser });
+  } catch (error) {
+    const { readBetaState } = await import("./kind-beta-state.js");
+    if (readBetaState(directory)?.phase !== "deleted") {
+      state.phase = "failed";
+      state.failure = { at: new Date().toISOString(), message: error instanceof Error ? error.message : "Setup failed" };
+      writeBetaState(directory, state);
+    }
+    throw new Error(`Local beta setup failed; private failure and ownership receipts retained in ${directory}`);
+  } finally { account.password = ""; }
 }

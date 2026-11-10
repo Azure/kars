@@ -225,13 +225,19 @@ untracked ServiceAccount patch for a qualified, reproducible installation.
 The source CLI wires the maintained cold Helm lifecycle into one Kind start command:
 
 ```bash
-npm i -g @kars-runtime/cli
-kars dev --release --target local-k8s --beta-config ./kind-beta.yaml --cluster-name kars-beta
+npm install --global <verified-beta-cli-tarball-url>
+kars dev --release --target local-k8s --beta-config
 ```
 
 This is source integration, **not a claim that the published npm package/images already contain it**. A matching packaged CLI, qualified images and actual clean-machine/customer acceptance remain release prerequisites. No additional product installer, grant-renewal command or preview IDP is involved.
 
-Prepare `kind-beta.yaml` alongside the reviewed Core/Bridge values and credential/RBAC resource files. The version-one input shape is:
+With no filename, setup prompts for initial inference through the maintained provider helper and a real new local email/password. It provisions release-bound packaged Dex as a separate prerequisite inside the fresh owned Kind node, after Cilium and before Core. Full Bridge continues to consume verified external-style HTTPS OIDC and reject legacy bundled Dex. The actual email claim maps to Bridge admin and prefixed Kubernetes User readers: built-in `view` plus explicit read-only Kars dashboard/SRE resources, nodes/namespaces and metrics. No Secrets reads, writes or wildcard grants are added; static-password groups are not assumed. Separate client secrets and registered callback URLs are generated for Bridge and Headlamp. Each application can authenticate with the same account; automatic shared-browser-session SSO is not enabled by this setup.
+
+The unique `.kars.test` issuer is routed through loopback HTTPS443 to a gateway-restricted NodePort, with matching in-cluster DNS and API-server host-network routing. Setup explicitly asks permission for one marked hosts entry and its constrained one-year CA trust (macOS login keychain or Linux `update-ca-certificates`). It does not weaken TLS verification, install a shared signing authority, or silently modify trust. Non-root Dex uses a prebound local PVC owned by that exact node. The fresh catalogue is explicitly empty: pricing is unknown, while real authorized usage continues to be recorded under non-expiring unbounded Kind-beta allowances.
+
+Private `.kars-kind-beta-<name>` state retains exact runtime endpoint, immutable node custody and failures. Run `kars dev down --cluster-name <printed-name>` from the same directory to delete only that recorded node and reverse owned hostname/trust entries. Ctrl+C only stops owned tunnels. Fresh attempts must not reuse old directories, funding or execution identities. This implementation has unit/render evidence, not live customer acceptance.
+
+Explicit-file external OIDC remains available with `kars dev --release --target local-k8s --beta-config ./kind-beta.yaml --cluster-name kars-beta`. Prepare `kind-beta.yaml` alongside the reviewed Core/Bridge values and credential/RBAC resource files. The version-one input shape is:
 
 ```yaml
 version: 1
@@ -262,6 +268,8 @@ For the default local URLs, Core sets `headlamp.oidc.callbackURL: http://localho
 For Headlamp's SRE Console, include `karssandboxes` **and** `karssreactions` in the intended dashboard reader's `kars.azure.com` rule with `get/list/watch`. The console lists these resources across namespaces; a namespace-only binding does not authorize that view. The built-in `view` role alone does not include these custom resources. Bind this access only to the intended operators; SRE action approval/patch permissions are separate and are not required to read the console. A successful OIDC login with a missing read grant displays **SRE state unavailable**, not evidence that SRE is absent or unhealthy.
 
 Core owns the inference configuration. Set `controller.inferenceDefaults.provider` and `.model` for the bootstrap route, using `foundry.endpoint` for `foundry` or `inferenceRouter.azure.openai.endpoint` for `azure-openai`. This cold profile currently qualifies only these HTTPS, API-key-backed routes, not every standalone `kars dev` provider. Explicit SRE overrides remain independent; absent Core defaults can use explicitly supplied SRE defaults for compatibility. Keep the selected model consistent with the reviewed broker contracts and actual provider availability.
+
+For unbounded Kind beta, set `inferenceBudget.calendarPolicy: record-only` and exactly `sre.firstInstallFunding: {unboundedTokens: true}`. With both explicit policies, `inferenceBudget.contracts: []` is supported; the catalogue version, existing budget TLS Secret/CA and pinned router digest remain required. This avoids inventing prices or model bounds during first setup. Enrollment still binds fresh account/execution identities, and the existing broker authorizes record-only requests and records actual usage. Missing price information remains unknown, not zero or free. Empty catalogues do not enable unbounded authority by themselves: finite or monetary budgets still need genuine matching contracts, and non-beta chart profiles reject an empty catalogue. Do not copy old funding records into the fresh inputs.
 
 When the provider Secret reference is omitted, the command reuses compatible saved Foundry credentials or asks interactively for the missing endpoint, API key and default model through the existing CLI credential prompts. Supplied endpoint/model values stay fixed. The shared prompt saves credentials in the existing private CLI configuration; installation sends the key directly to Kubernetes as a Core Secret, never as a Helm value or command argument. Prepared Secret references instead require their matching explicit endpoint/model and never consult laptop credentials. Noninteractive runs without either compatible saved configuration or complete prepared inputs fail clearly. Bridge receives no copied provider, model or inference credentials: it inherits the live Core configuration.
 
@@ -322,7 +330,8 @@ For the first, non-Entra Kind gate:
 - The Core first-install lifecycle now wires SRE through a separate bounded
   post-install caller when both `schemaHook.enabled` and `sre.enabled` are set.
   The Kind beta overlay selects exactly `sre.firstInstallFunding: {unboundedTokens: true}`,
-  with no token cap or expiry. Supply genuine broker/provider contracts and immutable
+  with no token cap or expiry. Supply an explicit broker catalogue (empty is supported
+  only with the record-only unbounded policy above) and immutable
   controller/Hermes/router/helper images. Cold Helm manifests retain immutable intent
   instead of premature SRE CRs; the caller binds that policy to the controller-created
   source and namespace UIDs in canonical registration, publishes the existing

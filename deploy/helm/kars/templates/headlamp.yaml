@@ -292,6 +292,21 @@ spec:
         - protocol: TCP
           port: 4466
   egress:
+    {{- with $oidc.localDexNamespace }}
+    {{- if or (ne . "kars-local-idp") (ne $.Values.global.installationProfile "kind-beta") }}
+    {{- fail "headlamp.oidc.localDexNamespace is reserved for the Kind beta local IdP" }}
+    {{- end }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . | quote }}
+          podSelector:
+            matchLabels:
+              app: dex
+      ports:
+        - protocol: TCP
+          port: 5557
+    {{- end }}
     - ports:
         - protocol: UDP
           port: 53
