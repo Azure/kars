@@ -37,8 +37,10 @@ router startup and passes the accepted feeds to the existing refresh task.
 
 ## T2: Security-control change? (NEUTRAL to STRENGTHENED)
 
-- The blocklist can only grow from extra feeds: entries are added to the deny
-  set; nothing in a feed can allow a domain or weaken other controls.
+- Feed entries are deny-only: nothing in a feed can allow a domain or weaken
+  other controls. A successful refresh replaces that source's last-good set,
+  so a feed update can add or remove deny entries; it cannot turn a deny into
+  an allow.
 - Fetch errors never carry the feed URL (`reqwest::Error::without_url()`),
   and logs name a feed by host only, so a token in a feed query string does
   not reach the logs (test `test_fetch_error_does_not_log_secret_query`).
@@ -50,9 +52,12 @@ router startup and passes the accepted feeds to the existing refresh task.
 
 ## T3: Availability / fail-open risk? (REDUCED)
 
-- Every source (seed file, OISD, each extra feed) has the same 60 s timeout,
-  a 50 MB cap enforced while the body streams (a larger declared
-  `Content-Length` is refused up front) and a 500,000-domain cap;
+- Every HTTP feed (OISD and each extra feed) has a 60 s timeout and a 50 MB
+  cap enforced while the body streams (a larger declared `Content-Length` is
+  refused up front). The seed source is a local file from the mounted
+  ConfigMap, read without a network fetch; its size is bounded by the
+  Kubernetes ConfigMap limit (1 MiB), not by these HTTP bounds.
+- Every source, the seed file included, keeps at most 500,000 domains, and
   `MAX_TOTAL_DOMAINS` (1,000,000) bounds all sources together, so a hostile
   or broken feed cannot exhaust router memory.
 - Each source keeps the entries of its last successful load, so a failing
