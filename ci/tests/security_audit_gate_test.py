@@ -266,7 +266,7 @@ class ReleaseRepairAuditGateTests(SecurityAuditGateTests):
 class LocalOnboardingAuditGateTests(SecurityAuditGateTests):
     audit = "docs/security-audits/2026-11-10-kind-local-onboarding.md"
     pr_number = "607"
-    source_head = "650141e5ad4bdf68a1c02e7a0ecae202fde10b3b"
+    source_head = "a4333b355a03648cf3769faf4eca26e988700aeb"
     source_base = "97789571866ca2c181f84455a845b957427cd991"
 
 

@@ -60,7 +60,7 @@ beta_approval_exception() {
       approved_base=ab78d11d66b626b4a176603643011ebc1cca1dff
       approved_pr=606 ;;
     docs/security-audits/2026-11-10-kind-local-onboarding.md)
-      approved_head=650141e5ad4bdf68a1c02e7a0ecae202fde10b3b
+      approved_head=a4333b355a03648cf3769faf4eca26e988700aeb
       approved_base=97789571866ca2c181f84455a845b957427cd991
       approved_pr=607 ;;
     *) return 1 ;;
