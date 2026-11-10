@@ -26,6 +26,30 @@ const oidcArgs = [
   "--set-string", "headlamp.oidc.clientSecret.name=headlamp-oidc",
 ];
 
+describe("managed local Dex egress", () => {
+  it.each([
+    ["deploy/helm/kars", "headlamp.yaml", "headlamp.oidc.localDexNamespace"],
+    ["bridge/deploy/helm/kars-bridge", "networkpolicy.yaml", "web.oidc.localDexNamespace"],
+  ])("allows only the owned IdP namespace and TLS port in %s", async (chart, template, setting) => {
+    const directory = mkdtempSync(join(tmpdir(), "local-dex-policy-"));
+    try {
+      mkdirSync(join(directory, "templates"));
+      copyFileSync(`${root}${chart}/values.yaml`, join(directory, "values.yaml"));
+      copyFileSync(`${root}${chart}/templates/${template}`, join(directory, "templates", template));
+      if (chart.includes("kars-bridge")) copyFileSync(`${root}${chart}/templates/_helpers.tpl`, join(directory, "templates/_helpers.tpl"));
+      writeFileSync(join(directory, "Chart.yaml"), "apiVersion: v2\nname: local-policy-test\nversion: 0.1.0\n");
+      const invoke = (profile: string, namespace: string) => execa("helm", ["template", "kars", directory, "--namespace", "kars-system", "--set-string", `global.installationProfile=${profile}`, "--set-string", `${setting}=${namespace}`], { stdio: "pipe" });
+      const { stdout } = await invoke("kind-beta", "kars-local-idp");
+      const policies = parseAllDocuments(stdout).map(document => document.toJSON()).filter(object => object?.kind === "NetworkPolicy");
+      const rules = policies.flatMap(policy => policy.spec.egress ?? []);
+      expect(rules.filter(rule => rule.to?.some((peer: any) => peer.namespaceSelector?.matchLabels?.["kubernetes.io/metadata.name"] === "kars-local-idp")))
+        .toEqual([{ to: [{ namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": "kars-local-idp" } }, podSelector: { matchLabels: { app: "dex" } } }], ports: [{ protocol: "TCP", port: 5557 }] }]);
+      await expect(invoke("", "kars-local-idp")).rejects.toThrow(/reserved for the Kind beta/);
+      await expect(invoke("kind-beta", "foreign")).rejects.toThrow(/reserved for the Kind beta/);
+    } finally { rmSync(directory, { recursive: true, force: true }); }
+  });
+});
+
 describe("Bridge cross-node router API proxy", () => {
   const enable = ["--set", "networkPolicy.routerApiServerIngress=true",
     "--api-versions", "cilium.io/v2/CiliumClusterwideNetworkPolicy"];

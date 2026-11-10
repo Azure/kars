@@ -35,11 +35,11 @@ function publicKey(certificate: string): string {
   return createHash("sha256").update(new X509Certificate(certificate).publicKey.export({ type: "spki", format: "der" })).digest("hex");
 }
 
-function validateIdentity(identity: BudgetIdentity): void {
+function validateIdentity(identity: BudgetIdentity, hostname = serviceName): void {
   const leaf = new X509Certificate(identity.certificate), ca = new X509Certificate(identity.ca);
   const valid = (certificate: X509Certificate) => Date.now() >= Date.parse(certificate.validFrom) && Date.now() < Date.parse(certificate.validTo);
   if (leaf.ca || !ca.ca || !valid(leaf) || !valid(ca) || !leaf.verify(ca.publicKey) || !leaf.checkIssued(ca)
-    || !leaf.checkPrivateKey(createPrivateKey(identity.privateKey)) || !leaf.checkHost(serviceName, { subject: "never" })
+    || !leaf.checkPrivateKey(createPrivateKey(identity.privateKey)) || !leaf.checkHost(hostname, { subject: "never" })
     || !leaf.keyUsage?.includes("1.3.6.1.5.5.7.3.1")) throw new Error("Generated Kind budget identity failed certificate validation");
 }
 
@@ -58,6 +58,11 @@ function readRotationRecord(filename: string): RotationRecord | undefined {
 }
 
 export async function issueKindBudgetIdentity(directory: string, execute: BetaExecute): Promise<BudgetIdentity> {
+  return issueKindTlsIdentity(directory, execute, serviceName);
+}
+
+export async function issueKindTlsIdentity(directory: string, execute: BetaExecute, hostname: string): Promise<BudgetIdentity> {
+  if (hostname.length > 253 || !hostname.split(".").every(label => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) throw new Error("Invalid Kind TLS hostname");
   privateDirectory(directory);
   const temporary = mkdtempSync(path.join(directory, "issuer-"));
   const file = (name: string) => path.join(temporary, name);
@@ -66,15 +71,15 @@ export async function issueKindBudgetIdentity(directory: string, execute: BetaEx
     catch { throw new Error("Kind budget certificate issuance failed; private command output is not displayed"); }
   };
   try {
-    writeFileSync(file("ca.cnf"), "[req]\ndistinguished_name=dn\nx509_extensions=ca\nprompt=no\n[dn]\nCN=Kars Kind provider setup CA\n[ca]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\n", { mode: 0o600 });
-    writeFileSync(file("server.cnf"), `[req]\ndistinguished_name=dn\nprompt=no\n[dn]\nCN=${serviceName}\n[server]\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:${serviceName}\n`, { mode: 0o600 });
+    writeFileSync(file("ca.cnf"), `[req]\ndistinguished_name=dn\nx509_extensions=ca\nprompt=no\n[dn]\nCN=Kars Kind CA\n[ca]\nbasicConstraints=critical,CA:TRUE,pathlen:0\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\nnameConstraints=critical,permitted;DNS:${hostname}\n`, { mode: 0o600 });
+    writeFileSync(file("server.cnf"), `[req]\ndistinguished_name=dn\nprompt=no\n[dn]\nCN=Kars Kind TLS\n[server]\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:${hostname}\n`, { mode: 0o600 });
     for (const name of ["ca", "server"]) await run(["genpkey", "-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-out", file(`${name}.key`)]);
     await run(["req", "-new", "-x509", "-sha256", "-days", "365", "-key", file("ca.key"), "-out", file("ca.crt"), "-config", file("ca.cnf")]);
     await run(["req", "-new", "-sha256", "-key", file("server.key"), "-out", file("server.csr"), "-config", file("server.cnf")]);
     await run(["x509", "-req", "-sha256", "-days", "365", "-in", file("server.csr"), "-CA", file("ca.crt"), "-CAkey", file("ca.key"),
-      "-CAcreateserial", "-out", file("server.crt"), "-extfile", file("server.cnf"), "-extensions", "server"]);
+      "-set_serial", `0x${randomUUID().replaceAll("-", "")}`, "-out", file("server.crt"), "-extfile", file("server.cnf"), "-extensions", "server"]);
     const identity = { certificate: readFileSync(file("server.crt"), "utf8"), privateKey: readFileSync(file("server.key"), "utf8"), ca: readFileSync(file("ca.crt"), "utf8") };
-    validateIdentity(identity);
+    validateIdentity(identity, hostname);
     return identity;
   } finally {
     rmSync(temporary, { recursive: true, force: true });

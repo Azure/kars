@@ -114,6 +114,78 @@ async fn materialized_task_execution_status_cas_recovers_its_task_anchor_not_its
 }
 
 #[tokio::test]
+async fn materialized_task_bundle_refresh_preserves_values_across_execution_status_updates() {
+    for change in ["task-progress", "target-rv", "consumer-status"] {
+        let f = materialized().await;
+        let original = consume(&f).await.unwrap();
+        f.state.lock().unwrap().after_bundle_read = Some(change);
+        let refreshed = consume(&f).await.unwrap();
+        assert_eq!(original.metadata, refreshed.metadata, "{change}");
+        assert_eq!(original.data, refreshed.data, "{change}");
+        let state = f.state.lock().unwrap();
+        assert!(state.after_bundle_read.is_none());
+        assert_eq!((state.creates, state.anchors, state.writes), (1, 1, 1));
+        assert!(state.calls.iter().all(|(method, _, _)| method != "DELETE"));
+    }
+}
+
+#[tokio::test]
+async fn materialized_task_bundle_refresh_rejects_authority_and_source_changes() {
+    for change in [
+        "target-uid",
+        "target-delete",
+        "target-owner",
+        "target-anchor",
+        "target-annotation",
+        "task-phase",
+        "task-ready-condition",
+        "task-envelope",
+        "task-generation",
+        "task-observed",
+        "task-spec",
+        "task-bindings",
+        "task-parent",
+        "task-lineage",
+        "task-budget",
+        "task-launch",
+        "task-sandbox-ref",
+        "task-stopping",
+        "task-detail-type",
+        "task-unknown-status",
+        "consumer-uid",
+        "consumer-delete",
+        "consumer-generation",
+        "consumer-owner",
+        "consumer-spec",
+        "consumer-bindings",
+        "consumer-legacy",
+        "consumer-annotation",
+        "grant-uid",
+        "grant-rv",
+        "grant-spec",
+        "source-uid",
+        "source-rv",
+        "source-slack-value",
+    ] {
+        let f = materialized().await;
+        let original = consume(&f).await.unwrap();
+        f.state.lock().unwrap().after_bundle_read = Some(change);
+        assert!(consume(&f).await.is_err(), "{change}");
+        let state = f.state.lock().unwrap();
+        assert_eq!(
+            (state.creates, state.anchors, state.writes),
+            (1, 1, 1),
+            "{change}"
+        );
+        assert_eq!(
+            state.objects[&state.bundle_path]["data"],
+            json!(original.data),
+            "{change}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn task_runtime_without_explicit_launch_cannot_create_or_recover_a_bundle() {
     for execution in [None, Some(json!({"launch":false}))] {
         let f = materialized().await;

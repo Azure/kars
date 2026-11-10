@@ -596,7 +596,9 @@ async fn prepare_bundle(
     }
     let live = targets::read(client, target).await?;
     if identity(&live.metadata)? != identity(&target_object.metadata)? {
-        return Err("Credential target changed before bundle write".into());
+        let consumer = task_consumer.ok_or("Credential target changed before bundle write")?;
+        bundle::verify_task_refresh(client, consumer, &target_object, &live, target, bindings)
+            .await?;
     }
     let fresh = current(client, &target.namespace, &bindings.grant).await?;
     if identity(&fresh.metadata)? != identity(&grant.metadata)? {

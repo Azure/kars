@@ -224,7 +224,7 @@ cold Kind/Core setup. Removing Bridge must leave Core and its workloads intact.
       "Where to run the sandbox: docker (default, fast) | local-k8s (kind+helm, mirrors AKS layout)",
       "docker"
     )
-    .option("--beta-config <file>", "Reviewed cold Kind beta inputs (requires bare --release --target local-k8s; keeps UI tunnels in foreground)")
+    .option("--beta-config [file]", "Full fresh Kind beta: prompt for inference and provision local Dex; optional file retains external OIDC (requires --release --target local-k8s)")
     .option(
       "--cluster-name <name>",
       "Kind cluster name (only used with --target local-k8s)",
@@ -372,10 +372,12 @@ Notes:
         const conflicting = cmd.options.filter(option => cmd.getOptionValueSource(option.attributeName()) === "cli"
           && !permitted.has(option.attributeName()));
         if (options.release !== true || options.target !== "local-k8s" || conflicting.length) {
-          throw new Error("Kind beta requires bare --release --target local-k8s --beta-config <file>; only --cluster-name may be added. Put reviewed product inputs in the values files, not standalone flags.");
+          throw new Error("Kind beta requires bare --release --target local-k8s --beta-config [file]; only --cluster-name may be added. Use interactive setup or an explicit external-OIDC input file.");
         }
         const { runLocalK8s } = await import("./dev/local-k8s.js");
-        await runLocalK8s({ name: "dev-agent", clusterName: options.clusterName, image: "", ephemeral: false,
+        const clusterName = options.betaConfig === true && cmd.getOptionValueSource("clusterName") !== "cli"
+          ? `kars-beta-${(await import("node:crypto")).randomUUID().slice(0, 8)}` : options.clusterName;
+        await runLocalK8s({ name: "dev-agent", clusterName, image: "", ephemeral: false,
           noBuild: true, betaConfig: options.betaConfig });
         return;
       }
@@ -1880,6 +1882,25 @@ Notes:
       }
       const { execa } = await import("execa");
       console.log(chalk.bold("\nTearing down local-k8s dev environment…\n"));
+      const { betaDirectory, readBetaState, teardownManagedBeta } = await import("./dev/kind-beta-state.js");
+      const directory = betaDirectory(options.clusterName);
+      const state = readBetaState(directory);
+      if (state) {
+        if (options.keepCluster) {
+          console.log("Managed beta retained. Close its owning foreground setup with Ctrl+C; unrelated listeners are never terminated.");
+          return;
+        }
+        const { changeManagedHostTrust } = await import("./dev/kind-beta-host.js");
+        const execute: import("./dev/kind-beta.js").BetaExecute = async (tool, args, settings) => {
+          try { const result = await execa(tool, args, settings); return { stdout: result.stdout ?? "" }; }
+          catch { throw new Error("Managed teardown failed; private ownership receipts and failures are retained"); }
+        };
+        await teardownManagedBeta(directory, { runtime: state.runtime, kind: "kind", kubectl: "kubectl", helm: "helm", env: { ...process.env } }, execute,
+          owned => changeManagedHostTrust(owned, false, execute));
+        console.log("Deleted only the recorded Kind node, its contained data and owned local trust; private receipts retained.");
+        return;
+      }
+      if ((await import("node:fs")).existsSync(directory)) throw new Error("This beta attempt has no managed-local ownership receipt; legacy name/port teardown is not permitted");
 
       // Always: kill any lingering port-forward on :4466.
       try {

@@ -628,6 +628,14 @@ chain. Only the verified runtime reference and execution status/detail may
 advance. Successful anchor recovery requires fresh preparation before any
 credential value write; it never returns values cached by the conflicted call.
 
+Ordinary bundle refresh for that verified Task-owned runtime also revalidates
+execution-status-only target revisions against the same Task authority and the
+live materialized Sandbox. It retains the bundle anchor, generation, spec,
+ownership and governance status, and still requires exact grant and source
+revisions. A progress update alone therefore does not revoke and repopulate an
+unchanged credential projection. Other callers retain exact target revision
+checks; changed authority still fails closed.
+
 Pre-existing unanchored lookalikes, lost CREATE acknowledgements, changed
 authority and persistent conflicts remain explicit failures. Core does not
 adopt or delete those bundles to clear an error. Fixed-stage controller

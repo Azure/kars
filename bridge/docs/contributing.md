@@ -68,7 +68,14 @@ locked, same-source core CLI and calls `kars schemas prepare` with the exact
 chart, values, release, namespace and context used by the following Helm
 installation. Runtime acceptance uses that same core preparation entrypoint.
 Schema and admission warnings remain failures; no policy status or generation
-is changed merely to refresh a diagnostic.
+is changed merely to refresh a diagnostic. After creating or updating a credential
+grant, enrolled-store cases first observe its asynchronous admission-parameter
+propagation using UID/resource-version-bound dry-run PATCH requests. Readiness
+requires the intended policy denial within 30 seconds; unrelated denials fail.
+Allowed dry-runs and partial case results remain in the evidence. The actual
+forbidden PATCH is still submitted once and must reject without changing the
+Secret; neither a successful forbidden write nor a missing policy is retried into
+a passing result.
 
 `Bridge component acceptance` requires the exact component job set: `addon`,
 `bff`, `dependencies`, `lockfiles`, `rust-dependencies`, `secrets`, `security`

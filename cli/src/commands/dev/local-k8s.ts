@@ -131,7 +131,7 @@ export interface LocalK8sOptions {
    */
   releaseVersion?: string;
   /** Reviewed cold Kind beta inputs; bypasses standalone sandbox setup. */
-  betaConfig?: string;
+  betaConfig?: string | boolean;
 }
 
 /**
@@ -453,7 +453,7 @@ export async function ensureCluster(
   name: string,
   env: NodeJS.ProcessEnv,
   runtime: string,
-  cold?: { config: string; kubeconfig: string; image: string },
+  cold?: { config: string; kubeconfig: string; image: string; onCreated?: () => Promise<void> },
 ): Promise<void> {
   if (await clusterExists(kind, name, env)) {
     if (cold) throw new Error(`Kind beta requires a fresh cluster; ${name} already exists. Inspect it; no automatic adoption or replacement.`);
@@ -466,11 +466,16 @@ export async function ensureCluster(
   // — and using one (e.g. InitConfiguration with `taints: []`) actually
   // breaks creation because kind's untaint step then fails with
   // "taint not found" and aborts.
-  await execa(kind, ["create", "cluster", "--name", name,
-    ...(cold ? ["--config", cold.config, "--kubeconfig", cold.kubeconfig, "--image", cold.image, "--retain"] : [])], {
-    stdio: ["pipe", "inherit", "inherit"],
-    env,
-  });
+  let creationFailure: unknown;
+  try {
+    await execa(kind, ["create", "cluster", "--name", name,
+      ...(cold ? ["--config", cold.config, "--kubeconfig", cold.kubeconfig, "--image", cold.image, "--retain"] : [])], {
+      stdio: ["pipe", "inherit", "inherit"], env,
+    });
+  } catch (error) { creationFailure = error; }
+  // A retained node can exist even when bootstrap fails. Bind custody before any further node changes.
+  await cold?.onCreated?.();
+  if (creationFailure) throw creationFailure;
   // Journald sizes its RAM-backed store from VM memory, not each Kind node's
   // cgroup limit. Bound new nodes only; never change a reused cluster's logs.
   const nodes = await kindNodeInventory(kind, name, env);

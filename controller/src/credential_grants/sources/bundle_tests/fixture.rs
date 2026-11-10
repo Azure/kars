@@ -20,6 +20,7 @@ pub struct State {
     pub consumer_path: Option<String>,
     pub after_create: Option<&'static str>,
     pub after_anchor: Option<&'static str>,
+    pub after_bundle_read: Option<&'static str>,
     pub create_response: Option<&'static str>,
     pub create_error: Option<u16>,
     pub lose_create_ack: bool,
@@ -187,7 +188,7 @@ pub fn mutate(state: &mut State, mutation: &str) {
         }
         "bundle-namespace" => value["metadata"]["namespace"] = json!("foreign"),
         "bundle-name" => value["metadata"]["name"] = json!("foreign"),
-        "source-rv" | "grant-rv" | "bundle-rv" => {}
+        "source-rv" | "grant-rv" | "bundle-rv" | "target-rv" => {}
         _ => panic!("unknown bundle fixture mutation"),
     }
     bump(value);
@@ -228,10 +229,16 @@ fn respond(state: &mut State, request: &Request) -> ResponseTemplate {
         if state.creates > 0 && failing {
             return failure(500);
         }
-        return state.objects.get(path).map_or_else(
+        let response = state.objects.get(path).map_or_else(
             || failure(404),
             |value| ResponseTemplate::new(200).set_body_json(value),
         );
+        if path == state.bundle_path
+            && let Some(mutation) = state.after_bundle_read.take()
+        {
+            mutate(state, mutation);
+        }
+        return response;
     }
     if method == "POST" && path == SECRETS {
         state.creates += 1;
@@ -425,6 +432,7 @@ pub async fn setup(kind: &str) -> Fixture {
         consumer_path: None,
         after_create: None,
         after_anchor: None,
+        after_bundle_read: None,
         create_response: None,
         create_error: None,
         lose_create_ack: false,

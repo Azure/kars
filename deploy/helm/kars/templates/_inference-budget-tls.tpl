@@ -30,6 +30,21 @@ Licensed under the MIT License. */}}
 {{- end -}}
 {{- end -}}
 
+{{- define "kars.inferenceBudget.contracts.validate" -}}
+{{- $budget := .Values.inferenceBudget | default dict -}}
+{{- if not (kindIs "slice" $budget.contracts) -}}
+{{- fail "inferenceBudget.contracts must be an explicit list" -}}
+{{- end -}}
+{{- if not $budget.contracts -}}
+{{- $profile := (.Values.global | default dict).installationProfile | default "" -}}
+{{- $funding := (.Values.sre | default dict).firstInstallFunding | default dict -}}
+{{- if not (and (eq $profile "kind-beta") (eq ($budget.calendarPolicy | default "enforce") "record-only")
+  (eq ($funding | toJson) (dict "unboundedTokens" true | toJson))) -}}
+{{- fail "An empty inferenceBudget.contracts list requires kind-beta, record-only calendar policy and exactly unboundedTokens: true first-install funding; finite or monetary budgets require genuine provider contracts" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "kars.inferenceBudget.catalogData" -}}
 {{- $encoded := .desired | toJson -}}
 {{- if .current -}}

@@ -52,6 +52,19 @@ OverlayFS and Grafana build repair at source
 [`2026-11-10-overlay-package-update.md`](2026-11-10-overlay-package-update.md).
 This additional approval does not repoint or extend the older PR593 approval.
 
+For Azure/kars#607, the maintainer explicitly renewed the single-maintainer
+sign-off of interactive local-Dex onboarding and the six-file Task credential
+status-race repair at source `a4333b355a03648cf3769faf4eca26e988700aeb`
+against integration base `97789571866ca2c181f84455a845b957427cd991`.
+The user selected **“Authorize this repair and exact-source sign-off”** for the
+frozen repair patch `cdd252c75f18a4655ae25bb9898423f6e1a890d6b022e5d1181c76d25eb64201`.
+This is new authorization, not inherited approval from the earlier
+`650141e5ad4bdf68a1c02e7a0ecae202fde10b3b` scope. Its current record is
+[`2026-11-10-kind-local-onboarding.md`](2026-11-10-kind-local-onboarding.md).
+This decision replaces only the two-human sign-off requirement for that exact
+scope; technical CI, artifact signing and fresh-cluster acceptance remain
+required. Neither the PR593 nor PR606 exception is changed or extended.
+
 For each exception, the gate requires its exact committed record, signer and source/base marker,
 the exact review base, and the approved source as an ancestor. Every tracked
 file must match that source except the four explicitly reviewed approval-plumbing

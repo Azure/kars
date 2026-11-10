@@ -20,7 +20,7 @@ function endpointURL(value: string): string {
 /** Fill only absent Core bootstrap settings; Bridge reads these from Core live. */
 export async function prepareKindBetaInference(core: Values, resources: Values[], dependencies: Dependencies = {
   load: loadConfig, prompt: promptAndSaveCredentials, interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY),
-}): Promise<Values> {
+}, configureInteractively = false): Promise<Values> {
   const defaults = core.controller?.inferenceDefaults ?? {};
   const provider = defaults.provider || core.sre?.provider || (core.foundry?.endpoint ? "foundry" : "azure-openai");
   if (!["foundry", "azure-openai"].includes(provider)) {
@@ -53,7 +53,7 @@ export async function prepareKindBetaInference(core: Values, resources: Values[]
     && saved.endpoint && saved.apiKey && saved.model
     && (!explicitEndpoint || endpointURL(saved.endpoint) === endpointURL(explicitEndpoint));
   let selected: KarsConfig;
-  if (compatible) selected = saved;
+  if (compatible && !configureInteractively) selected = saved;
   else {
     if (!dependencies.interactive) {
       throw new Error("Missing Kind beta inference settings. Run interactively to choose the endpoint, API-key authentication and default model, or supply reviewed Core inference values and their credential Secret");

@@ -12,6 +12,13 @@ Licensed under the MIT License. */}}
 {{- end }}
 {{- end }}
 {{- if .Values.idp.enabled }}
+{{- $managed := .Values.idp.dex.kindPrerequisite | default false }}
+{{- if and $managed (not (and (kindIs "bool" $managed) .Values.idp.dex.tls.enabled .Values.idp.dex.persistence.enabled .Values.idp.dex.persistence.existingClaim .Values.networkPolicy.dexApiServerIngress (regexMatch "^[^[:space:]@]+@sha256:[a-f0-9]{64}$" .Values.idp.dex.image))) }}
+{{- fail "idp.dex.kindPrerequisite requires immutable Dex, TLS, an owned persistent claim and Cilium API-server ingress" }}
+{{- end }}
+{{- if and $managed (not (regexMatch "^([0-9]{1,3}\\.){3}[0-9]{1,3}/32$" (.Values.idp.dex.kindGatewayCIDR | default ""))) }}
+{{- fail "idp.dex.kindPrerequisite requires the discovered Kind gateway IPv4 /32" }}
+{{- end }}
 {{- $tls := .Values.idp.dex.tls | default dict }}
 {{- $persistence := .Values.idp.dex.persistence | default dict }}
 {{- if and (hasKey $persistence "enabled") (not (kindIs "bool" $persistence.enabled)) }}
@@ -68,20 +75,11 @@ Licensed under the MIT License. */}}
 {{- fail "idp.headlampClient.callbackURL must be HTTPS /oidc-callback (HTTP only on loopback)" }}
 {{- end }}
 {{- end }}
-# kars Bridge — in-cluster IdP (Dex) for multi-user SSO.
-#
-# WHY THIS EXISTS: colleagues reach the Bridge over a single
-#   `kubectl port-forward svc/kars-bridge-web 3000:3000`
-# with NO public ingress and NO LoadBalancer. The OIDC login flow redirects the
-# *browser* to the IdP's authorization endpoint, so the IdP must be reachable at
-# an origin the browser can resolve. Rather than force every colleague to edit
-# /etc/hosts and run a second port-forward for Dex, the web pod proxies /dex/*
-# to this in-cluster Dex Service (see web/src/app/dex/[...path]/route.ts) and
-# Dex's issuer is set to `{web origin}/dex`. One port-forward, zero host hacks.
-#
-# Dex runs entirely in-cluster; it is never exposed publicly. Static passwords
-# are for a private alpha only — point `idp.dex.connectors` at a real upstream
-# (Entra ID, Okta, GitHub, ...) for anything beyond a colleague test ring.
+# The compatibility profile uses Bridge's same-origin /dex proxy.
+# Managed local beta renders this component separately: HTTPS-only, persistent
+# storage and explicit loopback hostname/trust, before installing full Bridge.
+# Static passwords are genuine local beta accounts, not upstream identities;
+# deployed multi-user environments should configure their external provider.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -92,9 +90,7 @@ metadata:
     app: dex
 data:
   config.yaml: |
-    # Issuer is the browser-facing origin + /dex (served by the web same-origin
-    # proxy), NOT the in-cluster Service DNS — otherwise the browser could not
-    # resolve the authorize/login redirects.
+    # The same issuer must resolve from both browsers and OIDC clients.
     issuer: {{ .Values.idp.issuer | quote }}
     {{- if $persistent }}
     storage:
@@ -105,7 +101,9 @@ data:
     storage: { type: memory }
     {{- end }}
     web:
+      {{- if not $managed }}
       http: 0.0.0.0:5556
+      {{- end }}
       {{- if $tls.enabled }}
       https: 0.0.0.0:5557
       tlsCert: /etc/dex-tls/tls.crt
@@ -190,11 +188,26 @@ spec:
                   key: {{ $headlamp.clientSecret.key | quote }}
             {{- end }}
           ports:
+            {{- if not $managed }}
             - containerPort: 5556
+            {{- end }}
             {{- if $tls.enabled }}
             - name: https
               containerPort: 5557
             {{- end }}
+          {{- if $managed }}
+          readinessProbe:
+            httpGet:
+              scheme: HTTPS
+              port: https
+              path: /.well-known/openid-configuration
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: { drop: ["ALL"] }
@@ -262,26 +275,34 @@ metadata:
     {{- include "kars-bridge.labels" . | nindent 4 }}
     app: dex
 spec:
+  {{- if $managed }}
+  type: NodePort
+  externalTrafficPolicy: Local
+  {{- end }}
   {{- with .Values.idp.dex.clusterIP }}
   clusterIP: {{ . | quote }}
   {{- end }}
   selector:
     app: dex
   ports:
+    {{- if not $managed }}
     - name: http
       port: 5556
       targetPort: 5556
+    {{- end }}
     {{- if $tls.enabled }}
     - name: https
-      port: 5557
+      port: {{ ternary 443 5557 $managed }}
+      {{- if $managed }}
+      nodePort: 30443
+      {{- end }}
       targetPort: https
     {{- end }}
 {{- if .Values.networkPolicy.create }}
 ---
-# kars ships a kars-system-default-deny that drops pod-to-pod on non-allowlisted
-# ports; the web pod's /dex proxy hop is not on that allowlist. This additive
-# policy opens ingress to Dex on 5556 from in-cluster callers so the same-origin
-# proxy (and OIDC discovery/token/JWKS server-side calls) can reach it.
+# Compatibility allows the same-origin /dex proxy. Managed local beta admits
+# only its gateway and named web clients over TLS, with deny-all egress;
+# API-server/control-plane ingress is governed separately by Cilium.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -293,13 +314,35 @@ spec:
   podSelector:
     matchLabels:
       app: dex
-  policyTypes: ["Ingress"]
+  policyTypes: ["Ingress"{{ if $managed }}, "Egress"{{ end }}]
+  {{- if $managed }}
+  egress: []
+  {{- end }}
   ingress:
     - from:
+        {{- if $managed }}
+        - ipBlock:
+            cidr: {{ .Values.idp.dex.kindGatewayCIDR | quote }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: headlamp
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: headlamp
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kars-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/component: web
+        {{- else }}
         - namespaceSelector: {}
+        {{- end }}
       ports:
+        {{- if not $managed }}
         - port: 5556
           protocol: TCP
+        {{- end }}
         {{- if $tls.enabled }}
         - port: 5557
           protocol: TCP

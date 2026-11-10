@@ -59,6 +59,10 @@ beta_approval_exception() {
       approved_head=187ada4b45203bc831e7976961ffcb2f92160886
       approved_base=ab78d11d66b626b4a176603643011ebc1cca1dff
       approved_pr=606 ;;
+    docs/security-audits/2026-11-10-kind-local-onboarding.md)
+      approved_head=a4333b355a03648cf3769faf4eca26e988700aeb
+      approved_base=97789571866ca2c181f84455a845b957427cd991
+      approved_pr=607 ;;
     *) return 1 ;;
   esac
   [[ "$(git rev-parse --verify "${BASE_REF}^{commit}")" == "$approved_base" ]] || return 1
