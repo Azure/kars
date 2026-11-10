@@ -52,6 +52,15 @@ OverlayFS and Grafana build repair at source
 [`2026-11-10-overlay-package-update.md`](2026-11-10-overlay-package-update.md).
 This additional approval does not repoint or extend the older PR593 approval.
 
+For Azure/kars#607, the maintainer explicitly authorized a single-maintainer
+sign-off of interactive local-Dex onboarding at source
+`650141e5ad4bdf68a1c02e7a0ecae202fde10b3b` against integration base
+`97789571866ca2c181f84455a845b957427cd991`. Its new record is
+[`2026-11-10-kind-local-onboarding.md`](2026-11-10-kind-local-onboarding.md).
+This decision replaces only the two-human sign-off requirement for that exact
+scope; technical CI, artifact signing and fresh-cluster acceptance remain
+required. Neither earlier exception is changed or extended.
+
 For each exception, the gate requires its exact committed record, signer and source/base marker,
 the exact review base, and the approved source as an ancestor. Every tracked
 file must match that source except the four explicitly reviewed approval-plumbing

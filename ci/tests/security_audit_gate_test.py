@@ -230,18 +230,30 @@ class SecurityAuditGateTests(GitFixture):
                 self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_other_beta_record_cannot_be_changed_as_policy_plumbing(self):
-        other = ("docs/security-audits/2026-11-10-overlay-package-update.md"
-                 if self.pr_number == "593"
-                 else "docs/security-audits/2026-11-04-beta-publication.md")
-        self.assert_unapproved_change_rejected(other)
+        records = ("docs/security-audits/2026-11-04-beta-publication.md",
+                   "docs/security-audits/2026-11-10-overlay-package-update.md",
+                   "docs/security-audits/2026-11-10-kind-local-onboarding.md")
+        self.approved_beta()
+        for other in records:
+            if other != self.audit:
+                with self.subTest(record=other):
+                    self.assertFalse((self.root / other).exists())
+                    self.write(other, "Not in the approved source\n")
+                    self.commit()
+                    self.assertEqual(self.beta_gate().returncode, 1)
+                    self.git("rm", other)
+                    self.commit()
+                    self.assertEqual(self.beta_gate().returncode, 0)
 
     def test_other_beta_pr_cannot_use_this_approval(self):
         self.approved_beta()
-        other = "606" if self.pr_number == "593" else "593"
-        result = self.beta_gate(GITHUB_ACTIONS="true", GITHUB_REPOSITORY="Azure/kars",
-                                GITHUB_EVENT_NAME="pull_request",
-                                GITHUB_REF=f"refs/pull/{other}/merge")
-        self.assertEqual(result.returncode, 1)
+        for other in ("593", "606", "607"):
+            if other != self.pr_number:
+                with self.subTest(pr=other):
+                    result = self.beta_gate(GITHUB_ACTIONS="true", GITHUB_REPOSITORY="Azure/kars",
+                                            GITHUB_EVENT_NAME="pull_request",
+                                            GITHUB_REF=f"refs/pull/{other}/merge")
+                    self.assertEqual(result.returncode, 1)
 
 
 class ReleaseRepairAuditGateTests(SecurityAuditGateTests):
@@ -249,6 +261,13 @@ class ReleaseRepairAuditGateTests(SecurityAuditGateTests):
     pr_number = "606"
     source_head = "187ada4b45203bc831e7976961ffcb2f92160886"
     source_base = "ab78d11d66b626b4a176603643011ebc1cca1dff"
+
+
+class LocalOnboardingAuditGateTests(SecurityAuditGateTests):
+    audit = "docs/security-audits/2026-11-10-kind-local-onboarding.md"
+    pr_number = "607"
+    source_head = "650141e5ad4bdf68a1c02e7a0ecae202fde10b3b"
+    source_base = "97789571866ca2c181f84455a845b957427cd991"
 
 
 if __name__ == "__main__":
