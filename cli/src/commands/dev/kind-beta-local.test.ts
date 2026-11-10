@@ -128,7 +128,7 @@ describe("fresh packaged Dex inputs", () => {
     const reader = plan.resources.find(resource => resource.kind === "ClusterRole")!;
     const maintainedReader = parseAllDocuments(readFileSync(path.join(repo, "deploy/headlamp-reader-rbac.yaml"), "utf8"))
       .map(document => document.toJSON()).find(resource => resource.kind === "ClusterRole");
-    expect(reader.rules[0]).toEqual(maintainedReader.rules.find((rule: any) => rule.apiGroups.includes("kars.azure.com")));
+    expect(reader.rules[0]).toEqual(maintainedReader.rules.find((rule: any) => rule.apiGroups.some((group: string) => group === "kars.azure.com")));
     expect(reader.rules.every((rule: any) => rule.verbs.join() === "get,list,watch" && !rule.resources.includes("secrets") && !rule.resources.includes("*"))).toBe(true);
     expect(plan.core.inferenceBudget.contracts).toEqual([]);
     expect(plan.core.inferenceBudget.unboundedTokenAllowances).toBeUndefined();

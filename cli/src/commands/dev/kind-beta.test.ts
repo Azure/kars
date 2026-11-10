@@ -4,13 +4,13 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, linkSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { PassThrough } from "node:stream";
 import { rootCertificates } from "node:tls";
 import * as path from "node:path";
 import { parse } from "yaml";
 import type { execa } from "execa";
-import { assertFreshKindBetaCluster, installKindBeta, kindBetaAccess, kindBetaApiDestinations, kindBetaClusterConfig, kindBetaKubeletTrust, loadKindBetaPlan, type BetaExecute } from "./kind-beta.js";
+import { assertFreshKindBetaCluster, installKindBeta, kindBetaAccess, kindBetaApiDestinations, kindBetaClusterConfig, kindBetaKubeletTrust, loadKindBetaPlan, probeKindBetaUI, type BetaExecute } from "./kind-beta.js";
 import { prepareKindBetaInference } from "./kind-beta-inference.js";
 import { setupInstalledKindBetaProviders } from "./kind-beta-providers.js";
 vi.mock("./kind-beta-providers.js", () => ({ setupInstalledKindBetaProviders: vi.fn(async () => {}) }));
@@ -334,6 +334,26 @@ describe("additive Bridge lifecycle isolation", () => {
 });
 
 describe("Kind creation and cold ordering", () => {
+  it("accepts an existing private ignore file without replacing it", async () => {
+    const f = installation(), ignore = path.join(f.directory, ".gitignore");
+    writeFileSync(ignore, "*\n", { mode: 0o600, flag: "wx" });
+    await f.install();
+    expect(readFileSync(ignore, "utf8")).toBe("*\n");
+  });
+  it.each(["symlink", "dangling-symlink", "hardlink", "shared", "directory", "oversized", "wrong-content"])("rejects a %s ignore file before operating on the cluster", async fault => {
+    const f = installation(), ignore = path.join(f.directory, ".gitignore"), target = path.join(f.directory, "other");
+    if (fault === "directory") mkdirSync(ignore);
+    else if (fault === "symlink" || fault === "dangling-symlink" || fault === "hardlink") {
+      if (fault !== "dangling-symlink") writeFileSync(target, "*\n", { mode: 0o600 });
+      if (fault === "hardlink") linkSync(target, ignore); else symlinkSync(target, ignore);
+    } else {
+      writeFileSync(ignore, fault === "oversized" ? "*\nextra" : fault === "wrong-content" ? "!\n" : "*\n", { mode: 0o600 });
+      if (fault === "shared") chmodSync(ignore, 0o644);
+    }
+    await expect(f.install()).rejects.toThrow();
+    expect(f.execute).not.toHaveBeenCalled();
+    expect(f.hooks.ensureCluster).not.toHaveBeenCalled();
+  });
   it.each(["missing", "wrong-audience", "duplicate", "missing-container"])("stops before workload installation when OIDC is %s", async fault => {
     const f = installation();
     if (fault === "missing") f.apiServer.command = ["kube-apiserver"];
@@ -505,6 +525,21 @@ describe("fresh Kind kubelet trust", () => {
 });
 
 describe("foreground loopback UI lifecycle", () => {
+  it.each([200, 302, 399])("accepts HTTP %s without following redirects or reading the body", async status => {
+    const cancel = vi.fn(async () => {});
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue({ status, body: { cancel } } as unknown as Response);
+    await expect(probeKindBetaUI(new URL("http://localhost:3000/private"))).resolves.toBeUndefined();
+    expect(fetch).toHaveBeenCalledWith(new URL("http://127.0.0.1:3000"), expect.objectContaining({ redirect: "manual" }));
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+  it.each([401, 403, 500, 502, 503, 504])("retains a fixed HTTP %s category for auth and retry handling", async status => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue({ status, body: null } as Response);
+    await expect(probeKindBetaUI(new URL("http://localhost:3000"))).rejects.toThrow(`Kind beta UI is not responsive (HTTP ${status})`);
+  });
+  it.each([199, 400, 501, 599, NaN, "untrusted-private-value", "__proto__"])("does not persist unrecognized HTTP status %s", async status => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue({ status, body: null } as unknown as Response);
+    await expect(probeKindBetaUI(new URL("http://localhost:3000"))).rejects.toThrow("Kind beta UI is not responsive (unexpected HTTP status)");
+  });
   function accessFixture(fail = false) {
     const plan = fixture().load(); const children: any[] = [];
     const spawn = vi.fn((_tool: string, args: string[]) => {

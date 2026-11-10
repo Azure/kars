@@ -9,6 +9,7 @@ import * as path from "node:path";
 import { execa } from "execa";
 import { parse, parseAllDocuments, stringify } from "yaml";
 import { requireBundledAsset, requirePackagedAsset } from "../../lib/repo-assets.js";
+import { readBoundedFileSync } from "../../lib/bounded-file.js";
 import { beginBetaState, betaDirectory, captureBetaNode, pinnedBetaTools, writeBetaState } from "./kind-beta-state.js";
 import { kindBetaKubeletTrust } from "../../lib/kind-kubelet-trust.js";
 export { kindBetaKubeletTrust } from "../../lib/kind-kubelet-trust.js";
@@ -249,8 +250,12 @@ export function kindBetaApiDestinations(service: ObjectMap, slices: ObjectMap) {
 
 export async function installKindBeta(plan: KindBetaPlan, tools: BetaTools, hooks: Hooks, execute: BetaExecute, directory: string) {
   const ignore = path.join(directory, ".gitignore");
-  if (!existsSync(ignore)) writeFileSync(ignore, "*\n", { mode: 0o600, flag: "wx" });
-  else if (readFileSync(ignore, "utf8") !== "*\n") throw new Error("Private beta attempt has an unexpected ignore policy");
+  try { writeFileSync(ignore, "*\n", { mode: 0o600, flag: "wx" }); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    const message = "Private beta attempt has an unexpected ignore policy";
+    if (readBoundedFileSync(ignore, 2, message, true) !== "*\n") throw new Error(message);
+  }
   const context = `kind-${plan.cluster}`, kubeconfig = path.join(directory, "kubeconfig");
   const kube = (args: string[], input?: string) => execute(tools.kubectl, ["--kubeconfig", kubeconfig, "--context", context, ...args], { env: tools.env, stdio: "pipe", ...(input ? { input } : {}) });
   const helm = (args: string[]) => execute(tools.helm, ["--kubeconfig", kubeconfig, "--kube-context", context, ...args], { env: tools.env, stdio: "pipe" });
@@ -343,12 +348,16 @@ async function assertPortAvailable(port: number) {
   });
 }
 
-async function probeKindBetaUI(originURL: URL) {
+export async function probeKindBetaUI(originURL: URL) {
   // Probe the forwarded socket, not localhost's possibly IPv6 DNS resolution.
   const target = new URL(originURL.origin); target.hostname = "127.0.0.1";
   const response = await fetch(target, { redirect: "manual", signal: AbortSignal.timeout(15000) });
   await response.body?.cancel();
-  if (response.status < 200 || response.status >= 400) throw new Error(`Kind beta UI is not responsive (HTTP ${response.status})`);
+  if (response.status >= 200 && response.status < 400) return;
+  // Persist only known diagnostic categories, never a network-supplied value.
+  const errors = new Map([[401, "HTTP 401"], [403, "HTTP 403"], [500, "HTTP 500"],
+    [502, "HTTP 502"], [503, "HTTP 503"], [504, "HTTP 504"]]);
+  throw new Error(`Kind beta UI is not responsive (${errors.get(response.status) ?? "unexpected HTTP status"})`);
 }
 
 export async function kindBetaAccess(plan: KindBetaPlan, tools: BetaTools, installed: { kubeconfig: string; context: string },

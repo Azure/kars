@@ -7,7 +7,7 @@ import base64
 from datetime import datetime, timezone
 import secrets
 
-from native_api import CORE, Failure, Setup, core, require, resource, uid
+from native_api import CORE, Failure, Setup, core, require, resource, uid, until
 
 NETWORK = "/apis/networking.k8s.io/v1"
 PENDING = "kars.azure.com/credential-rebind-pending"
@@ -40,6 +40,31 @@ class Cases:
                 "Native denial did not identify the intended admission predicate")
         return status
 
+    def await_store_policy(self, path, body, phase):
+        observation = {"phase": phase, "allowedDryRuns": 0, "deniedDryRuns": 0, "result": "pending"}
+        self.results.setdefault("enrolledStoreReadiness", []).append(observation)
+
+        def observed():
+            # VAP parameter informers observe grant CREATE/UPDATE asynchronously.
+            # Wait using dry-run only; forbidden persisted writes are never retried.
+            status, result = self.api.request("PATCH", path + "?dryRun=All", body,
+                                             expected=(200, 422), patch_type="application/merge-patch+json")
+            if status == 200:
+                observation["allowedDryRuns"] += 1
+                return False
+            require("kars-credential-enrolled-store-shape" in result.get("message", "")
+                    and "exact UID and purpose" in result["message"],
+                    "Store readiness denial did not identify the intended admission predicate")
+            observation["deniedDryRuns"] += 1
+            return True
+
+        try:
+            until("current enrolled store admission parameters", observed, timeout=30)
+            observation["result"] = "passed"
+        except Exception:
+            observation["result"] = "failed"
+            raise
+
     def stores(self):
         namespace = "native-admission-stores"
         workspace = self.namespace(namespace)
@@ -56,10 +81,14 @@ class Cases:
                                             "secret": {"name": name, "uid": uid(secret)}}]},
         })
         path = core(namespace, "secrets", name)
-        self.api.patch(path, {"metadata": {"annotations": {
+        enrolled = self.api.patch(path, {"metadata": {"annotations": {
             "kars.azure.com/credential-store-grant-uid": uid(grant),
         }}})
+        self.await_store_policy(path, {"metadata": {"uid": uid(enrolled),
+                                                   "resourceVersion": enrolled["metadata"]["resourceVersion"]},
+                                      "data": {"PASSWORD": "cHJvYmU="}}, "grant-created")
         cases = []
+        self.results["enrolledStoreKeys"] = cases
         for field in ["data", "stringData"]:
             value = secrets.token_hex(24)
             encoded = base64.b64encode(value.encode()).decode()
@@ -77,6 +106,7 @@ class Cases:
                 value = secrets.token_hex(24)
                 body[field] = {key: base64.b64encode(value.encode()).decode() if field == "data" else value
                                for key in keys}
+            self.results["enrolledStoreStage"] = "forbidden-" + "-".join(sorted(fields))
             code = self.denied("PATCH", path, body, "kars-credential-enrolled-store-shape",
                                "exact UID and purpose", 422)
             after = self.api.get(path)
@@ -89,13 +119,16 @@ class Cases:
             "integrationStores": [{"purpose": "provider-default",
                                     "secret": {"name": name, "uid": "different-secret-uid"}}],
         }})
-        code = self.denied("PATCH", path, {
+        body = {
             "metadata": {"uid": uid(before), "resourceVersion": before["metadata"]["resourceVersion"]},
             "stringData": {"API_KEY": secrets.token_hex(24)},
-        }, "kars-credential-enrolled-store-shape", "exact UID and purpose", 422)
+        }
+        self.await_store_policy(path, body, "grant-uid-rebound")
+        self.results["enrolledStoreStage"] = "wrong-secret-uid"
+        code = self.denied("PATCH", path, body, "kars-credential-enrolled-store-shape", "exact UID and purpose", 422)
         require(self.api.get(path)["data"] == before["data"], "Wrong enrolled UID changed secret values")
         cases.append({"identity": "wrong-secret-uid", "status": code})
-        self.results["enrolledStoreKeys"] = cases
+        self.results["enrolledStoreStage"] = "passed"
 
     def rebind(self):
         namespace = "native-admission-rebind"
