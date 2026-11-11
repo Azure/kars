@@ -232,7 +232,8 @@ class SecurityAuditGateTests(GitFixture):
     def test_other_beta_record_cannot_be_changed_as_policy_plumbing(self):
         records = ("docs/security-audits/2026-11-04-beta-publication.md",
                    "docs/security-audits/2026-11-10-overlay-package-update.md",
-                   "docs/security-audits/2026-11-10-kind-local-onboarding.md")
+                   "docs/security-audits/2026-11-10-kind-local-onboarding.md",
+                   "docs/security-audits/2026-11-11-headlamp-go-release-repair.md")
         self.approved_beta()
         for other in records:
             if other != self.audit:
@@ -247,7 +248,7 @@ class SecurityAuditGateTests(GitFixture):
 
     def test_other_beta_pr_cannot_use_this_approval(self):
         self.approved_beta()
-        for other in ("593", "606", "607"):
+        for other in ("593", "606", "607", "608"):
             if other != self.pr_number:
                 with self.subTest(pr=other):
                     result = self.beta_gate(GITHUB_ACTIONS="true", GITHUB_REPOSITORY="Azure/kars",
@@ -268,6 +269,13 @@ class LocalOnboardingAuditGateTests(SecurityAuditGateTests):
     pr_number = "607"
     source_head = "a4333b355a03648cf3769faf4eca26e988700aeb"
     source_base = "97789571866ca2c181f84455a845b957427cd991"
+
+
+class HeadlampReleaseAuditGateTests(SecurityAuditGateTests):
+    audit = "docs/security-audits/2026-11-11-headlamp-go-release-repair.md"
+    pr_number = "608"
+    source_head = "bec8d459b360ee6c9d5416b313df8a356195bbd7"
+    source_base = "2068be5faab76afeb1fa51afb7ebd20fd8177530"
 
 
 if __name__ == "__main__":

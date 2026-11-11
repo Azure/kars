@@ -142,6 +142,108 @@ for (const version of ['0.0.0-test.1', '0.0.0-test.1+build.5']) test(`clean pack
   assert.notEqual(parse(readFileSync(join(repo, 'deploy/helm/kars/values.yaml'), 'utf8')).controller.image.tag, `latest@${digest}`);
 });
 
+test('source-heavy release images use native runners without duplicate receipt or SBOM names', () => {
+  const jobs = parse(readFileSync(join(repo, '.github/workflows/release-public-interim.yml'), 'utf8')).jobs;
+  const build = jobs['build-images'];
+  const native = jobs['merge-native-images'].strategy.matrix.image;
+  assert.deepEqual(native, ['kars-bridge-bff', 'kars-prometheus', 'kars-grafana']);
+  assert.equal(build['timeout-minutes'], 90);
+  assert.equal(build['runs-on'], "${{ matrix.image.runner || 'ubuntu-22.04' }}");
+  assert.equal(build.env.ARCH_SUFFIX, "${{ matrix.image.arch && format('-{0}', matrix.image.arch) || '' }}");
+  const identities = new Set();
+  for (const image of build.strategy.matrix.image) {
+    const identity = image.ghcr + (image.arch ? `-${image.arch}` : '');
+    assert.ok(!identities.has(identity), identity);
+    identities.add(identity);
+    if (!native.includes(image.ghcr)) {
+      assert.equal(image.arch, undefined);
+      assert.equal(image.runner, undefined);
+      continue;
+    }
+    assert.equal(image.platforms, `linux/${image.arch}`);
+    assert.equal(image.runner || 'ubuntu-22.04', image.arch === 'arm64' ? 'ubuntu-24.04-arm' : 'ubuntu-22.04');
+    assert.equal(image.no_binaries, true);
+  }
+  for (const name of native) {
+    assert.deepEqual(build.strategy.matrix.image.filter(image => image.ghcr === name).map(image => image.arch).sort(), ['amd64', 'arm64']);
+  }
+  assert.match(build.steps.find(step => step.uses?.startsWith('docker/setup-qemu-action')).if, /!matrix.image.arch/);
+  const push = build.steps.find(step => step.id === 'push');
+  assert.match(push.with.tags, /env.ARCH_SUFFIX/);
+  assert.equal(push.with.sbom, true);
+  assert.equal(push.with.provenance, true);
+  for (const step of build.steps.filter(step => step.name === 'Record image build receipt' || step.with?.name?.startsWith('image-'))) {
+    assert.equal(step.if, '${{ !matrix.image.arch }}');
+  }
+  const sbom = build.steps.find(step => step.name === 'Generate SBOM (SPDX JSON)');
+  const upload = build.steps.find(step => step.name === 'Upload SBOM');
+  for (const value of [sbom.with.image, sbom.with['output-file'], upload.with.name, upload.with.path]) assert.match(value, /env.ARCH_SUFFIX/);
+});
+
+test('packaging waits for signed native manifests rather than per-arch receipts', () => {
+  const jobs = parse(readFileSync(join(repo, '.github/workflows/release-public-interim.yml'), 'utf8')).jobs;
+  const merge = jobs['merge-native-images'];
+  assert.deepEqual(merge.needs, ['prepare', 'build-images']);
+  assert.ok(jobs['cli-pack'].needs.includes('merge-native-images'));
+  assert.equal(merge.permissions['id-token'], 'write');
+  const index = predicate => merge.steps.findIndex(predicate);
+  const manifest = index(step => step.id === 'manifest');
+  const attest = index(step => step.uses?.startsWith('actions/attest-build-provenance'));
+  const sign = index(step => step.run?.includes('cosign sign --yes'));
+  const receipt = index(step => step.name === 'Record signed multi-arch image receipt');
+  const upload = index(step => step.uses?.startsWith('actions/upload-artifact'));
+  assert.ok(manifest >= 0 && attest > manifest && sign > attest && receipt > sign && upload > receipt);
+  assert.equal(merge.steps[attest].with['subject-digest'], '${{ steps.manifest.outputs.digest }}');
+  assert.match(merge.steps[sign].env.IMAGE, /@\$\{\{ steps.manifest.outputs.digest \}\}/);
+  assert.equal(merge.steps[receipt].env.DIGEST, '${{ steps.manifest.outputs.digest }}');
+  assert.equal(merge.steps[upload].with.name, 'image-${{ matrix.image }}-${{ env.VERSION }}');
+  assert.equal(merge.steps[upload].with['if-no-files-found'], 'error');
+  for (const step of merge.steps) assert.notEqual(step['continue-on-error'], true);
+});
+
+test('native manifest shell rejects incomplete architectures and never publishes prerelease latest', t => {
+  const jobs = parse(readFileSync(join(repo, '.github/workflows/release-public-interim.yml'), 'utf8')).jobs;
+  const script = jobs['merge-native-images'].steps.find(step => step.id === 'manifest').run;
+  const root = fixture(t);
+  const docker = `docker() {
+    printf '%s\\n' "$*" >> "$DOCKER_CALLS"
+    case "$*" in
+      *--raw*) cat "$MANIFEST" ;;
+      *--format*) printf '%s\\n' '${digest}' ;;
+      *create*) return 0 ;;
+      *) return 1 ;;
+    esac
+  }\n`;
+  for (const [architectures, valid] of [
+    [['amd64', 'arm64', 'unknown'], true],
+    [['amd64'], false],
+    [['arm64'], false],
+    [['amd64', 'amd64', 'arm64'], false],
+    [['amd64', 's390x'], false],
+  ]) {
+    for (const prerelease of ['true', 'false']) {
+      const calls = join(root, 'calls');
+      const output = join(root, 'output');
+      writeFileSync(calls, '');
+      writeFileSync(output, '');
+      writeFileSync(join(root, 'manifest.json'), JSON.stringify({ manifests: architectures.map(architecture => ({
+        platform: { os: architecture === 'unknown' ? 'unknown' : 'linux', architecture },
+      })) }));
+      const result = spawnSync('bash', ['-e', '-o', 'pipefail'], {
+        input: docker + script, encoding: 'utf8',
+        env: { ...process.env, REGISTRY: 'ghcr.io/azure', NAME: 'kars-bridge-bff', IMAGE_VERSION: 'v0.2.0-beta.3', PRERELEASE: prerelease,
+          DOCKER_CALLS: calls, MANIFEST: join(root, 'manifest.json'), GITHUB_OUTPUT: output },
+      });
+      assert.equal(result.status === 0, valid, result.stderr);
+      assert.equal(readFileSync(output, 'utf8'), valid ? `digest=${digest}\n` : '');
+      const commands = readFileSync(calls, 'utf8');
+      assert.equal(commands.includes(':latest'), prerelease === 'false');
+      for (const arch of ['amd64', 'arm64']) assert.ok(commands.includes(`v0.2.0-beta.3-${arch}`));
+      assert.ok(commands.includes(`@${digest} --raw`));
+    }
+  }
+});
+
 test('workflow publishes the complete chart image inventory through the existing pipeline', () => {
   const workflow = parse(readFileSync(join(repo, '.github/workflows/release-public-interim.yml'), 'utf8'));
   const jobs = workflow.jobs;

@@ -151,12 +151,13 @@ jobs:
 
   # ─── Stage 2: build + push container images to PUBLIC GHCR ─────
   build-images:
-    name: Build + push ${{ matrix.image.name }} (PUBLIC GHCR)
+    name: Build + push ${{ matrix.image.name }} ${{ matrix.image.arch }} (PUBLIC GHCR)
     needs: [prepare, build-binaries]
     env:
       VERSION: ${{ needs.prepare.outputs.tag }}
       IMAGE_VERSION: ${{ needs.prepare.outputs.imageTag }}
-    runs-on: ubuntu-22.04
+      ARCH_SUFFIX: ${{ matrix.image.arch && format('-{0}', matrix.image.arch) || '' }}
+    runs-on: ${{ matrix.image.runner || 'ubuntu-22.04' }}
     permissions:
       contents: read
       packages: write
@@ -192,12 +193,22 @@ jobs:
             dockerfile: sandbox-images/conformance-runner/Dockerfile
             ghcr: kars-conformance-runner
             platforms: linux/amd64,linux/arm64
+          # Source-heavy builds use the same native runners as the sandbox images.
           - name: bridge-bff
             dockerfile: bridge/bff/Dockerfile
             ghcr: kars-bridge-bff
             context: .
             no_binaries: true
-            platforms: linux/amd64,linux/arm64
+            platforms: linux/amd64
+            arch: amd64
+          - name: bridge-bff
+            dockerfile: bridge/bff/Dockerfile
+            ghcr: kars-bridge-bff
+            context: .
+            no_binaries: true
+            platforms: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
           - name: bridge-web
             dockerfile: bridge/web/Dockerfile
             ghcr: kars-bridge-web
@@ -253,7 +264,16 @@ jobs:
             ghcr: kars-prometheus
             context: .
             no_binaries: true
-            platforms: linux/amd64,linux/arm64
+            platforms: linux/amd64
+            arch: amd64
+          - name: prometheus
+            dockerfile: sandbox-images/prometheus/Dockerfile
+            ghcr: kars-prometheus
+            context: .
+            no_binaries: true
+            platforms: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
           - name: webhook-certgen
             dockerfile: sandbox-images/webhook-certgen/Dockerfile
             ghcr: kars-webhook-certgen
@@ -283,7 +303,16 @@ jobs:
             ghcr: kars-grafana
             context: .
             no_binaries: true
-            platforms: linux/amd64,linux/arm64
+            platforms: linux/amd64
+            arch: amd64
+          - name: grafana
+            dockerfile: sandbox-images/grafana/Dockerfile
+            ghcr: kars-grafana
+            context: .
+            no_binaries: true
+            platforms: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
           - name: k8s-sidecar
             dockerfile: sandbox-images/k8s-sidecar/Dockerfile
             ghcr: kars-k8s-sidecar
@@ -316,7 +345,7 @@ jobs:
         run: find ./bin -type f -name 'kars-*' -exec chmod +x {} \;
 
       - name: Set up QEMU (for cross-arch buildx)
-        if: matrix.image.platforms != 'linux/amd64'
+        if: matrix.image.platforms != 'linux/amd64' && !matrix.image.arch
         uses: docker/setup-qemu-action@49b3bc8e6bdd4a60e6116a5414239cba5943d3cf # v3.2.0
 
       - name: Set up Docker Buildx
@@ -339,8 +368,8 @@ jobs:
           push: true
           platforms: ${{ matrix.image.platforms }}
           tags: |
-            ${{ env.REGISTRY }}/${{ matrix.image.ghcr }}:${{ env.IMAGE_VERSION }}
-            ${{ needs.prepare.outputs.prerelease == 'false' && format('{0}/{1}:latest', env.REGISTRY, matrix.image.ghcr) || '' }}
+            ${{ env.REGISTRY }}/${{ matrix.image.ghcr }}:${{ env.IMAGE_VERSION }}${{ env.ARCH_SUFFIX }}
+            ${{ needs.prepare.outputs.prerelease == 'false' && format('{0}/{1}:latest{2}', env.REGISTRY, matrix.image.ghcr, env.ARCH_SUFFIX) || '' }}
           build-args: |
             VERSION=${{ env.VERSION }}
             SOURCE_REVISION=${{ github.sha }}
@@ -366,6 +395,7 @@ jobs:
           || echo "::warning::Could not set ${{ matrix.image.ghcr }} public via API; set it once manually in package settings."
 
       - name: Record image build receipt
+        if: ${{ !matrix.image.arch }}
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
         run: |
@@ -373,6 +403,7 @@ jobs:
           jq -n --arg name '${{ matrix.image.ghcr }}' --arg repository '${{ env.REGISTRY }}/${{ matrix.image.ghcr }}' --arg digest "$DIGEST" \
             '{name: $name, repository: $repository, digest: $digest}' > image-receipts/${{ matrix.image.ghcr }}.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        if: ${{ !matrix.image.arch }}
         with:
           name: image-${{ matrix.image.ghcr }}-${{ env.VERSION }}
           path: image-receipts/*.json
@@ -381,15 +412,15 @@ jobs:
       - name: Generate SBOM (SPDX JSON)
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
-          image: ${{ env.REGISTRY }}/${{ matrix.image.ghcr }}:${{ env.IMAGE_VERSION }}
+          image: ${{ env.REGISTRY }}/${{ matrix.image.ghcr }}:${{ env.IMAGE_VERSION }}${{ env.ARCH_SUFFIX }}
           format: spdx-json
-          output-file: sbom-${{ matrix.image.name }}.spdx.json
+          output-file: sbom-${{ matrix.image.name }}${{ env.ARCH_SUFFIX }}.spdx.json
 
       - name: Upload SBOM
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
         with:
-          name: sbom-${{ matrix.image.name }}-${{ env.VERSION }}
-          path: sbom-${{ matrix.image.name }}.spdx.json
+          name: sbom-${{ matrix.image.name }}-${{ env.VERSION }}${{ env.ARCH_SUFFIX }}
+          path: sbom-${{ matrix.image.name }}${{ env.ARCH_SUFFIX }}.spdx.json
           retention-days: 90
 
       - name: Install cosign
@@ -402,6 +433,75 @@ jobs:
           COSIGN_EXPERIMENTAL: '1'
         run: |
           cosign sign --yes ${{ env.REGISTRY }}/${{ matrix.image.ghcr }}@${{ steps.push.outputs.digest }}
+
+  # Native source builds keep per-architecture SBOMs; only signed multi-arch
+  # manifests become authoritative chart image receipts.
+  merge-native-images:
+    name: Merge + sign ${{ matrix.image }} native manifests
+    needs: [prepare, build-images]
+    runs-on: ubuntu-22.04
+    env:
+      VERSION: ${{ needs.prepare.outputs.tag }}
+      IMAGE_VERSION: ${{ needs.prepare.outputs.imageTag }}
+      PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [kars-bridge-bff, kars-prometheus, kars-grafana]
+    steps:
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create and validate both native architectures
+        id: manifest
+        env:
+          NAME: ${{ matrix.image }}
+        run: |
+          repository="$REGISTRY/$NAME"
+          LATEST_ARGS=()
+          if [ "$PRERELEASE" = false ]; then LATEST_ARGS=(-t "$repository:latest"); fi
+          docker buildx imagetools create \
+            -t "$repository:$IMAGE_VERSION" "${LATEST_ARGS[@]}" \
+            "$repository:$IMAGE_VERSION-amd64" "$repository:$IMAGE_VERSION-arm64"
+          DIGEST=$(docker buildx imagetools inspect "$repository:$IMAGE_VERSION" --format '{{.Manifest.Digest}}')
+          docker buildx imagetools inspect "$repository@$DIGEST" --raw | \
+            jq -e '[.manifests[].platform | select(.os == "linux") | .architecture] | sort == ["amd64", "arm64"]'
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+      - name: Attest merged build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ matrix.image }}
+          subject-digest: ${{ steps.manifest.outputs.digest }}
+          push-to-registry: true
+      - uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409 # v3.7.0
+        with:
+          cosign-release: 'v2.4.1'
+      - name: Cosign keyless sign manifest
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ matrix.image }}@${{ steps.manifest.outputs.digest }}
+        run: cosign sign --yes "$IMAGE"
+      - name: Record signed multi-arch image receipt
+        env:
+          NAME: ${{ matrix.image }}
+          DIGEST: ${{ steps.manifest.outputs.digest }}
+        run: |
+          mkdir -p image-receipts
+          jq -n --arg name "$NAME" --arg repository "$REGISTRY/$NAME" --arg digest "$DIGEST" \
+            '{name: $name, repository: $repository, digest: $digest}' > "image-receipts/$NAME.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: image-${{ matrix.image }}-${{ env.VERSION }}
+          path: image-receipts/*.json
+          if-no-files-found: error
 
   # ─── Stage 2b: build sandbox-base + openclaw-sandbox (NATIVE per-arch) ──
   # These two are heavy (Python/Go/Node), so building arm64 under QEMU is far
@@ -998,7 +1098,7 @@ jobs:
   # ─── Stage 3: pack @kars/cli for GitHub Release distribution ───
   cli-pack:
     name: Package release-bound charts and CLI; attempt npm OIDC publication
-    needs: [prepare, build-images, merge-sandbox, build-runtimes, merge-mesh]
+    needs: [prepare, build-images, merge-native-images, merge-sandbox, build-runtimes, merge-mesh]
     env:
       VERSION: ${{ needs.prepare.outputs.tag }}
       IMAGE_VERSION: ${{ needs.prepare.outputs.imageTag }}

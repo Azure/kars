@@ -27,9 +27,15 @@ product/version environment and the Vite configuration outside the scoped polyfi
 replacement are preserved. The build emits rendered-module/package evidence, output hashes,
 and a CycloneDX inventory, including the separately copied Monaco assets.
 These describe actual build outputs, not every development dependency in the lock.
-The backend is rebuilt from the same pinned source with Go 1.27.3
+The backend is rebuilt from the same pinned source with Go 1.27.4
 and explicit security dependency patches in `build-backend.sh`; it is not the
-unmodified upstream binary. The build sets upstream's `kubeconfig.Version` to
+unmodified upstream binary. This toolchain patch addresses
+[CVE-2026-97054](https://pkg.go.dev/vuln/GO-2026-6859), found in the shipped
+Go 1.27.3 backend by the all-severity image scan on 2026-11-11. The builder's
+multi-platform digest, exact toolchain guard and image label move together;
+Headlamp 0.41.0, its source and dependency pins, and the AL3 runtime base stay
+unchanged. Local helper tests do not qualify the rebuilt image: a fresh hosted
+image build and unchanged all-severity scan are still required. The build sets upstream's `kubeconfig.Version` to
 the pinned 0.41.0 release and executes `-version` to verify it before acceptance;
 omitting that linker value otherwise reports `Headlamp unknown`. It rebuilds `tools/headlamp-plugin` from its lockfile
 and ships its `package.json` alongside the bundle: Headlamp uses that metadata
