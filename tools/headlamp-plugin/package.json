@@ -21,6 +21,9 @@
   "overrides": {
     "vitest": "^4.1.12",
     "@vitest/coverage-istanbul": "^4.1.12",
-    "tmp": "^0.2.6"
+    "@vitest/mocker": "4.1.12",
+    "minimatch": "11.0.1",
+    "tmp": "^0.2.6",
+    "webpack-dev-middleware": "7.4.6"
   }
 }
