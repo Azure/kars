@@ -33,6 +33,11 @@ together. All CodeQL actions in a workflow must use the same release; Dependabot
 groups those updates to prevent initialization/analysis version mismatches.
 The mesh and OpenClaw packages override the vendored AGT SDK's `js-yaml` dependency
 to the patched 4.3.2 release without changing the SDK tarball.
+The Headlamp plugin's build-only dependency tree pins patched `@vitest/mocker`,
+`minimatch`, and `webpack-dev-middleware` versions even where Storybook's declared
+ranges lag behind; retain those overrides only with a passing Headlamp build.
+These packages are not shipped with the plugin. `deepmerge` remains tracked
+until its upstream project publishes a patched release.
 
 The benchmark gate compares the base revision with the candidate on the same
 runner and Rust toolchain, rather than treating historical hardware timings as

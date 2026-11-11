@@ -4,18 +4,17 @@
 # ci/check-agt-released.sh
 #
 # Runs daily (see .github/workflows/check-agt-released.yml) to detect
-# when Microsoft AGT publishes a release that contains the fix-commits
-# we currently consume via the [patch.crates-io] git pin in Cargo.toml
-# and the vendored npm tarball in vendor/agt/.
+# when Microsoft AGT publishes a release containing both the Rust crate
+# pin in Cargo.toml and the TypeScript SDK pin in vendor/agt/pin.json.
 #
 # Opens a GitHub issue the moment a fixed release is available so we
 # don't sit on the git pin longer than necessary. Closes the issue if
 # one already exists and the pin is gone.
 #
 # Strategy:
-#   1. Read the pinned commit SHA from Cargo.toml's [patch.crates-io].
-#   2. Ask GitHub which AGT tags include that commit (via /commits/{sha}/tags).
-#   3. If any tag exists, the fix has shipped — file an issue.
+#   1. Read both pinned commit SHAs.
+#   2. Check whether a release tag contains both commits.
+#   3. File an issue only after both pins have shipped.
 #
 # Exit codes:
 #   0 — no released version yet (status quo) OR issue already exists
@@ -29,45 +28,47 @@ cd "$REPO_ROOT"
 CARGO="Cargo.toml"
 [ -f "$CARGO" ] || { echo "no Cargo.toml — wrong directory" >&2; exit 1; }
 
-# Extract the pinned commit SHA from [patch.crates-io]
-PINNED_SHA=$(grep -oE 'agentmesh.*git.*rev = "([a-f0-9]{40})"' "$CARGO" \
+# Extract the Rust crate pin from [patch.crates-io] and the TypeScript SDK pin.
+RUST_PINNED_SHA=$(grep -oE 'agentmesh.*git.*rev = "([a-f0-9]{40})"' "$CARGO" \
   | head -1 \
   | grep -oE '[a-f0-9]{40}' \
   | head -1 || true)
+SDK_PINNED_SHA=$(jq -r '.sha // empty' vendor/agt/pin.json)
 
-if [ -z "$PINNED_SHA" ]; then
-  echo "::notice::No git pin in Cargo.toml — patch must have been removed. Nothing to check."
+if [ -z "$RUST_PINNED_SHA" ] || [ -z "$SDK_PINNED_SHA" ]; then
+  echo "::notice::One or both AGT pins are absent — nothing to check."
   exit 0
 fi
 
-echo "Pinned AGT commit: $PINNED_SHA"
+echo "Pinned AGT Rust commit: $RUST_PINNED_SHA"
+echo "Pinned AGT TypeScript SDK commit: $SDK_PINNED_SHA"
 
-# Check whether any AGT release tag contains this commit.
-# GitHub's `/repos/{owner}/{repo}/commits/{sha}/branches-where-head` only
-# covers branches, not tags. Use the search-style endpoint instead.
-TAGS_JSON=$(gh api "repos/microsoft/agent-governance-toolkit/commits/$PINNED_SHA/branches-where-head" 2>/dev/null || echo '[]')
+tag_contains_commit() {
+  local sha="$1"
+  local tag="$2"
+  local status
+  status=$(gh api "repos/microsoft/agent-governance-toolkit/compare/$sha...$tag" \
+    --jq '.status' 2>/dev/null || echo "")
+  case "$status" in
+    ahead|identical) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
-# Iterate all release tags, check `git describe --contains $PINNED_SHA`-equivalent via API
 RELEASED_TAG=""
 while read -r TAG; do
   [ -z "$TAG" ] && continue
-  # Does this tag contain the pinned commit? Use the compare endpoint:
-  # ahead_by > 0 with status "ahead" means the tag is AHEAD of the commit
-  # (i.e. the commit is in the tag's history)
-  STATUS=$(gh api "repos/microsoft/agent-governance-toolkit/compare/$PINNED_SHA...$TAG" \
-    --jq '.status' 2>/dev/null || echo "")
-  case "$STATUS" in
-    ahead|identical)
-      RELEASED_TAG="$TAG"
-      echo "Found released tag containing $PINNED_SHA: $TAG (status=$STATUS)"
-      break
-      ;;
-  esac
+  if tag_contains_commit "$RUST_PINNED_SHA" "$TAG" \
+    && tag_contains_commit "$SDK_PINNED_SHA" "$TAG"; then
+    RELEASED_TAG="$TAG"
+    echo "Found released tag containing both AGT pins: $TAG"
+    break
+  fi
 done < <(gh api 'repos/microsoft/agent-governance-toolkit/releases?per_page=10' \
            --jq '.[] | select(.draft == false) | .tag_name')
 
 if [ -z "$RELEASED_TAG" ]; then
-  echo "::notice::Pin $PINNED_SHA not yet in any AGT release — keeping the git override."
+  echo "::notice::Both AGT pins are not yet in the same release — keeping the git override and SDK tarball."
   exit 0
 fi
 
@@ -86,13 +87,14 @@ fi
 
 TITLE="AGT $RELEASED_TAG released — flip git pin in Cargo.toml + revendor SDK"
 BODY=$(cat <<MD
-AGT upstream just released **$RELEASED_TAG**, which contains the
-commit our \`[patch.crates-io]\` pin currently overrides:
+AGT upstream just released **$RELEASED_TAG**, which contains both commits
+currently pinned by Kars:
 
-- Pinned commit: \`$PINNED_SHA\`
+- Rust crate pin: \`$RUST_PINNED_SHA\`
+- TypeScript SDK pin: \`$SDK_PINNED_SHA\`
 - Released tag: \`$RELEASED_TAG\`
 
-The git override in \`Cargo.toml\` can now be removed. To-do:
+Both pins can now be replaced with the release. To-do:
 
 ### Rust side
 1. \`Cargo.toml\` — set \`agentmesh\` and \`agentmesh-mcp\` to the released
