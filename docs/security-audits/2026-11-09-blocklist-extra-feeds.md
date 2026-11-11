@@ -71,14 +71,16 @@ router startup and passes the accepted feeds to the existing refresh task.
   and count cap), format dispatch, fetch-error redaction, redirect refusal,
   declared-length and streamed-body caps, last-known-good entries of a failed
   feed, and the router env built by the controller.
-- CI on b1dac06: Rust Build & Test (fmt, clippy `-D warnings`, tests), E2E
-  (Kind), Chaos tier and the other gates pass; only this gate failed, which
-  this report addresses.
+- CI on a2e589a: Rust Build & Test (fmt, clippy `-D warnings`, tests), E2E
+  (Kind), Chaos tier, CodeQL and every other check pass (37 of 38); the only
+  failing check is this gate, which waits for the independent reviewer
+  sign-off.
 
 ## Verdict
 
 Accept. The default behaviour is OISD only; the new outbound fetches exist only
 when a cluster operator configures them, are HTTPS-only, non-redirecting,
-size- and count-capped, and can only add domains to the deny set.
+size- and count-capped, and deny-only: feed contents can never allow traffic,
+while a successful refresh may add or remove denied domains.
 
 Signed-off-by: Slava Olesik <looksof@gmail.com>
