@@ -4,7 +4,7 @@
 
 set -eu
 recipe="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-test "$(go env GOVERSION)" = go1.27.3
+test "$(go env GOVERSION)" = go1.27.4
 case "$(go env GOARCH)" in
     amd64|arm64) ;;
     *) echo "Headlamp requires a native amd64 or arm64 builder" >&2; exit 1 ;;
