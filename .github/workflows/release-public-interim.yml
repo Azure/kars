@@ -228,7 +228,7 @@ jobs:
           retention-days: 90
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409 # v3.7.0
+        uses: sigstore/cosign-installer@4959ce089c160fddf62f7b42464195ba1a56d382 # v3.7.0
         with:
           cosign-release: 'v2.4.1'
 
@@ -431,7 +431,7 @@ jobs:
           retention-days: 90
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409 # v3.7.0
+        uses: sigstore/cosign-installer@4959ce089c160fddf62f7b42464195ba1a56d382 # v3.7.0
         with:
           cosign-release: 'v2.4.1'
       - name: Cosign keyless sign manifests
@@ -586,7 +586,7 @@ jobs:
           retention-days: 90
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409 # v3.7.0
+        uses: sigstore/cosign-installer@4959ce089c160fddf62f7b42464195ba1a56d382 # v3.7.0
         with:
           cosign-release: 'v2.4.1'
 
@@ -726,7 +726,7 @@ jobs:
           retention-days: 90
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409 # v3.7.0
+        uses: sigstore/cosign-installer@4959ce089c160fddf62f7b42464195ba1a56d382 # v3.7.0
         with:
           cosign-release: 'v2.4.1'
 
@@ -898,7 +898,7 @@ jobs:
           echo "::notice::SHA256SUMS:"; cat SHA256SUMS
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409 # v3.7.0
+        uses: sigstore/cosign-installer@4959ce089c160fddf62f7b42464195ba1a56d382 # v3.7.0
         with:
           cosign-release: 'v2.4.1'
 
