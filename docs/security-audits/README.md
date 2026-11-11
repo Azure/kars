@@ -65,6 +65,18 @@ This decision replaces only the two-human sign-off requirement for that exact
 scope; technical CI, artifact signing and fresh-cluster acceptance remain
 required. Neither the PR593 nor PR606 exception is changed or extended.
 
+For Azure/kars#608, the maintainer explicitly authorized publishing the additional
+three-file Headlamp Go 1.27.4 patch and recording a source-bound single-maintainer
+sign-off, selecting **“Publish fix with my source-bound sign-off (Recommended)”**.
+The frozen patch is
+`c7f4bf780d9ef403134b5f2c8ea72581c20fe7c66be403591c24fd46b8b23df6`.
+The approved source `11edc2dc6fde46d8bbf8319ebc15ce2e2c0df18e` against base
+`2068be5faab76afeb1fa51afb7ebd20fd8177530` includes the previously authorized
+native release-runner repair. Its current record is
+[`2026-11-11-headlamp-go-release-repair.md`](2026-11-11-headlamp-go-release-repair.md).
+This decision does not waive the shipping-image vulnerability scan or any other
+technical gate, and does not extend or modify the three earlier approvals.
+
 For each exception, the gate requires its exact committed record, signer and source/base marker,
 the exact review base, and the approved source as an ancestor. Every tracked
 file must match that source except the four explicitly reviewed approval-plumbing
