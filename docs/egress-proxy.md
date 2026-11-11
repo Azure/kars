@@ -326,14 +326,16 @@ The blocklist engine combines multiple layers of threat intelligence:
 |--------|-------------|-----------------|
 | **Seed file** | Curated domain list loaded from ConfigMap at startup | On pod restart |
 | **OISD** | Community-maintained blocklist (50k+ domains) | Every 6 hours |
-| **URLhaus** | abuse.ch malware URL database (hostfile format) | Every 6 hours |
+| **Opt-in feeds** | Feeds named in `BLOCKLIST_EXTRA_FEEDS` (none by default, see below) | Every 6 hours |
 | **High-risk TLDs** | `.tk`, `.ml`, `.ga`, `.cf`, `.gq`, `.top`, `.buzz`, `.surf`, `.rest`, `.onion` | Static |
 | **Bare IP blocking** | URLs with IP addresses instead of domains | Static |
 
 Key properties:
 - Stored in `Arc<RwLock<HashSet<String>>>` — lock-free reads, rare write locks
 - Parent domain matching: blocking `example.com` also blocks `sub.example.com`
-- Max 500,000 domains per feed (memory safety limit)
+- Max 500,000 domains per source (seed file, OISD, each extra feed) and 1,000,000 across
+  all sources (memory safety limits). A source that would pass the total gets only the
+  space the others leave, and the router logs the truncation.
 - **Always enforced**, even when learn mode is on
 
 ### Auto-Refresh
@@ -342,11 +344,50 @@ The blocklist stays current through multiple refresh mechanisms:
 
 | Mechanism | Frequency | Source |
 |-----------|-----------|--------|
-| Router background task | Every 6 hours | Fetches latest feeds from [OISD](https://oisd.nl/) and [URLhaus](https://urlhaus.abuse.ch/) |
+| Router background task | Every 6 hours | Fetches the latest [OISD](https://oisd.nl/) list and any opt-in feeds |
 | K8s CronJob | Every 6 hours | Updates the ConfigMap mounted at `/etc/kars/blocklist/domains.txt` |
 | GitHub Actions CI | Daily | Refreshes the seed file in the repository (≤ 24h old) |
 
-**Safe refresh:** If all upstream feeds fail, the previous entries are preserved — no wipe-on-failure. The router logs a warning and retries on the next cycle.
+**Safe refresh:** Each source keeps the entries of its last successful load. When OISD or an
+extra feed fails, the router keeps that source's previous entries until it loads again and
+logs a warning naming the source, so a partial outage does not weaken coverage. A feed that
+has never loaded adds nothing until it does (also logged). No wipe-on-failure.
+
+### Opt-in Feeds
+
+OISD is the only built-in feed. Operators can add more with `BLOCKLIST_EXTRA_FEEDS`, a
+comma-separated list of `hosts:<https-url>` (hostfile lines, `0.0.0.0 domain`) and
+`domains:<https-url>` (one domain per line) entries. It is empty by default.
+
+Set it on the controller, which forwards it to every router:
+
+```yaml
+controller:
+  extraEnv:
+    - name: BLOCKLIST_EXTRA_FEEDS
+      value: "domains:https://hole.cert.pl/domains/v2/domains.txt"
+```
+
+- `https` URLs only, without credentials in the URL. Invalid entries are skipped with a
+  warning in the router log, which names the entry by its position, not by its URL.
+- A feed must answer `200` from the configured URL. Redirects are not followed (the
+  router's HTTP client never follows them), so configure the URL that serves the list.
+- Fetch errors are logged with the feed host only, never the URL or its query string, so
+  a token in the query stays out of the logs.
+- At most 8 extra feeds. Each one has the same caps as OISD: 60 s timeout, 50 MB body
+  (checked while the body streams in, after decompression), 500,000 domains, within the
+  1,000,000-domain total.
+- Loaded by the router only. The CronJob and the seed file stay OISD-only, since the
+  ConfigMap is capped at 1 MiB.
+- A listed domain is a hard deny like any other blocklist entry, so add only feeds you
+  trust.
+
+Examples of public feeds:
+
+| Feed | Entry |
+|------|-------|
+| [CERT Polska warning list](https://cert.pl/en/warning-list/) | `domains:https://hole.cert.pl/domains/v2/domains.txt` |
+| [NetAPI compromised domains](https://netapi.com/compromised-urls/) (CC BY 4.0) | `hosts:https://netapi.com/api2/?method=compromised&dataset_type=url&format=hosts` |
 
 ## Agent Integration
 

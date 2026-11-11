@@ -238,7 +238,18 @@ impl AppState {
                 .ok()
                 .and_then(|s| s.parse().ok());
 
-            bl.start_refresh_task(client.clone(), refresh_secs, Some(seed_path));
+            // Opt-in extra feeds (comma-separated hosts:/domains: https URLs), empty by default.
+            let (extra_feeds, ignored) = crate::blocklist::parse_extra_feeds(
+                &std::env::var("BLOCKLIST_EXTRA_FEEDS").unwrap_or_default(),
+            );
+            for reason in &ignored {
+                tracing::warn!(reason = %reason, "BLOCKLIST_EXTRA_FEEDS: entry ignored");
+            }
+            if !extra_feeds.is_empty() {
+                tracing::info!(count = extra_feeds.len(), "Blocklist: extra feeds enabled");
+            }
+
+            bl.start_refresh_task(client.clone(), refresh_secs, Some(seed_path), extra_feeds);
             tracing::info!("Blocklist enabled — auto-refresh active");
             bl
         } else {

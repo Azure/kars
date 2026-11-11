@@ -148,13 +148,13 @@ rules, then exits. Runtime effect:
 ### Domain Blocklist (auto-refreshing)
 
 ```
-Blocklist: loaded OISD feed      — 51,449 domains
-Blocklist: loaded URLhaus feed   —    456 domains
-Blocklist refreshed              — 51,969 domains blocked (total)
+Blocklist: source loaded (OISD)  — 51,449 domains
+Blocklist refreshed              — 51,449 domains blocked (total)
 ```
 
-Refreshes every 6 hours from OISD + URLhaus feeds. Includes high-risk TLDs
-(`.tk`, `.ml`, `.ga`, `.cf`, `.gq`), bare IP blocking, and subdomain matching.
+Refreshes every 6 hours from OISD and any opt-in feeds (`BLOCKLIST_EXTRA_FEEDS`).
+Includes high-risk TLDs (`.tk`, `.ml`, `.ga`, `.cf`, `.gq`), bare IP blocking, and
+subdomain matching.
 
 ---
 
