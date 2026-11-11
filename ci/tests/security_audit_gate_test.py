@@ -274,7 +274,7 @@ class LocalOnboardingAuditGateTests(SecurityAuditGateTests):
 class HeadlampReleaseAuditGateTests(SecurityAuditGateTests):
     audit = "docs/security-audits/2026-11-11-headlamp-go-release-repair.md"
     pr_number = "608"
-    source_head = "11edc2dc6fde46d8bbf8319ebc15ce2e2c0df18e"
+    source_head = "bec8d459b360ee6c9d5416b313df8a356195bbd7"
     source_base = "2068be5faab76afeb1fa51afb7ebd20fd8177530"
 
 

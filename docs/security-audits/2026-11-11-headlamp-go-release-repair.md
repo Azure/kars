@@ -5,9 +5,9 @@ Licensed under the MIT License. -->
 
 Date: 2026-11-11
 PR: https://github.com/Azure/kars/pull/608
-Reviewed implementation source: `11edc2dc6fde46d8bbf8319ebc15ce2e2c0df18e`
+Reviewed implementation source: `bec8d459b360ee6c9d5416b313df8a356195bbd7`
 Reviewed integration base: `2068be5faab76afeb1fa51afb7ebd20fd8177530`
-Scope: `.github/workflows/release-public-interim.yml`, `cli/scripts/release-artifacts.test.mjs`, `sandbox-images/headlamp/Dockerfile`, `sandbox-images/headlamp/build-backend.sh`, `sandbox-images/headlamp/README.md`.
+Scope: `.github/workflows/release-public-interim.yml`, `cli/scripts/release-artifacts.test.mjs`, `sandbox-images/headlamp/Dockerfile`, `sandbox-images/headlamp/build-backend.sh`, `sandbox-images/headlamp/README.md`, `cli/src/testing/helm-headlamp.test.ts`.
 Gated paths: `sandbox-images/headlamp/Dockerfile`.
 
 ## Summary
@@ -56,5 +56,13 @@ Approved by the maintainer for the exact source and integration base above. The 
 
 No second human review is claimed. The PR593, PR606 and PR607 approvals are unchanged and do not supply this sign-off. The follow-up may change only this record, `ci/security-audit-required.sh`, `ci/tests/security_audit_gate_test.py` and `docs/security-audits/README.md`. Every other tracked path must match the approved implementation source, with exact base and ancestry retained. No technical-check bypass, artifact-signing waiver or customer-acceptance result is granted by this record.
 
-Beta-approval-exception: Azure/kars#608; source=11edc2dc6fde46d8bbf8319ebc15ce2e2c0df18e; base=2068be5faab76afeb1fa51afb7ebd20fd8177530
+The maintainer subsequently selected **“Publish the test correction and update my sign-off (Recommended)”** after disclosure that the sole failed CLI test still expected the old builder. Source `bec8d459b360ee6c9d5416b313df8a356195bbd7` adds only the one-line assertion correction to prior publication `06847ab1431d8cc388dc22db9dc4bddfcaa42fab`. It changes no runtime code or technical-check requirements. The earlier exact-source decision and failed check remain in Git history and retained evidence.
+
+- `cd cli && npm test -- src/testing/helm-headlamp.test.ts` — before: 67 passed, 1 failed on the old builder assertion; after: all 68 passed.
+- `cd cli && ./node_modules/.bin/oxlint src/testing/helm-headlamp.test.ts` — passed, zero warnings/errors.
+- `git diff --check -- cli/src/testing/helm-headlamp.test.ts` — passed.
+- `PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s ci/tests -p security_audit_gate_test.py` — rerun with the updated source binding: all 96 tests passed; `bash -n ci/security-audit-required.sh` and scoped whitespace checks also passed. The same four approval-only follow-up paths remain enforced.
+- On prior publication `06847ab1431d8cc388dc22db9dc4bddfcaa42fab`, hosted Headlamp qualification, Kind E2E and native acceptance passed. CLI reported 6,265 passed and the one stale assertion failed. Fresh checks remain required on this corrected source; no release or independent fresh-Kind customer acceptance is claimed.
+
+Beta-approval-exception: Azure/kars#608; source=bec8d459b360ee6c9d5416b313df8a356195bbd7; base=2068be5faab76afeb1fa51afb7ebd20fd8177530
 Signed-off-by: Pal Lakatos-Toth <lakatos.toth.pal@gmail.com>

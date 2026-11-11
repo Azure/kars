@@ -64,7 +64,7 @@ beta_approval_exception() {
       approved_base=97789571866ca2c181f84455a845b957427cd991
       approved_pr=607 ;;
     docs/security-audits/2026-11-11-headlamp-go-release-repair.md)
-      approved_head=11edc2dc6fde46d8bbf8319ebc15ce2e2c0df18e
+      approved_head=bec8d459b360ee6c9d5416b313df8a356195bbd7
       approved_base=2068be5faab76afeb1fa51afb7ebd20fd8177530
       approved_pr=608 ;;
     *) return 1 ;;

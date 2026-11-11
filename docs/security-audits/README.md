@@ -70,9 +70,12 @@ three-file Headlamp Go 1.27.4 patch and recording a source-bound single-maintain
 sign-off, selecting **“Publish fix with my source-bound sign-off (Recommended)”**.
 The frozen patch is
 `c7f4bf780d9ef403134b5f2c8ea72581c20fe7c66be403591c24fd46b8b23df6`.
-The approved source `11edc2dc6fde46d8bbf8319ebc15ce2e2c0df18e` against base
+The maintainer subsequently selected **“Publish the test correction and update my sign-off (Recommended)”**
+to include the missed CLI assertion for that same verified builder version and digest.
+The updated approved source `bec8d459b360ee6c9d5416b313df8a356195bbd7` against base
 `2068be5faab76afeb1fa51afb7ebd20fd8177530` includes the previously authorized
-native release-runner repair. Its current record is
+native release-runner repair, unchanged Headlamp patch and this one-line test correction.
+All 68 focused Headlamp CLI tests pass. Its current record is
 [`2026-11-11-headlamp-go-release-repair.md`](2026-11-11-headlamp-go-release-repair.md).
 This decision does not waive the shipping-image vulnerability scan or any other
 technical gate, and does not extend or modify the three earlier approvals.
