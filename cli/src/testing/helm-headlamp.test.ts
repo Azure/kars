@@ -562,7 +562,7 @@ describe("Core-managed AL3 Headlamp", () => {
     expect(recipe).toContain("mcr.microsoft.com/azurelinux/distroless/base:3.0");
     expect(recipe).toContain("RUN npm ci --no-audit --no-fund");
     expect(recipe).toContain("RUN npm run build");
-    expect(recipe).toContain("FROM golang:1.27.3-bookworm@sha256:d9b6a1beb9474adc2a1ce842573639b44b2a0dd49b6669f51d3821baf9ec37c9 AS backend");
+    expect(recipe).toContain("FROM golang:1.27.4-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea AS backend");
     expect(recipe).toContain("RUN sh /usr/local/lib/kars-headlamp/build-backend.sh /download");
     const runtime = recipe.split("FROM ${AZURELINUX_DISTROLESS}")[1];
     expect(runtime).toContain("COPY --from=plugin --chmod=0555 /build/dist /headlamp/plugins/kars");
