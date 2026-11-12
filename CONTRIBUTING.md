@@ -136,6 +136,13 @@ npm run typecheck                     # tsc --noEmit
 
 ### Rust (edition 2024, MSRV 1.88)
 
+Install OpenSSL 3 with its `openssl` executable on `PATH` for the certificate
+interoperability tests. The shared private-endpoint issuer is checked with
+`openssl verify -x509_strict` for loopback IP and service DNS identities, including
+rejection of unrelated CAs and hostnames. Issued leaf certificates include the
+authority key identifier required by strict clients such as Python 3.13+; client
+certificate and hostname verification must remain enabled.
+
 ```bash
 cargo build --release     # builds controller + inference-router
 cargo test --all          # 205 unit tests (74 controller + 105 router + 26 integration)
