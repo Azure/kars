@@ -3,6 +3,9 @@
 
 "use strict";
 
+const { readFile, unlink } = require("node:fs/promises");
+const { tmpdir } = require("node:os");
+const { join } = require("node:path");
 const { spawn } = require("node:child_process");
 const { createServer } = require("node:net");
 const { setTimeout: delay } = require("node:timers/promises");
@@ -11,11 +14,15 @@ const fixtureMarker = "Webpack dev server smoke test";
 const storyTitle = "Security/webpack-dev-middleware";
 const timeoutMs = 120_000;
 
-function getWebpackAssetReferences(asset, baseUrl) {
-  const paths = [
-    ...asset.matchAll(/["'`]([^"'`]*\.iframe\.bundle\.js(?:\?[^"'`]*)?)["'`]/g),
-  ].map((match) => new URL(match[1], baseUrl));
-  return paths.filter((url) => url.origin === new URL(baseUrl).origin);
+async function readAssetManifest(manifestPath) {
+  try {
+    return JSON.parse(await readFile(manifestPath, "utf8"));
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
 }
 
 async function getAvailablePort() {
@@ -58,6 +65,14 @@ async function stopServer(server) {
 async function main() {
   const port = await getAvailablePort();
   const baseUrl = `http://127.0.0.1:${port}/`;
+  const manifestPath = join(tmpdir(), `kars-storybook-smoke-${process.pid}.json`);
+  try {
+    await unlink(manifestPath);
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      throw error;
+    }
+  }
   const server = spawn(
     "./node_modules/.bin/storybook",
     [
@@ -75,6 +90,7 @@ async function main() {
       stdio: "inherit",
       env: {
         ...process.env,
+        KARS_STORYBOOK_SMOKE_ASSET_MANIFEST: manifestPath,
         STORYBOOK_DISABLE_TELEMETRY: "1",
       },
     },
@@ -124,76 +140,62 @@ async function main() {
       }
 
       const iframeHtml = await iframeResponse.text();
-      const assetReferences = [
+      const iframeAssets = [
         ...iframeHtml.matchAll(/<script\b[^>]*\bsrc=["']([^"']+)["']/gi),
         ...iframeHtml.matchAll(/<link\b(?=[^>]*\brel=["'][^"']*(?:modulepreload|preload)[^"']*["'])[^>]*\bhref=["']([^"']+)["']/gi),
         ...iframeHtml.matchAll(/\bimport\s+(?:[^"'()]+?\s+from\s+)?["']([^"']+\.m?js(?:\?[^"']*)?)["']/gi),
         ...iframeHtml.matchAll(/\bimport\(\s*["']([^"']+\.m?js(?:\?[^"']*)?)["']\s*\)/gi),
       ].map((match) => new URL(match[1], baseUrl));
-      const assetPaths = [...new Set(assetReferences)]
+      const assetPaths = [...new Set(iframeAssets)]
         .filter((url) => url.origin === new URL(baseUrl).origin);
-
-      const webpackAssets = assetPaths.filter((url) => url.pathname.endsWith(".iframe.bundle.js"));
-      if (webpackAssets.length === 0) {
+      if (assetPaths.length === 0) {
         lastFailure = `Storybook iframe for ${story.id} did not reference a Webpack bundle`;
         await delay(1_000);
         continue;
       }
 
-      console.log(`Storybook fixture ${story.id}; initial Webpack assets: ${webpackAssets.map((url) => url.pathname).join(", ")}`);
-      const candidates = [...webpackAssets];
-      const seen = new Set();
-      let unavailableAsset = false;
-      for (let index = 0; index < candidates.length && index < 100; index += 1) {
-        const assetUrl = candidates[index];
-        if (seen.has(assetUrl.href)) {
-          continue;
-        }
-        seen.add(assetUrl.href);
+      const manifest = await readAssetManifest(manifestPath);
+      if (!manifest) {
+        lastFailure = "Storybook's Webpack compilation has not emitted the fixture asset manifest";
+        await delay(1_000);
+        continue;
+      }
+      if (manifest.hasErrors) {
+        throw new Error("Storybook's Webpack compilation reported errors");
+      }
+      if (manifest.storyAssets.length === 0) {
+        throw new Error("Webpack did not emit an asset containing the fixture story module");
+      }
 
+      console.log(`Storybook fixture ${story.id}; emitted story chunk(s): ${manifest.storyAssets.join(", ")}`);
+      for (const asset of manifest.storyAssets) {
+        const assetUrl = new URL(asset, baseUrl);
         const assetResponse = await tryFetch(assetUrl);
-        if (!assetResponse?.ok || !assetResponse.headers.get("content-type")?.includes("javascript")) {
-          unavailableAsset = true;
-          console.log(`Skipped ${assetUrl.pathname}: HTTP ${assetResponse?.status ?? "unavailable"}`);
-          continue;
+        if (!assetResponse?.ok) {
+          throw new Error(`Storybook did not serve emitted fixture chunk ${assetUrl.pathname} (HTTP ${assetResponse?.status ?? "unavailable"})`);
         }
-
-        const asset = await assetResponse.text();
-        console.log(`Fetched ${assetUrl.pathname}: fixture marker ${asset.includes(fixtureMarker) ? "found" : "not found"}`);
-        if (asset.includes(fixtureMarker)) {
+        if (!assetResponse.headers.get("content-type")?.includes("javascript")) {
+          throw new Error(`Storybook served ${assetUrl.pathname} with a non-JavaScript content type`);
+        }
+        const body = await assetResponse.text();
+        console.log(`Fetched ${assetUrl.pathname}: fixture marker ${body.includes(fixtureMarker) ? "found" : "not found"}`);
+        if (body.includes(fixtureMarker)) {
           console.log(`Storybook served the compiled fixture asset at ${assetUrl.pathname}`);
           return;
         }
-
-        const references = getWebpackAssetReferences(asset, baseUrl);
-        if (references.length > 0) {
-          console.log(`Webpack chunks referenced by ${assetUrl.pathname}: ${references.map((url) => url.pathname).join(", ")}`);
-        }
-        const chunkIds = [...new Set([...asset.matchAll(/\.e\((\d+)\)/g)].map((match) => match[1]))];
-        if (chunkIds.length > 0) {
-          console.log(`Webpack lazy chunk IDs in ${assetUrl.pathname}: ${chunkIds.join(", ")}`);
-        }
-        for (const reference of references) {
-          if (!seen.has(reference.href)) {
-            candidates.push(reference);
-          }
-        }
       }
 
-      if (candidates.length >= 100) {
-        throw new Error("Storybook Webpack asset graph exceeded the 100-asset smoke-test limit");
-      }
-      if (!unavailableAsset) {
-        throw new Error(`No Storybook Webpack chunk contained the fixture marker; fetched ${seen.size} assets`);
-      }
-
-      lastFailure = "A Storybook Webpack asset is not ready yet";
-      await delay(1_000);
+      throw new Error(`Storybook's emitted fixture chunk(s) did not contain the expected marker: ${manifest.storyAssets.join(", ")}`);
     }
 
     throw new Error(`Timed out after ${timeoutMs}ms: ${lastFailure}`);
   } finally {
     await stopServer(server);
+    await unlink(manifestPath).catch((error) => {
+      if (error.code !== "ENOENT") {
+        throw error;
+      }
+    });
   }
 }
 
