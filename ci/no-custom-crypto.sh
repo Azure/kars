@@ -21,6 +21,7 @@ ALLOW_PATHS=(
   'controller/src/providers/mesh.rs'
   'controller/src/mesh_peer/'  # in-tree controller-side mesh peer hashing/signing — uses ed25519-dalek::SigningKey + Sha256 only; tracked for SigningProvider extraction in plan §4.1
   'inference-router/src/providers/signing.rs'
+  'inference-router/src/providers/jwt.rs' # jsonwebtoken adapter; released RSA verification and Ed25519 public-key checks, with AWS-LC for other verification; no crypto math or private RSA operations
   'inference-router/src/providers/mesh.rs'
   'inference-router/src/a2a/agent_card.rs'      # AgentCard data model — references ed25519-dalek::VerifyingKey only for trust-anchor types; no signing primitives
   'inference-router/src/a2a/agent_projection.rs' # CRD → trust-anchor projection — re-exports ed25519-dalek::VerifyingKey only; verification-side surface

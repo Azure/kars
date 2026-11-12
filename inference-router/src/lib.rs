@@ -51,14 +51,9 @@ pub mod sidecar_client;
 pub mod spawn;
 pub mod telemetry;
 
-/// Select RustCrypto for JWT signing and verification. Workspace builds also
-/// enable the AWS-LC backend through OCI dependencies, so automatic provider
-/// selection is intentionally unavailable.
+/// Install the JWT provider while preserving the existing OAuth RSA key range.
 pub fn install_jsonwebtoken_crypto_provider() {
-    if jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER
-        .install_default()
-        .is_err()
-    {
+    if providers::jwt::DEFAULT_PROVIDER.install_default().is_err() {
         tracing::debug!("jsonwebtoken CryptoProvider already installed");
     }
 }

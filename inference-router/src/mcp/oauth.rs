@@ -384,6 +384,10 @@ pub fn verify_access_token(
     // `from_jwk` validates the family for us.
     let decoding_key =
         build_decoding_key(jwk).map_err(|e| OAuthError::DecodingKey(e.to_string()))?;
+    if header.alg == Algorithm::EdDSA {
+        crate::providers::jwt::validate_ed25519_key(&decoding_key)
+            .map_err(|e| OAuthError::ValidationFailed(e.to_string()))?;
+    }
 
     // 4. Build Validation and run the verified decode.
     let effective_audience = config

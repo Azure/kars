@@ -67,19 +67,25 @@ dev-server smoke-test, and high-severity audit steps.
   `ignore` list contains advisories with documented rationale; do
   **not** add IDs here without a comment explaining why the call
   site is non-attacker-observable. Current ignores:
-  - `RUSTSEC-2024-0370` (proc-macro-error unmaintained) — transitive
-    via `sigstore` → `json-syntax` → `locspan-derive`. Build-time
-    only, no runtime exposure.
   - `RUSTSEC-2023-0071` (rsa Marvin timing attack) — pulled by
-    `jsonwebtoken` and `sigstore`. Neither call site does
-    attacker-observable RSA decryption with secret keys.
-  - `RUSTSEC-2026-0387` (crypto-bigint 0.5 timing) — pulled by
-    `jsonwebtoken` and `sigstore` via `elliptic-curve` 0.13. Kars only
-    verifies EC signatures against public keys. Expires 2027-02-04;
-    tracked in Azure/kars#594.
+    Sigstore's OpenID Connect flow. Kars uses RSA only for public-key
+    signature verification, not private-key decryption. Router JWT
+    verification delegates RSA to released `rsa` 0.10 APIs with the
+    previous verifier's key-size bounds (no added minimum, 4096-bit
+    maximum); other JWT operations use AWS-LC. Existing RSA issuers are
+    not forced to rotate keys by this update. New RSA keys should
+    still be at least 2048 bits.
   - `RUSTSEC-2024-0449` (unsafe-libyaml unmaintained) — pulled by
     `serde_yaml` via kube, AGT `agentmesh`, and Kars crates. Expires
     2027-02-04; tracked in Azure/kars#595.
+
+  `RUSTSEC-2026-0387` (crypto-bigint timing variability) is no longer
+  ignored: JWT verification uses AWS-LC plus `rsa` 0.10 for compatible
+  RSA public verification; the latter and Sigstore 0.15 / OpenID Connect
+  4.1 use crypto-bigint 0.7.11, which is patched.
+
+  JWT verification also rejects weak, small-order Ed25519 issuer keys, which
+  can authenticate forged claims. Issuers using such keys must rotate them.
 - `[licenses]` — allow-list of SPDX identifiers. Adding a new
   third-party dependency that introduces a license outside the
   allow-list will fail CI.

@@ -1,0 +1,19 @@
+[req]
+distinguished_name = dn
+prompt = no
+
+[dn]
+CN = Kars test Fulcio root
+
+[fulcio_leaf]
+basicConstraints = critical,CA:FALSE
+keyUsage = critical,digitalSignature
+extendedKeyUsage = codeSigning
+subjectAltName = URI:https://example.test/workflow
+1.3.6.1.4.1.57264.1.1 = DER:68747470733a2f2f6973737565722e6578616d706c65
+
+[fulcio_root]
+basicConstraints = critical,CA:TRUE
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always

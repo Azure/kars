@@ -36,18 +36,12 @@ db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
 ignore = [
-    # RUSTSEC-2024-0370 — `proc-macro-error` (unmaintained). Pulled
-    # transitively via sigstore → json-syntax → locspan-derive. No
-    # safe upgrade available; sigstore upstream is tracking the
-    # migration. Re-evaluate when sigstore-rs > 0.13 ships.
-    "RUSTSEC-2024-0370",
     # RUSTSEC-2023-0071 — `rsa` Marvin timing sidechannel. Pulled via
-    # `jsonwebtoken` (RS256 verify path) and `sigstore` (Fulcio cert
-    # parse). No constant-time replacement is published yet; we never
-    # decrypt RSA-encrypted payloads with attacker-observable timing
-    # — both call sites verify signatures against trust-store
-    # public keys. Re-evaluate when RustCrypto/RSA ships a const-time
-    # backend (issue #626).
+    # sigstore → openidconnect (Fulcio OIDC). Router JWT RSA verification
+    # uses rsa 0.10 with patched crypto-bigint; other JWT operations use
+    # AWS-LC. All Kars RSA call sites verify signatures against public
+    # keys and do not perform private-key decryption. Re-evaluate
+    # when RustCrypto/RSA ships a constant-time backend (issue #626).
     "RUSTSEC-2023-0071",
     # RUSTSEC-2025-0134 — `rustls-pemfile` is unmaintained. Pulled
     # transitively via the rustls 0.23 ecosystem (parse-only path).
@@ -55,21 +49,12 @@ ignore = [
     # inline the parse path. Mirrors the ignore in `.cargo/audit.toml`.
     "RUSTSEC-2025-0134",
     # RUSTSEC-2026-0173 — `proc-macro-error2` is unmaintained. Pulled
-    # transitively via oci-client (0.15 + 0.16) → oci-spec → getset
+    # transitively via oci-client (0.16 + 0.18) → oci-spec → getset
     # 0.1.6. Build-time-only proc-macro; no runtime attack surface
     # beyond the build toolchain. Mirrors the ignore in
     # `.cargo/audit.toml`. Re-evaluate when `getset` switches off
-    # proc-macro-error2 or oci-client upgrades past getset 0.1.6.
+    # proc-macro-error2.
     "RUSTSEC-2026-0173",
-    # RUSTSEC-2026-0387 — `crypto-bigint 0.5.5` timing variability.
-    # Pulled via elliptic-curve 0.13 → jsonwebtoken (rust_crypto) and
-    # sigstore → openidconnect / oci-client. Kars only *verifies*
-    # ES256/ES384 signatures against public keys (MCP OAuth JWKS,
-    # cosign policy verification); no EC private key is held, so the
-    # timing leak exposes no secret. Parents don't yet accept
-    # crypto-bigint >= 0.7.6. Expires 2027-02-04 — tracked in
-    # Azure/kars#594. Mirrors `.cargo/audit.toml`.
-    "RUSTSEC-2026-0387",
     # RUSTSEC-2024-0449 — `unsafe-libyaml` is unmaintained (not a
     # vulnerability). Pulled via serde_yaml from kube-client, AGT
     # agentmesh, and our own crates; removing only our direct use

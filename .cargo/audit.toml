@@ -23,36 +23,16 @@ ignore = [
     # https://rustsec.org/advisories/RUSTSEC-2023-0071
     #
     # Severity: medium (CVSS 5.9). NO upstream fix is available.
-    # Source: transitive dependency — `jsonwebtoken 10.3.0` → `rsa 0.9.10`.
+    # Source: transitive dependency — `sigstore 0.15.0` →
+    # `openidconnect 4.1.0` → `rsa 0.9.10`. Router JWT RSA verification
+    # separately uses `rsa 0.10` with patched crypto-bigint; other JWT
+    # operations use AWS-LC.
     # The Marvin attack requires *RSA private key operations* whose timing leaks
-    # to a co-located attacker. Kars's only RSA usage is **JWT signature
-    # verification on JWKS-published public keys** (OAuth 2.1 access-token
-    # validation in `inference-router/src/mcp/oauth.rs`). Public-key verification
-    # does not exercise the vulnerable scalar-multiplication path; we never hold
-    # an RSA private key in router or controller code. Defence-in-depth: the
-    # OAuth verifier additionally enforces alg allow-listing (`RS256`/`PS256`/
-    # `EdDSA` only — no `none`, no algorithm confusion), kid pinning, and
-    # JWKS-cache bounds, so even a compromised RSA public key cannot widen the
-    # surface.
-    # TODO: drop this ignore when `jsonwebtoken` switches to a non-vulnerable
-    # RSA backend (tracked upstream: https://github.com/Keats/jsonwebtoken).
+    # to a co-located attacker. Sigstore's Fulcio OIDC and router JWT RSA
+    # verification use public keys; Kars does not perform RSA decryption
+    # or private-key operations. Router JWT validation uses an
+    # algorithm allow-list, kid pinning, and bounded JWKS caches.
     "RUSTSEC-2023-0071",
-    # RUSTSEC-2024-0370 — `proc-macro-error 1.0.4` is unmaintained
-    # https://rustsec.org/advisories/RUSTSEC-2024-0370
-    #
-    # Severity: informational ("unmaintained"), NOT a vulnerability.
-    # Source: transitive dependency chain (S12.b, controller-only):
-    #   sigstore 0.13.0 → json-syntax 0.12.5 → locspan-derive 0.6.0 (proc-macro)
-    #     → proc-macro-error 1.0.4
-    # `proc-macro-error` is a build-time-only crate (proc-macro). It runs at compile
-    # time inside `rustc`, not at runtime in the controller binary. There is no
-    # runtime attack surface from an unmaintained proc-macro crate beyond the build
-    # toolchain itself.
-    # The successor `proc-macro-error2` exists; sigstore-rs has not yet rolled
-    # forward (tracked upstream: https://github.com/sigstore/sigstore-rs).
-    # TODO: drop this ignore when `sigstore` switches off `json-syntax`/`locspan-derive`
-    # or those crates adopt `proc-macro-error2`.
-    "RUSTSEC-2024-0370",
     # RUSTSEC-2025-0134 — `rustls-pemfile` is unmaintained
     # https://rustsec.org/advisories/RUSTSEC-2025-0134
     #
@@ -70,34 +50,15 @@ ignore = [
     #
     # Severity: informational ("unmaintained"), NOT a vulnerability.
     # Source: transitive build-time chain (controller-only):
-    #   oci-client 0.16.1 / oci-client 0.15.0 → oci-spec → getset 0.1.6 (proc-macro)
+    #   oci-client 0.16.1 / oci-client 0.18.0 → oci-spec → getset 0.1.6 (proc-macro)
     #     → proc-macro-error2 2.0.1
-    # Same rationale as RUSTSEC-2024-0370 above — this is a proc-macro crate
-    # that runs at compile time inside rustc, not at runtime in the controller
-    # binary. There is no runtime attack surface from an unmaintained
-    # proc-macro crate beyond the build toolchain itself. The advisory was
-    # published 2026-06-07 (one day before this commit); no upstream
-    # replacement exists yet — `getset` would need to roll forward.
-    # TODO: drop this ignore when `getset` switches off `proc-macro-error2`
-    # or when oci-client upgrades past `getset 0.1.6`.
+    # This proc-macro runs at compile time inside rustc, not at runtime in
+    # the controller binary. There is no runtime attack surface from an
+    # unmaintained proc-macro crate beyond the build toolchain itself. The
+    # advisory was published 2026-06-07; no upstream replacement exists
+    # yet — `getset` would need to roll forward.
+    # TODO: drop this ignore when `getset` switches off `proc-macro-error2`.
     "RUSTSEC-2026-0173",
-    # RUSTSEC-2026-0387 — `crypto-bigint 0.5.5` timing variability in
-    # operations intended to be constant-time
-    # https://rustsec.org/advisories/RUSTSEC-2026-0387
-    #
-    # Severity: vulnerability; patched in crypto-bigint >= 0.7.6.
-    # Source: transitive only, via elliptic-curve 0.13.8 (ecdsa/p256/p384):
-    #   jsonwebtoken 10.4.0 (rust_crypto) → kars-inference-router, kars-controller
-    #   sigstore 0.14.0 → openidconnect 4.0.1 / oci-client → kars-controller
-    # Kars uses these curves only to *verify* signatures against public keys:
-    # ES256 OAuth access-token validation against JWKS
-    # (`inference-router/src/mcp/oauth.rs`) and cosign policy verification
-    # (`controller/src/policy_fetcher.rs`). No Kars code imports p256/p384/
-    # ecdsa directly and no EC private key is held by router or controller,
-    # so a timing leak over public inputs reveals no secret. Current parent
-    # releases do not accept elliptic-curve 0.14 / crypto-bigint 0.7.
-    # Expires 2027-02-04 — remove or re-justify; tracked in Azure/kars#594.
-    "RUSTSEC-2026-0387",
     # RUSTSEC-2024-0449 — `unsafe-libyaml 0.2.11` is unmaintained
     # https://rustsec.org/advisories/RUSTSEC-2024-0449
     #
