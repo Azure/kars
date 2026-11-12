@@ -179,6 +179,35 @@ restoration. Required CI, scans, signed-release checks and fresh Kind customer
 acceptance remain required. Preparing this record does not publish, merge,
 release or alter protections.
 
+For the additional CI-only Kind Docker image-identity repair on **Azure/kars#623**,
+maintainer `pallakatos` selected **“Authorize this CI repair, sign-off, merge and release (Recommended)”**
+at `2026-11-12T22:19:41.037506+00:00`. The new exact source is
+`c7a2af366ef0cbbb72418e152c59f0c317c3e856` against the same integration base
+`af5ff64796898060f8f9d4a9dc853013f1d51981`, with published PR623 head
+`384beb7c77de8ec7167fac977f5aeb99dcbc6747` as parent. Its separate record is
+[`2026-11-12-kind-image-descriptor-identity.md`](2026-11-12-kind-image-descriptor-identity.md).
+The three implementation paths are `tests/e2e/kind-router-image.mjs`,
+`cli/src/testing/kind-router-image.test.ts` and `docs/governed-inference-budgets.md`.
+The helper binds Docker's typed manifest/index Descriptor for containerd-backed
+stores and config ID for classic stores, preserving content hashes, platform
+graph, unpacked content, CRI and alias checks. All 23 focused tests and lint
+passed locally; the original source reproduces the failed assertion. Hosted
+verification remains pending. No runtime, image or production-policy change is
+included, and failed evidence remains retained.
+
+Only this newly added, separately validated exact-source approval may carry the
+unchanged npm, Headlamp and TLS records together. All three historical records
+remain inside the source comparison; no historical record becomes an allowed
+approval-only edit. The prior nine case identities and their original valid
+paths remain unchanged. No capability-pattern or workflow-only exemption is
+added: the cumulative PR already includes capability-introducing changes.
+This is delegated recording of one genuinely authorized maintainer sign-off,
+not independent human review. The confirmed decision retains only the previously
+authorized conditional reviewer-only exception: normal merge first, then only
+on a review-only refusal, with immediate full protection restoration. Required
+CI, scans, signed-release checks and fresh Kind customer acceptance are not
+waived. Preparing this record does not publish, merge, release or alter protections.
+
 For each exception, the gate requires its exact committed record, signer and source/base marker,
 the exact review base, and the approved source as an ancestor. Every tracked
 file must match that source except the four explicitly reviewed approval-plumbing

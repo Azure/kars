@@ -88,6 +88,10 @@ beta_approval_exception() {
       approved_head=acb9d9a2ccef87003830fa10c2cc3eb08e5129f9
       approved_base=af5ff64796898060f8f9d4a9dc853013f1d51981
       approved_pr=623 ;;
+    docs/security-audits/2026-11-12-kind-image-descriptor-identity.md)
+      approved_head=c7a2af366ef0cbbb72418e152c59f0c317c3e856
+      approved_base=af5ff64796898060f8f9d4a9dc853013f1d51981
+      approved_pr=623 ;;
     *) return 1 ;;
   esac
   [[ "$(git rev-parse --verify "${BASE_REF}^{commit}")" == "$approved_base" ]] || return 1
@@ -116,7 +120,15 @@ beta_approval_exception() {
 # Each successor compares historical files to its exact source, without exclusions.
 # Keep the original Headlamp-only approval path for its unchanged source as well.
 carried_beta_approval() {
-  local audit="$1" successor='docs/security-audits/2026-11-12-private-tls-authority-key-identifier.md'
+  local audit="$1" successor='docs/security-audits/2026-11-12-kind-image-descriptor-identity.md'
+  # The image-identity successor includes all three immutable prior records.
+  case "$audit" in
+    docs/security-audits/2026-11-12-openclaw-npm-registry.md|docs/security-audits/2026-11-12-headlamp-evidence-permissions.md|docs/security-audits/2026-11-12-private-tls-authority-key-identifier.md)
+      if grep -Fxq "$successor" <<< "$added_audit" && beta_approval_exception "$successor"; then
+        return 0
+      fi ;;
+  esac
+  successor='docs/security-audits/2026-11-12-private-tls-authority-key-identifier.md'
   case "$audit" in
     docs/security-audits/2026-11-12-openclaw-npm-registry.md|docs/security-audits/2026-11-12-headlamp-evidence-permissions.md) ;;
     *) return 1 ;;
