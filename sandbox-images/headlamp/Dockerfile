@@ -23,6 +23,8 @@ RUN node kars-build.mjs prepare \
     && npm install --package-lock-only --ignore-scripts --no-audit --no-fund --registry="${NPM_CONFIG_REGISTRY}" \
     && npm ci --omit=dev --no-audit --no-fund --registry="${NPM_CONFIG_REGISTRY}"
 RUN node --max-old-space-size=3072 kars-build.mjs build
+RUN install -d -m0755 ../frontend-build \
+    && install -m0444 package.json package-lock.json vite.config.ts ../frontend-build/
 
 FROM node:22-bookworm-slim AS plugin
 ARG NPM_CONFIG_REGISTRY=https://registry.npmjs.org
@@ -38,7 +40,7 @@ RUN npm run build
 FROM ${AZURELINUX_DISTROLESS}
 COPY --from=frontend /build/frontend/build /headlamp/frontend
 COPY --from=frontend /build/frontend/frontend-evidence.json /build/frontend/frontend.cdx.json /usr/share/kars/headlamp/
-COPY --from=frontend --chmod=0444 /build/frontend/package.json /build/frontend/package-lock.json /build/frontend/vite.config.ts /usr/share/kars/headlamp/frontend-build/
+COPY --from=frontend /build/frontend-build /usr/share/kars/headlamp/frontend-build/
 COPY --from=upstream /headlamp/plugins /headlamp/plugins
 COPY --from=upstream /headlamp/static-plugins /headlamp/static-plugins
 COPY --from=backend /download/headlamp-server /headlamp/headlamp-server

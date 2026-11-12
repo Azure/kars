@@ -7,6 +7,49 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import re
+import stat
+import subprocess
+
+
+class HeadlampEvidencePackagingTests(unittest.TestCase):
+    def test_read_only_inputs_keep_traversable_directory_under_restrictive_umask(self):
+        root = Path(__file__).resolve().parents[2]
+        recipe = (root / "sandbox-images/headlamp/Dockerfile").read_text()
+        command = re.search(
+            r"^RUN install -d -m0755 ../frontend-build[^\n]*",
+            recipe.replace("\\\n", ""), re.M,
+        )
+        self.assertIsNotNone(command, "Stage evidence with separate directory and file modes")
+        self.assertIn(
+            "COPY --from=frontend /build/frontend-build /usr/share/kars/headlamp/frontend-build/",
+            recipe,
+        )
+        self.assertNotIn("COPY --from=frontend --chmod=0444", recipe)
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            source = parent / "frontend"
+            source.mkdir()
+            contents = {name: (name + "\n").encode() for name in MODULE.INPUTS}
+            for name, data in contents.items():
+                (source / name).write_bytes(data)
+                (source / name).chmod(0o400)
+            subprocess.run(
+                ["sh", "-eu", "-c", "umask 077\n" + command.group()[4:]],
+                cwd=source, check=True, capture_output=True, text=True,
+            )
+            exported = parent / "frontend-build"
+            self.assertEqual(stat.S_IMODE(exported.stat().st_mode), 0o755)
+            self.assertEqual(set(p.name for p in exported.iterdir()), set(contents))
+            for name, data in contents.items():
+                self.assertEqual((exported / name).read_bytes(), data)
+                self.assertEqual(stat.S_IMODE((exported / name).stat().st_mode), 0o444)
+                self.assertEqual((source / name).read_bytes(), data)
+                self.assertEqual(stat.S_IMODE((source / name).stat().st_mode), 0o400)
+            (parent / "frontend-evidence.json").write_text(json.dumps({
+                "buildInputs": {name: hashlib.sha256(data).hexdigest() for name, data in contents.items()}
+            }))
+            MODULE.verify(parent)
 
 
 SPEC = importlib.util.spec_from_file_location(

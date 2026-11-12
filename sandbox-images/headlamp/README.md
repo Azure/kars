@@ -138,6 +138,14 @@ it does not replace scanning for every other advisory or alter lock contents.
 
 The Dockerfile retains the **actual regenerated** `package.json`, `package-lock.json`
 and patched `vite.config.ts` in `/usr/share/kars/headlamp/frontend-build/`, mode 0444.
+The build stages these files in a separate mode-0755 directory and copies it without
+an overriding `COPY --chmod`: applying file mode 0444 to a newly created destination
+directory prevents traversal and breaks unprivileged `docker cp` evidence export.
+Directory ownership remains root in the image; the non-root runtime cannot write
+it. File bytes, hash binding, lock verification and every scan remain unchanged.
+Run `python3 -B -m unittest discover -s ci/tests -p headlamp_build_evidence_test.py`
+to check the real staging command under a restrictive umask and the existing
+binding/inventory checks. Hosted image extraction is still required.
 `frontend-evidence.json` records their SHA-256 hashes in `buildInputs`. No installed
 frontend `node_modules` is shipped; bundled code and the lock evidence are distinct.
 The retained lock intentionally exposes build dependencies to scanning as well.
