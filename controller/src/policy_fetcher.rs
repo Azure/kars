@@ -705,6 +705,52 @@ async fn verify_via_sigstore_with_root<K: PolicyKind, T: sigstore::trust::TrustR
     Ok(parsed)
 }
 
+fn parse_rekor_certificate_chain(pem_chain: &[u8]) -> Option<Vec<x509_cert::Certificate>> {
+    use x509_cert::der::{Decode, pem::PemLabel};
+
+    const BEGIN: &[u8] = b"-----BEGIN CERTIFICATE-----";
+    const END: &[u8] = b"-----END CERTIFICATE-----";
+    const MAX_CERTIFICATES: usize = 10;
+
+    let mut certificates = Vec::new();
+    let mut offset = 0;
+    while offset < pem_chain.len() {
+        while offset < pem_chain.len() && pem_chain[offset].is_ascii_whitespace() {
+            offset += 1;
+        }
+        if offset == pem_chain.len() {
+            break;
+        }
+        if certificates.len() == MAX_CERTIFICATES || !pem_chain[offset..].starts_with(BEGIN) {
+            return None;
+        }
+
+        let content_start = offset + BEGIN.len();
+        let remaining = &pem_chain[content_start..];
+        let end_offset = remaining
+            .windows(END.len())
+            .position(|window| window == END)?;
+        if remaining[..end_offset]
+            .windows(BEGIN.len())
+            .any(|window| window == BEGIN)
+        {
+            return None;
+        }
+        let block_end = content_start + end_offset + END.len();
+        let (label, der) = x509_cert::der::pem::decode_vec(&pem_chain[offset..block_end]).ok()?;
+        if label != x509_cert::Certificate::PEM_LABEL {
+            return None;
+        }
+        certificates.push(x509_cert::Certificate::from_der(&der).ok()?);
+        offset = block_end;
+    }
+
+    if certificates.is_empty() {
+        return None;
+    }
+    Some(certificates)
+}
+
 fn verify_legacy_rekor_binding(
     layer: &sigstore::cosign::SignatureLayer,
     bundle: &sigstore::cosign::bundle::Bundle,
@@ -713,7 +759,6 @@ fn verify_legacy_rekor_binding(
     use sha2::{Digest, Sha256};
     use sigstore::cosign::signature_layers::CertificateSubject;
     use sigstore::crypto::{CosignVerificationKey, Signature};
-    use x509_cert::der::{Decode, pem::PemLabel};
 
     let fail = |message: &str| FetchError::SignatureVerifyFailed(message.to_owned());
     let body_bytes = base64::engine::general_purpose::STANDARD
@@ -797,16 +842,9 @@ fn verify_legacy_rekor_binding(
     let logged_certificate = base64::engine::general_purpose::STANDARD
         .decode(logged_certificate)
         .map_err(|_| fail("invalid base64 Rekor certificate"))?;
-    let (certificate_label, logged_certificate) =
-        x509_cert::der::pem::decode_vec(&logged_certificate)
-            .map_err(|_| fail("invalid PEM certificate in Rekor hashedrekord body"))?;
-    if certificate_label != x509_cert::Certificate::PEM_LABEL {
-        return Err(fail(
-            "Rekor hashedrekord public key is not a certificate PEM",
-        ));
-    }
-    let logged_certificate = x509_cert::Certificate::from_der(&logged_certificate)
-        .map_err(|_| fail("invalid DER certificate in Rekor hashedrekord body"))?;
+    let logged_certificate = parse_rekor_certificate_chain(&logged_certificate)
+        .map(|mut certificates| certificates.remove(0))
+        .ok_or_else(|| fail("invalid PEM certificate chain in Rekor hashedrekord body"))?;
     let accepted_identity = layer
         .certificate_signature
         .as_ref()
@@ -2628,6 +2666,10 @@ mod tests {
         RekorHashedrekordWithoutFormat,
         RekorWrongFormat,
         RekorCertificateSnapshot,
+        RekorCertificateChain,
+        RekorMismatchedCertificateChain,
+        RekorMalformedCertificateChain,
+        RekorOverLimitCertificateChain,
     }
 
     struct LocalRegistryFixture {
@@ -2881,13 +2923,23 @@ mod tests {
         } else {
             valid_signature.clone()
         };
-        let rekor_certificate = if matches!(
-            mutation,
-            FixtureMutation::RekorCertificate | FixtureMutation::RekorCertificateSnapshot
-        ) {
-            TEST_FULCIO_ROOT
-        } else {
-            signer_cert_pem
+        let rekor_certificate = match mutation {
+            FixtureMutation::RekorCertificate | FixtureMutation::RekorCertificateSnapshot => {
+                TEST_FULCIO_ROOT.to_vec()
+            }
+            FixtureMutation::RekorCertificateChain => [signer_cert_pem, TEST_FULCIO_ROOT].concat(),
+            FixtureMutation::RekorMismatchedCertificateChain => {
+                [TEST_FULCIO_ROOT, signer_cert_pem].concat()
+            }
+            FixtureMutation::RekorMalformedCertificateChain => [
+                signer_cert_pem,
+                b"-----BEGIN CERTIFICATE-----\nnot-base64\n-----END CERTIFICATE-----\n",
+            ]
+            .concat(),
+            FixtureMutation::RekorOverLimitCertificateChain => (0..11)
+                .flat_map(|_| signer_cert_pem.iter().copied())
+                .collect(),
+            _ => signer_cert_pem.to_vec(),
         };
         let hash_algorithm = match mutation {
             FixtureMutation::RekorSha384 => "sha384",
@@ -2919,7 +2971,7 @@ mod tests {
         let mut rekor_signature_entry = json!({
             "content": rekor_signature,
             "publicKey": {
-                "content": base64::engine::general_purpose::STANDARD.encode(rekor_certificate),
+                "content": base64::engine::general_purpose::STANDARD.encode(&rekor_certificate),
             }
         });
         if rekor_kind == "rekord" {
@@ -3056,6 +3108,7 @@ mod tests {
     enum AdditionalLegacyCandidate {
         MismatchedPayloadHash,
         MalformedCertificate,
+        MalformedCertificateChain,
     }
 
     fn build_local_registry_mixed_legacy_fixture(
@@ -3074,6 +3127,9 @@ mod tests {
         let additional_mutation = match additional {
             AdditionalLegacyCandidate::MismatchedPayloadHash => FixtureMutation::RekorPayloadHash,
             AdditionalLegacyCandidate::MalformedCertificate => FixtureMutation::None,
+            AdditionalLegacyCandidate::MalformedCertificateChain => {
+                FixtureMutation::RekorMalformedCertificateChain
+            }
         };
         let (additional_fixture, additional_digest) =
             build_local_registry_fixture(policy_bytes, additional_mutation);
@@ -3491,6 +3547,18 @@ mod tests {
                 "mismatched logged certificate",
             ),
             (
+                FixtureMutation::RekorMismatchedCertificateChain,
+                "mismatched leaf certificate in a logged chain",
+            ),
+            (
+                FixtureMutation::RekorMalformedCertificateChain,
+                "malformed certificate in a logged chain",
+            ),
+            (
+                FixtureMutation::RekorOverLimitCertificateChain,
+                "over-limit logged certificate chain",
+            ),
+            (
                 FixtureMutation::RekorPayloadHash,
                 "mismatched logged payload hash",
             ),
@@ -3529,6 +3597,7 @@ mod tests {
             FixtureMutation::RekorSha512,
             FixtureMutation::RekorUppercaseHash,
             FixtureMutation::RekorHashedrekordWithoutFormat,
+            FixtureMutation::RekorCertificateChain,
         ] {
             verify_local_signed_policy(canonical_doc().as_bytes(), mutation, &matching_policy)
                 .await
@@ -3569,6 +3638,7 @@ mod tests {
         for additional in [
             AdditionalLegacyCandidate::MismatchedPayloadHash,
             AdditionalLegacyCandidate::MalformedCertificate,
+            AdditionalLegacyCandidate::MalformedCertificateChain,
         ] {
             let (fixture, digest) =
                 build_local_registry_mixed_legacy_fixture(canonical_doc().as_bytes(), additional);

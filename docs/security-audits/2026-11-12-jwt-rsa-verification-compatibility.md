@@ -149,6 +149,12 @@ limitations are recorded in T4 and still require an independent review.
   must verify the accepted OCI layer signature. This binds
   authorization-relevant identity and key
   across a mutable tag change without trusting a second descriptor read.
+  Rekor `publicKey.content` may contain one certificate or up to ten
+  concatenated `CERTIFICATE` PEM blocks. Kars parses every block, applies the
+  identity/key/signature binding to the first (leaf) certificate, and does not
+  use appended certificates to extend trust; trust still comes from Sigstore's
+  separately validated certificate. The parser rejects malformed,
+  non-certificate, or over-limit chains.
   Byte-for-byte certificate DER equality is not asserted because the upstream
   API discards the original DER; a different certificate with the same key,
   issuer, and SAN is treated as the same signer identity for this check.
@@ -215,10 +221,14 @@ limitations are recorded in T4 and still require an independent review.
   signature hash matches the Rekor `data.hash` algorithm. A SET-signed
   `hashedrekord` fixture omits the
   schema-inapplicable `signature.format`, and another uses uppercase digest
-  hex. Negative cases include wrong issuer/SAN, tampered signature/artifact,
-  signed noncanonical policy bytes, validly SET-signed mismatched payload
-  hash/signature/certificate, non-x509 `rekord`, and the two-snapshot
-  certificate substitution.
+  hex. A further positive fixture carries the signer leaf followed by its
+  Fulcio root; negative chain fixtures cover a mismatched first certificate
+  and malformed appended certificate, plus a chain exceeding ten certificates.
+  A mixed-candidate fixture confirms a malformed chain does not veto an
+  independent valid legacy signature. Negative cases include wrong issuer/SAN,
+  tampered signature/artifact, signed noncanonical policy bytes, validly
+  SET-signed mismatched payload hash/signature/certificate, non-x509 `rekord`,
+  and the two-snapshot certificate substitution.
 - Mixed-signature OCI fixtures cover one valid authorized legacy signature
   alongside a second legacy candidate with a SET-signed mismatched hash or a
   malformed certificate annotation. Another fixture combines a valid signed
