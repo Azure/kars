@@ -42,7 +42,9 @@ anyhow.workspace = true
 async-trait.workspace = true
 
 # AGT governance (policy YAML parsing + native policy/trust/audit)
+# AGT 4.1 exposes serde_yaml::Value in its policy API.
 serde_yaml = "0.9"
+yaml_serde = "=0.10.7"
 agentmesh.workspace = true
 agentmesh-mcp.workspace = true
 

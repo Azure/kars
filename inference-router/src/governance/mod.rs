@@ -410,7 +410,7 @@ impl Governance {
         let Ok(yaml) = std::fs::read_to_string(path) else {
             return 1; // fallback: count as 1 file
         };
-        let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&yaml) else {
+        let Ok(value) = yaml_serde::from_str::<yaml_serde::Value>(&yaml) else {
             return 1;
         };
         value
@@ -933,12 +933,24 @@ mod tests {
         for (yaml, expected_count) in [
             ("policies: []\n", 0),
             ("policies:\n  - name: one\n  - name: two\n", 2),
+            ("policies: &rules [{name: 01}]\nother: *rules\n", 1),
+            ("policies: !custom [{name: worker}, {name: other}]\n", 2),
             ("policies: not-a-list\n", 1),
             ("policies: [\n", 1),
             ("policies: []\npolicies: []\n", 1),
             ("policies: []\n---\npolicies: []\n", 1),
         ] {
             std::fs::write(&file, yaml).expect("write policy");
+            let legacy_count = serde_yaml::from_str::<serde_yaml::Value>(yaml)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("policies")
+                        .and_then(|policies| policies.as_sequence())
+                        .map(Vec::len)
+                })
+                .unwrap_or(1);
+            assert_eq!(legacy_count, expected_count, "legacy parser: {yaml}");
             assert_eq!(
                 Governance::count_rules_in_file(&file),
                 expected_count,
