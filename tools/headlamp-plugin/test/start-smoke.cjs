@@ -6,6 +6,7 @@
 const { spawn } = require("node:child_process");
 const { mkdtemp, mkdir, readFile, rm, stat } = require("node:fs/promises");
 const { tmpdir } = require("node:os");
+const { createRequire } = require("node:module");
 const { basename, isAbsolute, join, relative, resolve, sep } = require("node:path");
 const { setTimeout: delay } = require("node:timers/promises");
 
@@ -56,6 +57,36 @@ async function main() {
   let child;
   try {
     await Promise.all([mkdir(dataHome), mkdir(configHome)]);
+    const savedEnvironment = Object.fromEntries(
+      ["HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME"].map((key) => [key, process.env[key]]),
+    );
+    let headlampPaths;
+    try {
+      Object.assign(process.env, {
+        HOME: temporaryDirectory,
+        XDG_DATA_HOME: dataHome,
+        XDG_CONFIG_HOME: configHome,
+      });
+      const toolkitRequire = createRequire(require.resolve("@kinvolk/headlamp-plugin/package.json"));
+      headlampPaths = toolkitRequire("env-paths")("Headlamp", { suffix: "" });
+    } finally {
+      for (const [key, value] of Object.entries(savedEnvironment)) {
+        if (value === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = value;
+        }
+      }
+    }
+
+    const relativeDataPath = relative(temporaryDirectory, headlampPaths.data);
+    if (isAbsolute(relativeDataPath) || relativeDataPath.startsWith(`..${sep}`) || relativeDataPath === "..") {
+      throw new Error(`Headlamp resolved its plugin data path outside the isolated directory: ${headlampPaths.data}`);
+    }
+    const packageJson = JSON.parse(await readFile("package.json", "utf8"));
+    const pluginName = packageJson.name.split("/").pop();
+    await mkdir(join(headlampPaths.data, "plugins", pluginName), { recursive: true });
+
     child = spawn("npm", ["run", "start"], {
       cwd: process.cwd(),
       detached: process.platform !== "win32",
