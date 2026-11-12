@@ -349,15 +349,11 @@ pub fn overlay_status_matches(
     if status.sandbox_pod.as_deref() != Some(expected_pod.as_str()) {
         return false;
     }
-    let ready_ok = status
+    status
         .conditions
         .iter()
         .find(|c| c.type_ == TYPE_READY)
-        .is_some_and(|c| c.status == STATUS_TRUE);
-    if !ready_ok {
-        return false;
-    }
-    true
+        .is_some_and(|c| c.status == STATUS_TRUE)
 }
 
 /// and a `Degraded=True` / `Ready=False` condition pair so `kubectl wait
