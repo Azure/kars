@@ -41,6 +41,7 @@ COPY runtimes/hermes/src/kars_runtime_hermes/plugin/native_github_pr.py ./runtim
 COPY runtimes/hermes/src/kars_runtime_hermes/plugin/native_python.py ./runtimes/hermes/src/kars_runtime_hermes/plugin/native_python.py
 
 # Older callers may stage the canonical tarball; never replace the locked SDK.
+# Use the bundled Node.js for byte equality; the AL3 base has no cmp.
 ARG MESH_PROVIDER=agt
 ARG AGT_SDK_TARBALL=
 COPY .agt-sdk/ ./legacy-agt-sdk/
@@ -48,7 +49,7 @@ RUN test "$MESH_PROVIDER" = agt && \
     cd /build/vendor/agt && sha256sum -c SHA256SUMS && \
     if [ -n "$AGT_SDK_TARBALL" ]; then \
       test "$AGT_SDK_TARBALL" = "$(basename "$AGT_SDK_TARBALL")" && \
-      cmp "/build/legacy-agt-sdk/$AGT_SDK_TARBALL" "/build/vendor/agt/$AGT_SDK_TARBALL"; \
+      node -e 'const fs = require("node:fs"); process.exit(fs.readFileSync(process.argv[1]).equals(fs.readFileSync(process.argv[2])) ? 0 : 1)' "/build/legacy-agt-sdk/$AGT_SDK_TARBALL" "/build/vendor/agt/$AGT_SDK_TARBALL"; \
     fi
 
 # Build both adapters from source, then retain only their production dependency

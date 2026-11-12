@@ -174,7 +174,33 @@ describe("sandbox Dockerfile — pinned mesh packaging", () => {
 
   it("only accepts legacy SDK input identical to the canonical tarball", () => {
     expect(dockerfile).toContain('test "$AGT_SDK_TARBALL" = "$(basename "$AGT_SDK_TARBALL")"');
-    expect(dockerfile).toContain('cmp "/build/legacy-agt-sdk/$AGT_SDK_TARBALL" "/build/vendor/agt/$AGT_SDK_TARBALL"');
+    expect(dockerfile).toContain('"/build/legacy-agt-sdk/$AGT_SDK_TARBALL" "/build/vendor/agt/$AGT_SDK_TARBALL"');
+  });
+
+  it.each([
+    { name: "identical binary tarballs", staged: [0, 255, 65], canonical: [0, 255, 65], status: 0 },
+    { name: "a changed byte", staged: [0, 254, 65], canonical: [0, 255, 65], status: 1 },
+    { name: "a truncated tarball", staged: [0, 255], canonical: [0, 255, 65], status: 1 },
+    { name: "a missing staged tarball", staged: null, canonical: [0, 255, 65], status: 1 },
+    { name: "a missing canonical tarball", staged: [0, 255, 65], canonical: null, status: 1 },
+  ])("checks $name without external comparison utilities", ({ staged, canonical, status }) => {
+    const command = dockerfile.match(/node -e '([^']+)' "\/build\/legacy-agt-sdk\/\$AGT_SDK_TARBALL" "\/build\/vendor\/agt\/\$AGT_SDK_TARBALL"/)?.[1];
+    expect(command).toBeDefined();
+    const directory = mkdtempSync(join(tmpdir(), "kars-sdk-compare-"));
+    try {
+      const stagedFile = join(directory, "staged.tgz");
+      const canonicalFile = join(directory, "canonical.tgz");
+      if (staged !== null) writeFileSync(stagedFile, Buffer.from(staged));
+      if (canonical !== null) writeFileSync(canonicalFile, Buffer.from(canonical));
+      const result = spawnSync(process.execPath, ["-e", command!, stagedFile, canonicalFile], {
+        encoding: "utf8",
+        env: { ...process.env, PATH: directory },
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(status);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it("retains both dependency trees for the relocated mesh link", () => {

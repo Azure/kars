@@ -67,6 +67,10 @@ beta_approval_exception() {
       approved_head=bec8d459b360ee6c9d5416b313df8a356195bbd7
       approved_base=2068be5faab76afeb1fa51afb7ebd20fd8177530
       approved_pr=608 ;;
+    docs/security-audits/2026-11-12-openclaw-sdk-compare.md)
+      approved_head=234b63e60f231f1c80286efaf9d2d44c91854f79
+      approved_base=e5db80c4e761cb5a92eb097b98713ba43d3d9394
+      approved_pr=617 ;;
     *) return 1 ;;
   esac
   [[ "$(git rev-parse --verify "${BASE_REF}^{commit}")" == "$approved_base" ]] || return 1
