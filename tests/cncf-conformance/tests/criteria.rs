@@ -10,7 +10,7 @@
 
 use kars_cncf_conformance as conf;
 
-fn manifests() -> std::collections::BTreeMap<std::path::PathBuf, Vec<serde_json::Value>> {
+fn manifests() -> std::collections::BTreeMap<std::path::PathBuf, Vec<serde_yaml::Value>> {
     conf::load_repo_manifests()
 }
 

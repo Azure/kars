@@ -55,9 +55,6 @@ hyper = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml = "0.9"
-# Matches the released kube 4.2 parser line and is tested on Rust 1.88.
-# serde-saphyr 1.x/2.x require Rust 1.89.
-serde-saphyr = { version = "=0.0.29", default-features = false, features = ["deserialize"] }
 
 # Azure identity (via REST — no SDK dependency)
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }

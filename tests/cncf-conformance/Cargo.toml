@@ -13,11 +13,10 @@ name = "cncf-conformance"
 path = "src/main.rs"
 
 [dependencies]
-serde_json = { workspace = true }
-serde-saphyr = { workspace = true }
+serde = { workspace = true }
+serde_yaml = { package = "yaml_serde", version = "=0.10.7" }
 anyhow = { workspace = true }
 walkdir = "2"
 
 [dev-dependencies]
-serde = { workspace = true }
-serde_yaml = { workspace = true }
+legacy_yaml = { package = "serde_yaml", version = "0.9" }

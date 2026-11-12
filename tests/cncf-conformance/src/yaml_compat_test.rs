@@ -4,12 +4,25 @@
 use super::*;
 use serde::Deserialize;
 
-fn legacy_documents(text: &str) -> Vec<Value> {
-    serde_yaml::Deserializer::from_str(text)
-        .map(|doc| serde_yaml::Value::deserialize(doc).expect("legacy manifest must parse"))
+fn legacy_documents(text: &str) -> Vec<legacy_yaml::Value> {
+    legacy_yaml::Deserializer::from_str(text)
+        .map(|doc| legacy_yaml::Value::deserialize(doc).expect("legacy manifest must parse"))
         .filter(|v| !v.is_null())
-        .map(|doc| serde_json::to_value(doc).expect("Kubernetes manifest must be JSON-compatible"))
         .collect()
+}
+
+fn assert_matches_legacy(text: &str) {
+    let old = legacy_documents(text);
+    let new = parse_manifests(text).expect("maintained parser must read manifest");
+    assert_eq!(new.len(), old.len(), "{text}");
+    for (old, new) in old.iter().zip(&new) {
+        assert_eq!(*new, serde_yaml::to_value(old).unwrap(), "{text}");
+        assert_eq!(
+            serde_yaml::to_string(new).unwrap(),
+            legacy_yaml::to_string(old).unwrap(),
+            "{text}"
+        );
+    }
 }
 
 #[test]
@@ -21,12 +34,7 @@ fn yaml_compatibility_static_crds() {
         let name = entry.file_name().to_string_lossy();
         if entry.file_type().is_file() && name.starts_with("crd") && name.ends_with(".yaml") {
             let text = std::fs::read_to_string(entry.path()).expect("read CRD");
-            assert_eq!(
-                parse_manifests(&text).expect("maintained parser must read CRD"),
-                legacy_documents(&text),
-                "{}",
-                entry.path().display()
-            );
+            assert_matches_legacy(&text);
             count += 1;
         }
     }
@@ -46,9 +54,8 @@ fn yaml_compatibility_rendered_chart() {
     let text =
         render_helm(&repo_root()).expect("installed Helm must render the chart successfully");
     let old = legacy_documents(&text);
-    let new = parse_manifests(&text).expect("maintained parser must read rendered chart");
     assert!(!old.is_empty(), "rendered corpus must contain documents");
-    assert_eq!(new, old);
+    assert_matches_legacy(&text);
 }
 
 #[test]
@@ -58,16 +65,17 @@ fn yaml_compatibility_streams_and_scalars() {
         "# comment only\n",
         "---\nkind: Test\n---\nnull\n---\nkind: Another\n",
         "metadata: {name: '01', labels: {enabled: 'true'}}\n",
+        "kind: Test\nvalue: 01\ncustom: !custom 42\n",
         "yes: yes\nno: no\non: on\noff: off\nboolean: true\n",
         "base: &base {name: worker}\nvalue: {<<: *base, enabled: true}\n",
+        "? [complex, key]\n: value\n",
         "description: |\n  line one\n  line two\n",
     ] {
-        assert_eq!(
-            parse_manifests(text).unwrap(),
-            legacy_documents(text),
-            "{text}"
-        );
+        assert_matches_legacy(text);
     }
+    let docs = parse_manifests("value: 01\ncustom: !custom 42\n").unwrap();
+    assert_eq!(docs[0]["value"].as_str(), Some("01"));
+    assert!(matches!(docs[0]["custom"], Value::Tagged(_)));
 }
 
 #[test]
@@ -79,8 +87,8 @@ fn invalid_manifests_fail_instead_of_disappearing_from_the_report() {
         "kind: Test\n---\nkind: [\n",
     ] {
         assert!(
-            serde_yaml::Deserializer::from_str(text)
-                .any(|doc| serde_yaml::Value::deserialize(doc).is_err()),
+            legacy_yaml::Deserializer::from_str(text)
+                .any(|doc| legacy_yaml::Value::deserialize(doc).is_err()),
             "legacy parser must also reject {text}"
         );
         assert!(parse_manifests(text).is_err(), "{text}");

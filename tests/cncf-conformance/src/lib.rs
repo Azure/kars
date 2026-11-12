@@ -15,23 +15,24 @@
 //! Public entry points:
 //!
 //! - [`load_repo_manifests`] — discover all `*.yaml` under the helm
-//!   templates dir and parse each into a list of `serde_json::Value`
+//!   templates dir and parse each into a list of `serde_yaml::Value`
 //!   documents (multi-doc YAML aware).
 //! - [`run_all_checks`] — apply every conformance criterion to the
 //!   loaded manifest set and return a [`ConformanceReport`].
 //!
-//! Manifest parsing uses `serde-saphyr` into JSON-compatible Kubernetes
-//! objects. Invalid YAML fails the run rather than silently dropping a
-//! document from the report. Differential tests retain `serde_yaml` only
-//! as a development oracle; controller/router policy parsers are separate
-//! and are not changed by this conformance-tool migration.
+//! Manifest parsing uses the maintained `yaml_serde` fork under the
+//! `serde_yaml` dependency name. Invalid YAML fails the run rather than
+//! silently dropping a document from the report. The unpublished library's
+//! YAML value type comes from the fork and is distinct from the original
+//! crate's type, despite the identical API name.
 
 #![deny(clippy::all)]
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use serde_json::Value;
+use serde::Deserialize;
+use serde_yaml::Value;
 
 /// Outcome of a single conformance criterion.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,14 +169,14 @@ pub fn load_repo_manifests() -> BTreeMap<PathBuf, Vec<Value>> {
     out
 }
 
-fn parse_manifests(text: &str) -> Result<Vec<Value>, serde_saphyr::Error> {
-    let options = serde_saphyr::options! {
-        strict_booleans: true,
-        merge_keys: serde_saphyr::MergeKeyPolicy::AsOrdinary,
-        with_snippet: false,
-    };
-    serde_saphyr::from_multiple_with_options::<Value>(text, options)
-        .map(|docs| docs.into_iter().filter(|v| !v.is_null()).collect())
+fn parse_manifests(text: &str) -> Result<Vec<Value>, serde_yaml::Error> {
+    serde_yaml::Deserializer::from_str(text)
+        .map(Value::deserialize)
+        .filter_map(|doc| match doc {
+            Ok(value) if value.is_null() => None,
+            other => Some(other),
+        })
+        .collect()
 }
 
 fn render_helm(root: &std::path::Path) -> Option<String> {
@@ -241,7 +242,7 @@ fn crd_kind(crd: &Value) -> Option<&str> {
 fn crd_versions(crd: &Value) -> Vec<&Value> {
     crd.get("spec")
         .and_then(|s| s.get("versions"))
-        .and_then(Value::as_array)
+        .and_then(Value::as_sequence)
         .map(|v| v.iter().collect())
         .unwrap_or_default()
 }
@@ -285,7 +286,7 @@ pub fn check_printer_columns(crds: &[&Value]) -> Outcome {
         let kind = crd_kind(c).unwrap_or("?");
         let any = crd_versions(c).iter().any(|v| {
             v.get("additionalPrinterColumns")
-                .and_then(Value::as_array)
+                .and_then(Value::as_sequence)
                 .map(|s| !s.is_empty())
                 .unwrap_or(false)
         });
@@ -376,8 +377,8 @@ pub fn check_structural_schema(crds: &[&Value]) -> Outcome {
 /// rule somewhere in its schema tree.
 pub fn check_cel_validations(crds: &[&Value]) -> Outcome {
     fn walk(v: &Value) -> bool {
-        if let Some(map) = v.as_object() {
-            if map.contains_key("x-kubernetes-validations") {
+        if let Some(map) = v.as_mapping() {
+            if map.contains_key(Value::String("x-kubernetes-validations".into())) {
                 return true;
             }
             for val in map.values() {
@@ -385,7 +386,7 @@ pub fn check_cel_validations(crds: &[&Value]) -> Outcome {
                     return true;
                 }
             }
-        } else if let Some(seq) = v.as_array() {
+        } else if let Some(seq) = v.as_sequence() {
             for val in seq {
                 if walk(val) {
                     return true;
@@ -449,7 +450,7 @@ pub fn check_deployment_probes(manifests: &BTreeMap<PathBuf, Vec<Value>>) -> Out
                 .and_then(|s| s.get("template"))
                 .and_then(|t| t.get("spec"))
                 .and_then(|s| s.get("containers"))
-                .and_then(Value::as_array);
+                .and_then(Value::as_sequence);
             let Some(containers) = containers else {
                 missing.push(format!("{name} (no containers)"));
                 continue;
@@ -505,16 +506,16 @@ pub fn check_default_deny_netpol(manifests: &BTreeMap<PathBuf, Vec<Value>>) -> O
             let policy_types = d
                 .get("spec")
                 .and_then(|s| s.get("policyTypes"))
-                .and_then(Value::as_array);
+                .and_then(Value::as_sequence);
             let pod_selector_empty = d
                 .get("spec")
                 .and_then(|s| s.get("podSelector"))
                 .map(|ps| {
-                    ps.as_object()
+                    ps.as_mapping()
                         .map(|m| {
                             m.is_empty()
-                                || m.get("matchLabels")
-                                    .and_then(Value::as_object)
+                                || m.get(Value::String("matchLabels".into()))
+                                    .and_then(Value::as_mapping)
                                     .map(|x| x.is_empty())
                                     .unwrap_or(false)
                         })
@@ -559,7 +560,7 @@ pub fn check_image_pinning(manifests: &BTreeMap<PathBuf, Vec<Value>>) -> Outcome
                 .and_then(|s| s.get("template"))
                 .and_then(|t| t.get("spec"))
                 .and_then(|s| s.get("containers"))
-                .and_then(Value::as_array);
+                .and_then(Value::as_sequence);
             let Some(containers) = containers else {
                 continue;
             };
@@ -641,7 +642,10 @@ pub fn check_state_printer_column(crds: &[&Value]) -> Outcome {
         let kind = crd_kind(c).unwrap_or("?");
         let mut found = false;
         for v in crd_versions(c) {
-            let Some(cols) = v.get("additionalPrinterColumns").and_then(Value::as_array) else {
+            let Some(cols) = v
+                .get("additionalPrinterColumns")
+                .and_then(Value::as_sequence)
+            else {
                 continue;
             };
             for col in cols {
