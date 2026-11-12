@@ -8,5 +8,6 @@ export default {
 };
 
 export const DevServer = {
+  name: "DevServer",
   render: () => React.createElement("div", null, "Webpack dev server smoke test"),
 };

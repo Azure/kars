@@ -36,7 +36,8 @@ to the patched 4.3.2 release without changing the SDK tarball.
 The Headlamp plugin's build-only dependency tree pins patched `@vitest/mocker`,
 `minimatch`, and `webpack-dev-middleware` versions even where Storybook's declared
 ranges lag behind; retain those overrides only with passing Headlamp build
-and Webpack-backed Storybook dev-server smoke tests. CI also runs online
+and Webpack-backed Storybook dev-server smoke tests that request a compiled
+story asset over HTTP. CI also runs online
 `npm audit --audit-level=high` for this tree; lower-severity advisories remain
 visible in its audit output and are not represented as fixed. These packages
 are not shipped with the plugin. `deepmerge` remains tracked until its upstream
