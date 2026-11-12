@@ -108,11 +108,13 @@ limitations are recorded in T4 and still require an independent review.
 ### Identity and candidate semantics
 
 - Production verification uses Sigstore 0.15 trusted signature-layer
-  discovery with Kars's configured trust root. Sigstore verifies the signature
-  material and certificate trust before returning candidate layers. Kars then
-  applies its configured issuer/SAN policy and explicitly verifies the
-  signature over that same layer's raw signed bytes with the validated
-  certificate key.
+  discovery with Kars's configured trust root. Sigstore validates the
+  certificate trust and Rekor evidence for legacy candidates, and verifies
+  DSSE signatures while constructing v0.3 referrer candidates. It does not
+  verify the legacy artifact signature before returning those layers. Kars
+  applies its configured issuer/SAN policy and explicitly verifies each
+  accepted legacy signature over that same layer's raw signed bytes with the
+  validated certificate key.
 - Sigstore's constraint contract is any-valid-signature: a candidate that
   fails a constraint is skipped if another candidate satisfies it. Kars now
   preserves this contract for legacy Rekor evidence: binding errors remove
@@ -120,13 +122,19 @@ limitations are recorded in T4 and still require an independent review.
   constraints run. A malformed or unrelated legacy layer cannot poison a
   valid authorized legacy or v0.3 referrer layer, and a rejected candidate is
   never allowed to authorize. If every candidate fails, verification remains
-  fail closed.
+  fail closed. Candidates are checked one at a time through borrowed
+  one-element slices, so Kars does not clone registry-controlled layer,
+  payload, or Rekor-bundle bytes.
 - The legacy `.sig` validator accepts Rekor `hashedrekord` and `rekord`
   `0.0.1` bodies. It recomputes the advertised digest from the exact signed
   layer bytes for SHA-256, SHA-384, or SHA-512 on `hashedrekord`; `rekord`
   `0.0.1` is constrained to its schema's SHA-256 hash. It requires the logged
-  signature bytes to equal the OCI signature and requires `signature.format`
-  to be `x509`. For `rekord`, raw `data.content` is not relied on: Rekor's
+  signature bytes to equal the OCI signature. `rekord` requires
+  `signature.format` to be `x509`; the `hashedrekord` schema has no `format`
+  field, and Kars accepts its canonical absence. Advertised hexadecimal
+  digests are decoded before comparison, so uppercase and lowercase hex
+  spellings bind to the same exact digest bytes. For `rekord`, raw
+  `data.content` is not relied on: Rekor's
   canonical entry omits it, and the bound digest is recomputed from the signed
   OCI layer. These formats follow the [Cosign legacy bundle example](https://github.com/sigstore/cosign/blob/main/specs/SIGNATURE_SPEC.md#properties)
   and [Rekor hashedrekord schema](https://github.com/sigstore/rekor/blob/main/pkg/types/hashedrekord/v0.0.1/entry.go)
@@ -152,10 +160,11 @@ limitations are recorded in T4 and still require an independent review.
 
 ### Failure handling, network effects, and limitations
 
-- Malformed Rekor base64/JSON, unsupported kind/version/hash algorithm or
-  signature format, incorrect payload digest/signature, malformed certificate,
-  missing or mismatched issuer/SAN, unsupported key, and a certificate key
-  that does not verify the layer signature all disqualify that candidate.
+- Malformed Rekor base64/JSON/hexadecimal digest, unsupported kind/version/hash
+  algorithm or `rekord` signature format, incorrect payload digest/signature,
+  malformed certificate, missing or mismatched issuer/SAN, unsupported key,
+  and a certificate key that does not verify the layer signature all disqualify
+  that candidate.
   These conditions do not suppress a different valid candidate. If no
   candidate remains or no candidate matches signer policy, policy retrieval
   fails closed.
@@ -185,10 +194,12 @@ limitations are recorded in T4 and still require an independent review.
 - The legacy OCI integration fixture signs a canonical SimpleSigning payload
   with a test certificate and signs the canonical Rekor SET with a test Rekor
   key. Positive cases include `hashedrekord` SHA-256/SHA-384/SHA-512 and
-  Rekor `rekord` SHA-256. Negative cases include wrong issuer/SAN, tampered
-  signature/artifact, signed noncanonical policy bytes, validly SET-signed
-  mismatched payload hash/signature/certificate, unsupported signature
-  format, and the two-snapshot certificate substitution.
+  Rekor `rekord` SHA-256. A SET-signed `hashedrekord` fixture omits the
+  schema-inapplicable `signature.format`, and another uses uppercase digest
+  hex. Negative cases include wrong issuer/SAN, tampered signature/artifact,
+  signed noncanonical policy bytes, validly SET-signed mismatched payload
+  hash/signature/certificate, non-x509 `rekord`, and the two-snapshot
+  certificate substitution.
 - Mixed-signature OCI fixtures cover one valid authorized legacy signature
   alongside a second legacy candidate with a SET-signed mismatched hash or a
   malformed certificate annotation. Another fixture combines a valid signed
@@ -207,7 +218,9 @@ limitations are recorded in T4 and still require an independent review.
 - `cargo test --locked --offline --package kars-controller
   policy_fetcher::tests::signed_oci -- --nocapture`: passed all three
   signed-OCI integration tests after adding multi-signature availability,
-  changed-tag/referrer, canonical `rekord`, and SHA-384/SHA-512 coverage.
+  changed-tag/referrer, canonical `rekord`, SHA-384/SHA-512, schema-correct
+  `hashedrekord`, uppercase digest, and borrowed candidate evaluation
+  coverage.
 - `cargo test --locked --offline --package kars-controller`: passed 863 unit
   tests plus the phase-taxonomy guard (1 test).
 - `cargo clippy --locked --offline --package kars-controller --all-targets --

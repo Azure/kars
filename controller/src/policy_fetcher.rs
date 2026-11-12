@@ -539,25 +539,7 @@ fn verify_signer_identity(
     use sigstore::cosign::verify_constraints;
     use sigstore::errors::Result as SigstoreResult;
 
-    let mut candidates = Vec::with_capacity(layers.len());
-    let mut binding_failures = Vec::new();
-    for layer in layers {
-        let Some(sigstore::cosign::bundle_content::BundleContent::RekorBundle(bundle)) =
-            &layer.bundle
-        else {
-            candidates.push(layer.clone());
-            continue;
-        };
-        match verify_legacy_rekor_binding(layer, bundle) {
-            Ok(()) => candidates.push(layer.clone()),
-            Err(error) => binding_failures.push(error),
-        }
-    }
-    if candidates.is_empty() {
-        return Err(binding_failures.into_iter().next().unwrap_or_else(|| {
-            FetchError::IdentityMismatch("no signature candidates were provided".into())
-        }));
-    }
+    let mut binding_failure = None;
 
     #[derive(Debug)]
     struct AnyOf(Vec<Box<dyn VerificationConstraint>>);
@@ -629,8 +611,33 @@ fn verify_signer_identity(
     }
 
     let constraints: VerificationConstraintVec = vec![Box::new(AnyOf(identities))];
-    verify_constraints(&candidates, constraints.iter())
-        .map_err(|e| FetchError::IdentityMismatch(format!("{e:?}")))
+    let mut identity_failure = None;
+    for layer in layers {
+        if let Some(sigstore::cosign::bundle_content::BundleContent::RekorBundle(bundle)) =
+            &layer.bundle
+            && let Err(error) = verify_legacy_rekor_binding(layer, bundle)
+        {
+            binding_failure.get_or_insert(error);
+            continue;
+        }
+        match verify_constraints(std::slice::from_ref(layer), constraints.iter()) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                identity_failure
+                    .get_or_insert_with(|| FetchError::IdentityMismatch(format!("{error:?}")));
+            }
+        }
+    }
+
+    if let Some(error) = identity_failure {
+        return Err(error);
+    }
+    if let Some(error) = binding_failure {
+        return Err(error);
+    }
+    Err(FetchError::IdentityMismatch(
+        "no signature candidates were provided".into(),
+    ))
 }
 
 async fn verify_via_sigstore_with_root<K: PolicyKind, T: sigstore::trust::TrustRoot + Sync>(
@@ -670,11 +677,10 @@ async fn verify_via_sigstore_with_root<K: PolicyKind, T: sigstore::trust::TrustR
         artifact_ref.digest.clone(),
     );
 
-    // Pull + locally verify each signature layer (sig over
-    // payload, optional cert chain, optional Rekor bundle). The returned
-    // layers may have `certificate_signature: None` if the trust roots
-    // weren't injected — that's fine, the constraint check below will
-    // fail closed in that case.
+    // Fetch candidate layers and validate Sigstore trust material. Legacy
+    // Rekor-backed artifact signatures are verified by the SignedIdentity
+    // constraint after their Rekor binding below; Sigstore verifies referrer
+    // DSSE signatures while constructing those bundle candidates.
     let layers = client
         .trusted_signature_layers(&auth, &image)
         .await
@@ -735,17 +741,19 @@ fn verify_legacy_rekor_binding(
         hash.get("algorithm").and_then(serde_json::Value::as_str),
     ) {
         (Some("hashedrekord"), Some("sha256")) | (Some("rekord"), Some("sha256")) => {
-            hex::encode(Sha256::digest(&layer.raw_data))
+            Sha256::digest(&layer.raw_data).to_vec()
         }
-        (Some("hashedrekord"), Some("sha384")) => {
-            hex::encode(sha2::Sha384::digest(&layer.raw_data))
-        }
-        (Some("hashedrekord"), Some("sha512")) => {
-            hex::encode(sha2::Sha512::digest(&layer.raw_data))
-        }
+        (Some("hashedrekord"), Some("sha384")) => sha2::Sha384::digest(&layer.raw_data).to_vec(),
+        (Some("hashedrekord"), Some("sha512")) => sha2::Sha512::digest(&layer.raw_data).to_vec(),
         _ => return Err(fail("unsupported Rekor hashedrekord hash algorithm")),
     };
-    if hash.get("value").and_then(serde_json::Value::as_str) != Some(expected_hash.as_str()) {
+    let logged_hash = hash
+        .get("value")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| fail("Rekor hash value is missing"))?;
+    let logged_hash =
+        hex::decode(logged_hash).map_err(|_| fail("Rekor hash value is not valid hexadecimal"))?;
+    if logged_hash != expected_hash {
         return Err(fail(
             "Rekor hashedrekord payload hash does not match the signed layer",
         ));
@@ -763,13 +771,14 @@ fn verify_legacy_rekor_binding(
         .and_then(|signature| signature.get("content"))
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| fail("Rekor hashedrekord body is missing signature.content"))?;
-    if spec
-        .get("signature")
-        .and_then(|signature| signature.get("format"))
-        .and_then(serde_json::Value::as_str)
-        != Some("x509")
+    if kind == Some("rekord")
+        && spec
+            .get("signature")
+            .and_then(|signature| signature.get("format"))
+            .and_then(serde_json::Value::as_str)
+            != Some("x509")
     {
-        return Err(fail("Rekor signature format must be x509"));
+        return Err(fail("Rekor rekord signature format must be x509"));
     }
     let logged_signature_bytes = base64::engine::general_purpose::STANDARD
         .decode(logged_signature)
@@ -2606,6 +2615,8 @@ mod tests {
         RekorKind,
         RekorSha384,
         RekorSha512,
+        RekorUppercaseHash,
+        RekorHashedrekordWithoutFormat,
         RekorWrongFormat,
         RekorCertificateSnapshot,
     }
@@ -2858,17 +2869,39 @@ mod tests {
         let rekor_payload_hash = if mutation == FixtureMutation::RekorPayloadHash {
             "0".repeat(64)
         } else {
-            match hash_algorithm {
+            let hash = match hash_algorithm {
                 "sha384" => hex::encode(sha2::Sha384::digest(&simple_signing_bytes)),
                 "sha512" => hex::encode(sha2::Sha512::digest(&simple_signing_bytes)),
                 _ => hex::encode(Sha256::digest(&simple_signing_bytes)),
+            };
+            if mutation == FixtureMutation::RekorUppercaseHash {
+                hash.to_ascii_uppercase()
+            } else {
+                hash
             }
         };
-        let rekor_kind = if mutation == FixtureMutation::RekorKind {
+        let rekor_kind = if matches!(
+            mutation,
+            FixtureMutation::RekorKind | FixtureMutation::RekorWrongFormat
+        ) {
             "rekord"
         } else {
             "hashedrekord"
         };
+        let mut rekor_signature_entry = json!({
+            "content": rekor_signature,
+            "publicKey": {
+                "content": base64::engine::general_purpose::STANDARD.encode(rekor_certificate),
+            }
+        });
+        if rekor_kind == "rekord" {
+            rekor_signature_entry["format"] =
+                json!(if mutation == FixtureMutation::RekorWrongFormat {
+                    "pgp"
+                } else {
+                    "x509"
+                });
+        }
         let rekor_body = json!({
             "apiVersion": "0.0.1",
             "kind": rekor_kind,
@@ -2879,17 +2912,7 @@ mod tests {
                         "value": rekor_payload_hash,
                     }
                 },
-                "signature": {
-                    "content": rekor_signature,
-                    "format": if mutation == FixtureMutation::RekorWrongFormat {
-                        "pgp"
-                    } else {
-                        "x509"
-                    },
-                    "publicKey": {
-                        "content": base64::engine::general_purpose::STANDARD.encode(rekor_certificate),
-                    }
-                }
+                "signature": rekor_signature_entry
             }
         });
         let rekor_body =
@@ -3476,6 +3499,8 @@ mod tests {
             FixtureMutation::RekorKind,
             FixtureMutation::RekorSha384,
             FixtureMutation::RekorSha512,
+            FixtureMutation::RekorUppercaseHash,
+            FixtureMutation::RekorHashedrekordWithoutFormat,
         ] {
             verify_local_signed_policy(canonical_doc().as_bytes(), mutation, &matching_policy)
                 .await
