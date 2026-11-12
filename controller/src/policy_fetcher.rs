@@ -517,11 +517,102 @@ async fn verify_via_sigstore<K: PolicyKind>(
     artifact_ref: &OciArtifactRef,
     signer_policy: &SignerPolicyConfig,
 ) -> Result<K::Output, FetchError> {
+    let trust_root = trust_root_cache().await?;
+    verify_via_sigstore_with_root::<K>(artifact_ref, signer_policy, trust_root.as_ref()).await
+}
+
+fn verify_signer_identity(
+    layers: &[sigstore::cosign::SignatureLayer],
+    signer_policy: &SignerPolicyConfig,
+) -> Result<(), FetchError> {
     use sigstore::cosign::verification_constraint::cert_subject_email_verifier::StringVerifier;
     use sigstore::cosign::verification_constraint::{
-        CertSubjectEmailVerifier, CertSubjectUrlVerifier, VerificationConstraintVec,
+        CertSubjectEmailVerifier, CertSubjectUrlVerifier, VerificationConstraint,
+        VerificationConstraintVec,
     };
-    use sigstore::cosign::{ClientBuilder, CosignCapabilities, verify_constraints};
+    use sigstore::cosign::verify_constraints;
+    use sigstore::errors::Result as SigstoreResult;
+
+    #[derive(Debug)]
+    struct AnyOf(Vec<Box<dyn VerificationConstraint>>);
+    impl VerificationConstraint for AnyOf {
+        fn verify(&self, layer: &sigstore::cosign::SignatureLayer) -> SigstoreResult<bool> {
+            for constraint in &self.0 {
+                if constraint.verify(layer)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+    }
+
+    #[derive(Debug)]
+    struct SignedIdentity(Box<dyn VerificationConstraint>);
+    impl VerificationConstraint for SignedIdentity {
+        fn verify(&self, layer: &sigstore::cosign::SignatureLayer) -> SigstoreResult<bool> {
+            use sigstore::crypto::Signature;
+
+            if !self.0.verify(layer)? {
+                return Ok(false);
+            }
+            let Some(certificate_signature) = &layer.certificate_signature else {
+                return Ok(false);
+            };
+            let Some(signature) = &layer.signature else {
+                return Ok(false);
+            };
+            Ok(certificate_signature
+                .verification_key
+                .verify_signature(
+                    Signature::Base64Encoded(signature.as_bytes()),
+                    &layer.raw_data,
+                )
+                .is_ok())
+        }
+    }
+
+    let mut identities: Vec<Box<dyn VerificationConstraint>> = Vec::new();
+    for issuer in &signer_policy.fulcio_issuers {
+        for san in &signer_policy.san_patterns {
+            if san.starts_with("https://") || san.starts_with("http://") {
+                identities.push(Box::new(SignedIdentity(Box::new(CertSubjectUrlVerifier {
+                    url: san.clone(),
+                    issuer: issuer.clone(),
+                }))));
+            } else {
+                let email = if let Some(re) = san.strip_prefix("re:") {
+                    match regex::Regex::new(re) {
+                        Ok(r) => StringVerifier::Regex(r),
+                        Err(e) => {
+                            return Err(FetchError::IdentityMismatch(format!(
+                                "invalid regex SAN pattern `{san}`: {e}"
+                            )));
+                        }
+                    }
+                } else {
+                    StringVerifier::ExactMatch(san.clone())
+                };
+                identities.push(Box::new(SignedIdentity(Box::new(
+                    CertSubjectEmailVerifier {
+                        email,
+                        issuer: Some(StringVerifier::ExactMatch(issuer.clone())),
+                    },
+                ))));
+            }
+        }
+    }
+
+    let constraints: VerificationConstraintVec = vec![Box::new(AnyOf(identities))];
+    verify_constraints(layers, constraints.iter())
+        .map_err(|e| FetchError::IdentityMismatch(format!("{e:?}")))
+}
+
+async fn verify_via_sigstore_with_root<K: PolicyKind>(
+    artifact_ref: &OciArtifactRef,
+    signer_policy: &SignerPolicyConfig,
+    trust_root: &sigstore::trust::sigstore::SigstoreTrustRoot,
+) -> Result<K::Output, FetchError> {
+    use sigstore::cosign::{ClientBuilder, CosignCapabilities};
     use sigstore::registry::OciReference;
 
     // Lazily initialize a Sigstore Public Good trust root (Fulcio CA +
@@ -532,10 +623,8 @@ async fn verify_via_sigstore<K: PolicyKind>(
     // Cached process-wide; refreshed on controller restart (TUF metadata
     // is checked-in via the crate's embedded snapshot, with TUF refresh
     // performed once on first reconcile).
-    let trust_root = trust_root_cache().await?;
-
     let mut client = ClientBuilder::default()
-        .with_trust_repository(trust_root.as_ref())
+        .with_trust_repository(trust_root)
         .map_err(|e| FetchError::Transient(format!("cosign client (trust repo): {e}")))?
         .build()
         .map_err(|e| FetchError::Transient(format!("cosign client: {e}")))?;
@@ -558,64 +647,9 @@ async fn verify_via_sigstore<K: PolicyKind>(
         .await
         .map_err(map_oci_error)?;
 
-    // Build + apply constraints in a sub-scope so the non-`Send`
-    // `Vec<Box<dyn VerificationConstraint>>` is dropped before the next
-    // `.await` (kube-rs requires the reconcile future to be `Send`).
-    {
-        use sigstore::cosign::signature_layers::SignatureLayer;
-        use sigstore::cosign::verification_constraint::VerificationConstraint;
-        use sigstore::errors::Result as SigstoreResult;
-
-        // OR adapter: passes if ANY inner constraint passes. Sigstore-rs'
-        // `verify_constraints` ANDs across constraints by design; we need
-        // OR semantics across the cartesian (issuer × SAN) pairs because
-        // an admin lists multiple acceptable signer combos and a single
-        // cert can only match one of them.
-        #[derive(Debug)]
-        struct AnyOf(Vec<Box<dyn VerificationConstraint>>);
-        impl VerificationConstraint for AnyOf {
-            fn verify(&self, sl: &SignatureLayer) -> SigstoreResult<bool> {
-                for c in &self.0 {
-                    if c.verify(sl)? {
-                        return Ok(true);
-                    }
-                }
-                Ok(false)
-            }
-        }
-
-        let mut inner: Vec<Box<dyn VerificationConstraint>> = Vec::new();
-        for issuer in &signer_policy.fulcio_issuers {
-            for san in &signer_policy.san_patterns {
-                if san.starts_with("https://") || san.starts_with("http://") {
-                    inner.push(Box::new(CertSubjectUrlVerifier {
-                        url: san.clone(),
-                        issuer: issuer.clone(),
-                    }));
-                } else {
-                    let email_v = if let Some(re) = san.strip_prefix("re:") {
-                        match regex::Regex::new(re) {
-                            Ok(r) => StringVerifier::Regex(r),
-                            Err(e) => {
-                                return Err(FetchError::IdentityMismatch(format!(
-                                    "invalid regex SAN pattern `{san}`: {e}"
-                                )));
-                            }
-                        }
-                    } else {
-                        StringVerifier::ExactMatch(san.clone())
-                    };
-                    inner.push(Box::new(CertSubjectEmailVerifier {
-                        email: email_v,
-                        issuer: Some(StringVerifier::ExactMatch(issuer.clone())),
-                    }));
-                }
-            }
-        }
-        let any_of: VerificationConstraintVec = vec![Box::new(AnyOf(inner))];
-        verify_constraints(&layers, any_of.iter())
-            .map_err(|e| FetchError::IdentityMismatch(format!("{e:?}")))?;
-    }
+    // Keep the non-Send verification constraints out of the reconcile future
+    // before its next `.await` (kube-rs requires the future to be `Send`).
+    verify_signer_identity(&layers, signer_policy)?;
 
     // Step D: pull artifact bytes (digest-pinned).
     //
@@ -2257,5 +2291,95 @@ mod tests {
         assert!(res.fail_closed_no_lkg);
         let v = cond_by_type(&res.conditions, "AllowlistVerified").expect("Verified emitted");
         assert_eq!(v.reason, "SignerPolicyMalformed");
+    }
+
+    fn signed_test_layer(subject: &str, issuer: &str) -> sigstore::cosign::SignatureLayer {
+        use sigstore::cosign::SignatureLayer;
+        use sigstore::cosign::constraint::{Constraint, PrivateKeySigner};
+        use sigstore::cosign::signature_layers::{CertificateSignature, CertificateSubject};
+        use sigstore::crypto::{CosignVerificationKey, SigningScheme};
+
+        let signer = SigningScheme::ECDSA_P256_SHA256_ASN1
+            .create_signer()
+            .expect("create test signer");
+        let public_key = signer
+            .to_sigstore_keypair()
+            .expect("derive test keypair")
+            .public_key_to_pem()
+            .expect("encode test public key");
+        let verification_key = CosignVerificationKey::try_from_pem(public_key.as_bytes())
+            .expect("parse test verification key");
+        let image = "localhost/policies:fixture"
+            .parse()
+            .expect("parse image ref");
+        let mut layer = SignatureLayer::new_unsigned(&image, &format!("sha256:{}", "a".repeat(64)))
+            .expect("create unsigned signature layer");
+        assert!(
+            PrivateKeySigner::new_with_signer(signer)
+                .add_constraint(&mut layer)
+                .expect("sign test layer")
+        );
+        layer.certificate_signature = Some(CertificateSignature {
+            verification_key,
+            subject: CertificateSubject::Uri(subject.into()),
+            issuer: Some(issuer.into()),
+            github_workflow_trigger: None,
+            github_workflow_sha: None,
+            github_workflow_name: None,
+            github_workflow_repository: None,
+            github_workflow_ref: None,
+        });
+        layer
+    }
+
+    fn test_signer_policy(issuer: &str, subject: &str) -> SignerPolicyConfig {
+        SignerPolicyConfig {
+            fulcio_issuers: vec![issuer.into()],
+            san_patterns: vec![subject.into()],
+            ed25519_keys: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn signer_identity_requires_matching_identity_and_valid_signature() {
+        let issuer = "https://issuer.example";
+        let subject = "https://example.test/workflow";
+        let layer = signed_test_layer(subject, issuer);
+
+        verify_signer_identity(std::slice::from_ref(&layer), &test_signer_policy(issuer, subject))
+            .expect("valid signed identity");
+
+        assert!(
+            verify_signer_identity(
+                std::slice::from_ref(&layer),
+                &test_signer_policy("https://wrong-issuer.example", subject),
+            )
+            .is_err(),
+            "wrong issuer must fail"
+        );
+        assert!(
+            verify_signer_identity(
+                std::slice::from_ref(&layer),
+                &test_signer_policy(issuer, "https://wrong-subject.example"),
+            )
+            .is_err(),
+            "wrong subject must fail"
+        );
+
+        let mut tampered_signature = layer.clone();
+        tampered_signature.signature = Some("AAAA".into());
+        assert!(
+            verify_signer_identity(&[tampered_signature], &test_signer_policy(issuer, subject),)
+                .is_err(),
+            "tampered signature must fail"
+        );
+
+        let mut tampered_payload = layer;
+        tampered_payload.raw_data.push(b' ');
+        assert!(
+            verify_signer_identity(&[tampered_payload], &test_signer_policy(issuer, subject),)
+                .is_err(),
+            "tampered signed payload must fail"
+        );
     }
 }
