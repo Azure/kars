@@ -8,6 +8,7 @@
     "build": "headlamp-plugin build",
     "start": "headlamp-plugin start",
     "test:storybook-webpack": "node test/storybook-smoke/run.cjs",
+    "test:headlamp-start": "node test/start-smoke.cjs",
     "test": "headlamp-plugin test",
     "lint": "headlamp-plugin lint",
     "format": "headlamp-plugin format"

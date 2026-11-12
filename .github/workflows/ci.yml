@@ -347,6 +347,7 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm run test:storybook-webpack
+      - run: npm run test:headlamp-start
       - name: npm audit (Headlamp dependencies)
         run: npm audit --audit-level=high
 

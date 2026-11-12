@@ -35,14 +35,18 @@ The mesh and OpenClaw packages override the vendored AGT SDK's `js-yaml` depende
 to the patched 4.3.2 release without changing the SDK tarball.
 The Headlamp plugin's build-only dependency tree pins patched `@vitest/mocker`,
 `minimatch`, and `webpack-dev-middleware` versions even where Storybook's declared
-ranges lag behind; retain those overrides only with passing Headlamp build
-and Webpack-backed Storybook dependency-path tests that request the lazy
-compiled story asset over HTTP. This exercises Storybook's Webpack builder,
-not the plugin's `headlamp-plugin start` command, which uses Vite. CI also runs online
-`npm audit --audit-level=high` for this tree; lower-severity advisories remain
-visible in its audit output and are not represented as fixed. These packages
-are not shipped with the plugin. `deepmerge` remains tracked until its upstream
-project publishes a patched release.
+ranges lag behind. The stable `@kinvolk/headlamp-plugin@0.14.0` toolchain still
+resolves `webpack-dev-middleware@6.1.3`, so upgrading to that released toolchain
+would not remove the vulnerable resolution; the later 0.15 prerelease is not a
+supported stable replacement. Retain the overrides with passing Headlamp build,
+Webpack-backed Storybook tests that fetch the dynamically emitted lazy story
+asset over HTTP, and a smoke test of the actual `npm run start` command.
+`headlamp-plugin start` uses Vite build-watch mode and copies the plugin bundle
+into Headlamp's plugin config directory; it does not start an HTTP dev server.
+CI also runs online `npm audit --audit-level=high` for this tree; lower-severity
+advisories remain visible in its audit output and are not represented as fixed.
+These packages are not shipped with the plugin. `deepmerge` remains tracked
+until its upstream project publishes a patched release.
 
 The benchmark gate compares the base revision with the candidate on the same
 runner and Rust toolchain, rather than treating historical hardware timings as
