@@ -115,15 +115,17 @@ async function main() {
       const assetReferences = [
         ...iframeHtml.matchAll(/<script\b[^>]*\bsrc=["']([^"']+)["']/gi),
         ...iframeHtml.matchAll(/<link\b(?=[^>]*\brel=["'][^"']*(?:modulepreload|preload)[^"']*["'])[^>]*\bhref=["']([^"']+)["']/gi),
-      ];
-      const assetPaths = assetReferences
-        .map((match) => new URL(match[1], baseUrl))
+        ...iframeHtml.matchAll(/\bimport\s+(?:[^"'()]+?\s+from\s+)?["']([^"']+\.m?js(?:\?[^"']*)?)["']/gi),
+        ...iframeHtml.matchAll(/\bimport\(\s*["']([^"']+\.m?js(?:\?[^"']*)?)["']\s*\)/gi),
+      ].map((match) => new URL(match[1], baseUrl));
+      const assetPaths = [...new Set(assetReferences)]
         .filter((url) => url.origin === new URL(baseUrl).origin);
 
-      const logAssetDetails = !loggedAssets && assetPaths.length > 0;
+      const logAssetDetails = !loggedAssets;
       if (logAssetDetails) {
         const paths = assetPaths.map((url) => url.pathname).join(", ") || "(none)";
         console.log(`Storybook fixture ${story.id}; iframe assets: ${paths}`);
+        console.log(`Storybook iframe HTML: ${iframeHtml.slice(0, 3_000).replace(/\s+/g, " ")}`);
         loggedAssets = true;
       }
 
