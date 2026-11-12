@@ -891,21 +891,27 @@ mod tests {
     }
 
     #[test]
-    fn yaml_compatibility_policy_counts_and_decisions() {
-        let cases = [
+    fn yaml_compatibility_policy_counts_and_decisions_preserve_legacy_numeric_versions() {
+        let mut cases = vec![
             (
-                include_bytes!("../../../cli/profiles/agt/kars-default.yaml").as_slice(),
+                include_bytes!("../../../cli/profiles/agt/kars-default.yaml").to_vec(),
                 10,
                 "shell:rm",
                 "shell:ls",
             ),
             (
-                include_bytes!("../../../cli/profiles/agt/kars-offload.yaml").as_slice(),
+                include_bytes!("../../../cli/profiles/agt/kars-offload.yaml").to_vec(),
                 6,
                 "spawn:create:child",
                 "shell:ls",
             ),
         ];
+        cases.extend(["1", "1.0"].map(|version| (
+            format!("version: {version}\nagent: compat\npolicies:\n  - name: deny\n    type: capability\n    denied_actions: [\"shell:rm\"]\n").into_bytes(),
+            1,
+            "shell:rm",
+            "shell:ls",
+        )));
         for (yaml, expected_count, denied_action, allowed_action) in cases {
             let dir = tempfile::tempdir().expect("create policy directory");
             let file = dir.path().join("profile.yaml");
@@ -922,42 +928,6 @@ mod tests {
             assert_eq!(
                 gov.evaluate("agent", allowed_action, None)["decision"],
                 "allow"
-            );
-        }
-    }
-
-    #[test]
-    fn legacy_unquoted_numeric_policy_versions_preserve_deny_decisions() {
-        for version in ["1", "1.0"] {
-            let yaml = format!(
-                r#"version: {version}
-agent: kars-compatibility-test
-policies:
-  - name: deny-dangerous-shell
-    type: capability
-    denied_actions:
-      - "shell:rm"
-    priority: 100
-"#
-            );
-            let dir = tempfile::tempdir().expect("create policy directory");
-            let file = dir.path().join("profile.yaml");
-            std::fs::write(&file, yaml).expect("write policy");
-            let gov = Governance::new("yaml-version-compatibility-test");
-            let count = gov
-                .load_policies_from_dir(dir.path().to_str().expect("UTF-8 path"))
-                .expect("load policy");
-
-            assert_eq!(count, 1, "version: {version}");
-            assert_eq!(
-                gov.evaluate("agent", "shell:rm", None)["decision"],
-                "deny",
-                "version: {version}"
-            );
-            assert_eq!(
-                gov.evaluate("agent", "shell:ls", None)["decision"],
-                "allow",
-                "version: {version}"
             );
         }
     }
