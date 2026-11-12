@@ -67,6 +67,8 @@ mod trust_graph;
 mod trust_graph_compile;
 mod trust_graph_reconciler;
 mod watch_config;
+#[cfg(test)]
+mod yaml_compat_test;
 
 use anyhow::Result;
 use kube::Client;
