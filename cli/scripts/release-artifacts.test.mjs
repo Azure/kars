@@ -56,6 +56,7 @@ test('image binding preserves profile policy and image field conventions', () =>
   assert.equal(values.monitoring.prometheusOperator.image.registry, 'ghcr.io');
   assert.equal(values.monitoring.prometheusOperator.image.repository, 'azure/kars-prometheus-operator');
   assert.equal(values.runtimes.hermes.image, `ghcr.io/azure/kars-runtime-hermes:latest@${digest}`);
+  assert.equal(values.managedMcp.playwrightImage, `ghcr.io/azure/kars-mcp-playwright:latest@${digest}`);
   for (const path of ['networkPolicy', 'azure', 'sre', 'auth', 'signerPolicy']) assert.deepEqual(values[path], original[path]);
   assert.equal(values.inferenceBudget.calendarPolicy, 'enforce');
   assert.equal(values.schemaHook.enabled, false);
@@ -142,11 +143,11 @@ for (const version of ['0.0.0-test.1', '0.0.0-test.1+build.5']) test(`clean pack
   assert.notEqual(parse(readFileSync(join(repo, 'deploy/helm/kars/values.yaml'), 'utf8')).controller.image.tag, `latest@${digest}`);
 });
 
-test('source-heavy release images use native runners without duplicate receipt or SBOM names', () => {
+test('native-required release images use native runners without duplicate receipt or SBOM names', () => {
   const jobs = parse(readFileSync(join(repo, '.github/workflows/release-public-interim.yml'), 'utf8')).jobs;
   const build = jobs['build-images'];
   const native = jobs['merge-native-images'].strategy.matrix.image;
-  assert.deepEqual(native, ['kars-bridge-bff', 'kars-prometheus', 'kars-grafana']);
+  assert.deepEqual(native, ['kars-bridge-bff', 'kars-prometheus', 'kars-grafana', 'kars-mcp-playwright']);
   assert.equal(build['timeout-minutes'], 90);
   assert.equal(build['runs-on'], "${{ matrix.image.runner || 'ubuntu-22.04' }}");
   assert.equal(build.env.ARCH_SUFFIX, "${{ matrix.image.arch && format('-{0}', matrix.image.arch) || '' }}");
@@ -201,7 +202,7 @@ test('packaging waits for signed native manifests rather than per-arch receipts'
   for (const step of merge.steps) assert.notEqual(step['continue-on-error'], true);
 });
 
-test('native manifest shell rejects incomplete architectures and never publishes prerelease latest', t => {
+for (const name of ['kars-bridge-bff', 'kars-mcp-playwright']) test(`native manifest shell for ${name} rejects incomplete architectures and never publishes prerelease latest`, t => {
   const jobs = parse(readFileSync(join(repo, '.github/workflows/release-public-interim.yml'), 'utf8')).jobs;
   const script = jobs['merge-native-images'].steps.find(step => step.id === 'manifest').run;
   const root = fixture(t);
@@ -231,15 +232,15 @@ test('native manifest shell rejects incomplete architectures and never publishes
       })) }));
       const result = spawnSync('bash', ['-e', '-o', 'pipefail'], {
         input: docker + script, encoding: 'utf8',
-        env: { ...process.env, REGISTRY: 'ghcr.io/azure', NAME: 'kars-bridge-bff', IMAGE_VERSION: 'v0.2.0-beta.3', PRERELEASE: prerelease,
+        env: { ...process.env, REGISTRY: 'ghcr.io/azure', NAME: name, IMAGE_VERSION: 'v0.2.0-beta.3', PRERELEASE: prerelease,
           DOCKER_CALLS: calls, MANIFEST: join(root, 'manifest.json'), GITHUB_OUTPUT: output },
       });
       assert.equal(result.status === 0, valid, result.stderr);
       assert.equal(readFileSync(output, 'utf8'), valid ? `digest=${digest}\n` : '');
       const commands = readFileSync(calls, 'utf8');
       assert.equal(commands.includes(':latest'), prerelease === 'false');
-      for (const arch of ['amd64', 'arm64']) assert.ok(commands.includes(`v0.2.0-beta.3-${arch}`));
-      assert.ok(commands.includes(`@${digest} --raw`));
+      for (const arch of ['amd64', 'arm64']) assert.ok(commands.includes(`ghcr.io/azure/${name}:v0.2.0-beta.3-${arch}`));
+      assert.ok(commands.includes(`ghcr.io/azure/${name}@${digest} --raw`));
     }
   }
 });

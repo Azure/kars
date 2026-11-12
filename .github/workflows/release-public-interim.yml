@@ -319,12 +319,23 @@ jobs:
             context: .
             no_binaries: true
             platforms: linux/amd64,linux/arm64
+          # Playwright's arm64 browser installer crashes with SIGILL under QEMU.
+          # Use the same native build and signed-manifest path as source builds.
           - name: mcp-playwright
             dockerfile: sandbox-images/mcp-playwright/Dockerfile
             ghcr: kars-mcp-playwright
             context: sandbox-images/mcp-playwright
             no_binaries: true
-            platforms: linux/amd64,linux/arm64
+            platforms: linux/amd64
+            arch: amd64
+          - name: mcp-playwright
+            dockerfile: sandbox-images/mcp-playwright/Dockerfile
+            ghcr: kars-mcp-playwright
+            context: sandbox-images/mcp-playwright
+            no_binaries: true
+            platforms: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
           - name: mcp-everything
             dockerfile: sandbox-images/mcp-everything/Dockerfile
             ghcr: kars-mcp-everything
@@ -453,7 +464,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [kars-bridge-bff, kars-prometheus, kars-grafana]
+        image: [kars-bridge-bff, kars-prometheus, kars-grafana, kars-mcp-playwright]
     steps:
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
       - uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v3

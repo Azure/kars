@@ -234,7 +234,8 @@ class SecurityAuditGateTests(GitFixture):
                    "docs/security-audits/2026-11-10-overlay-package-update.md",
                    "docs/security-audits/2026-11-10-kind-local-onboarding.md",
                    "docs/security-audits/2026-11-11-headlamp-go-release-repair.md",
-                   "docs/security-audits/2026-11-12-openclaw-sdk-compare.md")
+                   "docs/security-audits/2026-11-12-openclaw-sdk-compare.md",
+                   "docs/security-audits/2026-11-12-playwright-native-release.md")
         self.approved_beta()
         for other in records:
             if other != self.audit:
@@ -249,7 +250,7 @@ class SecurityAuditGateTests(GitFixture):
 
     def test_other_beta_pr_cannot_use_this_approval(self):
         self.approved_beta()
-        for other in ("593", "606", "607", "608", "617"):
+        for other in ("593", "606", "607", "608", "617", "621"):
             if other != self.pr_number:
                 with self.subTest(pr=other):
                     result = self.beta_gate(GITHUB_ACTIONS="true", GITHUB_REPOSITORY="Azure/kars",
@@ -284,6 +285,54 @@ class OpenClawSdkAuditGateTests(SecurityAuditGateTests):
     pr_number = "617"
     source_head = "234b63e60f231f1c80286efaf9d2d44c91854f79"
     source_base = "e5db80c4e761cb5a92eb097b98713ba43d3d9394"
+
+
+class PlaywrightNativeReleaseAuditGateTests(SecurityAuditGateTests):
+    audit = "docs/security-audits/2026-11-12-playwright-native-release.md"
+    pr_number = "621"
+    source_head = "efadcd4932c08844a94e62080e45b6256c29a58a"
+    source_base = "01548f2c365a94ca2016987f03a496a237ea46ff"
+
+    def workflow_only(self):
+        self.write(".github/workflows/release-public-interim.yml", "jobs: {}\n")
+        self.write("cli/scripts/release-artifacts.test.mjs", "// Workflow contracts\n")
+
+    def approved_workflow_beta(self):
+        self.capability = self.workflow_only
+        self.approved_beta()
+
+    def test_workflow_only_source_checks_its_new_voluntary_approval(self):
+        self.approved_workflow_beta()
+        result = self.beta_gate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("single-maintainer beta exception", result.stdout)
+        self.write(self.audit, self.approval.replace(self.approved_head, "0" * 40))
+        self.commit()
+        self.assertEqual(self.beta_gate().returncode, 1)
+
+    def test_workflow_only_scope_rejects_followup_source_changes(self):
+        self.approved_workflow_beta()
+        self.write(".github/workflows/release-public-interim.yml", "jobs: {unapproved: {}}\n")
+        self.commit()
+        self.assertEqual(self.beta_gate().returncode, 1)
+
+    def test_workflow_only_scope_rejects_other_pr_context(self):
+        self.approved_workflow_beta()
+        result = self.beta_gate(GITHUB_ACTIONS="true", GITHUB_REPOSITORY="Azure/kars",
+                                GITHUB_EVENT_NAME="pull_request", GITHUB_REF="refs/pull/617/merge")
+        self.assertEqual(result.returncode, 1)
+
+    def test_historical_playwright_record_edit_does_not_reopen_approval(self):
+        self.approved_workflow_beta()
+        self.base = self.git("rev-parse", "HEAD").strip()
+        self.write(self.audit, self.approval + "\nHistorical clarification.\n")
+        self.commit()
+        self.assertEqual(self.beta_gate().returncode, 0)
+
+    def test_unrelated_workflow_only_change_needs_no_capability_approval(self):
+        self.workflow_only()
+        self.commit()
+        self.assertEqual(self.gate().returncode, 0)
 
 
 if __name__ == "__main__":
