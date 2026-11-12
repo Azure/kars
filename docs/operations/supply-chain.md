@@ -56,19 +56,15 @@ and audit rows; the Headlamp plugin has a build row.
   `ignore` list contains advisories with documented rationale; do
   **not** add IDs here without a comment explaining why the call
   site is non-attacker-observable. Current ignores:
-  - `RUSTSEC-2024-0370` (proc-macro-error unmaintained) — transitive
-    via `sigstore` → `json-syntax` → `locspan-derive`. Build-time
-    only, no runtime exposure.
   - `RUSTSEC-2023-0071` (rsa Marvin timing attack) — pulled by
-    `jsonwebtoken` and `sigstore`. Neither call site does
-    attacker-observable RSA decryption with secret keys.
-  - `RUSTSEC-2026-0387` (crypto-bigint 0.5 timing) — pulled by
-    `jsonwebtoken` and `sigstore` via `elliptic-curve` 0.13. Kars only
-    verifies EC signatures against public keys. Expires 2027-02-04;
-    tracked in Azure/kars#594.
+    Sigstore's OpenID Connect flow; JWT verification uses AWS-LC.
+    Kars's remaining RSA use verifies signatures against public keys.
   - `RUSTSEC-2024-0449` (unsafe-libyaml unmaintained) — pulled by
     `serde_yaml` via kube, AGT `agentmesh`, and Kars crates. Expires
     2027-02-04; tracked in Azure/kars#595.
+`RUSTSEC-2026-0387` (crypto-bigint timing variability) is no longer
+ignored: JWT verification uses the AWS-LC backend, and Sigstore 0.15 /
+OpenID Connect 4.1 use crypto-bigint 0.7.11, which is patched.
 - `[licenses]` — allow-list of SPDX identifiers. Adding a new
   third-party dependency that introduces a license outside the
   allow-list will fail CI.

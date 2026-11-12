@@ -56,14 +56,10 @@ async fn main() -> Result<()> {
     // TLS-using code (kube-client, reqwest, kube::Client::try_default,
     // etc.) runs. Without this, kube-client's first TLS handshake from
     // a spawn handler panics with "Could not automatically determine
-    // the process-level CryptoProvider" because our dependency tree
-    // pulls both `aws-lc-rs` (transitively via reqwest+oci-client) and
-    // ring-derived feature gates (transitively via jsonwebtoken), so
-    // rustls 0.23 refuses to auto-pick.
+    // the process-level CryptoProvider" because both rustls providers
+    // are enabled in the dependency graph.
     //
-    // We standardise on aws-lc-rs (matches what oci-client/reqwest
-    // already activate; matches the memory note pinning oci-client to
-    // 0.16.1 to keep aws-lc-rs as the single resolved provider).
+    // We standardise on aws-lc-rs, which is also the JWT provider.
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .expect("rustls process-level CryptoProvider already installed by a dependency");

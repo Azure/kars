@@ -40,12 +40,10 @@ futures = "0.3"
 # HTTP
 axum = { version = "0.8", features = ["ws"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "gzip", "brotli", "deflate"] }
-# rustls 0.23 with aws-lc-rs is the only provider in our dep graph
-# (transitively via reqwest + oci-client). We declare it as a direct
-# workspace dep so the router's main() can install the provider
-# explicitly — otherwise kube-client's first TLS handshake panics
-# with "Could not automatically determine the process-level
-# CryptoProvider" when multiple feature flags resolve.
+# rustls 0.23 has both aws-lc-rs and ring providers enabled in the
+# workspace dependency graph. Declare aws-lc-rs directly so each binary
+# can install it explicitly before its first TLS handshake; rustls
+# panics if it cannot choose a process-level CryptoProvider.
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 tower = { version = "0.5", features = ["limit"] }
 tower-http = { version = "0.6", features = ["trace", "cors"] }
@@ -56,8 +54,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml = "0.9"
 
-# Azure identity (via REST — no SDK dependency)
-jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+# Azure identity (via REST — no SDK dependency). Use AWS-LC for JWT
+# operations to avoid pulling the older RustCrypto elliptic-curve stack.
+jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 
 # Observability
 tracing = "0.1"
