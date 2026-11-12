@@ -245,9 +245,9 @@ limitations are recorded in T4 and still require an independent review.
 - `cargo clippy --locked --offline --package kars-controller --all-targets --
   -D warnings`, `cargo fmt --all -- --check`, `git diff --check`, and
   `bash ci/no-custom-crypto.sh`: passed on the changed worktree.
-- New-head remote CI has not yet been run for this follow-up. Previous-head
-  green CI does not validate these changes; the PR must remain draft until
-  current-head checks and independent review are complete.
+- CI evidence is head-specific; previous-head green CI does not validate the
+  current PR head. The independent reviewer gate remains required for these
+  controller changes and must not be inferred from prior JWT-only review.
 - Baseline differential run: `cargo test --offline --package
   kars-inference-router --test oauth_crypto_compat` passed five tests with the
   previous RustCrypto provider. Its 28 positive RSA vectors were preserved
