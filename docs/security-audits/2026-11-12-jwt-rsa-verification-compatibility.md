@@ -47,6 +47,12 @@ fallback is introduced.
   automatic salt detection.
 - The adapter handles public keys only. Variable-time decoding of public
   modulus/exponent bytes does not process a private key.
+- Encoded public components are stripped of leading zero bytes before conversion
+  and rejected before allocation if their significant modulus or exponent exceeds
+  the former checked bounds. This matches the former `BigUint` decoding and
+  prevents attacker-controlled zero padding from inflating RSA 0.10's arithmetic
+  precision. With 1,024 zero bytes prepended to the same small test modulus, the
+  uncorrected adapter allocated 8,256 bits rather than 64.
 - Issuer, audience, expiry, kid, key-algorithm, scope, and HMAC-confusion checks
   remain in the existing OAuth verification path.
 - The crypto-wrapper allowlist adds only this provider file, consistent with the
@@ -73,12 +79,15 @@ fallback is introduced.
 - Baseline differential run: `cargo test --offline --package
   kars-inference-router --test oauth_crypto_compat` passed five tests with the
   previous RustCrypto provider. Its 28 positive RSA vectors were preserved
-  byte-for-byte for the candidate run.
+  byte-for-byte for the candidate run. A separate session-only RSA 0.9
+  primitive probe also verified signatures with 1,024 leading zero bytes in
+  both public components and checked the old exponent bounds.
 - Candidate: `cargo test --locked --offline --package kars-inference-router
-  --test oauth_crypto_compat` passed six tests. Coverage includes the actual Kars
+  --test oauth_crypto_compat` passed seven tests. Coverage includes the actual Kars
   `verify_access_token` API, PKCS#1 DER/PEM and SPKI PEM, tampered claims and
   signatures, malformed lengths/DER, wrong key family/audience, padded public
-  components, invalid components, over-limit moduli, and non-JOSE PSS salt lengths.
+  components including 1,024 leading zero bytes, invalid/empty components,
+  over-limit moduli/exponents, and non-JOSE PSS salt lengths.
   Wrong-salt fixtures are real signatures generated and rejected by the former
   RSA implementation, not random bytes.
 - `cargo test --locked --offline --package kars-inference-router`: passed.

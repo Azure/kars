@@ -332,6 +332,41 @@ fn pss_requires_the_jose_digest_length_salt() {
 }
 
 #[test]
+fn heavily_padded_public_components_still_verify() {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+    kars_inference_router::install_jsonwebtoken_crypto_provider();
+    let fixtures: Vec<RsaFixture> =
+        serde_json::from_str(include_str!("fixtures/oauth/rsa-compat.json")).unwrap();
+    let fixture = fixtures
+        .iter()
+        .find(|fixture| fixture.bits == 2048)
+        .unwrap();
+    let padded = |component: &str| {
+        let mut bytes = vec![0; 1024];
+        bytes.extend_from_slice(&URL_SAFE_NO_PAD.decode(component).unwrap());
+        URL_SAFE_NO_PAD.encode(bytes)
+    };
+    let jwk = json!({
+        "kty": "RSA",
+        "n": padded(&fixture.n),
+        "e": padded(&fixture.e),
+        "alg": "RS256",
+        "kid": "oauth-rsa-compat-2026",
+        "use": "sig",
+    });
+    let config = fixture_config(
+        Algorithm::RS256,
+        JwkSet {
+            keys: vec![serde_json::from_value(jwk).unwrap()],
+        },
+    );
+    let verified = verify_access_token(&fixture.tokens["RS256"], &config)
+        .expect("legacy JWK zero padding must not change signature verification");
+    assert_eq!(verified.subject, "oauth-fixture-user");
+}
+
+#[test]
 fn legacy_rsa_der_and_pem_keys_remain_compatible() {
     use base64::{
         Engine as _,
