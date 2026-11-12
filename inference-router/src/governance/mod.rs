@@ -927,6 +927,42 @@ mod tests {
     }
 
     #[test]
+    fn legacy_unquoted_numeric_policy_versions_preserve_deny_decisions() {
+        for version in ["1", "1.0"] {
+            let yaml = format!(
+                r#"version: {version}
+agent: kars-compatibility-test
+policies:
+  - name: deny-dangerous-shell
+    type: capability
+    denied_actions:
+      - "shell:rm"
+    priority: 100
+"#
+            );
+            let dir = tempfile::tempdir().expect("create policy directory");
+            let file = dir.path().join("profile.yaml");
+            std::fs::write(&file, yaml).expect("write policy");
+            let gov = Governance::new("yaml-version-compatibility-test");
+            let count = gov
+                .load_policies_from_dir(dir.path().to_str().expect("UTF-8 path"))
+                .expect("load policy");
+
+            assert_eq!(count, 1, "version: {version}");
+            assert_eq!(
+                gov.evaluate("agent", "shell:rm", None)["decision"],
+                "deny",
+                "version: {version}"
+            );
+            assert_eq!(
+                gov.evaluate("agent", "shell:ls", None)["decision"],
+                "allow",
+                "version: {version}"
+            );
+        }
+    }
+
+    #[test]
     fn yaml_compatibility_policy_count_fallbacks() {
         let dir = tempfile::tempdir().expect("create policy directory");
         let file = dir.path().join("profile.yaml");
