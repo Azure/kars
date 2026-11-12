@@ -54,8 +54,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml = "0.9"
 
-# Azure identity (via REST — no SDK dependency). Use AWS-LC for JWT
-# operations to avoid pulling the older RustCrypto elliptic-curve stack.
+# Azure identity (via REST — no SDK dependency). AWS-LC handles signing and
+# non-RSA verification; the router wraps released RSA 0.10 for compatible
+# public-key verification without the older RustCrypto elliptic-curve stack.
 jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 
 # Observability
@@ -76,6 +77,7 @@ chrono = { version = "0.4", features = ["serde"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.9"
 sha2 = "0.10"
+rsa = { version = "0.10", default-features = false, features = ["std", "encoding", "pkcs1v15"] }
 bs58 = "0.5"
 base64 = "0.22"
 hex = "0.4"

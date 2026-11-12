@@ -57,17 +57,20 @@ and audit rows; the Headlamp plugin has a build row.
   **not** add IDs here without a comment explaining why the call
   site is non-attacker-observable. Current ignores:
   - `RUSTSEC-2023-0071` (rsa Marvin timing attack) — pulled by
-    Sigstore's OpenID Connect flow; JWT verification uses AWS-LC.
-    Kars's remaining RSA use verifies signatures against public keys.
-    AWS-LC rejects RSA JWKs below 2048 bits; the former JWT RustCrypto
-    backend accepted 1024-bit keys. OAuth issuers must use at least
-    2048-bit RSA keys after the provider switch.
+    Sigstore's OpenID Connect flow. Kars uses RSA only for public-key
+    signature verification, not private-key decryption. Router JWT
+    verification delegates RSA to released `rsa` 0.10 APIs with the
+    previous verifier's key-size bounds (no added minimum, 4096-bit
+    maximum); other JWT operations use AWS-LC. Existing issuers are
+    not forced to rotate keys by this update. New RSA keys should
+    still be at least 2048 bits.
   - `RUSTSEC-2024-0449` (unsafe-libyaml unmaintained) — pulled by
     `serde_yaml` via kube, AGT `agentmesh`, and Kars crates. Expires
     2027-02-04; tracked in Azure/kars#595.
 `RUSTSEC-2026-0387` (crypto-bigint timing variability) is no longer
-ignored: JWT verification uses the AWS-LC backend, and Sigstore 0.15 /
-OpenID Connect 4.1 use crypto-bigint 0.7.11, which is patched.
+ignored: JWT verification uses AWS-LC plus `rsa` 0.10 for compatible
+RSA public verification; the latter and Sigstore 0.15 / OpenID Connect
+4.1 use crypto-bigint 0.7.11, which is patched.
 - `[licenses]` — allow-list of SPDX identifiers. Adding a new
   third-party dependency that introduces a license outside the
   allow-list will fail CI.

@@ -54,6 +54,7 @@
 
 pub mod audit;
 pub mod audit_impl;
+pub(crate) mod jwt;
 pub mod mesh;
 pub mod outage;
 pub mod policy;

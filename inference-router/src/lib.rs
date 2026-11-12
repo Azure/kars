@@ -51,12 +51,9 @@ pub mod sidecar_client;
 pub mod spawn;
 pub mod telemetry;
 
-/// Select AWS-LC explicitly for JWT signing and verification.
+/// Install the JWT provider while preserving the existing OAuth RSA key range.
 pub fn install_jsonwebtoken_crypto_provider() {
-    if jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER
-        .install_default()
-        .is_err()
-    {
+    if providers::jwt::DEFAULT_PROVIDER.install_default().is_err() {
         tracing::debug!("jsonwebtoken CryptoProvider already installed");
     }
 }

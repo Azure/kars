@@ -24,12 +24,13 @@ ignore = [
     #
     # Severity: medium (CVSS 5.9). NO upstream fix is available.
     # Source: transitive dependency — `sigstore 0.15.0` →
-    # `openidconnect 4.1.0` → `rsa 0.9.10`. JWT verification uses
-    # jsonwebtoken's AWS-LC backend and no longer adds RustCrypto RSA.
+    # `openidconnect 4.1.0` → `rsa 0.9.10`. Router JWT RSA verification
+    # separately uses `rsa 0.10` with patched crypto-bigint; other JWT
+    # operations use AWS-LC.
     # The Marvin attack requires *RSA private key operations* whose timing leaks
-    # to a co-located attacker. The remaining use is Sigstore's Fulcio OIDC
-    # signature validation against public keys; Kars does not perform RSA
-    # decryption or private-key operations. Router JWT validation uses an
+    # to a co-located attacker. Sigstore's Fulcio OIDC and router JWT RSA
+    # verification use public keys; Kars does not perform RSA decryption
+    # or private-key operations. Router JWT validation uses an
     # algorithm allow-list, kid pinning, and bounded JWKS caches.
     "RUSTSEC-2023-0071",
     # RUSTSEC-2025-0134 — `rustls-pemfile` is unmaintained

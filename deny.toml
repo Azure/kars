@@ -37,10 +37,10 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
 ignore = [
     # RUSTSEC-2023-0071 — `rsa` Marvin timing sidechannel. Pulled via
-    # sigstore → openidconnect (Fulcio OIDC). JWTs use jsonwebtoken's
-    # AWS-LC backend. No constant-time replacement is published yet;
-    # the remaining RSA call sites verify signatures against public
-    # keys and do not decrypt attacker-controlled payloads. Re-evaluate
+    # sigstore → openidconnect (Fulcio OIDC). Router JWT RSA verification
+    # uses rsa 0.10 with patched crypto-bigint; other JWT operations use
+    # AWS-LC. All Kars RSA call sites verify signatures against public
+    # keys and do not perform private-key decryption. Re-evaluate
     # when RustCrypto/RSA ships a constant-time backend (issue #626).
     "RUSTSEC-2023-0071",
     # RUSTSEC-2025-0134 — `rustls-pemfile` is unmaintained. Pulled

@@ -30,6 +30,7 @@ chrono.workspace = true
 
 # Azure identity (Workload Identity → token exchange via REST)
 jsonwebtoken.workspace = true
+rsa.workspace = true
 
 # Observability
 tracing.workspace = true
