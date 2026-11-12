@@ -4,8 +4,9 @@
 "use strict";
 
 const { spawn } = require("node:child_process");
+const { randomUUID } = require("node:crypto");
 const { existsSync } = require("node:fs");
-const { mkdtemp, mkdir, open, readFile, rm, writeFile } = require("node:fs/promises");
+const { cp, mkdtemp, mkdir, open, readFile, rm, symlink, writeFile } = require("node:fs/promises");
 const { createRequire } = require("node:module");
 const { tmpdir } = require("node:os");
 const { isAbsolute, join, relative, sep } = require("node:path");
@@ -92,6 +93,26 @@ function completedBuilds(output) {
   return (output.match(/built in/g) || []).length;
 }
 
+async function copyProject(sourceRoot, projectRoot) {
+  const excludedEntries = new Set([".git", "dist", "node_modules"]);
+  await cp(sourceRoot, projectRoot, {
+    recursive: true,
+    filter: (source) => {
+      const relativePath = relative(sourceRoot, source);
+      return !relativePath || !excludedEntries.has(relativePath.split(sep)[0]);
+    },
+  });
+  const dependencies = join(sourceRoot, "node_modules");
+  if (!existsSync(dependencies)) {
+    throw new Error(`Headlamp dependencies are not installed at ${dependencies}`);
+  }
+  await symlink(
+    dependencies,
+    join(projectRoot, "node_modules"),
+    process.platform === "win32" ? "junction" : "dir",
+  );
+}
+
 async function readStableSnapshot(filePath) {
   let handle;
   try {
@@ -108,10 +129,7 @@ async function readStableSnapshot(filePath) {
     ) {
       return null;
     }
-    return {
-      contents,
-      mtimeMs: Number(after.mtimeNs) / 1_000_000,
-    };
+    return { contents };
   } finally {
     if (handle) {
       await handle.close();
@@ -126,7 +144,8 @@ async function waitForCopiedBundle({
   bundlePath,
   copiedBundlePath,
   builds,
-  notBefore,
+  requiredMarkers,
+  forbiddenMarkers,
 }) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -147,10 +166,9 @@ async function waitForCopiedBundle({
         if (
           sourceSnapshot &&
           copiedSnapshot &&
-          sourceSnapshot.mtimeMs >= notBefore - 1_000 &&
-          copiedSnapshot.mtimeMs >= notBefore - 1_000 &&
           sourceSnapshot.contents === copiedSnapshot.contents &&
-          sourceSnapshot.contents.includes(fixtureMarker)
+          requiredMarkers.every((marker) => sourceSnapshot.contents.includes(marker)) &&
+          forbiddenMarkers.every((marker) => !sourceSnapshot.contents.includes(marker))
         ) {
           return;
         }
@@ -169,18 +187,21 @@ async function waitForCopiedBundle({
 
 async function main() {
   const temporaryDirectory = await mkdtemp(join(tmpdir(), "kars-headlamp-start-"));
+  const packageRoot = process.cwd();
+  const projectRoot = join(temporaryDirectory, "project");
   const dataHome = join(temporaryDirectory, "data");
   const configHome = join(temporaryDirectory, "config");
-  const sourcePath = join(process.cwd(), "src", "index.tsx");
+  const sourcePath = join(projectRoot, "src", "index.tsx");
   let originalSource;
   let sourceModified = false;
   let child;
   try {
     await Promise.all([mkdir(dataHome), mkdir(configHome)]);
+    await copyProject(packageRoot, projectRoot);
     const paths = getHeadlampPaths(temporaryDirectory, dataHome, configHome);
-    const packageJson = JSON.parse(await readFile("package.json", "utf8"));
+    const packageJson = JSON.parse(await readFile(join(projectRoot, "package.json"), "utf8"));
     const pluginName = packageJson.name.split("/").pop();
-    const bundlePath = join(process.cwd(), "dist", "main.js");
+    const bundlePath = join(projectRoot, "dist", "main.js");
     const copiedBundlePath = join(paths.configDir, "plugins", pluginName, "main.js");
     if (!isWithin(temporaryDirectory, copiedBundlePath)) {
       throw new Error(
@@ -189,9 +210,9 @@ async function main() {
     }
     await mkdir(paths.configDir, { recursive: true });
     originalSource = await readFile(sourcePath);
-    const startedAt = Date.now();
+    const rebuildMarker = `KARS_HEADLAMP_START_SMOKE_${randomUUID()}`;
     child = spawn("npm", ["run", "start"], {
-      cwd: process.cwd(),
+      cwd: projectRoot,
       detached: process.platform !== "win32",
       stdio: ["ignore", "pipe", "pipe"],
       env: {
@@ -225,15 +246,15 @@ async function main() {
       bundlePath,
       copiedBundlePath,
       builds: 1,
-      notBefore: startedAt,
+      requiredMarkers: [fixtureMarker],
+      forbiddenMarkers: [rebuildMarker],
     });
     const rebuildSource = Buffer.concat([
       originalSource,
-      Buffer.from(`\n// headlamp-start-smoke-${process.pid}\n`),
+      Buffer.from(`\nconsole.log(${JSON.stringify(rebuildMarker)});\n`),
     ]);
     sourceModified = true;
     await writeFile(sourcePath, rebuildSource);
-    const rebuildStartedAt = Date.now();
     await waitForCopiedBundle({
       child,
       getOutput: () => output,
@@ -241,7 +262,8 @@ async function main() {
       bundlePath,
       copiedBundlePath,
       builds: 2,
-      notBefore: rebuildStartedAt,
+      requiredMarkers: [fixtureMarker, rebuildMarker],
+      forbiddenMarkers: [],
     });
 
     await writeFile(sourcePath, originalSource);
@@ -253,11 +275,12 @@ async function main() {
       bundlePath,
       copiedBundlePath,
       builds: 3,
-      notBefore: Date.now(),
+      requiredMarkers: [fixtureMarker],
+      forbiddenMarkers: [rebuildMarker],
     });
 
     console.log(
-      "npm run start built and copied the Kars bundle, then rebuilt and recopied it after a source change and restore."
+      "npm run start built and copied the Kars bundle, rebuilt it with a unique source marker, then restored and recopied the original bundle."
     );
     console.log("The headlamp-plugin start command does not start an HTTP dev server.");
   } finally {
