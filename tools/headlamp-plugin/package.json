@@ -7,6 +7,7 @@
   "scripts": {
     "build": "headlamp-plugin build",
     "start": "headlamp-plugin start",
+    "test:dev-server": "storybook dev --config-dir test/storybook-smoke --ci --smoke-test",
     "test": "headlamp-plugin test",
     "lint": "headlamp-plugin lint",
     "format": "headlamp-plugin format"
