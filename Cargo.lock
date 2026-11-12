@@ -2666,12 +2666,14 @@ dependencies = [
  "serde_yaml",
  "sha2 0.10.9",
  "sigstore",
+ "sigstore_protobuf_specs",
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite 0.28.0",
  "tracing",
  "tracing-subscriber",
  "wiremock",
+ "x509-cert",
 ]
 
 [[package]]

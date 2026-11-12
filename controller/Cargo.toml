@@ -62,6 +62,7 @@ axum = "0.8"
 # See `controller/src/policy_fetcher.rs` and `docs/internal/policy-canonical-format.md`.
 sigstore = { version = "0.15", default-features = false, features = ["cosign", "verify", "rustls-tls", "sigstore-trust-root"] }
 oci-client = { version = "=0.16.1", default-features = false, features = ["rustls-tls"] }
+x509-cert = "0.3"
 # Explicit dep so we can install a process-level CryptoProvider at
 # startup. Multiple transitive deps (kube → ring, reqwest →
 # aws-lc-rs) enable both providers, which makes rustls 0.23.40+
@@ -78,6 +79,7 @@ tokio = { workspace = true }
 # HTTP poller tests. Pure dev-dep; never linked into the binary.
 wiremock = "0.6"
 serde_json_canonicalizer = "0.4.1"
+sigstore_protobuf_specs = "0.5.1"
 
 [[bench]]
 name = "reconciler_bench"

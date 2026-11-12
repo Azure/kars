@@ -522,9 +522,16 @@ async fn verify_via_sigstore<K: PolicyKind>(
         .await
 }
 
+/// Bind accepted signatures to their trusted certificate identity and Rekor record.
+///
+/// The legacy SET authenticates an opaque body, so its payload hash, signature,
+/// and exact certificate are checked against the corresponding OCI layer before
+/// the bundle's integrated time can be used as signature evidence. The issuer/SAN
+/// constraint and artifact-signature check both use Sigstore's same trusted certificate.
 fn verify_signer_identity(
     layers: &[sigstore::cosign::SignatureLayer],
     signer_policy: &SignerPolicyConfig,
+    legacy_certificates: &std::collections::HashMap<(String, String), Vec<u8>>,
 ) -> Result<(), FetchError> {
     use sigstore::cosign::verification_constraint::cert_subject_email_verifier::StringVerifier;
     use sigstore::cosign::verification_constraint::{
@@ -533,6 +540,15 @@ fn verify_signer_identity(
     };
     use sigstore::cosign::verify_constraints;
     use sigstore::errors::Result as SigstoreResult;
+
+    for layer in layers {
+        let Some(sigstore::cosign::bundle_content::BundleContent::RekorBundle(bundle)) =
+            &layer.bundle
+        else {
+            continue;
+        };
+        verify_legacy_rekor_binding(layer, bundle, legacy_certificates)?;
+    }
 
     #[derive(Debug)]
     struct AnyOf(Vec<Box<dyn VerificationConstraint>>);
@@ -655,9 +671,21 @@ async fn verify_via_sigstore_with_root<K: PolicyKind, T: sigstore::trust::TrustR
         .await
         .map_err(map_oci_error)?;
 
+    let legacy_certificates = if layers.iter().any(|layer| {
+        matches!(
+            layer.bundle.as_ref(),
+            Some(sigstore::cosign::bundle_content::BundleContent::RekorBundle(_))
+        )
+    }) {
+        // Sigstore retains the parsed certificate identity but not its original DER.
+        fetch_legacy_certificates(artifact_ref, &auth, use_http_registry).await?
+    } else {
+        std::collections::HashMap::new()
+    };
+
     // Keep the non-Send verification constraints out of the reconcile future
     // before its next `.await` (kube-rs requires the future to be `Send`).
-    verify_signer_identity(&layers, signer_policy)?;
+    verify_signer_identity(&layers, signer_policy, &legacy_certificates)?;
 
     // Step D: pull artifact bytes (digest-pinned).
     //
@@ -673,6 +701,172 @@ async fn verify_via_sigstore_with_root<K: PolicyKind, T: sigstore::trust::TrustR
     let mut parsed = K::parse(&bytes)?;
     K::finalize(&mut parsed, artifact_ref.digest.clone(), SystemTime::now());
     Ok(parsed)
+}
+
+fn verify_legacy_rekor_binding(
+    layer: &sigstore::cosign::SignatureLayer,
+    bundle: &sigstore::cosign::bundle::Bundle,
+    legacy_certificates: &std::collections::HashMap<(String, String), Vec<u8>>,
+) -> Result<(), FetchError> {
+    use base64::Engine as _;
+    use sha2::{Digest, Sha256};
+    use x509_cert::der::pem::PemLabel;
+
+    let fail = |message: &str| FetchError::SignatureVerifyFailed(message.to_owned());
+    let body_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&bundle.payload.body)
+        .map_err(|_| fail("invalid base64 Rekor body"))?;
+    let body: serde_json::Value =
+        serde_json::from_slice(&body_bytes).map_err(|_| fail("invalid Rekor body JSON"))?;
+    if body.get("kind").and_then(serde_json::Value::as_str) != Some("hashedrekord")
+        || body.get("apiVersion").and_then(serde_json::Value::as_str) != Some("0.0.1")
+    {
+        return Err(fail("unsupported Rekor body kind or apiVersion"));
+    }
+
+    let spec = body
+        .get("spec")
+        .ok_or_else(|| fail("Rekor hashedrekord body is missing spec"))?;
+    let hash = spec
+        .get("data")
+        .and_then(|data| data.get("hash"))
+        .ok_or_else(|| fail("Rekor hashedrekord body is missing data.hash"))?;
+    if hash.get("algorithm").and_then(serde_json::Value::as_str) != Some("sha256") {
+        return Err(fail("Rekor hashedrekord must use sha256"));
+    }
+    let expected_hash = hex::encode(Sha256::digest(&layer.raw_data));
+    if hash.get("value").and_then(serde_json::Value::as_str) != Some(expected_hash.as_str()) {
+        return Err(fail(
+            "Rekor hashedrekord payload hash does not match the signed layer",
+        ));
+    }
+
+    let signature = layer
+        .signature
+        .as_deref()
+        .ok_or_else(|| fail("signed layer is missing signature"))?;
+    let signature_bytes = base64::engine::general_purpose::STANDARD
+        .decode(signature)
+        .map_err(|_| fail("invalid base64 layer signature"))?;
+    let logged_signature = spec
+        .get("signature")
+        .and_then(|signature| signature.get("content"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| fail("Rekor hashedrekord body is missing signature.content"))?;
+    let logged_signature_bytes = base64::engine::general_purpose::STANDARD
+        .decode(logged_signature)
+        .map_err(|_| fail("invalid base64 Rekor signature"))?;
+    if logged_signature_bytes != signature_bytes {
+        return Err(fail(
+            "Rekor hashedrekord signature does not match the signed layer",
+        ));
+    }
+
+    let logged_certificate = spec
+        .get("signature")
+        .and_then(|signature| signature.get("publicKey"))
+        .and_then(|key| key.get("content"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| fail("Rekor hashedrekord body is missing publicKey.content"))?;
+    let logged_certificate = base64::engine::general_purpose::STANDARD
+        .decode(logged_certificate)
+        .map_err(|_| fail("invalid base64 Rekor certificate"))?;
+    let (certificate_label, logged_certificate) =
+        x509_cert::der::pem::decode_vec(&logged_certificate)
+            .map_err(|_| fail("invalid PEM certificate in Rekor hashedrekord body"))?;
+    if certificate_label != x509_cert::Certificate::PEM_LABEL {
+        return Err(fail(
+            "Rekor hashedrekord public key is not a certificate PEM",
+        ));
+    }
+    let certificate_key = (layer.oci_digest.clone(), signature.to_owned());
+    let accepted_certificate = legacy_certificates
+        .get(&certificate_key)
+        .ok_or_else(|| fail("cannot match legacy signature layer to its certificate"))?;
+    if &logged_certificate != accepted_certificate {
+        return Err(fail(
+            "Rekor hashedrekord certificate does not match the signed layer",
+        ));
+    }
+
+    Ok(())
+}
+
+async fn fetch_legacy_certificates(
+    artifact_ref: &OciArtifactRef,
+    auth: &sigstore::registry::Auth,
+    use_http_registry: bool,
+) -> Result<std::collections::HashMap<(String, String), Vec<u8>>, FetchError> {
+    use oci_client::client::{Client, ClientConfig, ClientProtocol};
+    use oci_client::manifest::OciManifest;
+    use oci_client::secrets::RegistryAuth;
+    use x509_cert::der::pem::PemLabel;
+
+    const SIGNATURE_ANNOTATION: &str = "dev.cosignproject.cosign/signature";
+    const CERTIFICATE_ANNOTATION: &str = "dev.sigstore.cosign/certificate";
+
+    let tag = artifact_ref.digest.replace(':', "-") + ".sig";
+    let signature_ref = oci_client::Reference::with_tag(
+        artifact_ref.registry.clone(),
+        artifact_ref.repository.clone(),
+        tag,
+    );
+    let mut config = ClientConfig::default();
+    if use_http_registry {
+        config.protocol = ClientProtocol::Http;
+    }
+    let client = Client::new(config);
+    let registry_auth = match auth {
+        sigstore::registry::Auth::Anonymous => RegistryAuth::Anonymous,
+        sigstore::registry::Auth::Basic(username, password) => {
+            RegistryAuth::Basic(username.clone(), password.clone())
+        }
+        sigstore::registry::Auth::Bearer(token) => RegistryAuth::Bearer(token.clone()),
+    };
+    let (manifest, _) = client
+        .pull_manifest(&signature_ref, &registry_auth)
+        .await
+        .map_err(map_oci_distribution_error)?;
+    let image_manifest = match manifest {
+        OciManifest::Image(image) => image,
+        OciManifest::ImageIndex(_) => {
+            return Err(FetchError::SignatureVerifyFailed(
+                "legacy cosign signature tag resolved to an OCI image index".into(),
+            ));
+        }
+    };
+
+    let mut certificates = std::collections::HashMap::new();
+    for layer in image_manifest.layers {
+        if layer.media_type != "application/vnd.dev.cosign.simplesigning.v1+json" {
+            continue;
+        }
+        let Some(annotations) = layer.annotations else {
+            continue;
+        };
+        let (Some(signature), Some(certificate)) = (
+            annotations.get(SIGNATURE_ANNOTATION),
+            annotations.get(CERTIFICATE_ANNOTATION),
+        ) else {
+            continue;
+        };
+        let (certificate_label, certificate) =
+            x509_cert::der::pem::decode_vec(certificate.as_bytes()).map_err(|e| {
+                FetchError::SignatureVerifyFailed(format!("invalid cosign certificate: {e}"))
+            })?;
+        if certificate_label != x509_cert::Certificate::PEM_LABEL {
+            return Err(FetchError::SignatureVerifyFailed(
+                "cosign certificate annotation is not a certificate PEM".into(),
+            ));
+        }
+        let key = (layer.digest, signature.clone());
+        if certificates.insert(key, certificate).is_some() {
+            return Err(FetchError::SignatureVerifyFailed(
+                "duplicate legacy signature layer identity".into(),
+            ));
+        }
+    }
+    Ok(certificates)
 }
 
 fn map_oci_error(e: sigstore::errors::SigstoreError) -> FetchError {
@@ -2362,6 +2556,7 @@ mod tests {
         verify_signer_identity(
             std::slice::from_ref(&layer),
             &test_signer_policy(issuer, subject),
+            &std::collections::HashMap::new(),
         )
         .expect("valid signed identity");
 
@@ -2369,6 +2564,7 @@ mod tests {
             verify_signer_identity(
                 std::slice::from_ref(&layer),
                 &test_signer_policy("https://wrong-issuer.example", subject),
+                &std::collections::HashMap::new(),
             )
             .is_err(),
             "wrong issuer must fail"
@@ -2377,6 +2573,7 @@ mod tests {
             verify_signer_identity(
                 std::slice::from_ref(&layer),
                 &test_signer_policy(issuer, "https://wrong-subject.example"),
+                &std::collections::HashMap::new(),
             )
             .is_err(),
             "wrong subject must fail"
@@ -2385,16 +2582,24 @@ mod tests {
         let mut tampered_signature = layer.clone();
         tampered_signature.signature = Some("AAAA".into());
         assert!(
-            verify_signer_identity(&[tampered_signature], &test_signer_policy(issuer, subject),)
-                .is_err(),
+            verify_signer_identity(
+                &[tampered_signature],
+                &test_signer_policy(issuer, subject),
+                &std::collections::HashMap::new(),
+            )
+            .is_err(),
             "tampered signature must fail"
         );
 
         let mut tampered_payload = layer;
         tampered_payload.raw_data.push(b' ');
         assert!(
-            verify_signer_identity(&[tampered_payload], &test_signer_policy(issuer, subject),)
-                .is_err(),
+            verify_signer_identity(
+                &[tampered_payload],
+                &test_signer_policy(issuer, subject),
+                &std::collections::HashMap::new(),
+            )
+            .is_err(),
             "tampered signed payload must fail"
         );
     }
@@ -2410,10 +2615,22 @@ mod tests {
     const OCI_MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
     const OCI_EMPTY_CONFIG_MEDIA_TYPE: &str = "application/vnd.oci.empty.v1+json";
     const COSIGN_LAYER_MEDIA_TYPE: &str = "application/vnd.dev.cosign.simplesigning.v1+json";
+    const SIGSTORE_BUNDLE_MEDIA_TYPE: &str = "application/vnd.dev.sigstore.bundle.v0.3+json";
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum FixtureMutation {
+        None,
+        Signature,
+        Artifact,
+        RekorSignature,
+        RekorCertificate,
+        RekorPayloadHash,
+    }
 
     struct LocalRegistryFixture {
         manifests: std::collections::HashMap<String, (String, Vec<u8>)>,
         blobs: std::collections::HashMap<String, Vec<u8>>,
+        referrers: std::collections::HashMap<String, Vec<u8>>,
     }
 
     struct LocalRegistry {
@@ -2468,13 +2685,15 @@ mod tests {
                 .expect("build OCI version response");
         }
         if path.starts_with("v2/policy/referrers/") {
+            let digest = path.trim_start_matches("v2/policy/referrers/");
+            let body = fixture.referrers.get(digest).cloned().unwrap_or_else(|| {
+                br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[]}"#
+                    .to_vec()
+            });
             return Response::builder()
                 .status(StatusCode::OK)
                 .header("content-type", "application/vnd.oci.image.index.v1+json")
-                .body(Body::from(
-                    br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[]}"#
-                        .to_vec(),
-                ))
+                .body(Body::from(body))
                 .expect("build OCI referrers response");
         }
         if let Some(reference) = path.strip_prefix("v2/policy/manifests/")
@@ -2541,8 +2760,7 @@ mod tests {
 
     fn build_local_registry_fixture(
         policy_bytes: &[u8],
-        tamper_signature: bool,
-        tamper_artifact: bool,
+        mutation: FixtureMutation,
     ) -> (LocalRegistryFixture, String) {
         use base64::Engine as _;
         use serde_json::json;
@@ -2595,6 +2813,8 @@ mod tests {
             .signature
             .clone()
             .expect("signature generated");
+        let simple_signing_bytes = serde_json::to_vec(&signature_layer.simple_signing)
+            .expect("serialize cosign simple-signing payload");
 
         let rekor_key = SigStoreKeyPair::from_pem(TEST_REKOR_KEY).expect("parse test Rekor key");
         let rekor_signer = rekor_key
@@ -2605,6 +2825,21 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system clock after Unix epoch")
             .as_secs() as i64;
+        let rekor_signature = if mutation == FixtureMutation::RekorSignature {
+            base64::engine::general_purpose::STANDARD.encode(b"mismatched signature")
+        } else {
+            valid_signature.clone()
+        };
+        let rekor_certificate = if mutation == FixtureMutation::RekorCertificate {
+            TEST_FULCIO_ROOT
+        } else {
+            TEST_SIGNER_CERT
+        };
+        let rekor_payload_hash = if mutation == FixtureMutation::RekorPayloadHash {
+            "0".repeat(64)
+        } else {
+            hex::encode(Sha256::digest(&simple_signing_bytes))
+        };
         let rekor_body = json!({
             "apiVersion": "0.0.1",
             "kind": "hashedrekord",
@@ -2612,14 +2847,13 @@ mod tests {
                 "data": {
                     "hash": {
                         "algorithm": "sha256",
-                        "value": artifact_digest.trim_start_matches("sha256:"),
+                        "value": rekor_payload_hash,
                     }
                 },
                 "signature": {
-                    "content": valid_signature,
-                    "format": "x509",
+                    "content": rekor_signature,
                     "publicKey": {
-                        "content": base64::engine::general_purpose::STANDARD.encode(TEST_SIGNER_CERT),
+                        "content": base64::engine::general_purpose::STANDARD.encode(rekor_certificate),
                     }
                 }
             }
@@ -2640,10 +2874,8 @@ mod tests {
         }))
         .expect("serialize test Rekor bundle");
 
-        let simple_signing_bytes = serde_json::to_vec(&signature_layer.simple_signing)
-            .expect("serialize cosign simple-signing payload");
         let signature_annotations = json!({
-            "dev.cosignproject.cosign/signature": if tamper_signature {
+            "dev.cosignproject.cosign/signature": if mutation == FixtureMutation::Signature {
                 "AAAA"
             } else {
                 valid_signature.as_str()
@@ -2672,7 +2904,7 @@ mod tests {
             (digest(policy_bytes), policy_bytes.to_vec()),
             (digest(&simple_signing_bytes), simple_signing_bytes),
         ]);
-        if tamper_artifact {
+        if mutation == FixtureMutation::Artifact {
             blobs.insert(
                 digest(policy_bytes),
                 b"tampered signed policy bytes".to_vec(),
@@ -2688,17 +2920,294 @@ mod tests {
                 (signature_manifest_digest, signature_manifest),
             ),
         ]);
-        (LocalRegistryFixture { manifests, blobs }, artifact_digest)
+        (
+            LocalRegistryFixture {
+                manifests,
+                blobs,
+                referrers: std::collections::HashMap::new(),
+            },
+            artifact_digest,
+        )
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum BundleFixtureMutation {
+        None,
+        WrongSubject,
+        BadSignature,
+        Artifact,
+    }
+
+    fn build_local_registry_bundle_fixture(
+        policy_bytes: &[u8],
+        mutation: BundleFixtureMutation,
+    ) -> (LocalRegistryFixture, String) {
+        use base64::{Engine as _, engine::general_purpose::STANDARD as base64};
+        use serde_json::json;
+        use sha2::{Digest, Sha256};
+        use sigstore::crypto::SigningScheme;
+        use sigstore::crypto::signing_key::SigStoreKeyPair;
+        use sigstore_protobuf_specs::dev::sigstore::bundle::v1::{
+            Bundle as ProtoBundle, VerificationMaterial, bundle::Content as BundleContent,
+            verification_material::Content as MaterialContent,
+        };
+        use sigstore_protobuf_specs::dev::sigstore::common::v1::{LogId, X509Certificate};
+        use sigstore_protobuf_specs::dev::sigstore::rekor::v1::{
+            Checkpoint, InclusionPromise, InclusionProof, KindVersion, TransparencyLogEntry,
+        };
+        use sigstore_protobuf_specs::io::intoto::{Envelope, Signature};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        fn digest(bytes: &[u8]) -> String {
+            format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
+        }
+
+        fn descriptor(bytes: &[u8], media_type: &str) -> serde_json::Value {
+            json!({
+                "mediaType": media_type,
+                "digest": digest(bytes),
+                "size": bytes.len(),
+            })
+        }
+
+        fn pae(payload_type: &str, payload: &[u8]) -> Vec<u8> {
+            let header = format!(
+                "DSSEv1 {} {} {} ",
+                payload_type.len(),
+                payload_type,
+                payload.len()
+            );
+            [header.as_bytes(), payload].concat()
+        }
+
+        let empty_config = [];
+        let policy_manifest = serde_json::to_vec(&json!({
+            "schemaVersion": 2,
+            "mediaType": OCI_MANIFEST_MEDIA_TYPE,
+            "artifactType": EGRESS_ALLOWLIST_V1_MEDIA_TYPE,
+            "config": descriptor(&empty_config, OCI_EMPTY_CONFIG_MEDIA_TYPE),
+            "layers": [descriptor(policy_bytes, EGRESS_ALLOWLIST_V1_MEDIA_TYPE)],
+        }))
+        .expect("serialize policy manifest");
+        let artifact_digest = digest(&policy_manifest);
+        let subject_digest = artifact_digest.trim_start_matches("sha256:");
+        let statement_digest = if mutation == BundleFixtureMutation::WrongSubject {
+            "0".repeat(64)
+        } else {
+            subject_digest.to_owned()
+        };
+        let statement = serde_json::to_vec(&json!({
+            "_type": "https://in-toto.io/Statement/v1",
+            "subject": [{
+                "name": "policy",
+                "digest": {"sha256": statement_digest},
+            }],
+            "predicateType": "https://sigstore.dev/cosign/sign/v1",
+        }))
+        .expect("serialize in-toto statement");
+        let payload_type = "application/vnd.in-toto+json";
+        let pae = pae(payload_type, &statement);
+
+        let signing_scheme = SigningScheme::ECDSA_P256_SHA256_ASN1;
+        let signer_key = SigStoreKeyPair::from_pem(TEST_SIGNER_KEY).expect("parse test signer key");
+        let signer = signer_key
+            .to_sigstore_signer(&signing_scheme)
+            .expect("build test artifact signer");
+        let mut signature = signer.sign(&pae).expect("sign DSSE PAE");
+        if mutation == BundleFixtureMutation::BadSignature {
+            let last = signature.last_mut().expect("ECDSA signature is nonempty");
+            *last ^= 1;
+        }
+        let envelope = Envelope {
+            payload: statement.clone(),
+            payload_type: payload_type.to_owned(),
+            signatures: vec![Signature {
+                sig: signature.clone(),
+                keyid: String::new(),
+            }],
+        };
+        let envelope_json = serde_json::to_vec(&envelope).expect("serialize DSSE envelope");
+
+        let certificate_der = pem_contents(TEST_SIGNER_CERT);
+        let rekor_key = SigStoreKeyPair::from_pem(TEST_REKOR_KEY).expect("parse test Rekor key");
+        let rekor_signer = rekor_key
+            .to_sigstore_signer(&signing_scheme)
+            .expect("build test Rekor signer");
+        let rekor_key_id = sha256_hex(TEST_REKOR_PUBLIC_KEY);
+        let rekor_key_id_bytes = Sha256::digest(TEST_REKOR_PUBLIC_KEY).to_vec();
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_secs() as i64;
+        let body = json!({
+            "apiVersion": "0.0.1",
+            "kind": "dsse",
+            "spec": {
+                "envelopeHash": {
+                    "algorithm": "sha256",
+                    "value": hex::encode(Sha256::digest(&envelope_json)),
+                },
+                "payloadHash": {
+                    "algorithm": "sha256",
+                    "value": hex::encode(Sha256::digest(&statement)),
+                },
+                "signatures": [{
+                    "signature": base64.encode(&signature),
+                    "verifier": base64.encode(TEST_SIGNER_CERT),
+                }],
+            },
+        });
+        let canonicalized_body =
+            serde_json_canonicalizer::to_vec(&body).expect("canonicalize DSSE Rekor entry");
+        let set_payload = json!({
+            "body": base64.encode(&canonicalized_body),
+            "integratedTime": timestamp,
+            "logID": rekor_key_id,
+            "logIndex": 0,
+        });
+        let set_payload =
+            serde_json_canonicalizer::to_vec(&set_payload).expect("canonicalize DSSE SET payload");
+        let signed_entry_timestamp = rekor_signer
+            .sign(&set_payload)
+            .expect("sign DSSE Rekor SET");
+
+        let leaf_hash = Sha256::new()
+            .chain_update([0])
+            .chain_update(&canonicalized_body)
+            .finalize()
+            .to_vec();
+        let root_hash = base64.encode(&leaf_hash);
+        let checkpoint_note = format!("test-rekor\n1\n{root_hash}\n");
+        let checkpoint_signature = rekor_signer
+            .sign(checkpoint_note.as_bytes())
+            .expect("sign Rekor checkpoint");
+        let key_fingerprint = &Sha256::digest(TEST_REKOR_PUBLIC_KEY)[..4];
+        let checkpoint_signature = [key_fingerprint, checkpoint_signature.as_slice()].concat();
+        let checkpoint = format!(
+            "{checkpoint_note}\n— test-rekor {}",
+            base64.encode(checkpoint_signature)
+        );
+
+        let tlog_entry = TransparencyLogEntry {
+            log_index: 0,
+            log_id: Some(LogId {
+                key_id: rekor_key_id_bytes,
+            }),
+            kind_version: Some(KindVersion {
+                kind: "dsse".into(),
+                version: "0.0.1".into(),
+            }),
+            integrated_time: timestamp,
+            inclusion_promise: Some(InclusionPromise {
+                signed_entry_timestamp,
+            }),
+            inclusion_proof: Some(InclusionProof {
+                log_index: 0,
+                root_hash: leaf_hash,
+                tree_size: 1,
+                hashes: Vec::new(),
+                checkpoint: Some(Checkpoint {
+                    envelope: checkpoint,
+                }),
+            }),
+            canonicalized_body,
+        };
+        let bundle = ProtoBundle {
+            media_type: SIGSTORE_BUNDLE_MEDIA_TYPE.into(),
+            verification_material: Some(VerificationMaterial {
+                tlog_entries: vec![tlog_entry],
+                timestamp_verification_data: None,
+                content: Some(MaterialContent::Certificate(X509Certificate {
+                    raw_bytes: certificate_der,
+                })),
+            }),
+            content: Some(BundleContent::DsseEnvelope(envelope)),
+        };
+        let bundle_bytes = serde_json::to_vec(&bundle).expect("serialize Sigstore bundle");
+        let bundle_digest = digest(&bundle_bytes);
+        let referrer_manifest = serde_json::to_vec(&json!({
+            "schemaVersion": 2,
+            "mediaType": OCI_MANIFEST_MEDIA_TYPE,
+            "artifactType": SIGSTORE_BUNDLE_MEDIA_TYPE,
+            "config": descriptor(&empty_config, OCI_EMPTY_CONFIG_MEDIA_TYPE),
+            "layers": [descriptor(&bundle_bytes, SIGSTORE_BUNDLE_MEDIA_TYPE)],
+            "subject": descriptor(&policy_manifest, OCI_MANIFEST_MEDIA_TYPE),
+        }))
+        .expect("serialize Sigstore referrer manifest");
+        let referrer_digest = digest(&referrer_manifest);
+        let referrers_index = serde_json::to_vec(&json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "manifests": [{
+                "mediaType": OCI_MANIFEST_MEDIA_TYPE,
+                "digest": referrer_digest,
+                "size": referrer_manifest.len(),
+                "artifactType": SIGSTORE_BUNDLE_MEDIA_TYPE,
+            }],
+        }))
+        .expect("serialize OCI referrers index");
+
+        let mut blobs = std::collections::HashMap::from([
+            (digest(&empty_config), empty_config.to_vec()),
+            (digest(policy_bytes), policy_bytes.to_vec()),
+            (bundle_digest, bundle_bytes),
+        ]);
+        if mutation == BundleFixtureMutation::Artifact {
+            blobs.insert(
+                digest(policy_bytes),
+                b"tampered signed policy bytes".to_vec(),
+            );
+        }
+        let manifests = std::collections::HashMap::from([
+            (
+                artifact_digest.clone(),
+                (artifact_digest.clone(), policy_manifest),
+            ),
+            (
+                referrer_digest.clone(),
+                (referrer_digest.clone(), referrer_manifest),
+            ),
+        ]);
+        let referrers =
+            std::collections::HashMap::from([(artifact_digest.clone(), referrers_index)]);
+        (
+            LocalRegistryFixture {
+                manifests,
+                blobs,
+                referrers,
+            },
+            artifact_digest,
+        )
     }
 
     async fn verify_local_signed_policy(
         policy_bytes: &[u8],
-        tamper_signature: bool,
-        tamper_artifact: bool,
+        mutation: FixtureMutation,
         signer_policy: &SignerPolicyConfig,
     ) -> Result<VerifiedAllowlist, FetchError> {
-        let (fixture, digest) =
-            build_local_registry_fixture(policy_bytes, tamper_signature, tamper_artifact);
+        let (fixture, digest) = build_local_registry_fixture(policy_bytes, mutation);
+        let registry = LocalRegistry::start(fixture).await;
+        let artifact_ref = OciArtifactRef {
+            registry: registry.address.clone(),
+            repository: "policy".into(),
+            digest,
+            artifact_type: EGRESS_ALLOWLIST_V1_MEDIA_TYPE.into(),
+        };
+        verify_via_sigstore_with_root::<EgressKind, _>(
+            &artifact_ref,
+            signer_policy,
+            &test_trust_root(),
+            true,
+        )
+        .await
+    }
+
+    async fn verify_local_bundle_signed_policy(
+        policy_bytes: &[u8],
+        mutation: BundleFixtureMutation,
+        signer_policy: &SignerPolicyConfig,
+    ) -> Result<VerifiedAllowlist, FetchError> {
+        let (fixture, digest) = build_local_registry_bundle_fixture(policy_bytes, mutation);
         let registry = LocalRegistry::start(fixture).await;
         let artifact_ref = OciArtifactRef {
             registry: registry.address.clone(),
@@ -2718,17 +3227,19 @@ mod tests {
     #[tokio::test]
     async fn signed_oci_policy_verification_checks_signature_identity_and_canonical_bytes() {
         let matching_policy = test_signer_policy(TEST_ISSUER, TEST_SUBJECT);
-        let verified =
-            verify_local_signed_policy(canonical_doc().as_bytes(), false, false, &matching_policy)
-                .await
-                .expect("real signed OCI policy should verify");
+        let verified = verify_local_signed_policy(
+            canonical_doc().as_bytes(),
+            FixtureMutation::None,
+            &matching_policy,
+        )
+        .await
+        .expect("real signed OCI policy should verify");
         assert_eq!(verified.endpoints.len(), 2);
 
         assert!(
             verify_local_signed_policy(
                 canonical_doc().as_bytes(),
-                false,
-                false,
+                FixtureMutation::None,
                 &test_signer_policy("https://wrong-issuer.example", TEST_SUBJECT),
             )
             .await
@@ -2738,8 +3249,7 @@ mod tests {
         assert!(
             verify_local_signed_policy(
                 canonical_doc().as_bytes(),
-                false,
-                false,
+                FixtureMutation::None,
                 &test_signer_policy(TEST_ISSUER, "https://wrong.example/workflow"),
             )
             .await
@@ -2747,31 +3257,123 @@ mod tests {
             "wrong certificate SAN must fail"
         );
         assert!(
-            verify_local_signed_policy(canonical_doc().as_bytes(), true, false, &matching_policy,)
-                .await
-                .is_err(),
+            verify_local_signed_policy(
+                canonical_doc().as_bytes(),
+                FixtureMutation::Signature,
+                &matching_policy,
+            )
+            .await
+            .is_err(),
             "tampered signature must fail"
         );
         assert!(
-            verify_local_signed_policy(canonical_doc().as_bytes(), false, true, &matching_policy,)
-                .await
-                .is_err(),
+            verify_local_signed_policy(
+                canonical_doc().as_bytes(),
+                FixtureMutation::Artifact,
+                &matching_policy,
+            )
+            .await
+            .is_err(),
             "tampered artifact bytes must fail"
         );
+        for (mutation, description) in [
+            (
+                FixtureMutation::RekorSignature,
+                "mismatched logged signature",
+            ),
+            (
+                FixtureMutation::RekorCertificate,
+                "mismatched logged certificate",
+            ),
+            (
+                FixtureMutation::RekorPayloadHash,
+                "mismatched logged payload hash",
+            ),
+        ] {
+            assert!(
+                verify_local_signed_policy(canonical_doc().as_bytes(), mutation, &matching_policy)
+                    .await
+                    .is_err(),
+                "{description} in a validly signed SET must fail"
+            );
+        }
 
         let noncanonical = format!("# signed but noncanonical\n{}", canonical_doc());
         assert!(
             matches!(
                 verify_local_signed_policy(
                     noncanonical.as_bytes(),
-                    false,
-                    false,
+                    FixtureMutation::None,
                     &matching_policy,
                 )
                 .await,
                 Err(FetchError::CanonicalFormViolation(_))
             ),
             "signed noncanonical policy bytes must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn signed_oci_referrer_bundle_verification_checks_signature_identity_and_subject() {
+        let matching_policy = test_signer_policy(TEST_ISSUER, TEST_SUBJECT);
+        let verified = verify_local_bundle_signed_policy(
+            canonical_doc().as_bytes(),
+            BundleFixtureMutation::None,
+            &matching_policy,
+        )
+        .await
+        .expect("cryptographically signed OCI referrer bundle should verify");
+        assert_eq!(verified.endpoints.len(), 2);
+
+        assert!(
+            verify_local_bundle_signed_policy(
+                canonical_doc().as_bytes(),
+                BundleFixtureMutation::None,
+                &test_signer_policy("https://wrong-issuer.example", TEST_SUBJECT),
+            )
+            .await
+            .is_err(),
+            "wrong Fulcio issuer must fail for OCI referrer bundles"
+        );
+        assert!(
+            verify_local_bundle_signed_policy(
+                canonical_doc().as_bytes(),
+                BundleFixtureMutation::None,
+                &test_signer_policy(TEST_ISSUER, "https://wrong.example/workflow"),
+            )
+            .await
+            .is_err(),
+            "wrong certificate SAN must fail for OCI referrer bundles"
+        );
+        assert!(
+            verify_local_bundle_signed_policy(
+                canonical_doc().as_bytes(),
+                BundleFixtureMutation::WrongSubject,
+                &matching_policy,
+            )
+            .await
+            .is_err(),
+            "validly signed bundle for a different manifest must fail"
+        );
+        assert!(
+            verify_local_bundle_signed_policy(
+                canonical_doc().as_bytes(),
+                BundleFixtureMutation::BadSignature,
+                &matching_policy,
+            )
+            .await
+            .is_err(),
+            "invalid DSSE signature must fail"
+        );
+        assert!(
+            verify_local_bundle_signed_policy(
+                canonical_doc().as_bytes(),
+                BundleFixtureMutation::Artifact,
+                &matching_policy,
+            )
+            .await
+            .is_err(),
+            "tampered artifact bytes must fail for OCI referrer bundles"
         );
     }
 }
