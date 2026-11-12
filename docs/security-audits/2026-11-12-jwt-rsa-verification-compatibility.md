@@ -2,10 +2,11 @@
 
 Date: 2026-11-12
 Scope: `inference-router/src/providers/jwt.rs`, provider installation,
-workspace/router dependency manifests and lockfile, OAuth compatibility fixtures,
-`ci/no-custom-crypto.sh`, and advisory rationale documentation.
+`inference-router/src/mcp/oauth.rs`, workspace/router dependency manifests and
+lockfile, OAuth compatibility fixtures, `ci/no-custom-crypto.sh`, and advisory
+rationale documentation.
 Gated paths: `inference-router/src/providers/jwt.rs`,
-`inference-router/src/providers/mod.rs`.
+`inference-router/src/providers/mod.rs`, `inference-router/src/mcp/oauth.rs`.
 
 ## Summary
 
@@ -65,11 +66,12 @@ fallback is introduced.
 - Both the former Ed25519 verifier and AWS-LC accepted small-order public keys,
   including the identity key that admits a fixed signature for arbitrary JWT
   claims. Before verification, the adapter rejects weak keys using the existing
-  `ed25519-dalek::VerifyingKey::is_weak` API. This intentionally rejects unsafe
-  issuer keys, including noncanonical weak encodings accepted by the former
-  provider; issuers using them must rotate their keys. Ordinary valid issuer
-  keys and their legacy trailing-byte handling remain covered by differential
-  tests.
+  `ed25519-dalek::VerifyingKey::is_weak` API. The OAuth path applies the same
+  check even when an embedding application already installed another
+  jsonwebtoken provider. This intentionally rejects unsafe issuer keys,
+  including noncanonical weak encodings accepted by the former provider;
+  issuers using them must rotate their keys. Ordinary valid issuer keys and
+  their legacy trailing-byte handling remain covered by differential tests.
 - Issuer, audience, expiry, kid, key-algorithm, scope, and HMAC-confusion checks
   remain in the existing OAuth verification path.
 - The crypto-wrapper allowlist adds only this provider file, consistent with the
@@ -87,6 +89,9 @@ fallback is introduced.
   alternate-provider retry on a failed signature.
 - Provider installation retains the existing process-global initialization
   behavior. Concurrent OAuth and route tests exercise the same installer.
+  A host that installs another provider first keeps that provider, so legacy
+  RSA and oversized Ed25519 key compatibility depend on that provider; the
+  OAuth weak-Ed25519-key rejection is enforced independently of it.
 - The synthetic public-only fixture matrix covers 512, 768, 1024, 2048, and
   4096-bit keys and public exponents 3 and 65537. It includes all six RSA
   algorithms where the baseline signing padding fits the key.
@@ -113,6 +118,9 @@ fallback is introduced.
   before candidate verification.
   Wrong-salt fixtures are real signatures generated and rejected by the former
   RSA implementation, not random bytes.
+- `cargo test --locked --offline --package kars-inference-router --test
+  oauth_preinstalled_provider` passed: OAuth rejects a weak-key forgery and
+  accepts a valid Ed25519 token when AWS-LC was installed before Kars.
 - A session-only provider differential probe compared 704 generated
   ES256/ES384/Ed25519 cases, including valid signatures, high/low-S ECDSA,
   compressed EC keys, and tampering. All 640 standard-key cases matched; the

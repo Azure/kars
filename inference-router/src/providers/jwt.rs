@@ -24,6 +24,23 @@ pub(crate) static DEFAULT_PROVIDER: LazyLock<CryptoProvider> = LazyLock::new(|| 
 
 type VerifyRsa = fn(&PublicKey, &[u8], &[u8]) -> std::result::Result<(), rsa::Error>;
 
+pub(crate) fn validate_ed25519_key(key: &DecodingKey) -> Result<()> {
+    if let (AlgorithmFamily::Ed, DecodingKeyKind::SecretOrDer(bytes)) = (key.family(), key.kind()) {
+        if bytes.len() < 32 {
+            return Err(ErrorKind::InvalidEddsaKey.into());
+        }
+        let mut public = [0_u8; 32];
+        public.copy_from_slice(&bytes[..32]);
+        let parsed = ed25519_dalek::VerifyingKey::from_bytes(&public)
+            .map_err(|_| ErrorKind::InvalidEddsaKey)?;
+        // Weak public keys can admit signatures valid for many messages.
+        if parsed.is_weak() {
+            return Err(ErrorKind::InvalidEddsaKey.into());
+        }
+    }
+    Ok(())
+}
+
 fn new_verifier(algorithm: &Algorithm, key: &DecodingKey) -> Result<Box<dyn JwtVerifier>> {
     let verify: VerifyRsa = match algorithm {
         Algorithm::RS256 => PublicKey::pkcs1v15_verify::<Sha256>,
@@ -33,18 +50,11 @@ fn new_verifier(algorithm: &Algorithm, key: &DecodingKey) -> Result<Box<dyn JwtV
         Algorithm::PS384 => PublicKey::pss_verify::<Sha384>,
         Algorithm::PS512 => PublicKey::pss_verify::<Sha512>,
         Algorithm::EdDSA => {
+            validate_ed25519_key(key)?;
             let legacy_key = match (key.family(), key.kind()) {
-                (AlgorithmFamily::Ed, DecodingKeyKind::SecretOrDer(bytes)) if bytes.len() >= 32 => {
-                    // Weak public keys can admit signatures valid for many messages.
-                    let mut public = [0_u8; 32];
-                    public.copy_from_slice(&bytes[..32]);
-                    let parsed = ed25519_dalek::VerifyingKey::from_bytes(&public)
-                        .map_err(|_| ErrorKind::InvalidEddsaKey)?;
-                    if parsed.is_weak() {
-                        return Err(ErrorKind::InvalidEddsaKey.into());
-                    }
+                (AlgorithmFamily::Ed, DecodingKeyKind::SecretOrDer(bytes)) if bytes.len() > 32 => {
                     // The former verifier used only the first 32 bytes.
-                    (bytes.len() > 32).then(|| DecodingKey::from_ed_der(&public))
+                    Some(DecodingKey::from_ed_der(&bytes[..32]))
                 }
                 _ => None,
             };
