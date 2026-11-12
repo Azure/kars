@@ -233,7 +233,8 @@ class SecurityAuditGateTests(GitFixture):
         records = ("docs/security-audits/2026-11-04-beta-publication.md",
                    "docs/security-audits/2026-11-10-overlay-package-update.md",
                    "docs/security-audits/2026-11-10-kind-local-onboarding.md",
-                   "docs/security-audits/2026-11-11-headlamp-go-release-repair.md")
+                   "docs/security-audits/2026-11-11-headlamp-go-release-repair.md",
+                   "docs/security-audits/2026-11-12-openclaw-sdk-compare.md")
         self.approved_beta()
         for other in records:
             if other != self.audit:
@@ -248,7 +249,7 @@ class SecurityAuditGateTests(GitFixture):
 
     def test_other_beta_pr_cannot_use_this_approval(self):
         self.approved_beta()
-        for other in ("593", "606", "607", "608"):
+        for other in ("593", "606", "607", "608", "617"):
             if other != self.pr_number:
                 with self.subTest(pr=other):
                     result = self.beta_gate(GITHUB_ACTIONS="true", GITHUB_REPOSITORY="Azure/kars",
@@ -276,6 +277,13 @@ class HeadlampReleaseAuditGateTests(SecurityAuditGateTests):
     pr_number = "608"
     source_head = "bec8d459b360ee6c9d5416b313df8a356195bbd7"
     source_base = "2068be5faab76afeb1fa51afb7ebd20fd8177530"
+
+
+class OpenClawSdkAuditGateTests(SecurityAuditGateTests):
+    audit = "docs/security-audits/2026-11-12-openclaw-sdk-compare.md"
+    pr_number = "617"
+    source_head = "234b63e60f231f1c80286efaf9d2d44c91854f79"
+    source_base = "e5db80c4e761cb5a92eb097b98713ba43d3d9394"
 
 
 if __name__ == "__main__":

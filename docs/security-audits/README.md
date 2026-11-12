@@ -80,6 +80,15 @@ All 68 focused Headlamp CLI tests pass. Its current record is
 This decision does not waive the shipping-image vulnerability scan or any other
 technical gate, and does not extend or modify the three earlier approvals.
 
+For Azure/kars#617, the maintainer selected **“Publish this repair via gh and update my sign-off (Recommended)”**
+to authorize the two-file OpenClaw SDK comparison repair, patch SHA-256
+`25feb4ad40ce8574593ad92727b3b1a94b21fd9a8398505c5de4204252e76335`.
+The exact source is `234b63e60f231f1c80286efaf9d2d44c91854f79` against base
+`e5db80c4e761cb5a92eb097b98713ba43d3d9394`. The bundled Node.js replaces the
+unavailable `cmp` utility while preserving exact SDK byte equality on AL3.
+Its separate record is [`2026-11-12-openclaw-sdk-compare.md`](2026-11-12-openclaw-sdk-compare.md).
+No previous approval is extended and no technical gate is waived.
+
 For each exception, the gate requires its exact committed record, signer and source/base marker,
 the exact review base, and the approved source as an ancestor. Every tracked
 file must match that source except the four explicitly reviewed approval-plumbing
