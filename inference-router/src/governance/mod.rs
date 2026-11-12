@@ -410,7 +410,7 @@ impl Governance {
         let Ok(yaml) = std::fs::read_to_string(path) else {
             return 1; // fallback: count as 1 file
         };
-        let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&yaml) else {
+        let Ok(value) = yaml_serde::from_str::<yaml_serde::Value>(&yaml) else {
             return 1;
         };
         value
@@ -888,6 +888,81 @@ mod tests {
         assert_eq!(action_map["detail"], "ls -la /tmp");
         assert_eq!(action_map["command"], "ls");
         assert_eq!(action_map["full"], "shell:ls -la /tmp");
+    }
+
+    #[test]
+    fn yaml_compatibility_policy_counts_and_decisions_preserve_legacy_numeric_versions() {
+        let mut cases = vec![
+            (
+                include_bytes!("../../../cli/profiles/agt/kars-default.yaml").to_vec(),
+                10,
+                "shell:rm",
+                "shell:ls",
+            ),
+            (
+                include_bytes!("../../../cli/profiles/agt/kars-offload.yaml").to_vec(),
+                6,
+                "spawn:create:child",
+                "shell:ls",
+            ),
+        ];
+        cases.extend(["1", "1.0"].map(|version| (
+            format!("version: {version}\nagent: compat\npolicies:\n  - name: deny\n    type: capability\n    denied_actions: [\"shell:rm\"]\n").into_bytes(),
+            1,
+            "shell:rm",
+            "shell:ls",
+        )));
+        for (yaml, expected_count, denied_action, allowed_action) in cases {
+            let dir = tempfile::tempdir().expect("create policy directory");
+            let file = dir.path().join("profile.yaml");
+            std::fs::write(&file, yaml).expect("write profile");
+            let gov = Governance::new("yaml-compatibility-test");
+            let count = gov
+                .load_policies_from_dir(dir.path().to_str().expect("UTF-8 path"))
+                .expect("load policy");
+            assert_eq!(count, expected_count);
+            assert_eq!(
+                gov.evaluate("agent", denied_action, None)["decision"],
+                "deny"
+            );
+            assert_eq!(
+                gov.evaluate("agent", allowed_action, None)["decision"],
+                "allow"
+            );
+        }
+    }
+
+    #[test]
+    fn yaml_compatibility_policy_count_fallbacks() {
+        let dir = tempfile::tempdir().expect("create policy directory");
+        let file = dir.path().join("profile.yaml");
+        for (yaml, expected_count) in [
+            ("policies: []\n", 0),
+            ("policies:\n  - name: one\n  - name: two\n", 2),
+            ("policies: &rules [{name: 01}]\nother: *rules\n", 1),
+            ("policies: !custom [{name: worker}, {name: other}]\n", 2),
+            ("policies: not-a-list\n", 1),
+            ("policies: [\n", 1),
+            ("policies: []\npolicies: []\n", 1),
+            ("policies: []\n---\npolicies: []\n", 1),
+        ] {
+            std::fs::write(&file, yaml).expect("write policy");
+            let legacy_count = serde_yaml::from_str::<serde_yaml::Value>(yaml)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("policies")
+                        .and_then(|policies| policies.as_sequence())
+                        .map(Vec::len)
+                })
+                .unwrap_or(1);
+            assert_eq!(legacy_count, expected_count, "legacy parser: {yaml}");
+            assert_eq!(
+                Governance::count_rules_in_file(&file),
+                expected_count,
+                "{yaml}"
+            );
+        }
     }
 
     #[test]

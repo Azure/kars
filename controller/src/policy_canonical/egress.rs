@@ -501,6 +501,63 @@ mod tests {
     }
 
     #[test]
+    fn yaml_compatibility_egress_golden_and_rejections() {
+        let canonical = "apiVersion: kars.dev/v1alpha1\nkind: EgressAllowlist\nmetadata:\n  generation: 42\nspec:\n  endpoints:\n    - host: a.example.com\n      port: 53\n    - host: a.example.com\n      port: 443\n    - host: xn--bcher-kva.example\n      port: 65535\n";
+        let parsed = parse(canonical.as_bytes()).expect("canonical endpoints must parse");
+        assert_eq!(parsed.generation, 42);
+        assert_eq!(
+            parsed.endpoints,
+            vec![
+                CanonicalEndpoint {
+                    host: "a.example.com".into(),
+                    port: 53,
+                    protocol: None
+                },
+                CanonicalEndpoint {
+                    host: "a.example.com".into(),
+                    port: 443,
+                    protocol: None
+                },
+                CanonicalEndpoint {
+                    host: "xn--bcher-kva.example".into(),
+                    port: 65535,
+                    protocol: None
+                },
+            ]
+        );
+
+        let cases = [
+            (
+                "duplicate mapping key",
+                canonical.replace("port: 53", "port: 53\n      port: 443"),
+            ),
+            ("quoted port", canonical.replace("port: 53", "port: '53'")),
+            (
+                "fractional generation",
+                canonical.replace("generation: 42", "generation: 42.0"),
+            ),
+            ("zero port", canonical.replace("port: 53", "port: 0")),
+            (
+                "multiple documents",
+                format!("{canonical}---\nkind: EgressAllowlist\n"),
+            ),
+        ];
+        for (name, yaml) in cases {
+            assert!(
+                matches!(
+                    parse(yaml.as_bytes()),
+                    Err(FetchError::CanonicalFormViolation(_))
+                ),
+                "{name} must be rejected"
+            );
+        }
+        assert!(matches!(
+            parse(b"\xff\n"),
+            Err(FetchError::CanonicalFormViolation(_))
+        ));
+    }
+
+    #[test]
     fn cache_roundtrip() {
         EgressKind::cache_clear();
         let v = parse(good_doc().as_bytes()).unwrap();

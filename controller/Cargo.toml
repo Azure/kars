@@ -21,7 +21,8 @@ async-trait.workspace = true
 # Serialization
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml.workspace = true
+# Keep existing imports while using the maintained YAML Organization fork.
+serde_yaml = { package = "yaml_serde", version = "=0.10.7" }
 
 # Shared corpus library (KarsEval slice 6)
 kars-eval-corpus = { path = "../eval-corpus", version = "0.1.0" }
@@ -71,6 +72,7 @@ rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", 
 regex = "1.12.3"
 
 [dev-dependencies]
+legacy_yaml = { package = "serde_yaml", version = "0.9" }
 # S16 — perf baseline criterion benches. See `controller/benches/`.
 criterion = { workspace = true }
 tokio = { workspace = true }

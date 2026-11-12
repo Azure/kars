@@ -19,6 +19,12 @@
 //!   documents (multi-doc YAML aware).
 //! - [`run_all_checks`] — apply every conformance criterion to the
 //!   loaded manifest set and return a [`ConformanceReport`].
+//!
+//! Manifest parsing uses the maintained `yaml_serde` fork under the
+//! `serde_yaml` dependency name. Invalid YAML fails the run rather than
+//! silently dropping a document from the report. The unpublished library's
+//! YAML value type comes from the fork and is distinct from the original
+//! crate's type, despite the identical API name.
 
 #![deny(clippy::all)]
 
@@ -128,10 +134,8 @@ pub fn load_repo_manifests() -> BTreeMap<PathBuf, Vec<Value>> {
         // meaningful (some checks key on path).
         for (source, body) in split_by_source(&text) {
             let key = root.join(source);
-            let docs: Vec<Value> = serde_yaml::Deserializer::from_str(&body)
-                .filter_map(|d| Value::deserialize(d).ok())
-                .filter(|v| !v.is_null())
-                .collect();
+            let docs = parse_manifests(&body)
+                .unwrap_or_else(|e| panic!("invalid rendered manifest {}: {e}", key.display()));
             if !docs.is_empty() {
                 out.entry(key).or_insert_with(Vec::new).extend(docs);
             }
@@ -156,15 +160,23 @@ pub fn load_repo_manifests() -> BTreeMap<PathBuf, Vec<Value>> {
         let Ok(text) = std::fs::read_to_string(path) else {
             continue;
         };
-        let docs: Vec<Value> = serde_yaml::Deserializer::from_str(&text)
-            .filter_map(|d| Value::deserialize(d).ok())
-            .filter(|v| !v.is_null())
-            .collect();
+        let docs = parse_manifests(&text)
+            .unwrap_or_else(|e| panic!("invalid manifest {}: {e}", path.display()));
         if !docs.is_empty() {
             out.insert(path.to_path_buf(), docs);
         }
     }
     out
+}
+
+fn parse_manifests(text: &str) -> Result<Vec<Value>, serde_yaml::Error> {
+    serde_yaml::Deserializer::from_str(text)
+        .map(Value::deserialize)
+        .filter_map(|doc| match doc {
+            Ok(value) if value.is_null() => None,
+            other => Some(other),
+        })
+        .collect()
 }
 
 fn render_helm(root: &std::path::Path) -> Option<String> {
@@ -838,3 +850,6 @@ pub fn run_all_checks() -> ConformanceReport {
     );
     report
 }
+
+#[cfg(test)]
+mod yaml_compat_test;
