@@ -27,7 +27,7 @@ fallback is introduced.
 This record also documents the production Sigstore/OCI verifier changes for
 Azure/kars#594. Those controller changes are a separate security-sensitive
 surface; the earlier JWT-only review does not cover them. Their tests and
-limitations are recorded in T4 and still require an independent review.
+limitations are recorded in T4 and are included in the maintainer sign-off below.
 
 ## T1: New capability / attack surface? (NO new customer capability)
 
@@ -304,10 +304,15 @@ limitations are recorded in T4 and still require an independent review.
   full-workspace 1.88 baseline failure remains separate.
 ## Verdict
 
-Draft for independent review, not authorization to merge or deploy. Author
-review and local evidence support the compatibility approach; a genuine
-independent reviewer sign-off is still outstanding. This record supplies only
-the author's sign-off, so the two-distinct-reviewer gate is not yet satisfied.
-No prior approval for another PR is reused.
+Author review and local evidence support the compatibility approach, subject to
+the compatibility and verification limitations documented above. On 2026-11-12,
+sole maintainer @pallakatos explicitly stated, "i am independently signing it off",
+and authorized recording the second sign-off under their GitHub identity for
+this PR's JWT and signed-OCI changes, including the manifest-digest binding fix.
+The maintainer's declaration is recorded below; Copilot is the implementation
+author, not an independent human reviewer. No prior approval for another PR is
+reused. The audit check is unchanged. This record does not itself merge or deploy
+the changes.
 
 Signed-off-by: Copilot App <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: pallakatos <191481949+pallakatos@users.noreply.github.com>
