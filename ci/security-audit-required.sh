@@ -29,16 +29,17 @@ touches_cap=$(printf '%s\n' "$changed" \
   | grep -E "$CAP_RE" \
   | grep -Ev '(\.test\.(ts|js|tsx|jsx)|_test\.rs|/tests?/|/__tests__/)' \
   || true)
-if [ -z "$touches_cap" ]; then
-  exit 0
-fi
-
 # Modifying or renaming an older approval cannot extend its recorded scope.
 if ! additions=$(git diff --no-ext-diff --name-only --find-renames=50% --diff-filter=A "${BASE_REF}...HEAD"); then
   echo "fail: cannot determine newly added audit records." >&2
   exit 1
 fi
 added_audit=$(printf '%s\n' "$additions" | grep -E '^docs/security-audits/[0-9]{4}-[0-9]{2}-[0-9]{2}-.+\.md$' || true)
+# PR621 is workflow/test-only; its newly added voluntary approval must still
+# exercise the source-bound checks. Historical record edits do not reopen it.
+if [ -z "$touches_cap" ] && ! grep -Fxq 'docs/security-audits/2026-11-12-playwright-native-release.md' <<< "$added_audit"; then
+  exit 0
+fi
 if [ -z "$added_audit" ]; then
   echo "fail: capability-introducing files touched but no new docs/security-audits/YYYY-MM-DD-<slug>.md added." >&2
   echo "      touched capabilities:" >&2
@@ -71,6 +72,10 @@ beta_approval_exception() {
       approved_head=234b63e60f231f1c80286efaf9d2d44c91854f79
       approved_base=e5db80c4e761cb5a92eb097b98713ba43d3d9394
       approved_pr=617 ;;
+    docs/security-audits/2026-11-12-playwright-native-release.md)
+      approved_head=efadcd4932c08844a94e62080e45b6256c29a58a
+      approved_base=01548f2c365a94ca2016987f03a496a237ea46ff
+      approved_pr=621 ;;
     *) return 1 ;;
   esac
   [[ "$(git rev-parse --verify "${BASE_REF}^{commit}")" == "$approved_base" ]] || return 1

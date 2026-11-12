@@ -89,6 +89,19 @@ unavailable `cmp` utility while preserving exact SDK byte equality on AL3.
 Its separate record is [`2026-11-12-openclaw-sdk-compare.md`](2026-11-12-openclaw-sdk-compare.md).
 No previous approval is extended and no technical gate is waived.
 
+For Azure/kars#621, the maintainer separately selected **“Publish this repair via gh and update my sign-off (Recommended)”**
+to authorize the two-file Playwright native release-build repair at source
+`efadcd4932c08844a94e62080e45b6256c29a58a` against base
+`01548f2c365a94ca2016987f03a496a237ea46ff`. The release workflow reuses native
+amd64/arm64 builds and the existing signed merged-manifest receipt path, without
+changing AL3, dependencies or image pins. Its separate record is
+[`2026-11-12-playwright-native-release.md`](2026-11-12-playwright-native-release.md).
+Because this source changes only a workflow and its tests, the normal capability
+path filter does not require an audit. Adding this specific voluntary record
+nevertheless invokes its source-bound checks; later historical record edits do
+not reopen it. Earlier approvals remain unchanged. Offline tests are not native
+container qualification, and no branch-protection change is authorized.
+
 For each exception, the gate requires its exact committed record, signer and source/base marker,
 the exact review base, and the approved source as an ancestor. Every tracked
 file must match that source except the four explicitly reviewed approval-plumbing
