@@ -147,6 +147,38 @@ full protection immediately. Technical checks, scans, signed-release verificatio
 and fresh-Kind customer acceptance are not waived. The record itself does not
 publish, merge, release or change branch protection.
 
+For the additional private-TLS repair on the **same Azure/kars#623**, the maintainer
+selected **“Authorize TLS repair publication, sign-off, merge and release (Recommended)”**
+at `2026-11-12T20:37:08.951024+00:00`. This separately authorizes source
+`acb9d9a2ccef87003830fa10c2cc3eb08e5129f9` against the unchanged base
+`af5ff64796898060f8f9d4a9dc853013f1d51981`, with published PR623 head
+`4afec6aee6b85a5c4d5476c55590d77f67fdfc41` as its parent. The implementation
+patch SHA-256 is `cc6d5703fd108037792d01ff77138c5e888b4c1fa7b7fea8b994a65d3f8e5166`.
+Its new record is
+[`2026-11-12-private-tls-authority-key-identifier.md`](2026-11-12-private-tls-authority-key-identifier.md).
+The two-file repair adds the issuer authority key identifier to private TLS leaf
+certificates, real strict OpenSSL verification coverage, and prerequisite
+documentation. It does not disable certificate, hostname or issuer verification.
+Local strict OpenSSL and unchanged Hermes httpx-client checks passed; the hosted
+Kind failure's cause is not yet confirmed. Existing certificates require normal
+rotation; the issuance fix targets fresh Kind certificates, not an automatic
+repair of already issued certificates or proof of hosted acceptance.
+
+The new TLS approval may carry only the unchanged PR622 npm and earlier PR623
+Headlamp records. Both remain included in the exact TLS source comparison; only
+the new record and the three policy/test/documentation paths are excluded.
+Missing or invalid TLS approval, source/base/ancestry/context drift, edits to
+either historical record, and other unsigned scopes fail closed. The old exact
+Headlamp approval path remains valid for its old unchanged source. All eight
+earlier cases and records remain immutable; neither old sign-off authorizes TLS.
+No new capability-pattern or workflow-only exemption is introduced. This is one
+genuinely authorized maintainer decision, not a fictional independent reviewer.
+Normal merge must be attempted first; the separately authorized reviewer-only
+exception is conditional on a review-only refusal and immediate full protection
+restoration. Required CI, scans, signed-release checks and fresh Kind customer
+acceptance remain required. Preparing this record does not publish, merge,
+release or alter protections.
+
 For each exception, the gate requires its exact committed record, signer and source/base marker,
 the exact review base, and the approved source as an ancestor. Every tracked
 file must match that source except the four explicitly reviewed approval-plumbing

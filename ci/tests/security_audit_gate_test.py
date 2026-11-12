@@ -237,7 +237,8 @@ class SecurityAuditGateTests(GitFixture):
                    "docs/security-audits/2026-11-12-openclaw-sdk-compare.md",
                    "docs/security-audits/2026-11-12-playwright-native-release.md",
                    "docs/security-audits/2026-11-12-openclaw-npm-registry.md",
-                   "docs/security-audits/2026-11-12-headlamp-evidence-permissions.md")
+                   "docs/security-audits/2026-11-12-headlamp-evidence-permissions.md",
+                   "docs/security-audits/2026-11-12-private-tls-authority-key-identifier.md")
         self.approved_beta()
         for other in records:
             if other != self.audit:
@@ -515,6 +516,123 @@ class HeadlampEvidencePermissionsAuditGateTests(SecurityAuditGateTests):
         self.assertEqual(self.beta_gate(BASE_REF="HEAD~1", GITHUB_ACTIONS="true",
                                        GITHUB_REPOSITORY="Azure/kars", GITHUB_EVENT_NAME="push",
                                        GITHUB_REF="refs/heads/kars-bridge").returncode, 0)
+
+
+class PrivateTlsAuthorityKeyIdentifierAuditGateTests(HeadlampEvidencePermissionsAuditGateTests):
+    audit = "docs/security-audits/2026-11-12-private-tls-authority-key-identifier.md"
+    source_head = "acb9d9a2ccef87003830fa10c2cc3eb08e5129f9"
+    headlamp_audit = HeadlampEvidencePermissionsAuditGateTests.audit
+    headlamp_approval = (
+        "# Published Headlamp approval, not a TLS sign-off\n"
+        "Beta-approval-exception: Azure/kars#623; "
+        "source=15281ad70925895f3f7c646b6503a2b1f6bd90d1; "
+        "base=af5ff64796898060f8f9d4a9dc853013f1d51981\n"
+        "Signed-off-by: Pal Lakatos-Toth <lakatos.toth.pal@gmail.com>\n"
+    )
+
+    def capability(self):
+        super().capability()
+        self.write("controller/src/providers/sre_tls.rs",
+                   "leaf.use_authority_key_identifier_extension = true;\n")
+        self.write("CONTRIBUTING.md", "Strict certificate tests require OpenSSL.\n")
+
+    def approved_successor_beta(self):
+        self.write(self.headlamp_audit, self.headlamp_approval)
+        super().approved_successor_beta()
+
+    def test_tls_scope_carries_both_records_unchanged_in_exact_contexts(self):
+        self.approved_successor_beta()
+        for event, ref in (("pull_request", "refs/pull/623/merge"),
+                           ("push", "refs/heads/kars-bridge")):
+            with self.subTest(event=event):
+                result = self.beta_gate(GITHUB_ACTIONS="true", GITHUB_REPOSITORY="Azure/kars",
+                                        GITHUB_EVENT_NAME=event, GITHUB_REF=ref)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                for path, expected in ((self.inherited_audit, self.inherited_approval),
+                                       (self.headlamp_audit, self.headlamp_approval)):
+                    self.assertIn(f"{path} is unchanged", result.stdout)
+                    self.assertEqual((self.root / path).read_text(), expected)
+                    self.assertEqual(self.git("show", f"{self.approved_head}:{path}"), expected)
+                self.assertIn(f"{self.audit} uses its explicit", result.stdout)
+
+    def test_either_prior_record_tamper_invalidates_tls_approval(self):
+        self.approved_successor_beta()
+        for path, original in ((self.inherited_audit, self.inherited_approval),
+                               (self.headlamp_audit, self.headlamp_approval)):
+            with self.subTest(record=path):
+                self.write(path, original + "\nHistorical scope tampered.\n")
+                self.commit()
+                self.assertEqual(self.beta_gate().returncode, 1)
+                self.write(path, original)
+                self.commit()
+                self.assertEqual(self.beta_gate().returncode, 0)
+
+    def test_either_prior_record_deletion_invalidates_tls_approval(self):
+        self.approved_successor_beta()
+        for path, original in ((self.inherited_audit, self.inherited_approval),
+                               (self.headlamp_audit, self.headlamp_approval)):
+            with self.subTest(record=path):
+                self.git("rm", path)
+                self.commit()
+                self.assertEqual(self.beta_gate().returncode, 1)
+                self.write(path, original)
+                self.commit()
+                self.assertEqual(self.beta_gate().returncode, 0)
+
+    def test_missing_tls_record_rejects_both_prior_records(self):
+        self.approved_successor_beta()
+        self.git("rm", self.audit)
+        self.commit()
+        result = self.beta_gate()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(self.inherited_audit, result.stderr)
+        self.assertIn(self.headlamp_audit, result.stderr)
+
+    def test_prior_headlamp_source_marker_cannot_approve_tls(self):
+        self.approved_successor_beta()
+        self.write(self.audit, self.approval.replace(
+            self.approved_head, HeadlampEvidencePermissionsAuditGateTests.source_head))
+        self.commit()
+        result = self.beta_gate()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(self.inherited_audit, result.stderr)
+        self.assertIn(self.headlamp_audit, result.stderr)
+
+    def test_tls_or_prerequisite_document_drift_invalidates_approval(self):
+        self.approved_successor_beta()
+        for path in ("controller/src/providers/sre_tls.rs", "CONTRIBUTING.md"):
+            with self.subTest(path=path):
+                original = (self.root / path).read_text()
+                self.write(path, original + "Unapproved change\n")
+                self.commit()
+                self.assertEqual(self.beta_gate().returncode, 1)
+                self.write(path, original)
+                self.commit()
+                self.assertEqual(self.beta_gate().returncode, 0)
+
+    def test_tls_scope_rejects_wrong_repository_event_and_branch_with_both_records(self):
+        self.approved_successor_beta()
+        context = {"GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": "Azure/kars",
+                   "GITHUB_EVENT_NAME": "pull_request", "GITHUB_REF": "refs/pull/623/merge"}
+        for change in ({"GITHUB_REPOSITORY": "other/kars"},
+                       {"GITHUB_EVENT_NAME": "workflow_dispatch"},
+                       {"GITHUB_REF": "refs/pull/624/merge"},
+                       {"GITHUB_EVENT_NAME": "push", "GITHUB_REF": "refs/heads/main"}):
+            with self.subTest(context=change):
+                result = self.beta_gate(**{**context, **change})
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(self.inherited_audit, result.stderr)
+                self.assertIn(self.headlamp_audit, result.stderr)
+
+    def test_tls_policy_plumbing_preserves_both_historical_records(self):
+        self.approved_successor_beta()
+        for path in ("ci/security-audit-required.sh", "ci/tests/security_audit_gate_test.py",
+                     "docs/security-audits/README.md"):
+            self.write(path, "Reviewed TLS approval plumbing\n")
+        self.commit()
+        self.assertEqual(self.beta_gate().returncode, 0)
+        self.assertEqual((self.root / self.inherited_audit).read_text(), self.inherited_approval)
+        self.assertEqual((self.root / self.headlamp_audit).read_text(), self.headlamp_approval)
 
 
 if __name__ == "__main__":

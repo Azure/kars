@@ -84,6 +84,10 @@ beta_approval_exception() {
       approved_head=15281ad70925895f3f7c646b6503a2b1f6bd90d1
       approved_base=af5ff64796898060f8f9d4a9dc853013f1d51981
       approved_pr=623 ;;
+    docs/security-audits/2026-11-12-private-tls-authority-key-identifier.md)
+      approved_head=acb9d9a2ccef87003830fa10c2cc3eb08e5129f9
+      approved_base=af5ff64796898060f8f9d4a9dc853013f1d51981
+      approved_pr=623 ;;
     *) return 1 ;;
   esac
   [[ "$(git rev-parse --verify "${BASE_REF}^{commit}")" == "$approved_base" ]] || return 1
@@ -108,11 +112,19 @@ beta_approval_exception() {
   grep -Fxq 'Signed-off-by: Pal Lakatos-Toth <lakatos.toth.pal@gmail.com>' <<< "$approval_text"
 }
 
-# PR623 retains PR622's record, still newly added against their common base.
-# Only the validated successor scope can carry it; that scope's source diff
-# includes the historical record, so modifying it invalidates the successor.
+# PR623's TLS scope retains both earlier records, still new against the base.
+# Each successor compares historical files to its exact source, without exclusions.
+# Keep the original Headlamp-only approval path for its unchanged source as well.
 carried_beta_approval() {
-  local audit="$1" successor='docs/security-audits/2026-11-12-headlamp-evidence-permissions.md'
+  local audit="$1" successor='docs/security-audits/2026-11-12-private-tls-authority-key-identifier.md'
+  case "$audit" in
+    docs/security-audits/2026-11-12-openclaw-npm-registry.md|docs/security-audits/2026-11-12-headlamp-evidence-permissions.md) ;;
+    *) return 1 ;;
+  esac
+  if grep -Fxq "$successor" <<< "$added_audit" && beta_approval_exception "$successor"; then
+    return 0
+  fi
+  successor='docs/security-audits/2026-11-12-headlamp-evidence-permissions.md'
   [[ "$audit" == 'docs/security-audits/2026-11-12-openclaw-npm-registry.md' ]] || return 1
   grep -Fxq "$successor" <<< "$added_audit" || return 1
   beta_approval_exception "$successor"
