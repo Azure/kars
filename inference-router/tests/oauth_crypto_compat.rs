@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 use jsonwebtoken::Algorithm;
 use jsonwebtoken::jwk::{Jwk, JwkSet};
 use kars_inference_router::mcp::{OAuthError, OAuthVerifierConfig, verify_access_token};
