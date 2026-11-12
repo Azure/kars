@@ -17,6 +17,29 @@ param vmSize string
 @description('VM size for the system node pool')
 param systemVmSize string = 'Standard_D2as_v5'
 
+@description('Node count for the system pool')
+@minValue(1)
+@maxValue(100)
+param systemNodeCount int = 2
+
+@description('AKS Kubernetes version (empty = regional default)')
+param kubernetesVersion string = ''
+
+@description('AKS system node pool name')
+param systemPoolName string = 'system'
+
+@description('AKS sandbox node pool name')
+param sandboxPoolName string = 'clawpool'
+
+@description('AKS Kata node pool name')
+param kataPoolName string = 'katapool'
+
+@description('VM size for Kata nodes')
+param kataVmSize string
+
+@description('Node count for Kata pool')
+param kataNodeCount int
+
 @description('Enable FIPS')
 param enableFips bool
 
@@ -46,7 +69,9 @@ resource aks 'Microsoft.ContainerService/managedClusters@2024-09-01' = {
   }
   properties: {
     dnsPrefix: name
-    kubernetesVersion: '1.33'
+    ...(!empty(kubernetesVersion) ? {
+      kubernetesVersion: kubernetesVersion
+    } : {})
     apiServerAccessProfile: !empty(authorizedIpRanges) ? {
       authorizedIPRanges: authorizedIpRanges
     } : null
@@ -57,8 +82,8 @@ resource aks 'Microsoft.ContainerService/managedClusters@2024-09-01' = {
     }
     agentPoolProfiles: concat([
       {
-        name: 'system'
-        count: 2
+        name: systemPoolName
+        count: systemNodeCount
         vmSize: systemVmSize
         osType: 'Linux'
         osSKU: 'AzureLinux'
@@ -66,7 +91,7 @@ resource aks 'Microsoft.ContainerService/managedClusters@2024-09-01' = {
         enableFIPS: enableFips
       }
       {
-        name: 'clawpool'
+        name: sandboxPoolName
         count: nodeCount
         vmSize: vmSize
         osType: 'Linux'
@@ -83,9 +108,9 @@ resource aks 'Microsoft.ContainerService/managedClusters@2024-09-01' = {
       }
     ], enableKata ? [
       {
-        name: 'katapool'
-        count: nodeCount
-        vmSize: 'Standard_D4as_v6'  // AMD v6, better availability than D4s_v3
+        name: kataPoolName
+        count: kataNodeCount
+        vmSize: kataVmSize
         osType: 'Linux'
         osSKU: 'AzureLinux'
         mode: 'User'

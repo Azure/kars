@@ -1,7 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+import { resolveAddSubscription } from "./add.js";
 
 /**
  * Tests for the `add` command's sandbox manifest generation logic.
@@ -177,6 +178,71 @@ describe("KarsSandbox manifest generation", () => {
     expect(manifest.metadata).toEqual({
       name: "my-agent",
       namespace: "kars-system",
+    });
+  });
+
+  describe("resolveAddSubscription", () => {
+    it("uses the cached deployment subscription without discovery", async () => {
+      const execute = vi.fn();
+      await expect(
+        resolveAddSubscription(execute as never, {
+          subscription: "sub-cached",
+          resourceGroup: "rg",
+          aksCluster: "aks",
+        }),
+      ).resolves.toBe("sub-cached");
+      expect(execute).not.toHaveBeenCalled();
+    });
+
+    it("uniquely discovers a legacy deployment subscription", async () => {
+      const execute = vi.fn(async (_file: string, args: string[]) => {
+        if (args[0] === "account") {
+          return { stdout: JSON.stringify([{ id: "sub-a" }, { id: "sub-b" }]) };
+        }
+        const subscription = args[args.indexOf("--subscription") + 1];
+        return {
+          stdout: JSON.stringify(
+            subscription === "sub-b"
+              ? [{ name: "kars-aks", resourceGroup: "kars-eastus2" }]
+              : [],
+          ),
+        };
+      });
+
+      await expect(
+        resolveAddSubscription(execute as never, {
+          resourceGroup: "kars-eastus2",
+          aksCluster: "kars-aks",
+        }),
+      ).resolves.toBe("sub-b");
+    });
+
+    it("fails closed when legacy deployment discovery is ambiguous", async () => {
+      const execute = vi.fn(async (_file: string, args: string[]) => {
+        if (args[0] === "account") {
+          return { stdout: JSON.stringify([{ id: "sub-a" }, { id: "sub-b" }]) };
+        }
+        return {
+          stdout: JSON.stringify([
+            { name: "kars-aks", resourceGroup: "kars-eastus2" },
+          ]),
+        };
+      });
+
+      await expect(
+        resolveAddSubscription(execute as never, {
+          resourceGroup: "kars-eastus2",
+          aksCluster: "kars-aks",
+        }),
+      ).rejects.toThrow("multiple enabled Azure subscriptions");
+    });
+
+    it("keeps Kubernetes-only use possible without deployment context", async () => {
+      const execute = vi.fn();
+      await expect(
+        resolveAddSubscription(execute as never, null),
+      ).resolves.toBeUndefined();
+      expect(execute).not.toHaveBeenCalled();
     });
   });
 

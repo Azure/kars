@@ -34,10 +34,14 @@ export interface PreflightOptions {
   region: string;
   resourceGroup: string;
   isolation: "standard" | "enhanced" | "confidential" | string;
+  /** Immutable subscription selected by `kars up`. */
+  subscriptionId?: string;
   /** If set, we don't need Microsoft.CognitiveServices write (external Foundry) */
   foundryEndpoint?: string;
   /** If set, skip all preflight checks (escape hatch). */
   skipPreflight?: boolean;
+  /** Require permissions needed to lease and roll back the resource group. */
+  rollbackOnFailure?: boolean;
   /** Mesh trust mode. The Entra Agent ID (Microsoft Graph) preflight only
    * runs for 'entra'; the default 'anonymous' needs no Graph access. */
   meshTrust?: string;
@@ -54,7 +58,7 @@ export interface PreflightResult {
 
 // Minimum set of Azure control-plane actions `kars up` requires.
 // Each entry lists the action and a short human label for error output.
-interface RequiredAction {
+export interface RequiredAction {
   action: string;
   why: string;
   /** Optional predicate — only require this action when predicate returns true. */
@@ -63,6 +67,7 @@ interface RequiredAction {
 
 const REQUIRED_ACTIONS: RequiredAction[] = [
   { action: "Microsoft.Resources/subscriptions/resourceGroups/write", why: "create the resource group" },
+  { action: "Microsoft.Resources/subscriptions/resourceGroups/delete", why: "delete the generated resource group after a failed deployment", when: (o) => Boolean(o.rollbackOnFailure) },
   { action: "Microsoft.Resources/deployments/write", why: "run the Bicep deployment" },
   { action: "Microsoft.ContainerService/managedClusters/write", why: "provision AKS" },
   { action: "Microsoft.ContainerService/managedClusters/listClusterUserCredential/action", why: "az aks get-credentials" },
@@ -73,15 +78,22 @@ const REQUIRED_ACTIONS: RequiredAction[] = [
   { action: "Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials/write", why: "federate Workload Identity to the sandbox ServiceAccount" },
   { action: "Microsoft.OperationalInsights/workspaces/write", why: "provision Log Analytics workspace" },
   { action: "Microsoft.Authorization/roleAssignments/write", why: "attach ACR to AKS and grant Workload Identity RBAC" },
+  { action: "Microsoft.Authorization/locks/read", why: "inspect the resource-group deployment lease", when: (o) => Boolean(o.rollbackOnFailure) },
+  { action: "Microsoft.Authorization/locks/write", why: "create and renew the resource-group deployment lease", when: (o) => Boolean(o.rollbackOnFailure) },
+  { action: "Microsoft.Authorization/locks/delete", why: "release the resource-group deployment lease", when: (o) => Boolean(o.rollbackOnFailure) },
   { action: "Microsoft.Network/virtualNetworks/write", why: "AKS VNet (if Bicep creates one)" },
   { action: "Microsoft.CognitiveServices/accounts/write", why: "provision Azure AI Foundry project", when: (o) => !o.foundryEndpoint },
 ];
 
+export function requiredActionsFor(opts: PreflightOptions): RequiredAction[] {
+  return REQUIRED_ACTIONS.filter((required) => !required.when || required.when(opts));
+}
+
 // Role names that satisfy most of the above at subscription scope.
 // Printed as remediation hints.
 const REMEDIATION_ROLES = [
-  "Contributor (Microsoft.Resources, AKS, ACR, KV, Monitor, MI)",
-  "User Access Administrator (Microsoft.Authorization/roleAssignments/*)",
+  "Contributor (Microsoft.Resources, AKS, ACR, KV, Monitor, MI; resource-group delete with --rollback-on-failure)",
+  "User Access Administrator (Microsoft.Authorization/roleAssignments/*; locks/* with --rollback-on-failure)",
   // Or the single role that covers both:
   "— OR — Owner (covers both, but violates least-privilege)",
 ];
@@ -131,6 +143,12 @@ export function hasEffectiveAction(perms: PermissionSet[], action: string): bool
   return false;
 }
 
+function withSubscription(args: string[], subscriptionId?: string): string[] {
+  return subscriptionId
+    ? [...args, "--subscription", subscriptionId]
+    : args;
+}
+
 async function fetchSubscriptionPermissions(subscriptionId: string): Promise<PermissionSet[]> {
   // az rest auto-uses caller's AAD token and the management.azure.com audience.
   // NOTE: do NOT pass `--url-parameters ""` — Azure CLI splits each entry on
@@ -138,22 +156,28 @@ async function fetchSubscriptionPermissions(subscriptionId: string): Promise<Per
   // unpack`. The flag is optional; omit it when there are no extra params.
   const { stdout } = await execa(
     "az",
-    [
+    withSubscription([
       "rest",
       "--method", "GET",
       "--url", `/subscriptions/${subscriptionId}/providers/Microsoft.Authorization/permissions?api-version=2022-04-01`,
-    ],
+    ], subscriptionId),
     { stdio: "pipe", timeout: 20000 }
   );
   const parsed = JSON.parse(stdout || "{}");
   return Array.isArray(parsed.value) ? parsed.value : [];
 }
 
-async function providerRegistrationState(providerNamespace: string): Promise<string | null> {
+async function providerRegistrationState(
+  providerNamespace: string,
+  subscriptionId?: string,
+): Promise<string | null> {
   try {
     const { stdout } = await execa(
       "az",
-      ["provider", "show", "--namespace", providerNamespace, "--query", "registrationState", "-o", "tsv"],
+      withSubscription(
+        ["provider", "show", "--namespace", providerNamespace, "--query", "registrationState", "-o", "tsv"],
+        subscriptionId,
+      ),
       { stdio: "pipe", timeout: 15000 }
     );
     return stdout.trim() || null;
@@ -164,18 +188,19 @@ async function providerRegistrationState(providerNamespace: string): Promise<str
 
 async function featureRegistrationState(
   providerNamespace: string,
-  featureName: string
+  featureName: string,
+  subscriptionId?: string,
 ): Promise<string | null> {
   try {
     const { stdout } = await execa(
       "az",
-      [
+      withSubscription([
         "feature", "show",
         "--namespace", providerNamespace,
         "--name", featureName,
         "--query", "properties.state",
         "-o", "tsv",
-      ],
+      ], subscriptionId),
       { stdio: "pipe", timeout: 15000 }
     );
     return stdout.trim() || null;
@@ -202,15 +227,20 @@ export async function runPreflightChecks(opts: PreflightOptions): Promise<Prefli
   let spin = ora({ text: "Checking Azure sign-in...", color: "cyan" }).start();
   let account: { id: string; tenantId: string; user?: { name?: string } };
   try {
-    const { stdout } = await execa("az", ["account", "show", "-o", "json"], {
+    const { stdout } = await execa(
+      "az",
+      withSubscription(["account", "show", "-o", "json"], opts.subscriptionId),
+      {
       stdio: "pipe",
       timeout: 15000,
-    });
+      },
+    );
     account = JSON.parse(stdout);
-    result.subscription = account.id;
+    const subscriptionId = opts.subscriptionId ?? account.id;
+    result.subscription = subscriptionId;
     result.tenant = account.tenantId;
     result.user = account.user?.name;
-    spin.succeed(`Signed in as ${chalk.bold(account.user?.name ?? "<unknown>")} (sub: ${account.id})`);
+    spin.succeed(`Signed in as ${chalk.bold(account.user?.name ?? "<unknown>")} (sub: ${subscriptionId})`);
   } catch {
     spin.fail("Not signed in to Azure — run `az login`");
     result.ok = false;
@@ -222,7 +252,7 @@ export async function runPreflightChecks(opts: PreflightOptions): Promise<Prefli
   spin = ora({ text: "Evaluating RBAC at subscription scope...", color: "cyan" }).start();
   let perms: PermissionSet[] = [];
   try {
-    perms = await fetchSubscriptionPermissions(account.id);
+    perms = await fetchSubscriptionPermissions(opts.subscriptionId ?? account.id);
   } catch (e) {
     spin.warn(`Could not read effective permissions — ${(e as Error).message.split("\n")[0]}`);
     result.warnings.push(
@@ -232,12 +262,12 @@ export async function runPreflightChecks(opts: PreflightOptions): Promise<Prefli
 
   if (perms.length > 0) {
     const missing: RequiredAction[] = [];
-    for (const req of REQUIRED_ACTIONS) {
-      if (req.when && !req.when(opts)) continue;
+    const requiredActions = requiredActionsFor(opts);
+    for (const req of requiredActions) {
       if (!hasEffectiveAction(perms, req.action)) missing.push(req);
     }
     if (missing.length === 0) {
-      spin.succeed(`RBAC — all ${REQUIRED_ACTIONS.filter((r) => !r.when || r.when(opts)).length} required actions granted`);
+      spin.succeed(`RBAC — all ${requiredActions.length} required actions granted`);
     } else {
       spin.fail(`RBAC — ${missing.length} required action(s) missing at subscription scope`);
       for (const m of missing) {
@@ -245,7 +275,7 @@ export async function runPreflightChecks(opts: PreflightOptions): Promise<Prefli
       }
       result.ok = false;
       result.blocking.push(
-        `Grant the current user sufficient RBAC. At minimum you need the roles:\n      ${REMEDIATION_ROLES.map((r) => chalk.cyan(r)).join("\n      ")}\n\n      Ask your subscription Owner / Global Admin to run:\n      ${chalk.cyan(`az role assignment create --assignee ${account.user?.name ?? "<your-user>"} --role "Contributor" --scope /subscriptions/${account.id}`)}\n      ${chalk.cyan(`az role assignment create --assignee ${account.user?.name ?? "<your-user>"} --role "User Access Administrator" --scope /subscriptions/${account.id}`)}`
+        `Grant the current user sufficient RBAC. At minimum you need the roles:\n      ${REMEDIATION_ROLES.map((r) => chalk.cyan(r)).join("\n      ")}\n\n      Ask your subscription Owner / Global Admin to run:\n      ${chalk.cyan(`az role assignment create --assignee ${account.user?.name ?? "<your-user>"} --role "Contributor" --scope /subscriptions/${opts.subscriptionId ?? account.id}`)}\n      ${chalk.cyan(`az role assignment create --assignee ${account.user?.name ?? "<your-user>"} --role "User Access Administrator" --scope /subscriptions/${opts.subscriptionId ?? account.id}`)}`
       );
     }
   } else if (spin.isSpinning) {
@@ -265,13 +295,19 @@ export async function runPreflightChecks(opts: PreflightOptions): Promise<Prefli
   spin = ora({ text: "Checking resource provider registration...", color: "cyan" }).start();
   const providerStates: Array<{ ns: string; state: string | null }> = [];
   for (const ns of REQUIRED_PROVIDERS) {
-    providerStates.push({ ns, state: await providerRegistrationState(ns) });
+    providerStates.push({
+    ns,
+    state: await providerRegistrationState(ns, opts.subscriptionId),
+    });
   }
   // Microsoft.CognitiveServices only required when provisioning a new Foundry
   if (!opts.foundryEndpoint) {
     providerStates.push({
       ns: "Microsoft.CognitiveServices",
-      state: await providerRegistrationState("Microsoft.CognitiveServices"),
+      state: await providerRegistrationState(
+        "Microsoft.CognitiveServices",
+        opts.subscriptionId,
+      ),
     });
   }
 
@@ -320,7 +356,11 @@ export async function runPreflightChecks(opts: PreflightOptions): Promise<Prefli
   const featureStates = await Promise.all(
     requiredFeatures.map(async (f) => ({
       ...f,
-      state: await featureRegistrationState(f.ns, f.name),
+      state: await featureRegistrationState(
+        f.ns,
+        f.name,
+        opts.subscriptionId,
+      ),
     }))
   );
   const unregisteredFeatures = featureStates.filter((f) => f.state !== "Registered");

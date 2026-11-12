@@ -114,10 +114,16 @@ kars up [options]
 | `--policy <preset>` | `developer` | Policy preset: `minimal`, `developer`, `web`, `azure` |
 | `--region <region>` | `eastus2` | Azure region |
 | `--cluster-name <name>` | `kars` | AKS cluster name |
+| `--kubernetes-version <version>` | regional standard default | Pin the Kubernetes version for a new AKS cluster after regional standard-support validation. Existing-cluster upgrades use the dedicated AKS/Kars upgrade workflow. |
+| `--node-count <count>` | adaptive, up to `3` | Sandbox user-pool node count for a new AKS cluster. Preflight keeps three when quota permits and safely reduces to one when the default does not fit. For an existing cluster, scale each pool with `az aks nodepool scale`, then rerun without this flag. The system pool remains at two nodes. |
+| `--node-vm-size <sku>` | auto-detected | VM size for sandbox nodes |
+| `--system-vm-size <sku>` | auto-detected | VM size for the two-node system pool |
+| `--kata-vm-size <sku>` | `Standard_D4as_v6` | Advanced: VM size for a new confidential Kata pool. Existing pool SKU changes require a supported AKS pool migration and are rejected before deployment. |
 | `--isolation <level>` | `enhanced` | Pod isolation: `standard` (runc), `enhanced` (runc + strict seccomp), `confidential` (Kata VM) |
 | `-g, --resource-group <name>` | — | Resource group name |
 | `--skip-infra` | `false` | Skip infrastructure provisioning (reuse existing cluster) |
-| `--force-infra` | `false` | Force Bicep deployment even if AKS cluster already exists |
+| `--force-infra` | `false` | Retry full infrastructure provisioning only when the AKS cluster does not exist. Rejected for every existing cluster; use dedicated AKS/manual remediation instead. |
+| `--rollback-on-failure` | `false` | Generate a collision-resistant resource group for this invocation, then remove it and purge its derived soft-deleted Key Vault/Azure AI names after failure. Rejected with an explicit or cached resource group. |
 | `--source-acr <server>` | `karsacr.azurecr.io` | Source ACR for pre-built images (customer deployments) |
 | `--release [version]` | — | Import the **public, cosign-signed GHCR release images** (`ghcr.io/azure/*`) into your ACR — no local build, no Rust toolchain. Bare `--release` uses `:latest`; pass a tag (e.g. `v0.1.18`) to pin. Takes precedence over `--build`. |
 | `--build` | `false` | Build images locally from source and push to ACR (developer mode). Compiles Rust in-Docker on macOS/arm64 via the `*.multistage` Dockerfiles. |
@@ -143,6 +149,12 @@ kars up --name prod-agent --region westus3 --release
 
 # Production deployment with Confidential VM isolation in a named resource group
 kars up --name prod-agent --isolation confidential -g my-rg --region westus3 --release
+
+# Pin a region-supported Kubernetes version and one sandbox node
+kars up --kubernetes-version 1.36.3 --node-count 1 --release
+
+# Generate a unique deployment group and remove it if provisioning fails
+kars up --rollback-on-failure --release
 
 # Fast upgrade (skip infra, re-run Helm only)
 kars up --upgrade
@@ -171,6 +183,43 @@ The state is invalidated automatically when:
 - The saved state is older than 7 days
 - The previous run completed successfully (`phase: complete`)
 - You pass `--from-scratch`
+
+**Deployment safety:** Before creating resources, `kars up` validates the
+derived Azure resource names, resolves a Kubernetes version offered under the
+region's standard support plan, and compares the complete two-node system plus
+sandbox-pool footprint with the remaining regional VM-family quota. If an
+existing resource group is selected, Kars leaves its tags unchanged. Normal
+`kars up` retains the historical `kars-<region>` default and never acquires
+automatic deletion ownership. With `--rollback-on-failure`, Kars instead
+generates a collision-resistant `kars-<region>-<suffix>` name after the final
+region is resolved and records an invocation-specific ownership tag and
+deletion-prevention lease. Kars prints the lease lock name as soon as it is
+established. If the CLI is interrupted before it can roll back or release the
+lease, remove the generated deployment with
+```bash
+kars destroy --all --yes --resource-group <generated-rg> --subscription <id> --region <region>
+```
+The destroy command removes Kars-managed lease/adoption locks before deleting
+the group. The flag is
+rejected when `-g`/`--resource-group` was supplied or a cached group was adopted;
+omit the flag to deploy there and clean up manually after a failure. Retrying a
+retained generated group cannot reacquire rollback ownership. An existing AKS cluster is never sent through the full `managedClusters`
+Bicep template because operator-managed properties that the template does not
+model, such as autoscaling and availability zones, could be reset. A healthy
+cluster with complete surrounding infrastructure is reused explicitly by
+skipping infrastructure deployment. If ancillary resources are incomplete,
+or if the cluster or a required pool is missing, failed, or unhealthy, preflight
+stops before Bicep and directs you to dedicated AKS or manual resource
+remediation. `--force-infra` is accepted only for a fresh/retry deployment
+before the AKS cluster exists and cannot override this gate.
+
+`--node-count` is only for new clusters. Scale an existing pool through the
+supported AKS child-resource workflow, for example
+`az aks nodepool scale --resource-group <rg> --cluster-name <cluster> --name <pool> --node-count <count>`,
+then rerun `kars up` without `--node-count`. Missing, failed, or Creating
+governed pools must likewise be added or repaired with `az aks nodepool`
+before rerunning. Kubernetes-version, VM-size, isolation-topology, and other
+existing-cluster mutations are also rejected before ARM/Bicep.
 
 **See also:** [README quick-start](../README.md), [docs/architecture.md](architecture.md)
 

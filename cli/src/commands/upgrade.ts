@@ -25,8 +25,9 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import { Stepper, banner, section, kvLine } from "../stepper.js";
-import { loadContext } from "../config.js";
+import { loadContext, type DeploymentContext } from "../config.js";
 import { requireBundledAsset } from "../lib/repo-assets.js";
+import { createSubscriptionPinnedExeca } from "./up/orchestration.js";
 import {
   releaseImagePlan,
   compareVersions,
@@ -98,6 +99,164 @@ interface UpgradeContext {
   keyVaultName?: string;
   foundryEndpoint?: string;
   foundryProjectEndpoint?: string;
+}
+
+function isLegacyAksNotFoundError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const candidate = error as {
+    stderr?: unknown;
+    stdout?: unknown;
+    shortMessage?: unknown;
+    message?: unknown;
+  };
+  const text = [
+    candidate.stderr,
+    candidate.stdout,
+    candidate.shortMessage,
+    candidate.message,
+  ]
+    .filter((value): value is string => typeof value === "string")
+    .join("\n");
+  return (
+    /\((?:ResourceNotFound|ResourceGroupNotFound|ManagedClusterNotFound|ParentResourceNotFound)\)/i.test(
+      text,
+    ) ||
+    /["']code["']\s*:\s*["'](?:ResourceNotFound|ResourceGroupNotFound|ManagedClusterNotFound|ParentResourceNotFound)["']/i.test(
+      text,
+    )
+  );
+}
+
+/**
+ * Resolve the subscription that owns the cached deployment. New contexts carry
+ * it explicitly. Legacy contexts are accepted only when the exact cached
+ * resource-group + AKS pair exists in exactly one enabled subscription.
+ */
+export async function resolveUpgradeSubscription(
+  execa: Execa,
+  ctx: Pick<DeploymentContext, "subscription" | "resourceGroup" | "aksCluster">,
+): Promise<string> {
+  const cached = ctx.subscription?.trim();
+  if (cached) return cached;
+
+  if (!ctx.resourceGroup || !ctx.aksCluster) {
+    throw new Error("Legacy deployment context is missing the cached resource group or AKS cluster");
+  }
+
+  const { stdout } = await execa("az", [
+    "account", "list",
+    "--query", "[?state=='Enabled'].id",
+    "--output", "json",
+  ], { stdio: "pipe", timeout: 15000 });
+
+  let rawSubscriptionIds: unknown;
+  try {
+    rawSubscriptionIds = JSON.parse(String(stdout || "[]"));
+  } catch {
+    throw new Error("Listing enabled Azure subscriptions returned invalid JSON");
+  }
+  if (!Array.isArray(rawSubscriptionIds)) {
+    throw new Error("Azure returned an invalid enabled subscription list");
+  }
+
+  const subscriptionIds = new Set<string>();
+  for (const candidate of rawSubscriptionIds) {
+    if (typeof candidate !== "string" || !candidate.trim()) {
+      throw new Error("Azure returned an invalid enabled subscription list");
+    }
+    subscriptionIds.add(candidate.trim());
+  }
+
+  const matches = new Set<string>();
+  for (const subscriptionId of subscriptionIds) {
+    let clusterOutput: string;
+    try {
+      const result = await execa("az", [
+        "aks", "show",
+        "--resource-group", ctx.resourceGroup,
+        "--name", ctx.aksCluster,
+        "--query", "{name:name,resourceGroup:resourceGroup}",
+        "--output", "json",
+        "--subscription", subscriptionId,
+      ], { stdio: "pipe", timeout: 30000 });
+      clusterOutput = String(result.stdout);
+    } catch (error) {
+      if (isLegacyAksNotFoundError(error)) continue;
+      throw error;
+    }
+
+    let cluster: unknown;
+    try {
+      cluster = JSON.parse(clusterOutput);
+    } catch {
+      throw new Error(
+        `Looking up cached AKS cluster in subscription '${subscriptionId}' returned invalid JSON`,
+      );
+    }
+    if (
+      typeof cluster === "object" &&
+      cluster !== null &&
+      typeof (cluster as { name?: unknown }).name === "string" &&
+      typeof (cluster as { resourceGroup?: unknown }).resourceGroup === "string" &&
+      (cluster as { name: string }).name.toLowerCase() === ctx.aksCluster.toLowerCase() &&
+      (cluster as { resourceGroup: string }).resourceGroup.toLowerCase() === ctx.resourceGroup.toLowerCase()
+    ) {
+      matches.add(subscriptionId);
+    }
+  }
+
+  if (matches.size === 1) return [...matches][0];
+  if (matches.size === 0) {
+    throw new Error(
+      `No enabled Azure subscription contains cached AKS cluster '${ctx.aksCluster}' ` +
+      `in resource group '${ctx.resourceGroup}'. Upgrade stopped before making changes. ` +
+      "Run 'kars up' to refresh the deployment context.",
+    );
+  }
+  throw new Error(
+    `Cached AKS cluster '${ctx.aksCluster}' in resource group '${ctx.resourceGroup}' ` +
+    `exists in multiple enabled Azure subscriptions (${[...matches].join(", ")}). ` +
+    "Upgrade stopped before making changes. Run 'kars up' and select the intended " +
+    "subscription to refresh the deployment context.",
+  );
+}
+
+type FoundryMemoryReconciler =
+  typeof import("./up/foundry_memory_rbac.js").ensureFoundryMemoryRbac;
+
+/** Run all Foundry setup, identity, and role-assignment calls in the deployment
+ * subscription while leaving non-Azure subprocesses untouched. */
+export async function reconcileUpgradeFoundryMemoryRbac(
+  execa: Execa,
+  subscriptionId: string,
+  stepper: Stepper,
+  foundryEndpoint: string,
+  reconcile?: FoundryMemoryReconciler,
+): ReturnType<FoundryMemoryReconciler> {
+  const ensure = reconcile ??
+    (await import("./up/foundry_memory_rbac.js")).ensureFoundryMemoryRbac;
+  return ensure({
+    execa: createSubscriptionPinnedExeca(execa, subscriptionId),
+    stepper,
+    foundryEndpoint,
+  });
+}
+
+/** Connect kubectl to the cached cluster without consulting Azure CLI's
+ * ambient subscription. */
+export async function getUpgradeAksCredentials(
+  execa: Execa,
+  subscriptionId: string,
+  aksCluster: string,
+  resourceGroup: string,
+): Promise<void> {
+  await createSubscriptionPinnedExeca(execa, subscriptionId)("az", [
+    "aks", "get-credentials",
+    "--name", aksCluster,
+    "--resource-group", resourceGroup,
+    "--overwrite-existing",
+    "--output", "none",
+  ], { stdio: "pipe" });
 }
 
 /** Chart `runtimes.*` value keys → ACR repo names. The single place the
@@ -379,6 +538,7 @@ Examples:
         ));
         process.exit(1);
       }
+      const subscriptionId = await resolveUpgradeSubscription(execa, ctxRaw);
       const ctx: UpgradeContext = {
         acrLoginServer: ctxRaw.acrLoginServer,
         aksCluster: ctxRaw.aksCluster,
@@ -397,11 +557,12 @@ Examples:
       try {
         // ── Step 1: Connect to the cluster ────────────────────────────
         stepper.step(`Connecting to AKS '${ctx.aksCluster}'...`);
-        await execa("az", [
-          "aks", "get-credentials",
-          "--name", ctx.aksCluster, "--resource-group", ctx.resourceGroup,
-          "--overwrite-existing", "--output", "none",
-        ], { stdio: "pipe" });
+        await getUpgradeAksCredentials(
+          execa,
+          subscriptionId,
+          ctx.aksCluster,
+          ctx.resourceGroup,
+        );
         // Sanity: the Helm release must exist to upgrade/rollback.
         const { stdout: relJson } = await execa("helm", [
           "list", "-n", NS, "-o", "json",
@@ -529,8 +690,8 @@ Examples:
           // required images — without it the upgrade would reference a tag that
           // isn't in ACR. Both pull from the same version-tagged GHCR source.
           const versioned = img.target.replace(/:latest$/, `:${target}`);
-          const okLatest = await acrImport(execa, acrName, img.src, img.target);
-          const okVersioned = await acrImport(execa, acrName, img.src, versioned);
+          const okLatest = await acrImport(execa, subscriptionId, acrName, img.src, img.target);
+          const okVersioned = await acrImport(execa, subscriptionId, acrName, img.src, versioned);
           if ((!okLatest || !okVersioned) && img.required) {
             requiredFailures++;
             stepper.detail("info", `${img.target} — import FAILED (required)`);
@@ -618,8 +779,12 @@ Examples:
         const foundryProjectEp = ctx.foundryProjectEndpoint || ctx.foundryEndpoint || "";
         if (isFoundryProjectHost(foundryProjectEp)) {
           try {
-            const { ensureFoundryMemoryRbac } = await import("./up/foundry_memory_rbac.js");
-            const mem = await ensureFoundryMemoryRbac({ execa, stepper, foundryEndpoint: foundryProjectEp });
+            const mem = await reconcileUpgradeFoundryMemoryRbac(
+              execa,
+              subscriptionId,
+              stepper,
+              foundryProjectEp,
+            );
             for (const n of mem.notes) stepper.detail("info", n);
             if (mem.granted) stepper.done("Foundry Memory Store access reconciled");
             else stepper.warn("Foundry Memory Store needs manual RBAC — see the notes above");
@@ -746,8 +911,18 @@ async function detectVersionByImageDigest(execa: Execa): Promise<string | undefi
 }
 
 /** `az acr import --force` one image. Returns true on success. */
-async function acrImport(execa: Execa, acrName: string, src: string, target: string): Promise<boolean> {
-  return execa("az", [
+export async function acrImport(
+  execa: Execa,
+  subscriptionId: string,
+  acrName: string,
+  src: string,
+  target: string,
+): Promise<boolean> {
+  const subscriptionPinnedExeca = createSubscriptionPinnedExeca(
+    execa,
+    subscriptionId,
+  );
+  return subscriptionPinnedExeca("az", [
     "acr", "import", "--name", acrName, "--source", src, "--image", target, "--force",
   ], { stdio: "pipe" }).then(() => true).catch(() => false);
 }
