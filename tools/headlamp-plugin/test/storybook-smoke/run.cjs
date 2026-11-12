@@ -72,6 +72,7 @@ async function main() {
   });
 
   let lastFailure = "Storybook did not publish the fixture story";
+  let loggedAssets = false;
   const deadline = Date.now() + timeoutMs;
   try {
     while (Date.now() < deadline) {
@@ -111,17 +112,36 @@ async function main() {
       }
 
       const iframeHtml = await iframeResponse.text();
-      const assetPaths = [...iframeHtml.matchAll(/<script\b[^>]*\bsrc=["']([^"']+)["']/gi)]
+      const assetReferences = [
+        ...iframeHtml.matchAll(/<script\b[^>]*\bsrc=["']([^"']+)["']/gi),
+        ...iframeHtml.matchAll(/<link\b(?=[^>]*\brel=["'][^"']*(?:modulepreload|preload)[^"']*["'])[^>]*\bhref=["']([^"']+)["']/gi),
+      ];
+      const assetPaths = assetReferences
         .map((match) => new URL(match[1], baseUrl))
         .filter((url) => url.origin === new URL(baseUrl).origin);
+
+      const logAssetDetails = !loggedAssets && assetPaths.length > 0;
+      if (logAssetDetails) {
+        const paths = assetPaths.map((url) => url.pathname).join(", ") || "(none)";
+        console.log(`Storybook fixture ${story.id}; iframe assets: ${paths}`);
+        loggedAssets = true;
+      }
 
       for (const assetUrl of assetPaths) {
         const assetResponse = await tryFetch(assetUrl);
         if (!assetResponse?.ok || !assetResponse.headers.get("content-type")?.includes("javascript")) {
+          if (logAssetDetails) {
+            const status = assetResponse?.status ?? "unavailable";
+            const type = assetResponse?.headers.get("content-type") ?? "unavailable";
+            console.log(`Skipped ${assetUrl.pathname}: HTTP ${status}, content-type ${type}`);
+          }
           continue;
         }
 
         const asset = await assetResponse.text();
+        if (logAssetDetails) {
+          console.log(`Fetched ${assetUrl.pathname}: ${asset.length} JavaScript characters; fixture marker ${asset.includes(fixtureMarker) ? "found" : "not found"}`);
+        }
         if (asset.includes(fixtureMarker)) {
           console.log(`Storybook served the compiled fixture asset at ${assetUrl.pathname}`);
           return;
