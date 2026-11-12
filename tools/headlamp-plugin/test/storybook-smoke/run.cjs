@@ -3,7 +3,7 @@
 
 "use strict";
 
-const { readFile, unlink } = require("node:fs/promises");
+const { mkdtemp, readFile, rmdir, unlink } = require("node:fs/promises");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const { spawn } = require("node:child_process");
@@ -65,14 +65,8 @@ async function stopServer(server) {
 async function main() {
   const port = await getAvailablePort();
   const baseUrl = `http://127.0.0.1:${port}/`;
-  const manifestPath = join(tmpdir(), `kars-storybook-smoke-${process.pid}.json`);
-  try {
-    await unlink(manifestPath);
-  } catch (error) {
-    if (error.code !== "ENOENT") {
-      throw error;
-    }
-  }
+  const manifestDirectory = await mkdtemp(join(tmpdir(), "kars-storybook-smoke-"));
+  const manifestPath = join(manifestDirectory, "asset-manifest.json");
   const server = spawn(
     "./node_modules/.bin/storybook",
     [
@@ -191,11 +185,14 @@ async function main() {
     throw new Error(`Timed out after ${timeoutMs}ms: ${lastFailure}`);
   } finally {
     await stopServer(server);
-    await unlink(manifestPath).catch((error) => {
-      if (error.code !== "ENOENT") {
-        throw error;
-      }
-    });
+    for (const path of [manifestPath, `${manifestPath}.tmp`]) {
+      await unlink(path).catch((error) => {
+        if (error.code !== "ENOENT") {
+          throw error;
+        }
+      });
+    }
+    await rmdir(manifestDirectory);
   }
 }
 
