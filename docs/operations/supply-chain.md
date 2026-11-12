@@ -40,9 +40,10 @@ resolves `webpack-dev-middleware@6.1.3`, so upgrading to that released toolchain
 would not remove the vulnerable resolution; the later 0.15 prerelease is not a
 supported stable replacement. Retain the overrides with passing Headlamp build,
 Webpack-backed Storybook tests that fetch the dynamically emitted lazy story
-asset over HTTP, and a smoke test of the actual `npm run start` command.
-`headlamp-plugin start` rebuilds `dist/main.js` in Vite build-watch mode and
-stays active to watch for changes; it does not start an HTTP dev server.
+asset over HTTP, and a smoke test of the actual `npm run start` command that
+verifies its initial plugin copy and subsequent watch-triggered rebuild/copy.
+`headlamp-plugin start` uses Vite build-watch mode; it does not start an HTTP
+dev server.
 CI also runs online `npm audit --audit-level=high` for this tree; lower-severity
 advisories remain visible in its audit output and are not represented as fixed.
 These packages are not shipped with the plugin. `deepmerge` remains tracked

@@ -4,9 +4,11 @@
 "use strict";
 
 const { spawn } = require("node:child_process");
-const { mkdtemp, mkdir, readFile, rm, stat } = require("node:fs/promises");
+const { existsSync } = require("node:fs");
+const { mkdtemp, mkdir, readFile, rm, stat, writeFile } = require("node:fs/promises");
+const { createRequire } = require("node:module");
 const { tmpdir } = require("node:os");
-const { join } = require("node:path");
+const { isAbsolute, join, relative, sep } = require("node:path");
 const { setTimeout: delay } = require("node:timers/promises");
 
 const timeoutMs = 120_000;
@@ -49,15 +51,120 @@ async function stopProcessGroup(child) {
   }
 }
 
+function getHeadlampPaths(temporaryDirectory, dataHome, configHome) {
+  const overrides = {
+    HOME: temporaryDirectory,
+    USERPROFILE: temporaryDirectory,
+    XDG_CONFIG_HOME: configHome,
+    XDG_DATA_HOME: dataHome,
+    APPDATA: configHome,
+    LOCALAPPDATA: dataHome,
+  };
+  const previousEnvironment = Object.fromEntries(
+    Object.keys(overrides).map((key) => [key, process.env[key]]),
+  );
+  try {
+    Object.assign(process.env, overrides);
+    const toolkitRequire = createRequire(require.resolve("@kinvolk/headlamp-plugin/package.json"));
+    const envPaths = toolkitRequire("env-paths");
+    const paths = envPaths("Headlamp", { suffix: "" });
+    return {
+      ...paths,
+      configDir: existsSync(paths.data) ? paths.data : paths.config,
+    };
+  } finally {
+    for (const [key, value] of Object.entries(previousEnvironment)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+}
+
+function isWithin(directory, filePath) {
+  const relativePath = relative(directory, filePath);
+  return !isAbsolute(relativePath) && relativePath !== ".." && !relativePath.startsWith(`..${sep}`);
+}
+
+function completedBuilds(output) {
+  return (output.match(/built in/g) || []).length;
+}
+
+async function waitForCopiedBundle({
+  child,
+  getOutput,
+  getSpawnError,
+  bundlePath,
+  copiedBundlePath,
+  builds,
+  notBefore,
+}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (getSpawnError()) {
+      throw getSpawnError();
+    }
+    if (child.exitCode !== null || child.signalCode !== null) {
+      throw new Error(
+        `npm run start exited before completing ${builds} build(s) (code ${child.exitCode}, signal ${child.signalCode})\n${getOutput()}`
+      );
+    }
+    if (completedBuilds(getOutput()) >= builds) {
+      try {
+        const [sourceStats, copiedStats] = await Promise.all([
+          stat(bundlePath),
+          stat(copiedBundlePath),
+        ]);
+        if (
+          sourceStats.mtimeMs >= notBefore - 1_000 &&
+          copiedStats.mtimeMs >= notBefore - 1_000
+        ) {
+          const [sourceBundle, copiedBundle] = await Promise.all([
+            readFile(bundlePath, "utf8"),
+            readFile(copiedBundlePath, "utf8"),
+          ]);
+          if (sourceBundle === copiedBundle && sourceBundle.includes(fixtureMarker)) {
+            return;
+          }
+        }
+      } catch (error) {
+        if (error.code !== "ENOENT") {
+          throw error;
+        }
+      }
+    }
+    await delay(250);
+  }
+  throw new Error(
+    `Timed out after ${timeoutMs}ms waiting for build ${builds} and its copied plugin bundle\n${getOutput()}`
+  );
+}
+
 async function main() {
   const temporaryDirectory = await mkdtemp(join(tmpdir(), "kars-headlamp-start-"));
   const dataHome = join(temporaryDirectory, "data");
   const configHome = join(temporaryDirectory, "config");
+  const sourcePath = join(process.cwd(), "src", "index.tsx");
+  let originalSource;
+  let sourceModified = false;
   let child;
   try {
     await Promise.all([mkdir(dataHome), mkdir(configHome)]);
-    const startedAt = Date.now();
+    const paths = getHeadlampPaths(temporaryDirectory, dataHome, configHome);
+    const packageJson = JSON.parse(await readFile("package.json", "utf8"));
+    const pluginName = packageJson.name.split("/").pop();
     const bundlePath = join(process.cwd(), "dist", "main.js");
+    const copiedBundlePath = join(paths.configDir, "plugins", pluginName, "main.js");
+    if (!isWithin(temporaryDirectory, copiedBundlePath)) {
+      throw new Error(
+        `Headlamp resolved its plugin path outside the isolated directory: ${copiedBundlePath}`
+      );
+    }
+    await mkdir(paths.configDir, { recursive: true });
+    originalSource = await readFile(sourcePath);
+    const startedAt = Date.now();
     child = spawn("npm", ["run", "start"], {
       cwd: process.cwd(),
       detached: process.platform !== "win32",
@@ -65,18 +172,20 @@ async function main() {
       env: {
         ...process.env,
         HOME: temporaryDirectory,
+        USERPROFILE: temporaryDirectory,
         XDG_CONFIG_HOME: configHome,
         XDG_DATA_HOME: dataHome,
+        APPDATA: configHome,
+        LOCALAPPDATA: dataHome,
         npm_config_offline: "true",
       },
     });
 
     let output = "";
     let spawnError;
-    const handleOutput = (chunk) => {
+    child.stdout.on("data", (chunk) => {
       output = appendOutput(output, chunk);
-    };
-    child.stdout.on("data", handleOutput);
+    });
     child.stderr.on("data", (chunk) => {
       output = appendOutput(output, chunk);
     });
@@ -84,40 +193,47 @@ async function main() {
       spawnError = error;
     });
 
-    const deadline = Date.now() + timeoutMs;
-    let buildReady = false;
-    while (Date.now() < deadline) {
-      if (spawnError) {
-        throw spawnError;
-      }
-      if (child.exitCode !== null || child.signalCode !== null) {
-        throw new Error(`npm run start exited before entering build-watch mode (code ${child.exitCode}, signal ${child.signalCode})\n${output}`);
-      }
-      if (output.includes("watching for file changes") && output.includes("built in")) {
-        try {
-          const bundleStats = await stat(bundlePath);
-          if (bundleStats.mtimeMs >= startedAt) {
-            buildReady = true;
-            break;
-          }
-        } catch (error) {
-          if (error.code !== "ENOENT") {
-            throw error;
-          }
-        }
-      }
-      await delay(250);
-    }
-    if (!buildReady) {
-      throw new Error(`Timed out after ${timeoutMs}ms waiting for npm run start to rebuild in watch mode\n${output}`);
-    }
+    await waitForCopiedBundle({
+      child,
+      getOutput: () => output,
+      getSpawnError: () => spawnError,
+      bundlePath,
+      copiedBundlePath,
+      builds: 1,
+      notBefore: startedAt,
+    });
+    const rebuildSource = Buffer.concat([
+      originalSource,
+      Buffer.from(`\n// headlamp-start-smoke-${process.pid}\n`),
+    ]);
+    sourceModified = true;
+    await writeFile(sourcePath, rebuildSource);
+    const rebuildStartedAt = Date.now();
+    await waitForCopiedBundle({
+      child,
+      getOutput: () => output,
+      getSpawnError: () => spawnError,
+      bundlePath,
+      copiedBundlePath,
+      builds: 2,
+      notBefore: rebuildStartedAt,
+    });
 
-    const bundle = await readFile(bundlePath, "utf8");
-    if (!bundle.includes(fixtureMarker)) {
-      throw new Error(`headlamp-plugin start did not emit the expected Kars bundle at ${bundlePath}`);
-    }
+    await writeFile(sourcePath, originalSource);
+    sourceModified = false;
+    await waitForCopiedBundle({
+      child,
+      getOutput: () => output,
+      getSpawnError: () => spawnError,
+      bundlePath,
+      copiedBundlePath,
+      builds: 3,
+      notBefore: Date.now(),
+    });
 
-    console.log("npm run start rebuilt the Kars plugin bundle and remained active in Vite watch mode.");
+    console.log(
+      "npm run start built and copied the Kars bundle, then rebuilt and recopied it after a source change and restore."
+    );
     console.log("The headlamp-plugin start command does not start an HTTP dev server.");
   } finally {
     try {
@@ -125,7 +241,13 @@ async function main() {
         await stopProcessGroup(child);
       }
     } finally {
-      await rm(temporaryDirectory, { recursive: true, force: true });
+      try {
+        if (sourceModified) {
+          await writeFile(sourcePath, originalSource);
+        }
+      } finally {
+        await rm(temporaryDirectory, { recursive: true, force: true });
+      }
     }
   }
 }
