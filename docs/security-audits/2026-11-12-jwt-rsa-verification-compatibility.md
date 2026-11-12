@@ -109,12 +109,12 @@ limitations are recorded in T4 and still require an independent review.
 
 - Production verification uses Sigstore 0.15 trusted signature-layer
   discovery with Kars's configured trust root. Sigstore validates the
-  certificate trust and Rekor evidence for legacy candidates, and verifies
-  DSSE signatures while constructing v0.3 referrer candidates. It does not
-  verify the legacy artifact signature before returning those layers. Kars
-  applies its configured issuer/SAN policy and explicitly verifies each
-  accepted legacy signature over that same layer's raw signed bytes with the
-  validated certificate key.
+  certificate trust and Rekor evidence, including SET/proof/body-certificate
+  binding for v0.3 referrers. It does not verify the legacy artifact signature
+  or referrer DSSE PAE signature before returning those layers. Kars applies
+  its configured issuer/SAN policy and explicitly verifies the actual
+  signature over each layer's signed bytes with the validated certificate key
+  for both legacy and referrer candidates.
 - Sigstore's constraint contract is any-valid-signature: a candidate that
   fails a constraint is skipped if another candidate satisfies it. Kars now
   preserves this contract for legacy Rekor evidence: binding errors remove
@@ -153,10 +153,10 @@ limitations are recorded in T4 and still require an independent review.
   API discards the original DER; a different certificate with the same key,
   issuer, and SAN is treated as the same signer identity for this check.
 - OCI v0.3 referrer bundles continue through Sigstore's protobuf bundle
-  verification path, including DSSE signature, certificate trust, Rekor SET,
-  inclusion proof/checkpoint, and subject-digest validation. Kars applies the
-  same configured issuer/SAN and actual artifact signature checks. A failed
-  legacy candidate does not preempt a valid referrer candidate.
+  verification path for certificate trust, Rekor SET, inclusion
+  proof/checkpoint, and subject-digest validation. Kars applies the same
+  configured issuer/SAN and actual DSSE PAE signature checks. A failed legacy
+  candidate does not preempt a valid referrer candidate.
 
 ### Failure handling, network effects, and limitations
 
@@ -188,13 +188,32 @@ limitations are recorded in T4 and still require an independent review.
   two reads occur and rejects the candidate because the Rekor cert's
   key/identity do not match the accepted signer. Production no longer
   refetches the tag.
+- RSA-PSS is not selected by the supported Cosign legacy certificate path.
+  Cosign's `ValidateAndUnpackCertWithIntermediates` calls
+  `signature.LoadVerifier(cert.PublicKey, crypto.SHA256)`; Sigstore Go's
+  generic `LoadVerifier` dispatches RSA keys to PKCS#1 v1.5, while RSA-PSS
+  requires an explicit `LoadRSAPSSVerifier` call. Likewise, Sigstore 0.15's
+  automatic `CosignVerificationKey::try_from` maps an `rsaEncryption` SPKI to
+  `RSA_PKCS1_SHA256`; its explicit scheme constructor can select PSS, but a
+  legacy Cosign signature object carries no algorithm marker to select it.
+  Kars retains the default legacy Cosign behavior rather than guessing an
+  alternate scheme. This documents the upstream default verifier behavior,
+  not a claim that the Cosign wire specification forbids PSS or that the
+  general Sigstore algorithm registry lacks RSA-PSS support.
+  References: [Cosign verifier](https://github.com/sigstore/cosign/blob/main/pkg/cosign/verify.go),
+  [Sigstore Go verifier dispatch](https://github.com/sigstore/sigstore/blob/main/pkg/signature/verifier.go),
+  [Cosign signature specification](https://github.com/sigstore/cosign/blob/main/specs/SIGNATURE_SPEC.md),
+  and [Sigstore Rust 0.15 key conversion](https://docs.rs/sigstore/0.15.0/src/sigstore/crypto/verification_key.rs.html).
 
 ### Signed-OCI evidence
 
 - The legacy OCI integration fixture signs a canonical SimpleSigning payload
   with a test certificate and signs the canonical Rekor SET with a test Rekor
-  key. Positive cases include `hashedrekord` SHA-256/SHA-384/SHA-512 and
-  Rekor `rekord` SHA-256. A SET-signed `hashedrekord` fixture omits the
+  key. Positive cases include `hashedrekord` SHA-256/P-256,
+  SHA-384/P-384, and SHA-512/P-521, plus Rekor `rekord` SHA-256/P-256. The
+  SHA-384 and SHA-512 cases use certificates and signatures whose artifact
+  signature hash matches the Rekor `data.hash` algorithm. A SET-signed
+  `hashedrekord` fixture omits the
   schema-inapplicable `signature.format`, and another uses uppercase digest
   hex. Negative cases include wrong issuer/SAN, tampered signature/artifact,
   signed noncanonical policy bytes, validly SET-signed mismatched payload

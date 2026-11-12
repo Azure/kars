@@ -677,10 +677,9 @@ async fn verify_via_sigstore_with_root<K: PolicyKind, T: sigstore::trust::TrustR
         artifact_ref.digest.clone(),
     );
 
-    // Fetch candidate layers and validate Sigstore trust material. Legacy
-    // Rekor-backed artifact signatures are verified by the SignedIdentity
-    // constraint after their Rekor binding below; Sigstore verifies referrer
-    // DSSE signatures while constructing those bundle candidates.
+    // Fetch candidate layers and validate Sigstore trust material. Kars binds
+    // legacy Rekor evidence and enforces issuer/SAN plus artifact-signature
+    // verification for both legacy and v0.3 layers below.
     let layers = client
         .trusted_signature_layers(&auth, &image)
         .await
@@ -2593,7 +2592,17 @@ mod tests {
 
     const TEST_SIGNER_CERT: &[u8] = include_bytes!("../tests/fixtures/sigstore/signer.pem");
     const TEST_SIGNER_KEY: &[u8] = include_bytes!("../tests/fixtures/sigstore/signer-key.pem");
+    const TEST_SIGNER_P384_CERT: &[u8] =
+        include_bytes!("../tests/fixtures/sigstore/signer-p384.pem");
+    const TEST_SIGNER_P384_KEY: &[u8] =
+        include_bytes!("../tests/fixtures/sigstore/signer-p384-key.pem");
+    const TEST_SIGNER_P521_CERT: &[u8] =
+        include_bytes!("../tests/fixtures/sigstore/signer-p521.pem");
+    const TEST_SIGNER_P521_KEY: &[u8] =
+        include_bytes!("../tests/fixtures/sigstore/signer-p521-key.pem");
     const TEST_FULCIO_ROOT: &[u8] = include_bytes!("../tests/fixtures/sigstore/fulcio-root.pem");
+    const TEST_FULCIO_CURVE_ROOT: &[u8] =
+        include_bytes!("../tests/fixtures/sigstore/fulcio-curve-root.pem");
     const TEST_REKOR_KEY: &[u8] = include_bytes!("../tests/fixtures/sigstore/rekor-key.pem");
     const TEST_REKOR_PUBLIC_KEY: &[u8] =
         include_bytes!("../tests/fixtures/sigstore/rekor-public.der");
@@ -2772,7 +2781,10 @@ mod tests {
     fn test_trust_root() -> sigstore::trust::ManualTrustRoot<'static> {
         let rekor_key_id = sha256_hex(TEST_REKOR_PUBLIC_KEY);
         sigstore::trust::ManualTrustRoot {
-            fulcio_certs: vec![pem_contents(TEST_FULCIO_ROOT).into()],
+            fulcio_certs: vec![
+                pem_contents(TEST_FULCIO_ROOT).into(),
+                pem_contents(TEST_FULCIO_CURVE_ROOT).into(),
+            ],
             rekor_keys: std::collections::BTreeMap::from([(
                 rekor_key_id,
                 TEST_REKOR_PUBLIC_KEY.to_vec(),
@@ -2816,13 +2828,29 @@ mod tests {
         }))
         .expect("serialize policy manifest");
         let artifact_digest = digest(&policy_manifest);
+        let (signer_key_pem, signer_cert_pem, signing_scheme) = match mutation {
+            FixtureMutation::RekorSha384 => (
+                TEST_SIGNER_P384_KEY,
+                TEST_SIGNER_P384_CERT,
+                SigningScheme::ECDSA_P384_SHA384_ASN1,
+            ),
+            FixtureMutation::RekorSha512 => (
+                TEST_SIGNER_P521_KEY,
+                TEST_SIGNER_P521_CERT,
+                SigningScheme::ECDSA_P521_SHA512_ASN1,
+            ),
+            _ => (
+                TEST_SIGNER_KEY,
+                TEST_SIGNER_CERT,
+                SigningScheme::ECDSA_P256_SHA256_ASN1,
+            ),
+        };
         let image = "localhost/policy:fixture"
             .parse()
             .expect("parse fixture image reference");
         let mut signature_layer =
             SignatureLayer::new_unsigned(&image, &artifact_digest).expect("create signed payload");
-        let signer_key = SigStoreKeyPair::from_pem(TEST_SIGNER_KEY).expect("parse test signer key");
-        let signing_scheme = SigningScheme::ECDSA_P256_SHA256_ASN1;
+        let signer_key = SigStoreKeyPair::from_pem(signer_key_pem).expect("parse test signer key");
         assert!(
             PrivateKeySigner::new_with_signer(
                 signer_key
@@ -2841,7 +2869,7 @@ mod tests {
 
         let rekor_key = SigStoreKeyPair::from_pem(TEST_REKOR_KEY).expect("parse test Rekor key");
         let rekor_signer = rekor_key
-            .to_sigstore_signer(&signing_scheme)
+            .to_sigstore_signer(&SigningScheme::ECDSA_P256_SHA256_ASN1)
             .expect("build test Rekor signer");
         let rekor_key_id = sha256_hex(TEST_REKOR_PUBLIC_KEY);
         let timestamp = SystemTime::now()
@@ -2859,7 +2887,7 @@ mod tests {
         ) {
             TEST_FULCIO_ROOT
         } else {
-            TEST_SIGNER_CERT
+            signer_cert_pem
         };
         let hash_algorithm = match mutation {
             FixtureMutation::RekorSha384 => "sha384",
@@ -2937,7 +2965,7 @@ mod tests {
             } else {
                 valid_signature.as_str()
             },
-            "dev.sigstore.cosign/certificate": std::str::from_utf8(TEST_SIGNER_CERT)
+            "dev.sigstore.cosign/certificate": std::str::from_utf8(signer_cert_pem)
                 .expect("test signer cert is UTF-8"),
             "dev.sigstore.cosign/bundle": rekor_bundle,
         });
