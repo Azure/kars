@@ -71,6 +71,7 @@ rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", 
 regex = "1.12.3"
 
 [dev-dependencies]
+serde-saphyr.workspace = true
 # S16 — perf baseline criterion benches. See `controller/benches/`.
 criterion = { workspace = true }
 tokio = { workspace = true }
