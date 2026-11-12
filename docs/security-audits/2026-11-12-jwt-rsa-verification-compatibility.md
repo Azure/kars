@@ -1,12 +1,14 @@
-# Security Audit - JWT RSA verification compatibility
+# Security Audit - JWT and signed-OCI verification compatibility
 
 Date: 2026-11-12
 Scope: `inference-router/src/providers/jwt.rs`, provider installation,
 `inference-router/src/mcp/oauth.rs`, workspace/router dependency manifests and
-lockfile, OAuth compatibility fixtures, `ci/no-custom-crypto.sh`, and advisory
-rationale documentation.
+lockfile, OAuth compatibility fixtures, `controller/src/policy_fetcher.rs`,
+controller Sigstore/OCI integration fixtures, `ci/no-custom-crypto.sh`, and
+advisory rationale documentation.
 Gated paths: `inference-router/src/providers/jwt.rs`,
-`inference-router/src/providers/mod.rs`, `inference-router/src/mcp/oauth.rs`.
+`inference-router/src/providers/mod.rs`, `inference-router/src/mcp/oauth.rs`,
+`controller/src/policy_fetcher.rs`.
 
 ## Summary
 
@@ -21,6 +23,11 @@ still supplies the signer factory, non-RSA verifiers, and JWK utilities.
 `rsa` 0.10 uses patched `crypto-bigint` 0.7.11. No unpublished upstream branch,
 custom cryptographic primitive, private RSA operation, or failure-triggered
 fallback is introduced.
+
+This record also documents the production Sigstore/OCI verifier changes for
+Azure/kars#594. Those controller changes are a separate security-sensitive
+surface; the earlier JWT-only review does not cover them. Their tests and
+limitations are recorded in T4 and still require an independent review.
 
 ## T1: New capability / attack surface? (NO new customer capability)
 
@@ -96,8 +103,119 @@ fallback is introduced.
   4096-bit keys and public exponents 3 and 65537. It includes all six RSA
   algorithms where the baseline signing padding fits the key.
 
+## T4: Sigstore signed-OCI verification
+
+### Identity and candidate semantics
+
+- Production verification uses Sigstore 0.15 trusted signature-layer
+  discovery with Kars's configured trust root. Sigstore verifies the signature
+  material and certificate trust before returning candidate layers. Kars then
+  applies its configured issuer/SAN policy and explicitly verifies the
+  signature over that same layer's raw signed bytes with the validated
+  certificate key.
+- Sigstore's constraint contract is any-valid-signature: a candidate that
+  fails a constraint is skipped if another candidate satisfies it. Kars now
+  preserves this contract for legacy Rekor evidence: binding errors remove
+  only that legacy candidate before the existing identity/signature
+  constraints run. A malformed or unrelated legacy layer cannot poison a
+  valid authorized legacy or v0.3 referrer layer, and a rejected candidate is
+  never allowed to authorize. If every candidate fails, verification remains
+  fail closed.
+- The legacy `.sig` validator accepts Rekor `hashedrekord` and `rekord`
+  `0.0.1` bodies. It recomputes the advertised digest from the exact signed
+  layer bytes for SHA-256, SHA-384, or SHA-512 on `hashedrekord`; `rekord`
+  `0.0.1` is constrained to its schema's SHA-256 hash. It requires the logged
+  signature bytes to equal the OCI signature and requires `signature.format`
+  to be `x509`. For `rekord`, raw `data.content` is not relied on: Rekor's
+  canonical entry omits it, and the bound digest is recomputed from the signed
+  OCI layer. These formats follow the [Cosign legacy bundle example](https://github.com/sigstore/cosign/blob/main/specs/SIGNATURE_SPEC.md#properties)
+  and [Rekor hashedrekord schema](https://github.com/sigstore/rekor/blob/main/pkg/types/hashedrekord/v0.0.1/entry.go)
+  and [rekord canonicalization](https://github.com/sigstore/rekor/blob/main/pkg/types/rekord/v0.0.1/entry.go).
+- Sigstore exposes the accepted legacy certificate's parsed verification key,
+  issuer, and SAN identity but does not retain its original DER bytes.
+  Previously Kars fetched the mutable `.sig` tag a second time to compare the
+  Rekor certificate to a second descriptor snapshot. That extra fetch has
+  been removed. The Rekor-logged certificate is parsed directly and must have
+  the same signer identity and Fulcio issuer as the certificate Sigstore
+  validated from its snapshot; its parsed SPKI must match exactly and that key
+  must verify the accepted OCI layer signature. This binds
+  authorization-relevant identity and key
+  across a mutable tag change without trusting a second descriptor read.
+  Byte-for-byte certificate DER equality is not asserted because the upstream
+  API discards the original DER; a different certificate with the same key,
+  issuer, and SAN is treated as the same signer identity for this check.
+- OCI v0.3 referrer bundles continue through Sigstore's protobuf bundle
+  verification path, including DSSE signature, certificate trust, Rekor SET,
+  inclusion proof/checkpoint, and subject-digest validation. Kars applies the
+  same configured issuer/SAN and actual artifact signature checks. A failed
+  legacy candidate does not preempt a valid referrer candidate.
+
+### Failure handling, network effects, and limitations
+
+- Malformed Rekor base64/JSON, unsupported kind/version/hash algorithm or
+  signature format, incorrect payload digest/signature, malformed certificate,
+  missing or mismatched issuer/SAN, unsupported key, and a certificate key
+  that does not verify the layer signature all disqualify that candidate.
+  These conditions do not suppress a different valid candidate. If no
+  candidate remains or no candidate matches signer policy, policy retrieval
+  fails closed.
+- Kars no longer performs a second authenticated manifest read of the legacy
+  `<digest>.sig` tag. Sigstore owns legacy-tag and referrer discovery using the
+  configured registry authentication; Kars only performs the existing
+  digest-pinned policy pull after verification succeeds. There is no new
+  registry destination, credential, trust anchor, or protocol.
+- Local tests use an OCI Distribution API fixture and test-only signing keys,
+  certificates, and Rekor material. They exercise actual signature/SET
+  verification but do not substitute for a live registry, Fulcio, or Rekor
+  transaction. A previous-head session-only live-registry probe against public
+  Kubewarden GHCR legacy and referrer signatures passed through the real
+  Sigstore public trust root; that probe was not a full Kars policy pull, and it
+  must be rerun against the final head before being counted as current-head
+  evidence.
+- The local fixture's changing `.sig` manifest snapshots model the mutable-tag
+  race: Sigstore's two manifest reads receive the original snapshot; a
+  hypothetical third read receives a changed descriptor whose certificate
+  bytes match the SET-signed Rekor body. The test asserts that only Sigstore's
+  two reads occur and rejects the candidate because the Rekor cert's
+  key/identity do not match the accepted signer. Production no longer
+  refetches the tag.
+
+### Signed-OCI evidence
+
+- The legacy OCI integration fixture signs a canonical SimpleSigning payload
+  with a test certificate and signs the canonical Rekor SET with a test Rekor
+  key. Positive cases include `hashedrekord` SHA-256/SHA-384/SHA-512 and
+  Rekor `rekord` SHA-256. Negative cases include wrong issuer/SAN, tampered
+  signature/artifact, signed noncanonical policy bytes, validly SET-signed
+  mismatched payload hash/signature/certificate, unsupported signature
+  format, and the two-snapshot certificate substitution.
+- Mixed-signature OCI fixtures cover one valid authorized legacy signature
+  alongside a second legacy candidate with a SET-signed mismatched hash or a
+  malformed certificate annotation. Another fixture combines a valid signed
+  OCI-referrer bundle with a legacy candidate whose changed third `.sig` tag
+  snapshot matches the SET certificate but not Sigstore's accepted signer;
+  verification succeeds on the referrer and asserts no third tag read occurs.
+  These pass because the invalid candidate is skipped while the valid signer
+  is still independently checked.
+- OCI-referrer integration positives and negatives use a real Sigstore v0.3
+  protobuf bundle, DSSE signature, certificate, SET, Merkle proof, and signed
+  checkpoint. Tests reject wrong issuer/SAN, wrong subject, invalid DSSE
+  signature, and tampered artifact bytes.
+
 ## Verification
 
+- `cargo test --locked --offline --package kars-controller
+  policy_fetcher::tests::signed_oci -- --nocapture`: passed all three
+  signed-OCI integration tests after adding multi-signature availability,
+  changed-tag/referrer, canonical `rekord`, and SHA-384/SHA-512 coverage.
+- `cargo test --locked --offline --package kars-controller`: passed 863 unit
+  tests plus the phase-taxonomy guard (1 test).
+- `cargo clippy --locked --offline --package kars-controller --all-targets --
+  -D warnings`, `cargo fmt --all -- --check`, `git diff --check`, and
+  `bash ci/no-custom-crypto.sh`: passed on the changed worktree.
+- New-head remote CI has not yet been run for this follow-up. Previous-head
+  green CI does not validate these changes; the PR must remain draft until
+  current-head checks and independent review are complete.
 - Baseline differential run: `cargo test --offline --package
   kars-inference-router --test oauth_crypto_compat` passed five tests with the
   previous RustCrypto provider. Its 28 positive RSA vectors were preserved
@@ -142,9 +260,6 @@ fallback is introduced.
   rejected a weak-key forgery using `cargo +1.88.0 run --locked --offline`.
   This is not a full-workspace MSRV claim; the previously reproduced
   full-workspace 1.88 baseline failure remains separate.
-- New-head remote CI, controller signed-OCI evidence, and combined PR review
-  remain required. Earlier green checks do not cover this follow-up.
-
 ## Verdict
 
 Draft for independent review, not authorization to merge or deploy. Author

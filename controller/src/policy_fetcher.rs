@@ -522,16 +522,14 @@ async fn verify_via_sigstore<K: PolicyKind>(
         .await
 }
 
-/// Bind accepted signatures to their trusted certificate identity and Rekor record.
+/// Bind each candidate signature to its trusted certificate identity and Rekor record.
 ///
-/// The legacy SET authenticates an opaque body, so its payload hash, signature,
-/// and exact certificate are checked against the corresponding OCI layer before
-/// the bundle's integrated time can be used as signature evidence. The issuer/SAN
-/// constraint and artifact-signature check both use Sigstore's same trusted certificate.
+/// Sigstore intentionally accepts an image when any signature layer satisfies
+/// the constraints. Invalid Rekor bindings therefore disqualify only their
+/// corresponding candidate and must not poison another valid signature.
 fn verify_signer_identity(
     layers: &[sigstore::cosign::SignatureLayer],
     signer_policy: &SignerPolicyConfig,
-    legacy_certificates: &std::collections::HashMap<(String, String), Vec<u8>>,
 ) -> Result<(), FetchError> {
     use sigstore::cosign::verification_constraint::cert_subject_email_verifier::StringVerifier;
     use sigstore::cosign::verification_constraint::{
@@ -541,13 +539,24 @@ fn verify_signer_identity(
     use sigstore::cosign::verify_constraints;
     use sigstore::errors::Result as SigstoreResult;
 
+    let mut candidates = Vec::with_capacity(layers.len());
+    let mut binding_failures = Vec::new();
     for layer in layers {
         let Some(sigstore::cosign::bundle_content::BundleContent::RekorBundle(bundle)) =
             &layer.bundle
         else {
+            candidates.push(layer.clone());
             continue;
         };
-        verify_legacy_rekor_binding(layer, bundle, legacy_certificates)?;
+        match verify_legacy_rekor_binding(layer, bundle) {
+            Ok(()) => candidates.push(layer.clone()),
+            Err(error) => binding_failures.push(error),
+        }
+    }
+    if candidates.is_empty() {
+        return Err(binding_failures.into_iter().next().unwrap_or_else(|| {
+            FetchError::IdentityMismatch("no signature candidates were provided".into())
+        }));
     }
 
     #[derive(Debug)]
@@ -620,7 +629,7 @@ fn verify_signer_identity(
     }
 
     let constraints: VerificationConstraintVec = vec![Box::new(AnyOf(identities))];
-    verify_constraints(layers, constraints.iter())
+    verify_constraints(&candidates, constraints.iter())
         .map_err(|e| FetchError::IdentityMismatch(format!("{e:?}")))
 }
 
@@ -671,21 +680,9 @@ async fn verify_via_sigstore_with_root<K: PolicyKind, T: sigstore::trust::TrustR
         .await
         .map_err(map_oci_error)?;
 
-    let legacy_certificates = if layers.iter().any(|layer| {
-        matches!(
-            layer.bundle.as_ref(),
-            Some(sigstore::cosign::bundle_content::BundleContent::RekorBundle(_))
-        )
-    }) {
-        // Sigstore retains the parsed certificate identity but not its original DER.
-        fetch_legacy_certificates(artifact_ref, &auth, use_http_registry).await?
-    } else {
-        std::collections::HashMap::new()
-    };
-
     // Keep the non-Send verification constraints out of the reconcile future
     // before its next `.await` (kube-rs requires the future to be `Send`).
-    verify_signer_identity(&layers, signer_policy, &legacy_certificates)?;
+    verify_signer_identity(&layers, signer_policy)?;
 
     // Step D: pull artifact bytes (digest-pinned).
     //
@@ -706,11 +703,12 @@ async fn verify_via_sigstore_with_root<K: PolicyKind, T: sigstore::trust::TrustR
 fn verify_legacy_rekor_binding(
     layer: &sigstore::cosign::SignatureLayer,
     bundle: &sigstore::cosign::bundle::Bundle,
-    legacy_certificates: &std::collections::HashMap<(String, String), Vec<u8>>,
 ) -> Result<(), FetchError> {
     use base64::Engine as _;
     use sha2::{Digest, Sha256};
-    use x509_cert::der::pem::PemLabel;
+    use sigstore::cosign::signature_layers::CertificateSubject;
+    use sigstore::crypto::{CosignVerificationKey, Signature};
+    use x509_cert::der::{Decode, pem::PemLabel};
 
     let fail = |message: &str| FetchError::SignatureVerifyFailed(message.to_owned());
     let body_bytes = base64::engine::general_purpose::STANDARD
@@ -718,7 +716,8 @@ fn verify_legacy_rekor_binding(
         .map_err(|_| fail("invalid base64 Rekor body"))?;
     let body: serde_json::Value =
         serde_json::from_slice(&body_bytes).map_err(|_| fail("invalid Rekor body JSON"))?;
-    if body.get("kind").and_then(serde_json::Value::as_str) != Some("hashedrekord")
+    let kind = body.get("kind").and_then(serde_json::Value::as_str);
+    if !matches!(kind, Some("hashedrekord" | "rekord"))
         || body.get("apiVersion").and_then(serde_json::Value::as_str) != Some("0.0.1")
     {
         return Err(fail("unsupported Rekor body kind or apiVersion"));
@@ -731,10 +730,21 @@ fn verify_legacy_rekor_binding(
         .get("data")
         .and_then(|data| data.get("hash"))
         .ok_or_else(|| fail("Rekor hashedrekord body is missing data.hash"))?;
-    if hash.get("algorithm").and_then(serde_json::Value::as_str) != Some("sha256") {
-        return Err(fail("Rekor hashedrekord must use sha256"));
-    }
-    let expected_hash = hex::encode(Sha256::digest(&layer.raw_data));
+    let expected_hash = match (
+        kind,
+        hash.get("algorithm").and_then(serde_json::Value::as_str),
+    ) {
+        (Some("hashedrekord"), Some("sha256")) | (Some("rekord"), Some("sha256")) => {
+            hex::encode(Sha256::digest(&layer.raw_data))
+        }
+        (Some("hashedrekord"), Some("sha384")) => {
+            hex::encode(sha2::Sha384::digest(&layer.raw_data))
+        }
+        (Some("hashedrekord"), Some("sha512")) => {
+            hex::encode(sha2::Sha512::digest(&layer.raw_data))
+        }
+        _ => return Err(fail("unsupported Rekor hashedrekord hash algorithm")),
+    };
     if hash.get("value").and_then(serde_json::Value::as_str) != Some(expected_hash.as_str()) {
         return Err(fail(
             "Rekor hashedrekord payload hash does not match the signed layer",
@@ -753,6 +763,14 @@ fn verify_legacy_rekor_binding(
         .and_then(|signature| signature.get("content"))
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| fail("Rekor hashedrekord body is missing signature.content"))?;
+    if spec
+        .get("signature")
+        .and_then(|signature| signature.get("format"))
+        .and_then(serde_json::Value::as_str)
+        != Some("x509")
+    {
+        return Err(fail("Rekor signature format must be x509"));
+    }
     let logged_signature_bytes = base64::engine::general_purpose::STANDARD
         .decode(logged_signature)
         .map_err(|_| fail("invalid base64 Rekor signature"))?;
@@ -779,94 +797,65 @@ fn verify_legacy_rekor_binding(
             "Rekor hashedrekord public key is not a certificate PEM",
         ));
     }
-    let certificate_key = (layer.oci_digest.clone(), signature.to_owned());
-    let accepted_certificate = legacy_certificates
-        .get(&certificate_key)
-        .ok_or_else(|| fail("cannot match legacy signature layer to its certificate"))?;
-    if &logged_certificate != accepted_certificate {
+    let logged_certificate = x509_cert::Certificate::from_der(&logged_certificate)
+        .map_err(|_| fail("invalid DER certificate in Rekor hashedrekord body"))?;
+    let accepted_identity = layer
+        .certificate_signature
+        .as_ref()
+        .ok_or_else(|| fail("legacy signature has no Sigstore-validated certificate"))?;
+    let logged_subject = CertificateSubject::from_certificate(&logged_certificate)
+        .map_err(|_| fail("Rekor certificate has no supported signer identity"))?;
+    if logged_subject != accepted_identity.subject {
         return Err(fail(
-            "Rekor hashedrekord certificate does not match the signed layer",
+            "Rekor certificate subject does not match the Sigstore-validated identity",
         ));
     }
+    const SIGSTORE_ISSUER_OID: &str = "1.3.6.1.4.1.57264.1.1";
+    let logged_issuer = logged_certificate
+        .tbs_certificate()
+        .extensions()
+        .ok_or_else(|| fail("Rekor certificate has no extensions"))?
+        .iter()
+        .find(|extension| extension.extn_id.to_string() == SIGSTORE_ISSUER_OID)
+        .map(|extension| {
+            String::from_utf8(extension.extn_value.as_bytes().to_vec())
+                .map_err(|_| fail("Rekor certificate issuer is not UTF-8"))
+        })
+        .transpose()?;
+    if logged_issuer != accepted_identity.issuer {
+        return Err(fail(
+            "Rekor certificate issuer does not match the Sigstore-validated identity",
+        ));
+    }
+    let logged_key = CosignVerificationKey::try_from(
+        logged_certificate
+            .tbs_certificate()
+            .subject_public_key_info(),
+    )
+    .map_err(|_| fail("Rekor certificate has an unsupported public key"))?;
+    fn key_material(key: &CosignVerificationKey) -> (&'static str, &[u8]) {
+        match key {
+            CosignVerificationKey::RSA_PSS_SHA256(bytes) => ("rsa-pss-sha256", bytes),
+            CosignVerificationKey::RSA_PKCS1_SHA256(bytes) => ("rsa-pkcs1-sha256", bytes),
+            CosignVerificationKey::ECDSA_P256_SHA256_ASN1(bytes) => ("ecdsa-p256-sha256", bytes),
+            CosignVerificationKey::ECDSA_P384_SHA384_ASN1(bytes) => ("ecdsa-p384-sha384", bytes),
+            CosignVerificationKey::ECDSA_P521_SHA512_ASN1(bytes) => ("ecdsa-p521-sha512", bytes),
+            CosignVerificationKey::ED25519(bytes) => ("ed25519", bytes),
+        }
+    }
+    if key_material(&logged_key) != key_material(&accepted_identity.verification_key) {
+        return Err(fail(
+            "Rekor certificate key does not match the Sigstore-validated certificate",
+        ));
+    }
+    logged_key
+        .verify_signature(
+            Signature::Base64Encoded(signature.as_bytes()),
+            &layer.raw_data,
+        )
+        .map_err(|_| fail("Rekor certificate key does not verify the signed layer"))?;
 
     Ok(())
-}
-
-async fn fetch_legacy_certificates(
-    artifact_ref: &OciArtifactRef,
-    auth: &sigstore::registry::Auth,
-    use_http_registry: bool,
-) -> Result<std::collections::HashMap<(String, String), Vec<u8>>, FetchError> {
-    use oci_client::client::{Client, ClientConfig, ClientProtocol};
-    use oci_client::manifest::OciManifest;
-    use oci_client::secrets::RegistryAuth;
-    use x509_cert::der::pem::PemLabel;
-
-    const SIGNATURE_ANNOTATION: &str = "dev.cosignproject.cosign/signature";
-    const CERTIFICATE_ANNOTATION: &str = "dev.sigstore.cosign/certificate";
-
-    let tag = artifact_ref.digest.replace(':', "-") + ".sig";
-    let signature_ref = oci_client::Reference::with_tag(
-        artifact_ref.registry.clone(),
-        artifact_ref.repository.clone(),
-        tag,
-    );
-    let mut config = ClientConfig::default();
-    if use_http_registry {
-        config.protocol = ClientProtocol::Http;
-    }
-    let client = Client::new(config);
-    let registry_auth = match auth {
-        sigstore::registry::Auth::Anonymous => RegistryAuth::Anonymous,
-        sigstore::registry::Auth::Basic(username, password) => {
-            RegistryAuth::Basic(username.clone(), password.clone())
-        }
-        sigstore::registry::Auth::Bearer(token) => RegistryAuth::Bearer(token.clone()),
-    };
-    let (manifest, _) = client
-        .pull_manifest(&signature_ref, &registry_auth)
-        .await
-        .map_err(map_oci_distribution_error)?;
-    let image_manifest = match manifest {
-        OciManifest::Image(image) => image,
-        OciManifest::ImageIndex(_) => {
-            return Err(FetchError::SignatureVerifyFailed(
-                "legacy cosign signature tag resolved to an OCI image index".into(),
-            ));
-        }
-    };
-
-    let mut certificates = std::collections::HashMap::new();
-    for layer in image_manifest.layers {
-        if layer.media_type != "application/vnd.dev.cosign.simplesigning.v1+json" {
-            continue;
-        }
-        let Some(annotations) = layer.annotations else {
-            continue;
-        };
-        let (Some(signature), Some(certificate)) = (
-            annotations.get(SIGNATURE_ANNOTATION),
-            annotations.get(CERTIFICATE_ANNOTATION),
-        ) else {
-            continue;
-        };
-        let (certificate_label, certificate) =
-            x509_cert::der::pem::decode_vec(certificate.as_bytes()).map_err(|e| {
-                FetchError::SignatureVerifyFailed(format!("invalid cosign certificate: {e}"))
-            })?;
-        if certificate_label != x509_cert::Certificate::PEM_LABEL {
-            return Err(FetchError::SignatureVerifyFailed(
-                "cosign certificate annotation is not a certificate PEM".into(),
-            ));
-        }
-        let key = (layer.digest, signature.clone());
-        if certificates.insert(key, certificate).is_some() {
-            return Err(FetchError::SignatureVerifyFailed(
-                "duplicate legacy signature layer identity".into(),
-            ));
-        }
-    }
-    Ok(certificates)
 }
 
 fn map_oci_error(e: sigstore::errors::SigstoreError) -> FetchError {
@@ -2556,7 +2545,6 @@ mod tests {
         verify_signer_identity(
             std::slice::from_ref(&layer),
             &test_signer_policy(issuer, subject),
-            &std::collections::HashMap::new(),
         )
         .expect("valid signed identity");
 
@@ -2564,7 +2552,6 @@ mod tests {
             verify_signer_identity(
                 std::slice::from_ref(&layer),
                 &test_signer_policy("https://wrong-issuer.example", subject),
-                &std::collections::HashMap::new(),
             )
             .is_err(),
             "wrong issuer must fail"
@@ -2573,7 +2560,6 @@ mod tests {
             verify_signer_identity(
                 std::slice::from_ref(&layer),
                 &test_signer_policy(issuer, "https://wrong-subject.example"),
-                &std::collections::HashMap::new(),
             )
             .is_err(),
             "wrong subject must fail"
@@ -2582,24 +2568,16 @@ mod tests {
         let mut tampered_signature = layer.clone();
         tampered_signature.signature = Some("AAAA".into());
         assert!(
-            verify_signer_identity(
-                &[tampered_signature],
-                &test_signer_policy(issuer, subject),
-                &std::collections::HashMap::new(),
-            )
-            .is_err(),
+            verify_signer_identity(&[tampered_signature], &test_signer_policy(issuer, subject))
+                .is_err(),
             "tampered signature must fail"
         );
 
         let mut tampered_payload = layer;
         tampered_payload.raw_data.push(b' ');
         assert!(
-            verify_signer_identity(
-                &[tampered_payload],
-                &test_signer_policy(issuer, subject),
-                &std::collections::HashMap::new(),
-            )
-            .is_err(),
+            verify_signer_identity(&[tampered_payload], &test_signer_policy(issuer, subject))
+                .is_err(),
             "tampered signed payload must fail"
         );
     }
@@ -2625,10 +2603,17 @@ mod tests {
         RekorSignature,
         RekorCertificate,
         RekorPayloadHash,
+        RekorKind,
+        RekorSha384,
+        RekorSha512,
+        RekorWrongFormat,
+        RekorCertificateSnapshot,
     }
 
     struct LocalRegistryFixture {
         manifests: std::collections::HashMap<String, (String, Vec<u8>)>,
+        manifest_snapshots: std::collections::HashMap<String, Vec<(String, Vec<u8>)>>,
+        manifest_reads: std::sync::Mutex<std::collections::HashMap<String, usize>>,
         blobs: std::collections::HashMap<String, Vec<u8>>,
         referrers: std::collections::HashMap<String, Vec<u8>>,
     }
@@ -2636,6 +2621,7 @@ mod tests {
     struct LocalRegistry {
         address: String,
         task: tokio::task::JoinHandle<()>,
+        state: std::sync::Arc<LocalRegistryFixture>,
     }
 
     impl LocalRegistry {
@@ -2648,9 +2634,10 @@ mod tests {
                 .await
                 .expect("bind local OCI registry");
             let address = listener.local_addr().expect("local OCI registry address");
+            let state = Arc::new(fixture);
             let app = axum::Router::new()
                 .route("/{*path}", any(local_registry_request))
-                .with_state(Arc::new(fixture));
+                .with_state(state.clone());
             let task = tokio::spawn(async move {
                 axum::serve(listener, app)
                     .await
@@ -2659,7 +2646,18 @@ mod tests {
             Self {
                 address: address.to_string(),
                 task,
+                state,
             }
+        }
+
+        fn manifest_reads(&self, reference: &str) -> usize {
+            self.state
+                .manifest_reads
+                .lock()
+                .expect("manifest read lock")
+                .get(reference)
+                .copied()
+                .unwrap_or_default()
         }
     }
 
@@ -2696,22 +2694,36 @@ mod tests {
                 .body(Body::from(body))
                 .expect("build OCI referrers response");
         }
-        if let Some(reference) = path.strip_prefix("v2/policy/manifests/")
-            && let Some((digest, bytes)) = fixture.manifests.get(reference)
-        {
-            let builder = Response::builder()
-                .status(StatusCode::OK)
-                .header("content-type", OCI_MANIFEST_MEDIA_TYPE)
-                .header(
-                    HeaderName::from_static("docker-content-digest"),
-                    HeaderValue::from_str(digest).expect("valid manifest digest"),
-                );
-            let body = if method == axum::http::Method::HEAD {
-                Body::empty()
-            } else {
-                Body::from(bytes.clone())
-            };
-            return builder.body(body).expect("build OCI manifest response");
+        if let Some(reference) = path.strip_prefix("v2/policy/manifests/") {
+            let snapshot = fixture
+                .manifest_snapshots
+                .get(reference)
+                .and_then(|snapshots| {
+                    if method != axum::http::Method::GET {
+                        return snapshots.first();
+                    }
+                    let mut reads = fixture.manifest_reads.lock().expect("manifest read lock");
+                    let index = reads.entry(reference.to_owned()).or_default();
+                    let snapshot = snapshots.get((*index).min(snapshots.len().saturating_sub(1)));
+                    *index = index.saturating_add(1);
+                    snapshot
+                });
+            let manifest = snapshot.or_else(|| fixture.manifests.get(reference));
+            if let Some((digest, bytes)) = manifest {
+                let builder = Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", OCI_MANIFEST_MEDIA_TYPE)
+                    .header(
+                        HeaderName::from_static("docker-content-digest"),
+                        HeaderValue::from_str(digest).expect("valid manifest digest"),
+                    );
+                let body = if method == axum::http::Method::HEAD {
+                    Body::empty()
+                } else {
+                    Body::from(bytes.clone())
+                };
+                return builder.body(body).expect("build OCI manifest response");
+            }
         }
         if let Some(digest) = path.strip_prefix("v2/policy/blobs/")
             && let Some(bytes) = fixture.blobs.get(digest)
@@ -2830,28 +2842,50 @@ mod tests {
         } else {
             valid_signature.clone()
         };
-        let rekor_certificate = if mutation == FixtureMutation::RekorCertificate {
+        let rekor_certificate = if matches!(
+            mutation,
+            FixtureMutation::RekorCertificate | FixtureMutation::RekorCertificateSnapshot
+        ) {
             TEST_FULCIO_ROOT
         } else {
             TEST_SIGNER_CERT
         };
+        let hash_algorithm = match mutation {
+            FixtureMutation::RekorSha384 => "sha384",
+            FixtureMutation::RekorSha512 => "sha512",
+            _ => "sha256",
+        };
         let rekor_payload_hash = if mutation == FixtureMutation::RekorPayloadHash {
             "0".repeat(64)
         } else {
-            hex::encode(Sha256::digest(&simple_signing_bytes))
+            match hash_algorithm {
+                "sha384" => hex::encode(sha2::Sha384::digest(&simple_signing_bytes)),
+                "sha512" => hex::encode(sha2::Sha512::digest(&simple_signing_bytes)),
+                _ => hex::encode(Sha256::digest(&simple_signing_bytes)),
+            }
+        };
+        let rekor_kind = if mutation == FixtureMutation::RekorKind {
+            "rekord"
+        } else {
+            "hashedrekord"
         };
         let rekor_body = json!({
             "apiVersion": "0.0.1",
-            "kind": "hashedrekord",
+            "kind": rekor_kind,
             "spec": {
                 "data": {
                     "hash": {
-                        "algorithm": "sha256",
+                        "algorithm": hash_algorithm,
                         "value": rekor_payload_hash,
                     }
                 },
                 "signature": {
                     "content": rekor_signature,
+                    "format": if mutation == FixtureMutation::RekorWrongFormat {
+                        "pgp"
+                    } else {
+                        "x509"
+                    },
                     "publicKey": {
                         "content": base64::engine::general_purpose::STANDARD.encode(rekor_certificate),
                     }
@@ -2884,7 +2918,7 @@ mod tests {
                 .expect("test signer cert is UTF-8"),
             "dev.sigstore.cosign/bundle": rekor_bundle,
         });
-        let signature_manifest = serde_json::to_vec(&json!({
+        let signature_manifest_value = json!({
             "schemaVersion": 2,
             "mediaType": OCI_MANIFEST_MEDIA_TYPE,
             "config": descriptor(&empty_config, OCI_EMPTY_CONFIG_MEDIA_TYPE),
@@ -2894,10 +2928,37 @@ mod tests {
                 "size": simple_signing_bytes.len(),
                 "annotations": signature_annotations,
             }],
-        }))
-        .expect("serialize cosign signature manifest");
+        });
+        let signature_manifest = serde_json::to_vec(&signature_manifest_value)
+            .expect("serialize cosign signature manifest");
         let signature_manifest_digest = digest(&signature_manifest);
         let signature_tag = artifact_digest.replace(':', "-") + ".sig";
+        let mut manifest_snapshots = std::collections::HashMap::new();
+        if mutation == FixtureMutation::RekorCertificateSnapshot {
+            let mut changed_snapshot = signature_manifest_value.clone();
+            changed_snapshot["layers"][0]["annotations"]["dev.sigstore.cosign/certificate"] =
+                serde_json::Value::String(
+                    std::str::from_utf8(TEST_FULCIO_ROOT)
+                        .expect("test Fulcio root is UTF-8")
+                        .to_owned(),
+                );
+            let changed_snapshot = serde_json::to_vec(&changed_snapshot)
+                .expect("serialize changed signature tag snapshot");
+            manifest_snapshots.insert(
+                signature_tag.clone(),
+                vec![
+                    (
+                        signature_manifest_digest.clone(),
+                        signature_manifest.clone(),
+                    ),
+                    (
+                        signature_manifest_digest.clone(),
+                        signature_manifest.clone(),
+                    ),
+                    (digest(&changed_snapshot), changed_snapshot),
+                ],
+            );
+        }
 
         let mut blobs = std::collections::HashMap::from([
             (digest(&empty_config), empty_config.to_vec()),
@@ -2923,6 +2984,8 @@ mod tests {
         (
             LocalRegistryFixture {
                 manifests,
+                manifest_snapshots,
+                manifest_reads: std::sync::Mutex::new(std::collections::HashMap::new()),
                 blobs,
                 referrers: std::collections::HashMap::new(),
             },
@@ -2936,6 +2999,92 @@ mod tests {
         WrongSubject,
         BadSignature,
         Artifact,
+    }
+
+    #[derive(Clone, Copy)]
+    enum AdditionalLegacyCandidate {
+        MismatchedPayloadHash,
+        MalformedCertificate,
+    }
+
+    fn build_local_registry_mixed_legacy_fixture(
+        policy_bytes: &[u8],
+        additional: AdditionalLegacyCandidate,
+    ) -> (LocalRegistryFixture, String) {
+        use serde_json::json;
+        use sha2::{Digest, Sha256};
+
+        fn digest(bytes: &[u8]) -> String {
+            format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
+        }
+
+        let (mut valid_fixture, artifact_digest) =
+            build_local_registry_fixture(policy_bytes, FixtureMutation::None);
+        let additional_mutation = match additional {
+            AdditionalLegacyCandidate::MismatchedPayloadHash => FixtureMutation::RekorPayloadHash,
+            AdditionalLegacyCandidate::MalformedCertificate => FixtureMutation::None,
+        };
+        let (additional_fixture, additional_digest) =
+            build_local_registry_fixture(policy_bytes, additional_mutation);
+        assert_eq!(artifact_digest, additional_digest);
+        let signature_tag = artifact_digest.replace(':', "-") + ".sig";
+        let valid_manifest = valid_fixture
+            .manifests
+            .get(&signature_tag)
+            .expect("valid legacy signature manifest")
+            .1
+            .clone();
+        let additional_manifest = additional_fixture
+            .manifests
+            .get(&signature_tag)
+            .expect("additional legacy signature manifest")
+            .1
+            .clone();
+        let mut valid_manifest: serde_json::Value =
+            serde_json::from_slice(&valid_manifest).expect("parse valid signature manifest");
+        let additional_manifest: serde_json::Value = serde_json::from_slice(&additional_manifest)
+            .expect("parse additional signature manifest");
+        let mut additional_layer = additional_manifest["layers"][0].clone();
+        if matches!(additional, AdditionalLegacyCandidate::MalformedCertificate) {
+            additional_layer["annotations"]["dev.sigstore.cosign/certificate"] =
+                json!("not a PEM certificate");
+        }
+        valid_manifest["layers"]
+            .as_array_mut()
+            .expect("signature manifest layers")
+            .push(additional_layer);
+        let manifest_bytes =
+            serde_json::to_vec(&valid_manifest).expect("serialize multi-signature manifest");
+        let manifest_digest = digest(&manifest_bytes);
+        valid_fixture
+            .manifests
+            .insert(signature_tag, (manifest_digest, manifest_bytes));
+        valid_fixture.blobs.extend(additional_fixture.blobs);
+        (valid_fixture, artifact_digest)
+    }
+
+    fn build_local_registry_referrer_with_bad_legacy_fixture(
+        policy_bytes: &[u8],
+    ) -> (LocalRegistryFixture, String) {
+        let (mut referrer_fixture, artifact_digest) =
+            build_local_registry_bundle_fixture(policy_bytes, BundleFixtureMutation::None);
+        let (legacy_fixture, legacy_digest) =
+            build_local_registry_fixture(policy_bytes, FixtureMutation::RekorCertificateSnapshot);
+        assert_eq!(artifact_digest, legacy_digest);
+        let signature_tag = artifact_digest.replace(':', "-") + ".sig";
+        let legacy_manifest = legacy_fixture
+            .manifests
+            .get(&signature_tag)
+            .expect("invalid legacy signature manifest")
+            .clone();
+        referrer_fixture
+            .manifests
+            .insert(signature_tag, legacy_manifest);
+        referrer_fixture
+            .manifest_snapshots
+            .extend(legacy_fixture.manifest_snapshots);
+        referrer_fixture.blobs.extend(legacy_fixture.blobs);
+        (referrer_fixture, artifact_digest)
     }
 
     fn build_local_registry_bundle_fixture(
@@ -3173,6 +3322,8 @@ mod tests {
         (
             LocalRegistryFixture {
                 manifests,
+                manifest_snapshots: std::collections::HashMap::new(),
+                manifest_reads: std::sync::Mutex::new(std::collections::HashMap::new()),
                 blobs,
                 referrers,
             },
@@ -3186,7 +3337,23 @@ mod tests {
         signer_policy: &SignerPolicyConfig,
     ) -> Result<VerifiedAllowlist, FetchError> {
         let (fixture, digest) = build_local_registry_fixture(policy_bytes, mutation);
+        verify_local_fixture(fixture, digest, signer_policy).await
+    }
+
+    async fn verify_local_fixture(
+        fixture: LocalRegistryFixture,
+        digest: String,
+        signer_policy: &SignerPolicyConfig,
+    ) -> Result<VerifiedAllowlist, FetchError> {
         let registry = LocalRegistry::start(fixture).await;
+        verify_local_fixture_at_registry(&registry, digest, signer_policy).await
+    }
+
+    async fn verify_local_fixture_at_registry(
+        registry: &LocalRegistry,
+        digest: String,
+        signer_policy: &SignerPolicyConfig,
+    ) -> Result<VerifiedAllowlist, FetchError> {
         let artifact_ref = OciArtifactRef {
             registry: registry.address.clone(),
             repository: "policy".into(),
@@ -3208,20 +3375,7 @@ mod tests {
         signer_policy: &SignerPolicyConfig,
     ) -> Result<VerifiedAllowlist, FetchError> {
         let (fixture, digest) = build_local_registry_bundle_fixture(policy_bytes, mutation);
-        let registry = LocalRegistry::start(fixture).await;
-        let artifact_ref = OciArtifactRef {
-            registry: registry.address.clone(),
-            repository: "policy".into(),
-            digest,
-            artifact_type: EGRESS_ALLOWLIST_V1_MEDIA_TYPE.into(),
-        };
-        verify_via_sigstore_with_root::<EgressKind, _>(
-            &artifact_ref,
-            signer_policy,
-            &test_trust_root(),
-            true,
-        )
-        .await
+        verify_local_fixture(fixture, digest, signer_policy).await
     }
 
     #[tokio::test]
@@ -3291,10 +3445,16 @@ mod tests {
             ),
         ] {
             assert!(
-                verify_local_signed_policy(canonical_doc().as_bytes(), mutation, &matching_policy)
-                    .await
-                    .is_err(),
-                "{description} in a validly signed SET must fail"
+                matches!(
+                    verify_local_signed_policy(
+                        canonical_doc().as_bytes(),
+                        mutation,
+                        &matching_policy,
+                    )
+                    .await,
+                    Err(FetchError::SignatureVerifyFailed(_))
+                ),
+                "{description} in a validly signed SET must fail as a signature error"
             );
         }
 
@@ -3310,6 +3470,71 @@ mod tests {
                 Err(FetchError::CanonicalFormViolation(_))
             ),
             "signed noncanonical policy bytes must be rejected"
+        );
+
+        for mutation in [
+            FixtureMutation::RekorKind,
+            FixtureMutation::RekorSha384,
+            FixtureMutation::RekorSha512,
+        ] {
+            verify_local_signed_policy(canonical_doc().as_bytes(), mutation, &matching_policy)
+                .await
+                .expect("supported SET-signed Rekor format should verify");
+        }
+        assert!(
+            verify_local_signed_policy(
+                canonical_doc().as_bytes(),
+                FixtureMutation::RekorWrongFormat,
+                &matching_policy,
+            )
+            .await
+            .is_err(),
+            "non-x509 Rekor signature formats must fail"
+        );
+        let (snapshot_fixture, digest) = build_local_registry_fixture(
+            canonical_doc().as_bytes(),
+            FixtureMutation::RekorCertificateSnapshot,
+        );
+        let signature_tag = digest.replace(':', "-") + ".sig";
+        let registry = LocalRegistry::start(snapshot_fixture).await;
+        assert!(
+            verify_local_fixture_at_registry(&registry, digest, &matching_policy)
+                .await
+                .is_err(),
+            "a later mutable .sig tag snapshot must not substitute a different certificate"
+        );
+        assert_eq!(
+            registry.manifest_reads(&signature_tag),
+            2,
+            "Sigstore reads its signature manifest twice; Kars must not make a third mutable-tag read"
+        );
+    }
+
+    #[tokio::test]
+    async fn signed_oci_verification_keeps_any_valid_candidate_semantics() {
+        let matching_policy = test_signer_policy(TEST_ISSUER, TEST_SUBJECT);
+        for additional in [
+            AdditionalLegacyCandidate::MismatchedPayloadHash,
+            AdditionalLegacyCandidate::MalformedCertificate,
+        ] {
+            let (fixture, digest) =
+                build_local_registry_mixed_legacy_fixture(canonical_doc().as_bytes(), additional);
+            verify_local_fixture(fixture, digest, &matching_policy)
+                .await
+                .expect("an unrelated invalid legacy signature must not reject a valid signature");
+        }
+
+        let (fixture, digest) =
+            build_local_registry_referrer_with_bad_legacy_fixture(canonical_doc().as_bytes());
+        let signature_tag = digest.replace(':', "-") + ".sig";
+        let registry = LocalRegistry::start(fixture).await;
+        verify_local_fixture_at_registry(&registry, digest, &matching_policy)
+            .await
+            .expect("a valid OCI referrer must survive an invalid legacy candidate");
+        assert_eq!(
+            registry.manifest_reads(&signature_tag),
+            2,
+            "mixed verification must not refetch the changed legacy tag"
         );
     }
 
