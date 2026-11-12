@@ -5,7 +5,7 @@
 
 const { spawn } = require("node:child_process");
 const { existsSync } = require("node:fs");
-const { mkdtemp, mkdir, readFile, rm, stat, writeFile } = require("node:fs/promises");
+const { mkdtemp, mkdir, open, readFile, rm, writeFile } = require("node:fs/promises");
 const { createRequire } = require("node:module");
 const { tmpdir } = require("node:os");
 const { isAbsolute, join, relative, sep } = require("node:path");
@@ -92,6 +92,33 @@ function completedBuilds(output) {
   return (output.match(/built in/g) || []).length;
 }
 
+async function readStableSnapshot(filePath) {
+  let handle;
+  try {
+    handle = await open(filePath, "r");
+    const before = await handle.stat({ bigint: true });
+    const contents = await handle.readFile("utf8");
+    const after = await handle.stat({ bigint: true });
+    if (
+      before.dev !== after.dev ||
+      before.ino !== after.ino ||
+      before.size !== after.size ||
+      before.mtimeNs !== after.mtimeNs ||
+      before.ctimeNs !== after.ctimeNs
+    ) {
+      return null;
+    }
+    return {
+      contents,
+      mtimeMs: Number(after.mtimeNs) / 1_000_000,
+    };
+  } finally {
+    if (handle) {
+      await handle.close();
+    }
+  }
+}
+
 async function waitForCopiedBundle({
   child,
   getOutput,
@@ -113,21 +140,19 @@ async function waitForCopiedBundle({
     }
     if (completedBuilds(getOutput()) >= builds) {
       try {
-        const [sourceStats, copiedStats] = await Promise.all([
-          stat(bundlePath),
-          stat(copiedBundlePath),
+        const [sourceSnapshot, copiedSnapshot] = await Promise.all([
+          readStableSnapshot(bundlePath),
+          readStableSnapshot(copiedBundlePath),
         ]);
         if (
-          sourceStats.mtimeMs >= notBefore - 1_000 &&
-          copiedStats.mtimeMs >= notBefore - 1_000
+          sourceSnapshot &&
+          copiedSnapshot &&
+          sourceSnapshot.mtimeMs >= notBefore - 1_000 &&
+          copiedSnapshot.mtimeMs >= notBefore - 1_000 &&
+          sourceSnapshot.contents === copiedSnapshot.contents &&
+          sourceSnapshot.contents.includes(fixtureMarker)
         ) {
-          const [sourceBundle, copiedBundle] = await Promise.all([
-            readFile(bundlePath, "utf8"),
-            readFile(copiedBundlePath, "utf8"),
-          ]);
-          if (sourceBundle === copiedBundle && sourceBundle.includes(fixtureMarker)) {
-            return;
-          }
+          return;
         }
       } catch (error) {
         if (error.code !== "ENOENT") {
