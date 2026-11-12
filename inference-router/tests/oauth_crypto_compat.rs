@@ -167,6 +167,53 @@ struct RsaFixture {
     wrong_salt_tokens: BTreeMap<String, String>,
 }
 
+#[derive(serde::Deserialize)]
+struct EcdsaFixture {
+    algorithm: String,
+    curve: String,
+    x: String,
+    y: String,
+    tokens: Vec<String>,
+}
+
+#[test]
+fn legacy_ecdsa_jwk_signatures_remain_compatible() {
+    kars_inference_router::install_jsonwebtoken_crypto_provider();
+    let fixtures: Vec<EcdsaFixture> =
+        serde_json::from_str(include_str!("fixtures/oauth/ecdsa-compat.json")).unwrap();
+    assert_eq!(fixtures.len(), 2);
+    for fixture in fixtures {
+        let algorithm: Algorithm = serde_json::from_value(json!(fixture.algorithm)).unwrap();
+        let jwk = json!({
+            "kty": "EC",
+            "crv": fixture.curve,
+            "x": fixture.x,
+            "y": fixture.y,
+            "alg": fixture.algorithm,
+            "kid": "oauth-ec-compat-2026",
+            "use": "sig",
+        });
+        let config = fixture_config(
+            algorithm,
+            JwkSet {
+                keys: vec![serde_json::from_value(jwk).unwrap()],
+            },
+        );
+        let mut wrong_audience = config.clone();
+        wrong_audience.expected_audience = "https://wrong-audience.example.com".into();
+        assert_eq!(fixture.tokens.len(), 2);
+        assert_ne!(fixture.tokens[0], fixture.tokens[1]);
+        for token in fixture.tokens {
+            let verified = verify_access_token(&token, &config)
+                .unwrap_or_else(|error| panic!("{algorithm:?} fixture rejected: {error:?}"));
+            assert_eq!(verified.subject, "oauth-fixture-user");
+            assert!(verify_access_token(&alter_token_signature(&token), &config).is_err());
+            assert!(verify_access_token(&alter_token_subject(&token), &config).is_err());
+            assert!(verify_access_token(&token, &wrong_audience).is_err());
+        }
+    }
+}
+
 #[test]
 fn legacy_rsa_jwk_sizes_and_algorithms_remain_compatible() {
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};

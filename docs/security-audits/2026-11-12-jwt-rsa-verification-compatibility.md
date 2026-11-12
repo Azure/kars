@@ -92,12 +92,15 @@ fallback is introduced.
   primitive probe also verified signatures with 1,024 leading zero bytes in
   both public components and checked the old exponent bounds.
 - Candidate: `cargo test --locked --offline --package kars-inference-router
-  --test oauth_crypto_compat` passed eight tests. Coverage includes the actual Kars
+  --test oauth_crypto_compat` passed nine tests. Coverage includes the actual Kars
   `verify_access_token` API, PKCS#1 DER/PEM and SPKI PEM, tampered claims and
   signatures, malformed lengths/DER, wrong key family/audience, padded public
   components including 1,024 leading zero bytes, invalid/empty components,
-  over-limit moduli/exponents, non-JOSE PSS salt lengths, and Ed25519 keys with
-  0, 1, or 1,024 trailing bytes; incorrect and short Ed25519 keys are rejected.
+  over-limit moduli/exponents, non-JOSE PSS salt lengths, ES256/ES384 high- and
+  low-S signatures, and Ed25519 keys with 0, 1, or 1,024 trailing bytes;
+  incorrect and short Ed25519 keys are rejected. The ECDSA public-only fixtures
+  were generated with the former provider's RustCrypto curve libraries and
+  verified by that provider before candidate verification.
   Wrong-salt fixtures are real signatures generated and rejected by the former
   RSA implementation, not random bytes.
 - A session-only provider differential probe compared 704 generated
