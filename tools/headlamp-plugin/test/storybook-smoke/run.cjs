@@ -11,6 +11,13 @@ const fixtureMarker = "Webpack dev server smoke test";
 const storyTitle = "Security/webpack-dev-middleware";
 const timeoutMs = 120_000;
 
+function getWebpackAssetReferences(asset, baseUrl) {
+  const paths = [
+    ...asset.matchAll(/["'`]([^"'`]*\.iframe\.bundle\.js(?:\?[^"'`]*)?)["'`]/g),
+  ].map((match) => new URL(match[1], baseUrl));
+  return paths.filter((url) => url.origin === new URL(baseUrl).origin);
+}
+
 async function getAvailablePort() {
   const server = createServer();
   await new Promise((resolve, reject) => {
@@ -64,7 +71,13 @@ async function main() {
       "--port",
       String(port),
     ],
-    { stdio: "inherit" },
+    {
+      stdio: "inherit",
+      env: {
+        ...process.env,
+        STORYBOOK_DISABLE_TELEMETRY: "1",
+      },
+    },
   );
   let spawnError;
   server.once("error", (error) => {
@@ -72,7 +85,6 @@ async function main() {
   });
 
   let lastFailure = "Storybook did not publish the fixture story";
-  let loggedAssets = false;
   const deadline = Date.now() + timeoutMs;
   try {
     while (Date.now() < deadline) {
@@ -121,36 +133,61 @@ async function main() {
       const assetPaths = [...new Set(assetReferences)]
         .filter((url) => url.origin === new URL(baseUrl).origin);
 
-      const logAssetDetails = !loggedAssets;
-      if (logAssetDetails) {
-        const paths = assetPaths.map((url) => url.pathname).join(", ") || "(none)";
-        console.log(`Storybook fixture ${story.id}; iframe assets: ${paths}`);
-        console.log(`Storybook iframe HTML: ${iframeHtml.slice(0, 3_000).replace(/\s+/g, " ")}`);
-        loggedAssets = true;
+      const webpackAssets = assetPaths.filter((url) => url.pathname.endsWith(".iframe.bundle.js"));
+      if (webpackAssets.length === 0) {
+        lastFailure = `Storybook iframe for ${story.id} did not reference a Webpack bundle`;
+        await delay(1_000);
+        continue;
       }
 
-      for (const assetUrl of assetPaths) {
+      console.log(`Storybook fixture ${story.id}; initial Webpack assets: ${webpackAssets.map((url) => url.pathname).join(", ")}`);
+      const candidates = [...webpackAssets];
+      const seen = new Set();
+      let unavailableAsset = false;
+      for (let index = 0; index < candidates.length && index < 100; index += 1) {
+        const assetUrl = candidates[index];
+        if (seen.has(assetUrl.href)) {
+          continue;
+        }
+        seen.add(assetUrl.href);
+
         const assetResponse = await tryFetch(assetUrl);
         if (!assetResponse?.ok || !assetResponse.headers.get("content-type")?.includes("javascript")) {
-          if (logAssetDetails) {
-            const status = assetResponse?.status ?? "unavailable";
-            const type = assetResponse?.headers.get("content-type") ?? "unavailable";
-            console.log(`Skipped ${assetUrl.pathname}: HTTP ${status}, content-type ${type}`);
-          }
+          unavailableAsset = true;
+          console.log(`Skipped ${assetUrl.pathname}: HTTP ${assetResponse?.status ?? "unavailable"}`);
           continue;
         }
 
         const asset = await assetResponse.text();
-        if (logAssetDetails) {
-          console.log(`Fetched ${assetUrl.pathname}: ${asset.length} JavaScript characters; fixture marker ${asset.includes(fixtureMarker) ? "found" : "not found"}`);
-        }
+        console.log(`Fetched ${assetUrl.pathname}: fixture marker ${asset.includes(fixtureMarker) ? "found" : "not found"}`);
         if (asset.includes(fixtureMarker)) {
           console.log(`Storybook served the compiled fixture asset at ${assetUrl.pathname}`);
           return;
         }
+
+        const references = getWebpackAssetReferences(asset, baseUrl);
+        if (references.length > 0) {
+          console.log(`Webpack chunks referenced by ${assetUrl.pathname}: ${references.map((url) => url.pathname).join(", ")}`);
+        }
+        const chunkIds = [...new Set([...asset.matchAll(/\.e\((\d+)\)/g)].map((match) => match[1]))];
+        if (chunkIds.length > 0) {
+          console.log(`Webpack lazy chunk IDs in ${assetUrl.pathname}: ${chunkIds.join(", ")}`);
+        }
+        for (const reference of references) {
+          if (!seen.has(reference.href)) {
+            candidates.push(reference);
+          }
+        }
       }
 
-      lastFailure = "No Webpack-served JavaScript asset contained the fixture marker";
+      if (candidates.length >= 100) {
+        throw new Error("Storybook Webpack asset graph exceeded the 100-asset smoke-test limit");
+      }
+      if (!unavailableAsset) {
+        throw new Error(`No Storybook Webpack chunk contained the fixture marker; fetched ${seen.size} assets`);
+      }
+
+      lastFailure = "A Storybook Webpack asset is not ready yet";
       await delay(1_000);
     }
 
