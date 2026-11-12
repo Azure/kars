@@ -11,7 +11,8 @@ people (author + an independent reviewer).
 
 Capability paths (see the gate for the exact regex): controller CRD/reconcilers/
 admission, inference-router mcp/a2a/providers/routes, CLI commands/migrate/
-adapters, OpenClaw runtime core, sandbox-image Dockerfiles/entrypoints, seccomp
+adapters, OpenClaw runtime core, the shared mesh plugin and OpenClaw runtime
+`package-lock.json` files, sandbox-image Dockerfiles/entrypoints, seccomp
 profiles, and bundled Helm files. Test files are exempt.
 
 ## How to add one
@@ -102,6 +103,22 @@ nevertheless invokes its source-bound checks; later historical record edits do
 not reopen it. Earlier approvals remain unchanged. Offline tests are not native
 container qualification, and no branch-protection change is authorized.
 
+For Azure/kars#622, the maintainer selected **“Publish, sign off, merge after checks, and release; allow the temporary review-only exception if needed”**
+to authorize the four-file OpenClaw npm registry repair at source
+`28ca292c01bbd4310af90563fc2496281fce7141` against integration base
+`af5ff64796898060f8f9d4a9dc853013f1d51981`. Its separate record is
+[`2026-11-12-openclaw-npm-registry.md`](2026-11-12-openclaw-npm-registry.md).
+Only 131 registry URL prefixes change across the two dependency locks; dependency
+versions, integrity hashes, vendored AGT archives and lifecycle restrictions remain
+unchanged. Those two exact lockfile paths now use the ordinary capability gate,
+not the workflow-only voluntary-record handling for PR621. This is an explicitly
+authorized maintainer sign-off, not independent human or security review. Only if
+normal merging refuses for review requirements may the publisher use the user's
+temporary review-only exception for this PR; restore full protection immediately.
+Required checks, scans, signed-release verification and fresh-Kind acceptance are
+not waived. This permission changes no earlier approval or repository protection
+by itself; the gate does not implement a branch-protection bypass.
+
 For each exception, the gate requires its exact committed record, signer and source/base marker,
 the exact review base, and the approved source as an ancestor. Every tracked
 file must match that source except the four explicitly reviewed approval-plumbing
@@ -113,7 +130,7 @@ changed base, implementation, workflows, unrelated documents or new files are no
 There is no configurable source SHA, signer or waiver environment variable.
 
 Future capability changes still need a new record with two distinct human
-signers. The exception grants neither merge/release authorization nor technical
+signers. The gate exception itself grants neither merge/release authorization nor technical
 acceptance: all technical gates, signed-release checks and fresh-system customer
 journeys remain required. Remove the one-time exception when this beta approval
 no longer needs to be evaluated; do not repoint it at a later source revision.

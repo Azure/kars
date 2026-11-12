@@ -235,7 +235,8 @@ class SecurityAuditGateTests(GitFixture):
                    "docs/security-audits/2026-11-10-kind-local-onboarding.md",
                    "docs/security-audits/2026-11-11-headlamp-go-release-repair.md",
                    "docs/security-audits/2026-11-12-openclaw-sdk-compare.md",
-                   "docs/security-audits/2026-11-12-playwright-native-release.md")
+                   "docs/security-audits/2026-11-12-playwright-native-release.md",
+                   "docs/security-audits/2026-11-12-openclaw-npm-registry.md")
         self.approved_beta()
         for other in records:
             if other != self.audit:
@@ -250,7 +251,7 @@ class SecurityAuditGateTests(GitFixture):
 
     def test_other_beta_pr_cannot_use_this_approval(self):
         self.approved_beta()
-        for other in ("593", "606", "607", "608", "617", "621"):
+        for other in ("593", "606", "607", "608", "617", "621", "622"):
             if other != self.pr_number:
                 with self.subTest(pr=other):
                     result = self.beta_gate(GITHUB_ACTIONS="true", GITHUB_REPOSITORY="Azure/kars",
@@ -333,6 +334,42 @@ class PlaywrightNativeReleaseAuditGateTests(SecurityAuditGateTests):
         self.workflow_only()
         self.commit()
         self.assertEqual(self.gate().returncode, 0)
+
+
+class OpenClawNpmRegistryAuditGateTests(SecurityAuditGateTests):
+    audit = "docs/security-audits/2026-11-12-openclaw-npm-registry.md"
+    pr_number = "622"
+    source_head = "28ca292c01bbd4310af90563fc2496281fce7141"
+    source_base = "af5ff64796898060f8f9d4a9dc853013f1d51981"
+
+    def capability(self):
+        self.write("mesh-plugin/package-lock.json", '{"lockfileVersion": 3}\n')
+        self.write("runtimes/openclaw/package-lock.json", '{"lockfileVersion": 3}\n')
+
+    def assert_lock_requires_approval(self, path):
+        self.write(path, '{"lockfileVersion": 3}\n')
+        self.commit()
+        result = self.gate()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("no new docs/security-audits/", result.stderr)
+        self.assertIn(path, result.stderr)
+
+    def test_mesh_lock_requires_new_capability_approval(self):
+        self.assert_lock_requires_approval("mesh-plugin/package-lock.json")
+
+    def test_runtime_lock_requires_new_capability_approval(self):
+        self.assert_lock_requires_approval("runtimes/openclaw/package-lock.json")
+
+    def test_either_lock_change_invalidates_exact_source_approval(self):
+        self.approved_beta()
+        for path in ("mesh-plugin/package-lock.json", "runtimes/openclaw/package-lock.json"):
+            with self.subTest(path=path):
+                self.write(path, '{"lockfileVersion": 3, "unapproved": true}\n')
+                self.commit()
+                self.assertEqual(self.beta_gate().returncode, 1)
+                self.write(path, '{"lockfileVersion": 3}\n')
+                self.commit()
+                self.assertEqual(self.beta_gate().returncode, 0)
 
 
 if __name__ == "__main__":

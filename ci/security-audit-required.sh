@@ -17,7 +17,7 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
 # Capability-introducing paths — mirrors §4.4 of the plan.
-CAP_RE='^(controller/src/(crd|reconcilers|admission)|inference-router/src/(mcp|a2a|providers|routes)|cli/src/(commands|migrate|adapters)|runtimes/openclaw/src/(core|index\.ts)|sandbox-images/[^/]+/(Dockerfile|entrypoint\.sh)|cli/profiles/|deploy/seccomp/|deploy/helm/kars/files/|shared/.*\.rs$|bridge/(bff/src/|web/src/|teams-gateway/src/|deploy/|[^/]+/Dockerfile|start-bff\.sh))'
+CAP_RE='^(controller/src/(crd|reconcilers|admission)|inference-router/src/(mcp|a2a|providers|routes)|cli/src/(commands|migrate|adapters)|runtimes/openclaw/src/(core|index\.ts)|(mesh-plugin|runtimes/openclaw)/package-lock\.json$|sandbox-images/[^/]+/(Dockerfile|entrypoint\.sh)|cli/profiles/|deploy/seccomp/|deploy/helm/kars/files/|shared/.*\.rs$|bridge/(bff/src/|web/src/|teams-gateway/src/|deploy/|[^/]+/Dockerfile|start-bff\.sh))'
 
 if ! changed=$(git diff --no-ext-diff --name-only "${BASE_REF}...HEAD"); then
   echo "fail: cannot determine the reviewed capability diff." >&2
@@ -76,6 +76,10 @@ beta_approval_exception() {
       approved_head=efadcd4932c08844a94e62080e45b6256c29a58a
       approved_base=01548f2c365a94ca2016987f03a496a237ea46ff
       approved_pr=621 ;;
+    docs/security-audits/2026-11-12-openclaw-npm-registry.md)
+      approved_head=28ca292c01bbd4310af90563fc2496281fce7141
+      approved_base=af5ff64796898060f8f9d4a9dc853013f1d51981
+      approved_pr=622 ;;
     *) return 1 ;;
   esac
   [[ "$(git rev-parse --verify "${BASE_REF}^{commit}")" == "$approved_base" ]] || return 1
