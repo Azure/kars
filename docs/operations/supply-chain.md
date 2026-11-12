@@ -59,6 +59,9 @@ and audit rows; the Headlamp plugin has a build row.
   - `RUSTSEC-2023-0071` (rsa Marvin timing attack) — pulled by
     Sigstore's OpenID Connect flow; JWT verification uses AWS-LC.
     Kars's remaining RSA use verifies signatures against public keys.
+    AWS-LC rejects RSA JWKs below 2048 bits; the former JWT RustCrypto
+    backend accepted 1024-bit keys. OAuth issuers must use at least
+    2048-bit RSA keys after the provider switch.
   - `RUSTSEC-2024-0449` (unsafe-libyaml unmaintained) — pulled by
     `serde_yaml` via kube, AGT `agentmesh`, and Kars crates. Expires
     2027-02-04; tracked in Azure/kars#595.
