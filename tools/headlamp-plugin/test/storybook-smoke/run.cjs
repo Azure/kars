@@ -11,6 +11,7 @@ const { createServer } = require("node:net");
 const { setTimeout: delay } = require("node:timers/promises");
 
 const fixtureMarker = "Webpack dev server smoke test";
+const fixtureAsset = "webpack-dev-middleware-stories.iframe.bundle.js";
 const storyTitle = "Security/webpack-dev-middleware";
 const timeoutMs = 120_000;
 
@@ -158,32 +159,30 @@ async function main() {
       if (manifest.hasErrors) {
         throw new Error("Storybook's Webpack compilation reported errors");
       }
-      if (manifest.storyAssets.length === 0) {
-        throw new Error("Webpack did not emit an asset containing the fixture story module");
+      if (!manifest.storyAssets.includes(fixtureAsset)) {
+        throw new Error(`Webpack did not emit the expected fixture asset: ${manifest.storyAssets.join(", ")}`);
       }
 
       console.log(`Storybook fixture ${story.id}; emitted story chunk(s): ${manifest.storyAssets.join(", ")}`);
-      for (const asset of manifest.storyAssets) {
-        const assetUrl = new URL(asset, baseUrl);
-        if (assetUrl.origin !== baseOrigin || assetUrl.username || assetUrl.password) {
-          throw new Error(`Webpack emitted a nonlocal fixture chunk URL: ${assetUrl.href}`);
-        }
-        const assetResponse = await tryFetch(assetUrl);
-        if (!assetResponse?.ok) {
-          throw new Error(`Storybook did not serve emitted fixture chunk ${assetUrl.pathname} (HTTP ${assetResponse?.status ?? "unavailable"})`);
-        }
-        if (!assetResponse.headers.get("content-type")?.includes("javascript")) {
-          throw new Error(`Storybook served ${assetUrl.pathname} with a non-JavaScript content type`);
-        }
-        const body = await assetResponse.text();
-        console.log(`Fetched ${assetUrl.pathname}: fixture marker ${body.includes(fixtureMarker) ? "found" : "not found"}`);
-        if (body.includes(fixtureMarker)) {
-          console.log(`Storybook served the compiled fixture asset at ${assetUrl.pathname}`);
-          return;
-        }
+      const assetUrl = new URL(fixtureAsset, baseUrl);
+      if (assetUrl.origin !== baseOrigin) {
+        throw new Error(`Fixture asset URL is not local: ${assetUrl.href}`);
+      }
+      const assetResponse = await tryFetch(assetUrl);
+      if (!assetResponse?.ok) {
+        throw new Error(`Storybook did not serve emitted fixture chunk ${assetUrl.pathname} (HTTP ${assetResponse?.status ?? "unavailable"})`);
+      }
+      if (!assetResponse.headers.get("content-type")?.includes("javascript")) {
+        throw new Error(`Storybook served ${assetUrl.pathname} with a non-JavaScript content type`);
+      }
+      const body = await assetResponse.text();
+      console.log(`Fetched ${assetUrl.pathname}: fixture marker ${body.includes(fixtureMarker) ? "found" : "not found"}`);
+      if (body.includes(fixtureMarker)) {
+        console.log(`Storybook served the compiled fixture asset at ${assetUrl.pathname}`);
+        return;
       }
 
-      throw new Error(`Storybook's emitted fixture chunk(s) did not contain the expected marker: ${manifest.storyAssets.join(", ")}`);
+      throw new Error(`Storybook's emitted fixture chunk did not contain the expected marker: ${assetUrl.pathname}`);
     }
 
     throw new Error(`Timed out after ${timeoutMs}ms: ${lastFailure}`);
