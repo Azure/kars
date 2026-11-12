@@ -891,6 +891,63 @@ mod tests {
     }
 
     #[test]
+    fn yaml_compatibility_policy_counts_and_decisions() {
+        let cases = [
+            (
+                include_bytes!("../../../cli/profiles/agt/kars-default.yaml").as_slice(),
+                10,
+                "shell:rm",
+                "shell:ls",
+            ),
+            (
+                include_bytes!("../../../cli/profiles/agt/kars-offload.yaml").as_slice(),
+                6,
+                "spawn:create:child",
+                "shell:ls",
+            ),
+        ];
+        for (yaml, expected_count, denied_action, allowed_action) in cases {
+            let dir = tempfile::tempdir().expect("create policy directory");
+            let file = dir.path().join("profile.yaml");
+            std::fs::write(&file, yaml).expect("write profile");
+            let gov = Governance::new("yaml-compatibility-test");
+            let count = gov
+                .load_policies_from_dir(dir.path().to_str().expect("UTF-8 path"))
+                .expect("load policy");
+            assert_eq!(count, expected_count);
+            assert_eq!(
+                gov.evaluate("agent", denied_action, None)["decision"],
+                "deny"
+            );
+            assert_eq!(
+                gov.evaluate("agent", allowed_action, None)["decision"],
+                "allow"
+            );
+        }
+    }
+
+    #[test]
+    fn yaml_compatibility_policy_count_fallbacks() {
+        let dir = tempfile::tempdir().expect("create policy directory");
+        let file = dir.path().join("profile.yaml");
+        for (yaml, expected_count) in [
+            ("policies: []\n", 0),
+            ("policies:\n  - name: one\n  - name: two\n", 2),
+            ("policies: not-a-list\n", 1),
+            ("policies: [\n", 1),
+            ("policies: []\npolicies: []\n", 1),
+            ("policies: []\n---\npolicies: []\n", 1),
+        ] {
+            std::fs::write(&file, yaml).expect("write policy");
+            assert_eq!(
+                Governance::count_rules_in_file(&file),
+                expected_count,
+                "{yaml}"
+            );
+        }
+    }
+
+    #[test]
     fn governance_metrics_avg_latency() {
         let m = GovernanceMetrics::new();
         assert_eq!(m.avg_eval_latency_us(), 0);

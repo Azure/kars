@@ -341,6 +341,74 @@ policies:
     }
 
     #[test]
+    fn yaml_compatibility_shipped_profiles() {
+        for (yaml, agent, count) in [
+            (
+                include_bytes!("../../../cli/profiles/agt/kars-default.yaml").as_slice(),
+                "kars-default",
+                10,
+            ),
+            (
+                include_bytes!("../../../deploy/helm/kars/files/kars-default-agt-profile.yaml")
+                    .as_slice(),
+                "kars-default",
+                10,
+            ),
+            (
+                include_bytes!("../../../cli/profiles/agt/kars-offload.yaml").as_slice(),
+                "kars-offload",
+                6,
+            ),
+        ] {
+            let profile = parse(yaml).expect("shipped profile must parse");
+            assert_eq!(profile.version, "1.0");
+            assert_eq!(profile.agent, agent);
+            assert_eq!(profile.policies_count, count);
+            assert_eq!(profile.bytes, yaml);
+        }
+    }
+
+    #[test]
+    fn yaml_compatibility_profile_scalars_and_aliases() {
+        let yaml = b"agent: &name 'worker-01'\nversion: '1.0'\npolicies:\n  - name: *name\n    allowed_actions: ['shell:ls', 'mesh:*']\n";
+        let profile = parse(yaml).expect("quoted scalars and aliases must parse");
+        assert_eq!(profile.version, "1.0");
+        assert_eq!(profile.agent, "worker-01");
+        assert_eq!(profile.policies_count, 1);
+        assert_eq!(profile.bytes, yaml);
+    }
+
+    #[test]
+    fn yaml_compatibility_rejects_ambiguous_profiles() {
+        let cases: &[(&str, &[u8])] = &[
+            (
+                "duplicate key",
+                b"version: '1.0'\nagent: a\nagent: b\npolicies: []\n",
+            ),
+            (
+                "multiple documents",
+                b"version: '1.0'\nagent: a\npolicies: []\n---\nagent: b\n",
+            ),
+            ("numeric version", b"version: 1.0\nagent: a\npolicies: []\n"),
+            ("null agent", b"version: '1.0'\nagent: null\npolicies: []\n"),
+            (
+                "mapping policies",
+                b"version: '1.0'\nagent: a\npolicies: {}\n",
+            ),
+            (
+                "broken alias",
+                b"version: '1.0'\nagent: *missing\npolicies: []\n",
+            ),
+        ];
+        for (name, yaml) in cases {
+            assert!(
+                matches!(parse(yaml), Err(FetchError::CanonicalFormViolation(_))),
+                "{name} must be rejected"
+            );
+        }
+    }
+
+    #[test]
     fn finalize_stamps_digest_and_time() {
         let mut r = parse(b"version: \"1.0\"\nagent: f\npolicies: []\n").unwrap();
         let now = SystemTime::now();
