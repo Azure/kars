@@ -3,28 +3,13 @@
 
 "use strict";
 
-const { mkdtemp, readFile, rmdir, unlink } = require("node:fs/promises");
-const { tmpdir } = require("node:os");
-const { join } = require("node:path");
 const { spawn } = require("node:child_process");
 const { createServer } = require("node:net");
 const { setTimeout: delay } = require("node:timers/promises");
 
 const fixtureMarker = "Webpack dev server smoke test";
-const fixtureAsset = "webpack-dev-middleware-stories.iframe.bundle.js";
 const storyTitle = "Security/webpack-dev-middleware";
 const timeoutMs = 120_000;
-
-async function readAssetManifest(manifestPath) {
-  try {
-    return JSON.parse(await readFile(manifestPath, "utf8"));
-  } catch (error) {
-    if (error.code === "ENOENT") {
-      return null;
-    }
-    throw error;
-  }
-}
 
 async function getAvailablePort() {
   const server = createServer();
@@ -67,8 +52,6 @@ async function main() {
   const port = await getAvailablePort();
   const baseUrl = `http://127.0.0.1:${port}/`;
   const baseOrigin = new URL(baseUrl).origin;
-  const manifestDirectory = await mkdtemp(join(tmpdir(), "kars-storybook-smoke-"));
-  const manifestPath = join(manifestDirectory, "asset-manifest.json");
   const server = spawn(
     "./node_modules/.bin/storybook",
     [
@@ -83,17 +66,29 @@ async function main() {
       String(port),
     ],
     {
-      stdio: "inherit",
+      stdio: ["inherit", "inherit", "inherit", "ipc"],
       env: {
         ...process.env,
-        KARS_STORYBOOK_SMOKE_ASSET_MANIFEST: manifestPath,
         STORYBOOK_DISABLE_TELEMETRY: "1",
       },
     },
   );
   let spawnError;
+  let assetManifest;
+  let manifestError;
   server.once("error", (error) => {
     spawnError = error;
+  });
+  server.on("message", (message) => {
+    if (message?.type !== "kars-storybook-smoke-assets") {
+      return;
+    }
+    if (typeof message.hasErrors !== "boolean" || !Array.isArray(message.storyAssets)
+      || !message.storyAssets.every((asset) => typeof asset === "string")) {
+      manifestError = new Error("Storybook sent an invalid emitted-asset manifest");
+      return;
+    }
+    assetManifest = message;
   });
 
   let lastFailure = "Storybook did not publish the fixture story";
@@ -150,52 +145,48 @@ async function main() {
         continue;
       }
 
-      const manifest = await readAssetManifest(manifestPath);
-      if (!manifest) {
-        lastFailure = "Storybook's Webpack compilation has not emitted the fixture asset manifest";
+      if (manifestError) {
+        throw manifestError;
+      }
+      if (!assetManifest) {
+        lastFailure = "Storybook's Webpack compilation has not reported the fixture asset manifest";
         await delay(1_000);
         continue;
       }
-      if (manifest.hasErrors) {
+      if (assetManifest.hasErrors) {
         throw new Error("Storybook's Webpack compilation reported errors");
       }
-      if (!manifest.storyAssets.includes(fixtureAsset)) {
-        throw new Error(`Webpack did not emit the expected fixture asset: ${manifest.storyAssets.join(", ")}`);
+      if (assetManifest.storyAssets.length === 0) {
+        throw new Error("Webpack did not emit an asset containing the fixture story module");
       }
 
-      console.log(`Storybook fixture ${story.id}; emitted story chunk(s): ${manifest.storyAssets.join(", ")}`);
-      const assetUrl = new URL(fixtureAsset, baseUrl);
-      if (assetUrl.origin !== baseOrigin) {
-        throw new Error(`Fixture asset URL is not local: ${assetUrl.href}`);
-      }
-      const assetResponse = await tryFetch(assetUrl);
-      if (!assetResponse?.ok) {
-        throw new Error(`Storybook did not serve emitted fixture chunk ${assetUrl.pathname} (HTTP ${assetResponse?.status ?? "unavailable"})`);
-      }
-      if (!assetResponse.headers.get("content-type")?.includes("javascript")) {
-        throw new Error(`Storybook served ${assetUrl.pathname} with a non-JavaScript content type`);
-      }
-      const body = await assetResponse.text();
-      console.log(`Fetched ${assetUrl.pathname}: fixture marker ${body.includes(fixtureMarker) ? "found" : "not found"}`);
-      if (body.includes(fixtureMarker)) {
-        console.log(`Storybook served the compiled fixture asset at ${assetUrl.pathname}`);
-        return;
+      console.log(`Storybook fixture ${story.id}; emitted story chunk(s): ${assetManifest.storyAssets.join(", ")}`);
+      for (const asset of assetManifest.storyAssets) {
+        const assetUrl = new URL(asset, baseUrl);
+        if (assetUrl.origin !== baseOrigin || assetUrl.username || assetUrl.password) {
+          throw new Error(`Webpack emitted a nonlocal fixture chunk URL: ${assetUrl.href}`);
+        }
+        const assetResponse = await tryFetch(assetUrl);
+        if (!assetResponse?.ok) {
+          throw new Error(`Storybook did not serve emitted fixture chunk ${assetUrl.pathname} (HTTP ${assetResponse?.status ?? "unavailable"})`);
+        }
+        if (!assetResponse.headers.get("content-type")?.includes("javascript")) {
+          throw new Error(`Storybook served ${assetUrl.pathname} with a non-JavaScript content type`);
+        }
+        const body = await assetResponse.text();
+        console.log(`Fetched ${assetUrl.pathname}: fixture marker ${body.includes(fixtureMarker) ? "found" : "not found"}`);
+        if (body.includes(fixtureMarker)) {
+          console.log(`Storybook served the compiled fixture asset at ${assetUrl.pathname}`);
+          return;
+        }
       }
 
-      throw new Error(`Storybook's emitted fixture chunk did not contain the expected marker: ${assetUrl.pathname}`);
+      throw new Error(`Storybook's emitted fixture chunk(s) did not contain the expected marker: ${assetManifest.storyAssets.join(", ")}`);
     }
 
     throw new Error(`Timed out after ${timeoutMs}ms: ${lastFailure}`);
   } finally {
     await stopServer(server);
-    for (const path of [manifestPath, `${manifestPath}.tmp`]) {
-      await unlink(path).catch((error) => {
-        if (error.code !== "ENOENT") {
-          throw error;
-        }
-      });
-    }
-    await rmdir(manifestDirectory);
   }
 }
 

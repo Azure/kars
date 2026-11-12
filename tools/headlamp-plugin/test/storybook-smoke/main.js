@@ -1,8 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-const fs = require("node:fs");
-
 function moduleContainsFixture(module) {
   if (typeof module.resource === "string" && module.resource.includes("webpack-dev-middleware.stories.js")) {
     return true;
@@ -30,16 +28,14 @@ module.exports = {
             }
           }
 
-          const manifestPath = process.env.KARS_STORYBOOK_SMOKE_ASSET_MANIFEST;
-          if (!manifestPath) {
-            throw new Error("KARS_STORYBOOK_SMOKE_ASSET_MANIFEST is required for the Storybook smoke test");
+          if (typeof process.send !== "function") {
+            throw new Error("Storybook smoke test requires an IPC channel to report emitted assets");
           }
-          const temporaryPath = `${manifestPath}.tmp`;
-          fs.writeFileSync(temporaryPath, JSON.stringify({
+          process.send({
+            type: "kars-storybook-smoke-assets",
             hasErrors: stats.hasErrors(),
             storyAssets: [...new Set(storyAssets)].filter((asset) => /\.m?js$/.test(asset)),
-          }));
-          fs.renameSync(temporaryPath, manifestPath);
+          });
         });
       },
     });
