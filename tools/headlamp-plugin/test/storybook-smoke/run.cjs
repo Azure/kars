@@ -65,6 +65,7 @@ async function stopServer(server) {
 async function main() {
   const port = await getAvailablePort();
   const baseUrl = `http://127.0.0.1:${port}/`;
+  const baseOrigin = new URL(baseUrl).origin;
   const manifestDirectory = await mkdtemp(join(tmpdir(), "kars-storybook-smoke-"));
   const manifestPath = join(manifestDirectory, "asset-manifest.json");
   const server = spawn(
@@ -164,6 +165,9 @@ async function main() {
       console.log(`Storybook fixture ${story.id}; emitted story chunk(s): ${manifest.storyAssets.join(", ")}`);
       for (const asset of manifest.storyAssets) {
         const assetUrl = new URL(asset, baseUrl);
+        if (assetUrl.origin !== baseOrigin || assetUrl.username || assetUrl.password) {
+          throw new Error(`Webpack emitted a nonlocal fixture chunk URL: ${assetUrl.href}`);
+        }
         const assetResponse = await tryFetch(assetUrl);
         if (!assetResponse?.ok) {
           throw new Error(`Storybook did not serve emitted fixture chunk ${assetUrl.pathname} (HTTP ${assetResponse?.status ?? "unavailable"})`);
