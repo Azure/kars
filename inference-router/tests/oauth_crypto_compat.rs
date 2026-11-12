@@ -367,6 +367,81 @@ fn heavily_padded_public_components_still_verify() {
 }
 
 #[test]
+fn legacy_ed25519_jwk_trailing_bytes_remain_compatible() {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use ed25519_dalek::{Signer, SigningKey};
+
+    kars_inference_router::install_jsonwebtoken_crypto_provider();
+    let signer = SigningKey::from_bytes(&[42; 32]);
+    let header = URL_SAFE_NO_PAD.encode(
+        serde_json::to_vec(&json!({
+            "alg": "EdDSA",
+            "typ": "JWT",
+            "kid": "oauth-fixture-2026",
+        }))
+        .unwrap(),
+    );
+    let claims = URL_SAFE_NO_PAD.encode(
+        serde_json::to_vec(&json!({
+            "iss": TEST_ISSUER,
+            "sub": "oauth-fixture-user",
+            "aud": TEST_AUDIENCE,
+            "exp": 4102444800_u64,
+            "scope": "mcp.tools.read",
+        }))
+        .unwrap(),
+    );
+    let message = format!("{header}.{claims}");
+    let signature = signer.sign(message.as_bytes());
+    let token = format!("{message}.{}", URL_SAFE_NO_PAD.encode(signature.to_bytes()));
+
+    for extra_bytes in [0, 1, 1024] {
+        let mut public = signer.verifying_key().to_bytes().to_vec();
+        public.extend(std::iter::repeat_n(0, extra_bytes));
+        let jwk = json!({
+            "kty": "OKP",
+            "crv": "Ed25519",
+            "x": URL_SAFE_NO_PAD.encode(public),
+            "alg": "EdDSA",
+            "kid": "oauth-fixture-2026",
+            "use": "sig",
+        });
+        let config = fixture_config(
+            Algorithm::EdDSA,
+            JwkSet {
+                keys: vec![serde_json::from_value(jwk).unwrap()],
+            },
+        );
+        verify_access_token(&token, &config).unwrap_or_else(|error| {
+            panic!("Ed25519 JWK with {extra_bytes} trailing bytes rejected: {error:?}")
+        });
+        assert!(verify_access_token(&alter_token_signature(&token), &config).is_err());
+        assert!(verify_access_token(&alter_token_subject(&token), &config).is_err());
+    }
+
+    let original = signer.verifying_key().to_bytes();
+    let mut wrong_key = original;
+    wrong_key[0] ^= 1;
+    for public in [&original[..31], &wrong_key[..]] {
+        let jwk = json!({
+            "kty": "OKP",
+            "crv": "Ed25519",
+            "x": URL_SAFE_NO_PAD.encode(public),
+            "alg": "EdDSA",
+            "kid": "oauth-fixture-2026",
+            "use": "sig",
+        });
+        let config = fixture_config(
+            Algorithm::EdDSA,
+            JwkSet {
+                keys: vec![serde_json::from_value(jwk).unwrap()],
+            },
+        );
+        assert!(verify_access_token(&token, &config).is_err());
+    }
+}
+
+#[test]
 fn legacy_rsa_der_and_pem_keys_remain_compatible() {
     use base64::{
         Engine as _,

@@ -27,8 +27,10 @@ fallback is introduced.
   anchor, or mesh protocol changes.
 - RSA selection is by the validated algorithm, never by retrying a failed
   signature under a different backend or algorithm.
-- RSA decoding keys must belong to the RSA family. Non-RSA algorithms delegate
-  directly to the existing AWS-LC provider.
+- RSA decoding keys must belong to the RSA family. Non-RSA signatures are
+  verified by AWS-LC. For legacy oversized Ed25519 public-key encodings, the
+  adapter passes only the first 32 bytes to AWS-LC, matching the prior verifier;
+  it does not try another key or verification backend after a failure.
 - JWK components and PKCS#1 DER both use the same checked public-key constructor.
   DER components are parsed by the maintained `pkcs1` library, not handwritten
   ASN.1 code.
@@ -53,6 +55,13 @@ fallback is introduced.
   prevents attacker-controlled zero padding from inflating RSA 0.10's arithmetic
   precision. With 1,024 zero bytes prepended to the same small test modulus, the
   uncorrected adapter allocated 8,256 bits rather than 64.
+- The prior Ed25519 verifier consumed the first 32 bytes even when a trusted
+  JWK's `x` contained trailing bytes. Although those oversized encodings are
+  non-conforming, rejecting them would change existing issuer behavior. The
+  adapter preserves that interpretation without accepting a different
+  public key or performing private-key operations. Correctly formatted new
+  Ed25519 JWKs contain exactly 32 bytes; short inputs now fail closed rather
+  than retaining the former verifier's panic.
 - Issuer, audience, expiry, kid, key-algorithm, scope, and HMAC-confusion checks
   remain in the existing OAuth verification path.
 - The crypto-wrapper allowlist adds only this provider file, consistent with the
@@ -83,13 +92,19 @@ fallback is introduced.
   primitive probe also verified signatures with 1,024 leading zero bytes in
   both public components and checked the old exponent bounds.
 - Candidate: `cargo test --locked --offline --package kars-inference-router
-  --test oauth_crypto_compat` passed seven tests. Coverage includes the actual Kars
+  --test oauth_crypto_compat` passed eight tests. Coverage includes the actual Kars
   `verify_access_token` API, PKCS#1 DER/PEM and SPKI PEM, tampered claims and
   signatures, malformed lengths/DER, wrong key family/audience, padded public
   components including 1,024 leading zero bytes, invalid/empty components,
-  over-limit moduli/exponents, and non-JOSE PSS salt lengths.
+  over-limit moduli/exponents, non-JOSE PSS salt lengths, and Ed25519 keys with
+  0, 1, or 1,024 trailing bytes; incorrect and short Ed25519 keys are rejected.
   Wrong-salt fixtures are real signatures generated and rejected by the former
   RSA implementation, not random bytes.
+- A session-only provider differential probe compared 704 generated
+  ES256/ES384/Ed25519 cases, including valid signatures, high/low-S ECDSA,
+  compressed EC keys, and tampering. All 640 standard-key cases matched; the
+  64 oversized Ed25519 cases exposed the incompatibility fixed above. All 704
+  cases match with the final provider.
 - `cargo test --locked --offline --package kars-inference-router`: passed.
 - `cargo clippy --locked --offline --package kars-inference-router --all-targets
   -- -D warnings`: passed.

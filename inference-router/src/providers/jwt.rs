@@ -1,8 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! JWT library adapter: maintained RSA public verification with the former
-//! RustCrypto key-size bounds, and AWS-LC for every other operation.
+//! JWT library adapter: compatible RSA/Ed25519 public-key handling with
+//! maintained verification libraries, and AWS-LC for all other operations.
 
 use jsonwebtoken::{
     Algorithm, AlgorithmFamily, DecodingKey, DecodingKeyKind,
@@ -32,6 +32,20 @@ fn new_verifier(algorithm: &Algorithm, key: &DecodingKey) -> Result<Box<dyn JwtV
         Algorithm::PS256 => PublicKey::pss_verify::<Sha256>,
         Algorithm::PS384 => PublicKey::pss_verify::<Sha384>,
         Algorithm::PS512 => PublicKey::pss_verify::<Sha512>,
+        Algorithm::EdDSA => {
+            // The former verifier used only the first 32 bytes. Keep existing
+            // issuer keys working while verifying with AWS-LC, not a fallback.
+            let legacy_key = match (key.family(), key.kind()) {
+                (AlgorithmFamily::Ed, DecodingKeyKind::SecretOrDer(bytes)) if bytes.len() > 32 => {
+                    Some(DecodingKey::from_ed_der(&bytes[..32]))
+                }
+                _ => None,
+            };
+            return (aws_lc::DEFAULT_PROVIDER.verifier_factory)(
+                algorithm,
+                legacy_key.as_ref().unwrap_or(key),
+            );
+        }
         _ => return (aws_lc::DEFAULT_PROVIDER.verifier_factory)(algorithm, key),
     };
     if key.family() != AlgorithmFamily::Rsa {
