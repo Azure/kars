@@ -33,11 +33,18 @@ fn new_verifier(algorithm: &Algorithm, key: &DecodingKey) -> Result<Box<dyn JwtV
         Algorithm::PS384 => PublicKey::pss_verify::<Sha384>,
         Algorithm::PS512 => PublicKey::pss_verify::<Sha512>,
         Algorithm::EdDSA => {
-            // The former verifier used only the first 32 bytes. Keep existing
-            // issuer keys working while verifying with AWS-LC, not a fallback.
             let legacy_key = match (key.family(), key.kind()) {
-                (AlgorithmFamily::Ed, DecodingKeyKind::SecretOrDer(bytes)) if bytes.len() > 32 => {
-                    Some(DecodingKey::from_ed_der(&bytes[..32]))
+                (AlgorithmFamily::Ed, DecodingKeyKind::SecretOrDer(bytes)) if bytes.len() >= 32 => {
+                    // Weak public keys can admit signatures valid for many messages.
+                    let mut public = [0_u8; 32];
+                    public.copy_from_slice(&bytes[..32]);
+                    let parsed = ed25519_dalek::VerifyingKey::from_bytes(&public)
+                        .map_err(|_| ErrorKind::InvalidEddsaKey)?;
+                    if parsed.is_weak() {
+                        return Err(ErrorKind::InvalidEddsaKey.into());
+                    }
+                    // The former verifier used only the first 32 bytes.
+                    (bytes.len() > 32).then(|| DecodingKey::from_ed_der(&public))
                 }
                 _ => None,
             };
@@ -162,5 +169,33 @@ mod tests {
         let short = rsa_public_key(&short).unwrap();
         assert_eq!(padded.n_bits_precision(), short.n_bits_precision());
         assert_eq!(padded.e().bits_precision(), short.e().bits_precision());
+    }
+
+    #[test]
+    fn ed25519_small_order_public_keys_are_rejected() {
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+        for encoded in [
+            "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "xxdqcD1N2E-6PAt2DRBnDyogU_osOczGTsf9d5KsA3o",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIA",
+            "JuiVj8KyJ7BFw_SJ8u-Y8NXfrAXTxjM5sTgCiG1T_AU",
+            "7P_______________________________________38",
+            "JuiVj8KyJ7BFw_SJ8u-Y8NXfrAXTxjM5sTgCiG1T_IU",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "xxdqcD1N2E-6PAt2DRBnDyogU_osOczGTsf9d5KsA_o",
+        ] {
+            let bytes: [u8; 32] = URL_SAFE_NO_PAD.decode(encoded).unwrap().try_into().unwrap();
+            assert!(
+                ed25519_dalek::VerifyingKey::from_bytes(&bytes)
+                    .unwrap()
+                    .is_weak()
+            );
+            let key = DecodingKey::from_ed_der(&bytes);
+            assert!(
+                new_verifier(&Algorithm::EdDSA, &key).is_err(),
+                "small-order key {encoded} must be rejected"
+            );
+        }
     }
 }

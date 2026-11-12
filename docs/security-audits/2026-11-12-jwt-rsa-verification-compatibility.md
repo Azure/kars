@@ -35,7 +35,7 @@ fallback is introduced.
   DER components are parsed by the maintained `pkcs1` library, not handwritten
   ASN.1 code.
 
-## T2: Security-control change? (Patched arithmetic, unchanged acceptance policy)
+## T2: Security-control change? (Patched arithmetic and weak-key rejection)
 
 - `PublicKey::new_with_size_limits(n, e, 0..=4096)` explicitly preserves the former
   verifier's size bounds while retaining the library's other modulus/exponent
@@ -62,6 +62,14 @@ fallback is introduced.
   public key or performing private-key operations. Correctly formatted new
   Ed25519 JWKs contain exactly 32 bytes; short inputs now fail closed rather
   than retaining the former verifier's panic.
+- Both the former Ed25519 verifier and AWS-LC accepted small-order public keys,
+  including the identity key that admits a fixed signature for arbitrary JWT
+  claims. Before verification, the adapter rejects weak keys using the existing
+  `ed25519-dalek::VerifyingKey::is_weak` API. This intentionally rejects unsafe
+  issuer keys, including noncanonical weak encodings accepted by the former
+  provider; issuers using them must rotate their keys. Ordinary valid issuer
+  keys and their legacy trailing-byte handling remain covered by differential
+  tests.
 - Issuer, audience, expiry, kid, key-algorithm, scope, and HMAC-confusion checks
   remain in the existing OAuth verification path.
 - The crypto-wrapper allowlist adds only this provider file, consistent with the
@@ -71,7 +79,7 @@ fallback is introduced.
   Sigstore/OpenID Connect RSA dependency; successful audit commands do not mean
   there are no ignored advisories.
 
-## T3: Availability / fail-open risk? (Compatibility restored)
+## T3: Availability / fail-open risk? (Compatibility tested; unsafe keys rejected)
 
 - All RSA verification uses one selected maintained backend. Errors propagate
   through signature verification and the existing OAuth rejection path.
@@ -92,22 +100,25 @@ fallback is introduced.
   primitive probe also verified signatures with 1,024 leading zero bytes in
   both public components and checked the old exponent bounds.
 - Candidate: `cargo test --locked --offline --package kars-inference-router
-  --test oauth_crypto_compat` passed nine tests. Coverage includes the actual Kars
+  --test oauth_crypto_compat` passed ten tests. Coverage includes the actual Kars
   `verify_access_token` API, PKCS#1 DER/PEM and SPKI PEM, tampered claims and
   signatures, malformed lengths/DER, wrong key family/audience, padded public
   components including 1,024 leading zero bytes, invalid/empty components,
   over-limit moduli/exponents, non-JOSE PSS salt lengths, ES256/ES384 high- and
   low-S signatures, and Ed25519 keys with 0, 1, or 1,024 trailing bytes;
-  incorrect and short Ed25519 keys are rejected. The ECDSA public-only fixtures
-  were generated with the former provider's RustCrypto curve libraries and
-  verified by that provider before candidate verification.
+  incorrect, short, and small-order Ed25519 keys are rejected. The weak-key test
+  reproduces a message-independent forged signature through the actual OAuth
+  path before the fix. The ECDSA public-only fixtures were generated with the
+  former provider's RustCrypto curve libraries and verified by that provider
+  before candidate verification.
   Wrong-salt fixtures are real signatures generated and rejected by the former
   RSA implementation, not random bytes.
 - A session-only provider differential probe compared 704 generated
   ES256/ES384/Ed25519 cases, including valid signatures, high/low-S ECDSA,
   compressed EC keys, and tampering. All 640 standard-key cases matched; the
   64 oversized Ed25519 cases exposed the incompatibility fixed above. All 704
-  cases match with the final provider.
+  normal-key cases match with the final provider. A separate weak-key probe
+  demonstrated the intentional security rejection described above.
 - `cargo test --locked --offline --package kars-inference-router`: passed.
 - `cargo clippy --locked --offline --package kars-inference-router --all-targets
   -- -D warnings`: passed.
@@ -118,9 +129,11 @@ fallback is introduced.
 - `cargo deny --offline check`: advisories, bans, licenses, and sources passed;
   existing non-blocking dependency warnings remain.
 - Rust 1.88: an isolated session-local crate compiled this exact provider source
-  against jsonwebtoken 10.4.0 and RSA 0.10.0 and verified all 28 RSA vectors using
-  `cargo +1.88.0 run --offline`. This is not a full-workspace MSRV claim; the
-  previously reproduced full-workspace 1.88 baseline failure remains separate.
+  against jsonwebtoken 10.4.0, RSA 0.10.0, and the existing ed25519-dalek 2.2.0
+  dependency. It verified 28 RSA, four ECDSA, and three Ed25519 vectors and
+  rejected a weak-key forgery using `cargo +1.88.0 run --locked --offline`.
+  This is not a full-workspace MSRV claim; the previously reproduced
+  full-workspace 1.88 baseline failure remains separate.
 - New-head remote CI, controller signed-OCI evidence, and combined PR review
   remain required. Earlier green checks do not cover this follow-up.
 

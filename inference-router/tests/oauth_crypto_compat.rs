@@ -489,6 +489,73 @@ fn legacy_ed25519_jwk_trailing_bytes_remain_compatible() {
 }
 
 #[test]
+fn weak_ed25519_issuer_keys_cannot_authenticate_forged_tokens() {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+    kars_inference_router::install_jsonwebtoken_crypto_provider();
+    let header = URL_SAFE_NO_PAD.encode(
+        serde_json::to_vec(&json!({
+            "alg": "EdDSA",
+            "typ": "JWT",
+            "kid": "oauth-fixture-2026",
+        }))
+        .unwrap(),
+    );
+    let mut signature = [0_u8; 64];
+    signature[0] = 1;
+    let signature = URL_SAFE_NO_PAD.encode(signature);
+
+    let mut identity = [0_u8; 32];
+    identity[0] = 1;
+    let mut padded_identity = identity.to_vec();
+    padded_identity.push(0);
+    let mut noncanonical_identity = [0xff_u8; 32];
+    noncanonical_identity[0] = 0xee;
+    noncanonical_identity[31] = 0x7f;
+
+    for public in [
+        identity.as_slice(),
+        padded_identity.as_slice(),
+        noncanonical_identity.as_slice(),
+    ] {
+        let jwk = json!({
+            "kty": "OKP",
+            "crv": "Ed25519",
+            "x": URL_SAFE_NO_PAD.encode(public),
+            "alg": "EdDSA",
+            "kid": "oauth-fixture-2026",
+            "use": "sig",
+        });
+        let config = fixture_config(
+            Algorithm::EdDSA,
+            JwkSet {
+                keys: vec![serde_json::from_value(jwk).unwrap()],
+            },
+        );
+        let results = ["alice", "forged-subject"].map(|subject| {
+            let claims = URL_SAFE_NO_PAD.encode(
+                serde_json::to_vec(&json!({
+                    "iss": TEST_ISSUER,
+                    "sub": subject,
+                    "aud": TEST_AUDIENCE,
+                    "exp": 4102444800_u64,
+                    "scope": "mcp.tools.read",
+                }))
+                .unwrap(),
+            );
+            let token = format!("{header}.{claims}.{signature}");
+            (subject, verify_access_token(&token, &config))
+        });
+        assert!(
+            results
+                .iter()
+                .all(|(_, result)| matches!(result, Err(OAuthError::ValidationFailed(_)))),
+            "small-order Ed25519 keys must not authenticate tokens: {results:?}"
+        );
+    }
+}
+
+#[test]
 fn legacy_rsa_der_and_pem_keys_remain_compatible() {
     use base64::{
         Engine as _,

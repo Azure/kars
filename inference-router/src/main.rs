@@ -59,7 +59,7 @@ async fn main() -> Result<()> {
     // the process-level CryptoProvider" because both rustls providers
     // are enabled in the dependency graph.
     //
-    // We standardise on aws-lc-rs, which is also the JWT provider.
+    // We standardise on aws-lc-rs for TLS; JWTs use a compatible provider.
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .expect("rustls process-level CryptoProvider already installed by a dependency");
