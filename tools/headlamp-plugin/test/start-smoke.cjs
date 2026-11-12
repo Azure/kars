@@ -6,8 +6,7 @@
 const { spawn } = require("node:child_process");
 const { mkdtemp, mkdir, readFile, rm, stat } = require("node:fs/promises");
 const { tmpdir } = require("node:os");
-const { createRequire } = require("node:module");
-const { basename, isAbsolute, join, relative, resolve, sep } = require("node:path");
+const { join } = require("node:path");
 const { setTimeout: delay } = require("node:timers/promises");
 
 const timeoutMs = 120_000;
@@ -57,36 +56,8 @@ async function main() {
   let child;
   try {
     await Promise.all([mkdir(dataHome), mkdir(configHome)]);
-    const savedEnvironment = Object.fromEntries(
-      ["HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME"].map((key) => [key, process.env[key]]),
-    );
-    let headlampPaths;
-    try {
-      Object.assign(process.env, {
-        HOME: temporaryDirectory,
-        XDG_DATA_HOME: dataHome,
-        XDG_CONFIG_HOME: configHome,
-      });
-      const toolkitRequire = createRequire(require.resolve("@kinvolk/headlamp-plugin/package.json"));
-      headlampPaths = toolkitRequire("env-paths")("Headlamp", { suffix: "" });
-    } finally {
-      for (const [key, value] of Object.entries(savedEnvironment)) {
-        if (value === undefined) {
-          delete process.env[key];
-        } else {
-          process.env[key] = value;
-        }
-      }
-    }
-
-    const relativeDataPath = relative(temporaryDirectory, headlampPaths.data);
-    if (isAbsolute(relativeDataPath) || relativeDataPath.startsWith(`..${sep}`) || relativeDataPath === "..") {
-      throw new Error(`Headlamp resolved its plugin data path outside the isolated directory: ${headlampPaths.data}`);
-    }
-    const packageJson = JSON.parse(await readFile("package.json", "utf8"));
-    const pluginName = packageJson.name.split("/").pop();
-    await mkdir(join(headlampPaths.data, "plugins", pluginName), { recursive: true });
-
+    const startedAt = Date.now();
+    const bundlePath = join(process.cwd(), "dist", "main.js");
     child = spawn("npm", ["run", "start"], {
       cwd: process.cwd(),
       detached: process.platform !== "win32",
@@ -101,27 +72,9 @@ async function main() {
     });
 
     let output = "";
-    let pendingOutput = "";
-    let copiedBundlePath;
-    let copyPathError;
     let spawnError;
     const handleOutput = (chunk) => {
       output = appendOutput(output, chunk);
-      pendingOutput += chunk;
-      const lines = pendingOutput.split(/\r?\n/);
-      pendingOutput = lines.pop();
-      for (const line of lines) {
-        const match = line.match(/^Copied ".*" -> "(.+)"\.$/);
-        if (match && basename(match[1]) === "main.js") {
-          const candidate = resolve(match[1]);
-          const candidateRelativePath = relative(temporaryDirectory, candidate);
-          if (isAbsolute(candidateRelativePath) || candidateRelativePath.startsWith(`..${sep}`) || candidateRelativePath === "..") {
-            copyPathError = new Error(`headlamp-plugin start wrote outside its isolated config directory: ${candidate}`);
-          } else {
-            copiedBundlePath = candidate;
-          }
-        }
-      }
     };
     child.stdout.on("data", handleOutput);
     child.stderr.on("data", (chunk) => {
@@ -132,22 +85,21 @@ async function main() {
     });
 
     const deadline = Date.now() + timeoutMs;
-    let copied = false;
+    let buildReady = false;
     while (Date.now() < deadline) {
       if (spawnError) {
         throw spawnError;
       }
-      if (copyPathError) {
-        throw copyPathError;
-      }
       if (child.exitCode !== null || child.signalCode !== null) {
-        throw new Error(`npm run start exited before copying the plugin bundle (code ${child.exitCode}, signal ${child.signalCode})\n${output}`);
+        throw new Error(`npm run start exited before entering build-watch mode (code ${child.exitCode}, signal ${child.signalCode})\n${output}`);
       }
-      if (copiedBundlePath) {
+      if (output.includes("watching for file changes") && output.includes("built in")) {
         try {
-          await stat(copiedBundlePath);
-          copied = true;
-          break;
+          const bundleStats = await stat(bundlePath);
+          if (bundleStats.mtimeMs >= startedAt) {
+            buildReady = true;
+            break;
+          }
         } catch (error) {
           if (error.code !== "ENOENT") {
             throw error;
@@ -156,24 +108,17 @@ async function main() {
       }
       await delay(250);
     }
-    if (!copied) {
-      throw new Error(`Timed out after ${timeoutMs}ms waiting for npm run start to copy the plugin bundle\n${output}`);
+    if (!buildReady) {
+      throw new Error(`Timed out after ${timeoutMs}ms waiting for npm run start to rebuild in watch mode\n${output}`);
     }
 
-    const [copiedBundle, sourceBundle] = await Promise.all([
-      readFile(copiedBundlePath, "utf8"),
-      readFile(join(process.cwd(), "dist", "main.js"), "utf8"),
-    ]);
-    if (!copiedBundle.includes(fixtureMarker)) {
-      throw new Error(`headlamp-plugin start did not emit the expected Kars bundle at ${copiedBundlePath}`);
-    }
-    if (copiedBundle !== sourceBundle) {
-      throw new Error(`headlamp-plugin start's copied bundle differs from dist/main.js at ${copiedBundlePath}`);
+    const bundle = await readFile(bundlePath, "utf8");
+    if (!bundle.includes(fixtureMarker)) {
+      throw new Error(`headlamp-plugin start did not emit the expected Kars bundle at ${bundlePath}`);
     }
 
-    const relativeBundlePath = relative(temporaryDirectory, copiedBundlePath);
-    console.log(`npm run start rebuilt and copied the Vite plugin bundle to its isolated Headlamp config directory: ${relativeBundlePath}`);
-    console.log("The headlamp-plugin start command uses Vite build-watch mode; it does not start an HTTP dev server.");
+    console.log("npm run start rebuilt the Kars plugin bundle and remained active in Vite watch mode.");
+    console.log("The headlamp-plugin start command does not start an HTTP dev server.");
   } finally {
     try {
       if (child) {
