@@ -522,14 +522,15 @@ async fn verify_via_sigstore<K: PolicyKind>(
         .await
 }
 
-/// Bind each candidate signature to its trusted certificate identity and Rekor record.
+/// Bind each candidate to the pinned manifest digest, trusted identity, and Rekor record.
 ///
 /// Sigstore intentionally accepts an image when any signature layer satisfies
-/// the constraints. Invalid Rekor bindings therefore disqualify only their
-/// corresponding candidate and must not poison another valid signature.
+/// the constraints. Invalid digest bindings and Rekor records therefore
+/// disqualify only their candidate and must not poison another valid signature.
 fn verify_signer_identity(
     layers: &[sigstore::cosign::SignatureLayer],
     signer_policy: &SignerPolicyConfig,
+    expected_digest: &str,
 ) -> Result<(), FetchError> {
     use sigstore::cosign::verification_constraint::cert_subject_email_verifier::StringVerifier;
     use sigstore::cosign::verification_constraint::{
@@ -540,6 +541,7 @@ fn verify_signer_identity(
     use sigstore::errors::Result as SigstoreResult;
 
     let mut binding_failure = None;
+    let mut digest_failure = None;
 
     #[derive(Debug)]
     struct AnyOf(Vec<Box<dyn VerificationConstraint>>);
@@ -613,6 +615,14 @@ fn verify_signer_identity(
     let constraints: VerificationConstraintVec = vec![Box::new(AnyOf(identities))];
     let mut identity_failure = None;
     for layer in layers {
+        if layer.simple_signing.critical.image.docker_manifest_digest != expected_digest {
+            digest_failure.get_or_insert_with(|| {
+                FetchError::SignatureVerifyFailed(format!(
+                    "signature manifest digest does not match pinned artifact digest `{expected_digest}`"
+                ))
+            });
+            continue;
+        }
         if let Some(sigstore::cosign::bundle_content::BundleContent::RekorBundle(bundle)) =
             &layer.bundle
             && let Err(error) = verify_legacy_rekor_binding(layer, bundle)
@@ -633,6 +643,9 @@ fn verify_signer_identity(
         return Err(error);
     }
     if let Some(error) = binding_failure {
+        return Err(error);
+    }
+    if let Some(error) = digest_failure {
         return Err(error);
     }
     Err(FetchError::IdentityMismatch(
@@ -687,7 +700,7 @@ async fn verify_via_sigstore_with_root<K: PolicyKind, T: sigstore::trust::TrustR
 
     // Keep the non-Send verification constraints out of the reconcile future
     // before its next `.await` (kube-rs requires the future to be `Send`).
-    verify_signer_identity(&layers, signer_policy)?;
+    verify_signer_identity(&layers, signer_policy, &artifact_ref.digest)?;
 
     // Step D: pull artifact bytes (digest-pinned).
     //
@@ -2586,11 +2599,13 @@ mod tests {
     fn signer_identity_requires_matching_identity_and_valid_signature() {
         let issuer = "https://issuer.example";
         let subject = "https://example.test/workflow";
+        let expected_digest = format!("sha256:{}", "a".repeat(64));
         let layer = signed_test_layer(subject, issuer);
 
         verify_signer_identity(
             std::slice::from_ref(&layer),
             &test_signer_policy(issuer, subject),
+            &expected_digest,
         )
         .expect("valid signed identity");
 
@@ -2598,6 +2613,7 @@ mod tests {
             verify_signer_identity(
                 std::slice::from_ref(&layer),
                 &test_signer_policy("https://wrong-issuer.example", subject),
+                &expected_digest,
             )
             .is_err(),
             "wrong issuer must fail"
@@ -2606,6 +2622,7 @@ mod tests {
             verify_signer_identity(
                 std::slice::from_ref(&layer),
                 &test_signer_policy(issuer, "https://wrong-subject.example"),
+                &expected_digest,
             )
             .is_err(),
             "wrong subject must fail"
@@ -2614,18 +2631,50 @@ mod tests {
         let mut tampered_signature = layer.clone();
         tampered_signature.signature = Some("AAAA".into());
         assert!(
-            verify_signer_identity(&[tampered_signature], &test_signer_policy(issuer, subject))
-                .is_err(),
+            verify_signer_identity(
+                &[tampered_signature],
+                &test_signer_policy(issuer, subject),
+                &expected_digest,
+            )
+            .is_err(),
             "tampered signature must fail"
         );
 
         let mut tampered_payload = layer;
         tampered_payload.raw_data.push(b' ');
         assert!(
-            verify_signer_identity(&[tampered_payload], &test_signer_policy(issuer, subject))
-                .is_err(),
+            verify_signer_identity(
+                &[tampered_payload],
+                &test_signer_policy(issuer, subject),
+                &expected_digest,
+            )
+            .is_err(),
             "tampered signed payload must fail"
         );
+        assert!(
+            matches!(
+                verify_signer_identity(
+                    std::slice::from_ref(&signed_test_layer(subject, issuer)),
+                    &test_signer_policy(issuer, subject),
+                    &format!("sha256:{}", "b".repeat(64)),
+                ),
+                Err(FetchError::SignatureVerifyFailed(_))
+            ),
+            "signature for a different manifest digest must fail"
+        );
+
+        let mut other_digest_layer = signed_test_layer(subject, issuer);
+        other_digest_layer
+            .simple_signing
+            .critical
+            .image
+            .docker_manifest_digest = format!("sha256:{}", "b".repeat(64));
+        verify_signer_identity(
+            &[other_digest_layer, signed_test_layer(subject, issuer)],
+            &test_signer_policy(issuer, subject),
+            &expected_digest,
+        )
+        .expect("a mismatched candidate must not poison a valid candidate");
     }
 
     const TEST_SIGNER_CERT: &[u8] = include_bytes!("../tests/fixtures/sigstore/signer.pem");
@@ -2670,11 +2719,13 @@ mod tests {
         RekorMismatchedCertificateChain,
         RekorMalformedCertificateChain,
         RekorOverLimitCertificateChain,
+        DigestMismatch,
     }
 
     struct LocalRegistryFixture {
         manifests: std::collections::HashMap<String, (String, Vec<u8>)>,
         manifest_snapshots: std::collections::HashMap<String, Vec<(String, Vec<u8>)>>,
+        head_digest_overrides: std::collections::HashMap<String, String>,
         manifest_reads: std::sync::Mutex<std::collections::HashMap<String, usize>>,
         blobs: std::collections::HashMap<String, Vec<u8>>,
         referrers: std::collections::HashMap<String, Vec<u8>>,
@@ -2772,12 +2823,20 @@ mod tests {
                 });
             let manifest = snapshot.or_else(|| fixture.manifests.get(reference));
             if let Some((digest, bytes)) = manifest {
+                let response_digest = if method == axum::http::Method::HEAD {
+                    fixture
+                        .head_digest_overrides
+                        .get(reference)
+                        .unwrap_or(digest)
+                } else {
+                    digest
+                };
                 let builder = Response::builder()
                     .status(StatusCode::OK)
                     .header("content-type", OCI_MANIFEST_MEDIA_TYPE)
                     .header(
                         HeaderName::from_static("docker-content-digest"),
-                        HeaderValue::from_str(digest).expect("valid manifest digest"),
+                        HeaderValue::from_str(response_digest).expect("valid manifest digest"),
                     );
                 let body = if method == axum::http::Method::HEAD {
                     Body::empty()
@@ -2861,15 +2920,33 @@ mod tests {
         }
 
         let empty_config = [];
-        let policy_manifest = serde_json::to_vec(&json!({
+        let policy_manifest_value = json!({
             "schemaVersion": 2,
             "mediaType": OCI_MANIFEST_MEDIA_TYPE,
             "artifactType": EGRESS_ALLOWLIST_V1_MEDIA_TYPE,
             "config": descriptor(&empty_config, OCI_EMPTY_CONFIG_MEDIA_TYPE),
             "layers": [descriptor(policy_bytes, EGRESS_ALLOWLIST_V1_MEDIA_TYPE)],
-        }))
-        .expect("serialize policy manifest");
+        });
+        let policy_manifest =
+            serde_json::to_vec(&policy_manifest_value).expect("serialize policy manifest");
         let artifact_digest = digest(&policy_manifest);
+        let (signature_digest, alternate_manifest) = if mutation == FixtureMutation::DigestMismatch
+        {
+            let mut other_manifest = policy_manifest_value.clone();
+            other_manifest["annotations"] =
+                json!({"test.example/variant": "other-signed-manifest"});
+            let other_manifest =
+                serde_json::to_vec(&other_manifest).expect("serialize alternate manifest");
+            (
+                format!(
+                    "sha384:{}",
+                    hex::encode(sha2::Sha384::digest(&other_manifest))
+                ),
+                Some(other_manifest),
+            )
+        } else {
+            (artifact_digest.clone(), None)
+        };
         let (signer_key_pem, signer_cert_pem, signing_scheme) = match mutation {
             FixtureMutation::RekorSha384 => (
                 TEST_SIGNER_P384_KEY,
@@ -2891,7 +2968,7 @@ mod tests {
             .parse()
             .expect("parse fixture image reference");
         let mut signature_layer =
-            SignatureLayer::new_unsigned(&image, &artifact_digest).expect("create signed payload");
+            SignatureLayer::new_unsigned(&image, &signature_digest).expect("create signed payload");
         let signer_key = SigStoreKeyPair::from_pem(signer_key_pem).expect("parse test signer key");
         assert!(
             PrivateKeySigner::new_with_signer(
@@ -3035,7 +3112,7 @@ mod tests {
         let signature_manifest = serde_json::to_vec(&signature_manifest_value)
             .expect("serialize cosign signature manifest");
         let signature_manifest_digest = digest(&signature_manifest);
-        let signature_tag = artifact_digest.replace(':', "-") + ".sig";
+        let signature_tag = signature_digest.replace(':', "-") + ".sig";
         let mut manifest_snapshots = std::collections::HashMap::new();
         if mutation == FixtureMutation::RekorCertificateSnapshot {
             let mut changed_snapshot = signature_manifest_value.clone();
@@ -3074,7 +3151,7 @@ mod tests {
                 b"tampered signed policy bytes".to_vec(),
             );
         }
-        let manifests = std::collections::HashMap::from([
+        let mut manifests = std::collections::HashMap::from([
             (
                 artifact_digest.clone(),
                 (artifact_digest.clone(), policy_manifest),
@@ -3084,10 +3161,21 @@ mod tests {
                 (signature_manifest_digest, signature_manifest),
             ),
         ]);
+        if let Some(other_manifest) = alternate_manifest {
+            manifests.insert(
+                signature_digest.clone(),
+                (signature_digest.clone(), other_manifest),
+            );
+        }
+        let mut head_digest_overrides = std::collections::HashMap::new();
+        if mutation == FixtureMutation::DigestMismatch {
+            head_digest_overrides.insert(artifact_digest.clone(), signature_digest);
+        }
         (
             LocalRegistryFixture {
                 manifests,
                 manifest_snapshots,
+                head_digest_overrides,
                 manifest_reads: std::sync::Mutex::new(std::collections::HashMap::new()),
                 blobs,
                 referrers: std::collections::HashMap::new(),
@@ -3430,6 +3518,7 @@ mod tests {
             LocalRegistryFixture {
                 manifests,
                 manifest_snapshots: std::collections::HashMap::new(),
+                head_digest_overrides: std::collections::HashMap::new(),
                 manifest_reads: std::sync::Mutex::new(std::collections::HashMap::new()),
                 blobs,
                 referrers,
@@ -3496,6 +3585,19 @@ mod tests {
         .await
         .expect("real signed OCI policy should verify");
         assert_eq!(verified.endpoints.len(), 2);
+
+        assert!(
+            matches!(
+                verify_local_signed_policy(
+                    canonical_doc().as_bytes(),
+                    FixtureMutation::DigestMismatch,
+                    &matching_policy,
+                )
+                .await,
+                Err(FetchError::SignatureVerifyFailed(_))
+            ),
+            "a signature for a different manifest must not authorize the pinned policy"
+        );
 
         assert!(
             verify_local_signed_policy(
