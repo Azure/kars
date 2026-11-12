@@ -24,7 +24,14 @@ async function getAvailablePort() {
 
 async function tryFetch(url) {
   try {
-    return await fetch(url, { signal: AbortSignal.timeout(2_000) });
+    const response = await fetch(url, {
+      redirect: "manual",
+      signal: AbortSignal.timeout(2_000),
+    });
+    if (response.status >= 300 && response.status < 400) {
+      throw new Error(`Refusing redirected response from ${url}`);
+    }
+    return response;
   } catch (error) {
     if (error instanceof TypeError || error.name === "AbortError" || error.name === "TimeoutError") {
       return null;
