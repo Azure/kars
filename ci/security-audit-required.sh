@@ -80,6 +80,10 @@ beta_approval_exception() {
       approved_head=28ca292c01bbd4310af90563fc2496281fce7141
       approved_base=af5ff64796898060f8f9d4a9dc853013f1d51981
       approved_pr=622 ;;
+    docs/security-audits/2026-11-12-headlamp-evidence-permissions.md)
+      approved_head=15281ad70925895f3f7c646b6503a2b1f6bd90d1
+      approved_base=af5ff64796898060f8f9d4a9dc853013f1d51981
+      approved_pr=623 ;;
     *) return 1 ;;
   esac
   [[ "$(git rev-parse --verify "${BASE_REF}^{commit}")" == "$approved_base" ]] || return 1
@@ -104,6 +108,16 @@ beta_approval_exception() {
   grep -Fxq 'Signed-off-by: Pal Lakatos-Toth <lakatos.toth.pal@gmail.com>' <<< "$approval_text"
 }
 
+# PR623 retains PR622's record, still newly added against their common base.
+# Only the validated successor scope can carry it; that scope's source diff
+# includes the historical record, so modifying it invalidates the successor.
+carried_beta_approval() {
+  local audit="$1" successor='docs/security-audits/2026-11-12-headlamp-evidence-permissions.md'
+  [[ "$audit" == 'docs/security-audits/2026-11-12-openclaw-npm-registry.md' ]] || return 1
+  grep -Fxq "$successor" <<< "$added_audit" || return 1
+  beta_approval_exception "$successor"
+}
+
 fail=0
 while IFS= read -r audit; do
   [ -z "$audit" ] && continue
@@ -116,6 +130,8 @@ while IFS= read -r audit; do
   if [ "${#signers[@]}" -lt 2 ]; then
     if beta_approval_exception "$audit"; then
       echo "pass: $audit uses its explicit, source-bound single-maintainer beta exception."
+    elif carried_beta_approval "$audit"; then
+      echo "pass: $audit is unchanged within the explicit, source-bound PR623 successor approval."
     else
       echo "fail: $audit has ${#signers[@]} distinct Signed-off-by emails; need 2 (author + independent reviewer)." >&2
       fail=1

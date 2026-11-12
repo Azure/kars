@@ -119,6 +119,34 @@ Required checks, scans, signed-release verification and fresh-Kind acceptance ar
 not waived. This permission changes no earlier approval or repository protection
 by itself; the gate does not implement a branch-protection bypass.
 
+For Azure/kars#623, the maintainer selected **“Authorize publication, sign-off, merge and release, including the conditional reviewer-only exception”**
+to authorize the successor retaining PR622's npm repair plus the tested three-file
+Headlamp evidence-permission fix at source
+`15281ad70925895f3f7c646b6503a2b1f6bd90d1` against integration base
+`af5ff64796898060f8f9d4a9dc853013f1d51981`. Its separate record is
+[`2026-11-12-headlamp-evidence-permissions.md`](2026-11-12-headlamp-evidence-permissions.md).
+The existing ordinary capability rule already covers the Headlamp Dockerfile;
+no additional workflow-only exception or capability-pattern change is needed.
+The repair stages the actual frontend evidence files with mode 0444 in a mode
+0755 directory, preserving root ownership and non-root read-only access. Scans,
+hash binding, dependency/runtime/base/toolchain pins, authentication and isolation
+are unchanged. Local tests do not establish fresh image extraction or Kind acceptance.
+
+PR623 retains the immutable PR622 record from parent
+`88b7aeb4bd9856107f03227a4734f053b44e78e8`; it is still a new file relative to their
+common integration base. The gate permits only that exact historical record to
+be carried by the separately validated, newly added PR623 approval. The successor's
+source comparison includes the historical record, so any change to it fails; a
+missing or invalid successor marker/signature, changed source/base/ancestry,
+another PR context or another unsigned record still fails. This does not repoint
+PR622 or make its sign-off authorize PR623. All seven earlier cases and records
+remain unchanged. This is authorized maintainer sign-off, not independent human
+or security review. Only if normal merging refuses for review requirements may
+the publisher use the conditional reviewer-only exception for PR623, restoring
+full protection immediately. Technical checks, scans, signed-release verification
+and fresh-Kind customer acceptance are not waived. The record itself does not
+publish, merge, release or change branch protection.
+
 For each exception, the gate requires its exact committed record, signer and source/base marker,
 the exact review base, and the approved source as an ancestor. Every tracked
 file must match that source except the four explicitly reviewed approval-plumbing
