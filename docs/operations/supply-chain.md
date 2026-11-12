@@ -35,7 +35,17 @@ The mesh and OpenClaw packages override the vendored AGT SDK's `js-yaml` depende
 to the patched 4.3.2 release without changing the SDK tarball.
 The Headlamp plugin's build-only dependency tree pins patched `@vitest/mocker`,
 `minimatch`, and `webpack-dev-middleware` versions even where Storybook's declared
-ranges lag behind; retain those overrides only with a passing Headlamp build.
+ranges lag behind. The stable `@kinvolk/headlamp-plugin@0.14.0` toolchain still
+resolves `webpack-dev-middleware@6.1.3`, so upgrading to that released toolchain
+would not remove the vulnerable resolution; the later 0.15 prerelease is not a
+supported stable replacement. Retain the overrides with passing Headlamp build,
+Webpack-backed Storybook tests that fetch the dynamically emitted lazy story
+asset over HTTP, and a smoke test of the actual `npm run start` command that
+verifies its initial plugin copy and subsequent watch-triggered rebuild/copy.
+`headlamp-plugin start` uses Vite build-watch mode; it does not start an HTTP
+dev server.
+CI also runs online `npm audit --audit-level=high` for this tree; lower-severity
+advisories remain visible in its audit output and are not represented as fixed.
 These packages are not shipped with the plugin. `deepmerge` remains tracked
 until its upstream project publishes a patched release.
 
@@ -46,7 +56,8 @@ when a required benchmark measurement is missing from either revision.
 
 TypeScript jobs install the committed lockfiles with `npm ci`. LangGraph and
 the compatibility/conformance test packages have dedicated typecheck, test,
-and audit rows; the Headlamp plugin has a build row.
+and audit rows; the Headlamp plugin has build, Webpack-backed Storybook
+dev-server smoke-test, and high-severity audit steps.
 
 ## `deny.toml`
 
