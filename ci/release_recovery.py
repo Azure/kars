@@ -29,7 +29,7 @@ ALLOWLIST = {
     WORKFLOW, "ci/release_recovery.py", "ci/tests/release_recovery_test.py",
     "cli/scripts/release-artifacts.test.mjs", "bridge/docs/public-beta-helm.md",
     "ci/security-audit-required.sh", "ci/tests/security_audit_gate_test.py",
-    "docs/security-audits/README.md",
+    "docs/security-audits/README.md", "runtimes/hermes/tests/test_mesh_auth.py",
 }
 IMAGES = (
     "controller", "metrics-server", "headlamp", "inference-router", "a2a-gateway",
@@ -245,30 +245,78 @@ def select_artifacts(artifacts, producer, jobs, version):
         job = jobs[job_name]
         created, updated = timestamp(artifact.get("created_at")), timestamp(artifact.get("updated_at"))
         # GitHub artifact metadata has no attempt field. Bind creation to its exact
-        # successful producer job in the current attempt, not the run-wide inventory.
+        # original successful producer execution, not a copied rerun success row.
         require(timestamp(job["started_at"]) <= created <= updated <= timestamp(job["completed_at"]),
                 "Artifact does not belong to the selected producer job/attempt")
         selected.append({key: artifact[key] for key in (
             "id", "name", "digest", "size_in_bytes", "created_at", "updated_at", "expires_at", "workflow_run")}
-            | {"kind": kind, "producer_run_attempt": producer["run_attempt"], "producer_job_id": job["id"]})
+            | {"kind": kind, "producer_run_attempt": job["run_attempt"], "producer_job_id": job["id"]})
     require(names == required.keys(), "Missing required version-bound artifacts")
     require(len({a["id"] for a in selected}) == len(selected), "Duplicate selected artifact IDs")
     require(sum(a["size_in_bytes"] for a in selected) <= MAX_TOTAL_ZIP, "Total artifact ZIP size exceeds bound")
     return sorted(selected, key=lambda artifact: artifact["id"])
 
 
+def job_evidence(jobs):
+    return [{key: job[key] for key in (
+        "id", "name", "run_id", "run_attempt", "head_sha", "status", "conclusion", "started_at", "completed_at")}
+        for job in sorted(jobs, key=lambda job: job["id"])]
+
+
+def producer_history(endpoint, latest, version):
+    originals, history, previous_end = None, [], None
+    for attempt in range(1, latest["run_attempt"] + 1):
+        run = gh_json(f"{endpoint}/attempts/{attempt}")
+        metadata = validate_run(run, latest["run_id"], latest["repository"])
+        require(metadata["run_attempt"] == attempt and metadata["source_sha"] == latest["source_sha"] and
+                metadata["repository_id"] == latest["repository_id"], "Wrong historical run/source/attempt")
+        require(attempt != latest["run_attempt"] or metadata["updated_at"] == latest["updated_at"],
+                "Latest attempt history changed during validation")
+        start, end = timestamp(run.get("run_started_at")), timestamp(metadata["updated_at"])
+        require(start <= end and (previous_end is None or previous_end <= start),
+                "Ambiguous overlapping attempt history")
+        previous_end = end
+        jobs = pages(f"{endpoint}/attempts/{attempt}/jobs", "jobs")
+        by_name = validate_jobs(jobs, metadata, version)
+        successes = {name: job for name, job in by_name.items() if name not in {PACKAGING, PUBLICATION}}
+        for name in (PACKAGING, PUBLICATION):
+            require(start <= timestamp(by_name[name]["started_at"]) <=
+                    timestamp(by_name[name]["completed_at"]) <= end,
+                    "Packaging job does not belong to its historical attempt")
+        if originals is None:
+            require(all(start <= timestamp(job["started_at"]) <= timestamp(job["completed_at"]) <= end
+                        for job in successes.values()), "Original producer lies outside attempt history")
+            originals = successes
+        else:
+            require(successes.keys() == originals.keys(), "Producer history changed: job set differs")
+            # A packaging-only rerun gets new success-row IDs and run_attempt values,
+            # but keeps the original execution interval. Only the first attempt's
+            # rows within their own run window establish actual producer identities.
+            fields = ("name", "run_id", "head_sha", "status", "conclusion", "started_at", "completed_at")
+            for name, job in successes.items():
+                require(all(job[key] == originals[name][key] for key in fields) and
+                        timestamp(job["completed_at"]) < start,
+                        f"Producer history changed or was rebuilt: {name}")
+        encoded = json.dumps(job_evidence(jobs), separators=(",", ":"), sort_keys=True).encode()
+        history.append({"run_attempt": attempt, "started_at": run["run_started_at"],
+                        "updated_at": metadata["updated_at"],
+                        "jobs_sha256": "sha256:" + hashlib.sha256(encoded).hexdigest()})
+    evidence = job_evidence([*originals.values(), by_name[PACKAGING], by_name[PUBLICATION]])
+    return originals, history, evidence
+
+
 def inventory(run_id, version, repo):
     require(type(run_id) is int and run_id > 0, "Invalid original run ID")
     endpoint = f"repos/{repo}/actions/runs/{run_id}"
-    producer = validate_run(gh_json(endpoint), run_id, repo)
-    jobs = pages(f"{endpoint}/attempts/{producer['run_attempt']}/jobs", "jobs")
-    by_name = validate_jobs(jobs, producer, version)
-    artifacts = select_artifacts(pages(f"{endpoint}/artifacts", "artifacts"), producer, by_name, version)
-    require(validate_run(gh_json(endpoint), run_id, repo) == producer,
+    latest = validate_run(gh_json(endpoint), run_id, repo)
+    originals, history, evidence = producer_history(endpoint, latest, version)
+    artifacts = select_artifacts(pages(f"{endpoint}/artifacts", "artifacts"), latest, originals, version)
+    require(validate_run(gh_json(endpoint), run_id, repo) == latest,
             "Producer run changed during validation")
-    evidence = [{key: job[key] for key in (
-        "id", "name", "run_id", "run_attempt", "head_sha", "status", "conclusion", "started_at", "completed_at")}
-        for job in sorted(jobs, key=lambda job: job["id"])]
+    original_attempts = {job["run_attempt"] for job in originals.values()}
+    require(len(original_attempts) == 1, "Ambiguous original producer attempts")
+    producer = latest | {"run_attempt": original_attempts.pop(), "latest_packaging_attempt": latest["run_attempt"],
+                         "attempt_history": history}
     return producer, artifacts, evidence
 
 
@@ -287,7 +335,8 @@ def prepare(run_id, version):
     with open(output, "a", encoding="utf-8") as stream:
         stream.write(f"run_id={run_id}\nsource_sha={producer['source_sha']}\nrecovery=true\nmanifest={encoded}\n")
     print(f"Validated {len(jobs) - 2} successful producer jobs and {len(artifacts)} retained artifacts "
-          f"from run {run_id}, attempt {producer['run_attempt']}, source {producer['source_sha']}. "
+          f"from run {run_id}, producer attempt {producer['run_attempt']}, "
+          f"latest failed packaging attempt {producer['latest_packaging_attempt']}, source {producer['source_sha']}. "
           "No images or binaries rebuilt; no artifacts downloaded.")
     return manifest
 
@@ -430,7 +479,8 @@ def download(kind, destination):
             finally:
                 archive.unlink(missing_ok=True)
     print(f"Recovered {len(chosen)} {kind} artifacts by immutable ID from run {producer['run_id']}, "
-          f"attempt {producer['run_attempt']}; verified ZIP SHA256 digests. Original artifacts retained.")
+          f"producer attempt {producer['run_attempt']} (latest failed packaging attempt "
+          f"{producer['latest_packaging_attempt']}); verified ZIP SHA256 digests. Original artifacts retained.")
 
 
 def main():

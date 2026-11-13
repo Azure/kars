@@ -141,9 +141,12 @@ full release; do not omit it when recovering successful producer work.
 
 In recovery releases, `release-manifest.json` distinguishes `producer` from
 `packaging`. The checksum-covered `release-recovery.json` records original run,
-source, attempt, artifact IDs and archive hashes. Images and original binaries
-retain their original producer provenance; newly assembled chart/CLI tarballs
-and checksum attestations identify the recovery workflow commit/run instead.
+source, attempt, artifact IDs and archive hashes. After a packaging-only rerun,
+recovery distinguishes the latest failed packaging attempt from the original
+producer attempts and job IDs; GitHub's copied successful job rows are not new
+builds. Images and original binaries retain their original producer provenance;
+newly assembled chart/CLI tarballs and checksum attestations identify the recovery
+workflow commit/run instead.
 
 Run `node --test cli/scripts/release-artifacts.test.mjs` for the lightweight
 packaging regression tests (Node, locked CLI dependencies and Helm required).

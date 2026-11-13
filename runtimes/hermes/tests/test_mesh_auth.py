@@ -257,6 +257,7 @@ def test_connect_timeout_cancels_work_before_unlock_and_retry(runtime, monkeypat
     runtime.registries[0].aclose.assert_awaited_once()
     assert_lock(runtime.lock_path, held=False)
     runtime.relay_factory.side_effect = original_factory
+    monkeypatch.setattr(mesh.asyncio, "wait_for", original_wait_for)
     assert mesh._get_or_init_client()._is_connected
 
 

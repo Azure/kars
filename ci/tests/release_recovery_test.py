@@ -79,6 +79,8 @@ class RecoveryTests(unittest.TestCase):
                 "workflow_run": {"id": RUN_ID, "repository_id": 42, "head_repository_id": 42,
                                  "head_branch": "kars-bridge", "head_sha": SOURCE},
             })
+        self.attempt_runs = {}
+        self.attempt_jobs = {}
         self.calls = []
         api = patch.object(RECOVERY, "gh_json", side_effect=self.api)
         api.start()
@@ -91,13 +93,30 @@ class RecoveryTests(unittest.TestCase):
         base = f"repos/{REPO}/actions/runs/{RUN_ID}"
         if endpoint == base:
             return copy.deepcopy(self.run)
-        for resource, key, entries in (("attempts/1/jobs", "jobs", self.jobs),
-                                       ("artifacts", "artifacts", self.artifacts)):
+        resources = [("artifacts", "artifacts", self.artifacts)]
+        for attempt in range(1, self.run["run_attempt"] + 1):
+            if endpoint == f"{base}/attempts/{attempt}":
+                return copy.deepcopy(self.attempt_runs.get(attempt, self.run | {"run_started_at": self.start}))
+            resources.append((f"attempts/{attempt}/jobs", "jobs", self.attempt_jobs.get(attempt, self.jobs)))
+        for resource, key, entries in resources:
             prefix = f"{base}/{resource}?per_page=100&page="
             if endpoint.startswith(prefix):
                 offset = (int(endpoint[len(prefix):]) - 1) * 100
                 return {"total_count": len(entries), key: copy.deepcopy(entries[offset:offset + 100])}
         raise AssertionError("Unexpected API endpoint: " + endpoint)
+
+    def packaging_rerun(self):
+        self.attempt_runs[1] = self.run | {"run_started_at": self.start}
+        self.attempt_jobs[1] = copy.deepcopy(self.jobs)
+        start = (datetime.fromisoformat(self.end) + timedelta(minutes=10)).isoformat()
+        finish = (datetime.fromisoformat(start) + timedelta(minutes=1)).isoformat()
+        self.run = self.run | {"run_attempt": 2, "updated_at": finish}
+        self.attempt_runs[2] = self.run | {"created_at": start, "run_started_at": start}
+        self.jobs = [job | {"id": job["id"] + 10000, "run_attempt": 2} for job in self.jobs]
+        for job in self.jobs:
+            if job["name"] in {RECOVERY.PACKAGING, RECOVERY.PUBLICATION}:
+                job.update(started_at=start, completed_at=finish)
+        self.attempt_jobs[2] = self.jobs
 
     def inventory(self):
         return RECOVERY.inventory(RUN_ID, VERSION, REPO)
@@ -127,6 +146,101 @@ class RecoveryTests(unittest.TestCase):
         self.assertTrue(all(a["digest"].startswith("sha256:") for a in artifacts))
         self.assertEqual([sum(a["kind"] == kind for a in artifacts)
                           for kind in ("images", "sboms", "binaries")], [32, 39, 1])
+
+    def test_packaging_only_rerun_retains_original_attempt_and_job_ids(self):
+        self.packaging_rerun()
+        producer, artifacts, jobs = self.inventory()
+        self.assertEqual(producer["run_attempt"], 1)
+        self.assertEqual(producer["latest_packaging_attempt"], 2)
+        self.assertEqual([a["run_attempt"] for a in producer["attempt_history"]], [1, 2])
+        original_ids = {job["id"] for job in self.attempt_jobs[1] if job["conclusion"] == "success"}
+        self.assertEqual(len(original_ids), 53)
+        self.assertTrue(all(a["producer_run_attempt"] == 1 and a["producer_job_id"] in original_ids
+                            for a in artifacts))
+        self.assertEqual({job["id"] for job in jobs if job["conclusion"] == "success"}, original_ids)
+        self.assertTrue(all(job["run_attempt"] == 2 for job in jobs if job["conclusion"] != "success"))
+        with patch.object(RECOVERY.subprocess, "run", side_effect=self.git):
+            manifest = RECOVERY.prepare(RUN_ID, VERSION)
+        self.assertEqual(manifest["producer"], producer)
+
+    def test_rerun_original_history_is_fully_paginated(self):
+        for index in range(100):
+            self.jobs.append(self.jobs[0] | {"id": 3000 + index, "name": f"Additional gate {index}"})
+        self.packaging_rerun()
+        producer, _, jobs = self.inventory()
+        self.assertEqual(producer["run_attempt"], 1)
+        self.assertEqual(len(jobs), 155)
+        for attempt in (1, 2):
+            self.assertIn(f"repos/{REPO}/actions/runs/{RUN_ID}/attempts/{attempt}/jobs?per_page=100&page=2",
+                          self.calls)
+
+    def test_rerun_rejects_missing_or_changed_original_producers(self):
+        self.packaging_rerun()
+        original = copy.deepcopy(self.attempt_jobs[1])
+        index = next(i for i, job in enumerate(original) if job["name"] == RECOVERY.BINARIES)
+        changes = ({"head_sha": CURRENT}, {"run_attempt": 2}, {"conclusion": "failure"},
+                   {"started_at": (datetime.fromisoformat(self.start) + timedelta(seconds=1)).isoformat()})
+        for change in changes:
+            self.attempt_jobs[1] = copy.deepcopy(original)
+            self.attempt_jobs[1][index].update(change)
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                self.inventory()
+        self.attempt_jobs[1] = [job for job in original if job["name"] != RECOVERY.BINARIES]
+        with self.assertRaisesRegex(ValueError, "Missing required producer"):
+            self.inventory()
+
+    def test_rerun_rejects_rebuilt_or_unknown_producers(self):
+        self.packaging_rerun()
+        job = next(job for job in self.jobs if job["name"] == RECOVERY.BINARIES)
+        job.update(started_at=self.attempt_runs[2]["run_started_at"], completed_at=self.run["updated_at"])
+        with self.assertRaisesRegex(ValueError, "history changed or was rebuilt"):
+            self.inventory()
+        job.update(started_at=self.start, completed_at=self.end)
+        self.jobs.append(job | {"id": 99999, "name": "Previously absent producer"})
+        with self.assertRaisesRegex(ValueError, "job set differs"):
+            self.inventory()
+
+    def test_rerun_rejects_ambiguous_or_misbound_attempt_history(self):
+        self.packaging_rerun()
+        original = copy.deepcopy(self.attempt_runs)
+        changes = ((1, {"run_attempt": 2}), (1, {"head_sha": CURRENT}),
+                   (1, {"run_started_at": self.created}),
+                   (2, {"run_started_at": self.start}),
+                   (2, {"updated_at": self.attempt_runs[2]["run_started_at"]}))
+        for attempt, change in changes:
+            self.attempt_runs = copy.deepcopy(original)
+            self.attempt_runs[attempt].update(change)
+            with self.subTest(attempt=attempt, change=change), self.assertRaises(ValueError):
+                self.inventory()
+
+    def test_rerun_rejects_latest_attempt_metadata_changed_during_validation(self):
+        self.packaging_rerun()
+        self.attempt_runs[2]["updated_at"] = (
+            datetime.fromisoformat(self.run["updated_at"]) + timedelta(seconds=1)).isoformat()
+        with self.assertRaisesRegex(ValueError, "Latest attempt history changed"):
+            self.inventory()
+
+    def test_rerun_cannot_rebind_new_artifacts_to_old_execution(self):
+        self.packaging_rerun()
+        self.artifacts[0].update(created_at=self.attempt_runs[2]["run_started_at"],
+                                 updated_at=self.attempt_runs[2]["run_started_at"])
+        with self.assertRaisesRegex(ValueError, "selected producer job/attempt"):
+            self.inventory()
+
+    def test_download_rechecks_original_and_copied_history_before_transfer(self):
+        self.packaging_rerun()
+        manifest = self.manifest()
+        original = copy.deepcopy(self.attempt_jobs)
+        for attempt in (1, 2):
+            self.attempt_jobs = copy.deepcopy(original)
+            job = next(job for job in self.attempt_jobs[attempt] if job["name"] == RECOVERY.BINARIES)
+            job["id"] += 100000
+            with self.subTest(attempt=attempt), \
+                    patch.dict(os.environ, {"RELEASE_RECOVERY_MANIFEST": json.dumps(manifest)}), \
+                    patch.object(RECOVERY, "download_archive") as transfer, \
+                    self.assertRaisesRegex(ValueError, "changed since prepare"):
+                RECOVERY.download("binaries", self.root / "binaries")
+            transfer.assert_not_called()
 
     def test_prepare_outputs_one_line_manifest_without_downloads(self):
         self.diff = "M\0.github/workflows/release-public-interim.yml\0A\0ci/release_recovery.py\0"
@@ -264,6 +378,18 @@ class RecoveryTests(unittest.TestCase):
             self.diff = diff
             with self.subTest(diff=diff), patch.object(RECOVERY.subprocess, "run", side_effect=self.git), \
                     self.assertRaises(ValueError):
+                RECOVERY.validate_source(producer, REPO, CURRENT)
+
+    def test_only_exact_hermes_auth_test_is_allowed(self):
+        producer = self.inventory()[0]
+        self.diff = "M\0runtimes/hermes/tests/test_mesh_auth.py\0"
+        with patch.object(RECOVERY.subprocess, "run", side_effect=self.git):
+            RECOVERY.validate_source(producer, REPO, CURRENT)
+        for path in ("runtimes/hermes/tests/test_other.py", "runtimes/hermes/src/mesh.py",
+                     "runtimes/openclaw/tests/test_mesh_auth.py"):
+            self.diff = f"M\0{path}\0"
+            with self.subTest(path=path), patch.object(RECOVERY.subprocess, "run", side_effect=self.git), \
+                    self.assertRaisesRegex(ValueError, "outside recovery allowlist"):
                 RECOVERY.validate_source(producer, REPO, CURRENT)
 
     def test_unprotected_branch_wrong_checkout_and_nonancestor_fail(self):
