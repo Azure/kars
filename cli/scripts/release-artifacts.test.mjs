@@ -8,6 +8,7 @@ import { cpSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writ
 import { spawnSync } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { runInNewContext } from 'node:vm';
 import { parse } from 'yaml';
 import { bindImages, bridgeImages, coreImages, prepareCharts, readReceipts, releaseVersion, requiredImages } from './release-artifacts.mjs';
 
@@ -241,6 +242,130 @@ for (const name of ['kars-bridge-bff', 'kars-mcp-playwright']) test(`native mani
       assert.equal(commands.includes(':latest'), prerelease === 'false');
       for (const arch of ['amd64', 'arm64']) assert.ok(commands.includes(`ghcr.io/azure/${name}:v0.2.0-beta.3-${arch}`));
       assert.ok(commands.includes(`ghcr.io/azure/${name}@${digest} --raw`));
+    }
+  }
+});
+
+test('locked dependency restoration registers the required Helm repository before building', () => {
+  const jobs = parse(readFileSync(join(repo, '.github/workflows/release-public-interim.yml'), 'utf8')).jobs;
+  const script = jobs['cli-pack'].steps.find(step => step.name === 'Restore exact locked chart dependencies before CLI bundling').run;
+  const registration = 'helm repo add prometheus-community https://prometheus-community.github.io/helm-charts';
+  assert.ok(script.includes(registration));
+  assert.ok(script.indexOf(registration) < script.indexOf('helm dependency build deploy/helm/kars'));
+  assert.ok(script.includes('git diff --exit-code -- deploy/helm/kars/Chart.lock'));
+  assert.ok(script.includes('helm dependency build bridge/deploy/helm/kars-bridge'));
+  assert.ok(!script.includes('helm dependency update'));
+});
+
+test('cold Helm configuration reproduces the failure and the actual workflow step restores exact locks', {
+  skip: process.env.KARS_RELEASE_NETWORK_TESTS !== '1' && 'Set KARS_RELEASE_NETWORK_TESTS=1 to exercise the real public Helm repository',
+}, t => {
+  const root = fixture(t);
+  for (const relative of ['deploy/helm/kars', 'deploy/helm/kars-datapath-witness', 'bridge/deploy/helm/kars-bridge']) {
+    cpSync(join(repo, relative), join(root, relative), { recursive: true });
+    rmSync(join(root, relative, 'charts'), { recursive: true, force: true });
+  }
+  const env = { ...process.env,
+    HELM_CONFIG_HOME: join(root, '.helm/config'), HELM_CACHE_HOME: join(root, '.helm/cache'),
+    HELM_DATA_HOME: join(root, '.helm/data'), HELM_PLUGINS: join(root, '.helm/plugins'),
+    HELM_REPOSITORY_CONFIG: join(root, '.helm/config/repositories.yaml'),
+    HELM_REPOSITORY_CACHE: join(root, '.helm/cache/repository'), HELM_REGISTRY_CONFIG: join(root, '.helm/config/registry.json'),
+  };
+  const lock = readFileSync(join(root, 'deploy/helm/kars/Chart.lock'), 'utf8');
+  const failed = spawnSync('helm', ['dependency', 'build', 'deploy/helm/kars'], { cwd: root, env, encoding: 'utf8', timeout: 30000 });
+  assert.notEqual(failed.status, 0);
+  assert.match(failed.stderr, /no repository definition/);
+  const jobs = parse(readFileSync(join(repo, '.github/workflows/release-public-interim.yml'), 'utf8')).jobs;
+  const script = jobs['cli-pack'].steps.find(step => step.name === 'Restore exact locked chart dependencies before CLI bundling').run;
+  const fixed = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', script], { cwd: root, env, encoding: 'utf8', timeout: 180000 });
+  assert.equal(fixed.status, 0, `${fixed.stderr}\n${fixed.stdout}`);
+  assert.equal(readFileSync(join(root, 'deploy/helm/kars/Chart.lock'), 'utf8'), lock);
+  for (const dependency of parse(lock).dependencies) {
+    assert.ok(readFileSync(join(root, `deploy/helm/kars/charts/${dependency.name}-${dependency.version}.tgz`)).length > 0);
+  }
+});
+
+test('packaging-only recovery skips every producer without permitting failed preparation or packaging', () => {
+  const workflow = parse(readFileSync(join(repo, '.github/workflows/release-public-interim.yml'), 'utf8'));
+  const jobs = workflow.jobs;
+  assert.equal(workflow.on.workflow_dispatch.inputs.recovery_run_id.default, '');
+  const validate = jobs.prepare.steps.find(step => step.id === 'recovery');
+  assert.equal(validate.env.RECOVERY_RUN_ID, '${{ inputs.recovery_run_id }}');
+  assert.match(validate.run, /release_recovery\.py prepare --run-id "\$RECOVERY_RUN_ID" --version "\$RELEASE_VERSION"/);
+  assert.equal(jobs.prepare.outputs.recovery, "${{ steps.recovery.outputs.recovery || 'false' }}");
+  const evaluate = (name, recovery, overrides = {}, cancelled = false) => {
+    const job = jobs[name];
+    const needs = Object.fromEntries([job.needs].flat().map(id => [id, {
+      result: overrides[id] ?? (id === 'prepare' || id === 'cli-pack' || !recovery ? 'success' : 'skipped'),
+      outputs: { recovery: String(recovery) },
+    }]));
+    const results = Object.values(needs).map(value => value.result);
+    const condition = job.if.slice(3, -2).replace(/needs\.\*\.result/g, 'results').replace(/needs\.([\w-]+)/g, 'needs["$1"]');
+    if (!/\b(?:always|success|failure|cancelled)\(/.test(condition) && (cancelled || results.some(result => result !== 'success'))) return false;
+    return runInNewContext(condition, { needs, results, cancelled: () => cancelled, failure: () => results.includes('failure'), contains: (items, item) => items.includes(item) });
+  };
+  const producers = Object.keys(jobs).filter(name => !['prepare', 'cli-pack', 'release'].includes(name));
+  for (const name of producers) {
+    assert.equal(jobs[name].if, "${{ needs.prepare.outputs.recovery != 'true' }}", name);
+    assert.equal(evaluate(name, false), true, `${name}: normal build`);
+    assert.equal(evaluate(name, true), false, `${name}: recovery must never build`);
+    assert.equal(evaluate(name, false, { prepare: 'failure' }), false, `${name}: invalid source`);
+  }
+  for (const name of ['cli-pack', 'release']) {
+    assert.equal(evaluate(name, true), true, `${name}: successful recovery validation`);
+    assert.equal(evaluate(name, false), true, `${name}: successful ordinary producers`);
+    assert.equal(evaluate(name, true, { prepare: 'failure' }), false);
+    assert.equal(evaluate(name, true, { prepare: 'skipped' }), false);
+    assert.equal(evaluate(name, true, {}, true), false);
+    assert.equal(evaluate(name, false, { 'build-images': 'failure' }), false);
+    assert.equal(evaluate(name, false, { 'build-images': 'skipped' }), false);
+    assert.equal(jobs[name].permissions.actions, 'read');
+    assert.equal(jobs[name].env.RELEASE_RECOVERY_MANIFEST, '${{ needs.prepare.outputs.recoveryManifest }}');
+  }
+  for (const result of ['failure', 'skipped', 'cancelled']) assert.equal(evaluate('release', true, { 'cli-pack': result }), false);
+  const downloads = [...jobs['cli-pack'].steps, ...jobs.release.steps].filter(step => step.uses?.startsWith('actions/download-artifact'));
+  for (const step of downloads) {
+    if (String(step.with.pattern ?? step.with.name).startsWith('packages-')) assert.equal(step.if, undefined, 'New packages must come from this recovery run');
+    else assert.equal(step.if, "${{ needs.prepare.outputs.recovery != 'true' }}");
+  }
+  for (const [job, kind, destination] of [['cli-pack', 'images', 'image-receipts'], ['release', 'binaries', 'release-binaries'], ['release', 'sboms', 'release-artefacts']]) {
+    const step = jobs[job].steps.find(step => step.run === `python3 ci/release_recovery.py download --kind ${kind} --destination ${destination}`);
+    assert.equal(step.if, "${{ needs.prepare.outputs.recovery == 'true' }}");
+    assert.equal(step.env.GH_TOKEN, '${{ secrets.GITHUB_TOKEN }}');
+  }
+});
+
+test('release manifest distinguishes recovered producer provenance from current packaging provenance', t => {
+  const root = fixture(t);
+  mkdirSync(join(root, 'release-artefacts'));
+  writeFileSync(join(root, 'release-artefacts/release-images.json'), JSON.stringify(images()));
+  writeFileSync(join(root, 'release-artefacts/npm-publication.json'), JSON.stringify({ outcome: 'publish-failed' }));
+  const jobs = parse(readFileSync(join(repo, '.github/workflows/release-public-interim.yml'), 'utf8')).jobs;
+  const step = jobs.release.steps.find(step => step.name === 'Build release manifest from verified receipts and npm outcome');
+  const script = step.run.split("<<'JS'\n")[1].split('\nJS')[0];
+  const recovery = { producer: { source_sha: '1'.repeat(40), run_id: 123, run_attempt: 1 }, artifacts: [{ id: 456, digest }] };
+  for (const binding of [null, recovery]) {
+    rmSync(join(root, 'release-artefacts/release-recovery.json'), { force: true });
+    const result = spawnSync(process.execPath, ['--input-type=module'], { cwd: root, input: script, encoding: 'utf8', env: {
+      ...process.env, GITHUB_REPOSITORY: 'Azure/kars', GITHUB_SHA: '2'.repeat(40), GITHUB_REF: 'refs/heads/kars-bridge',
+      GITHUB_RUN_ID: '789', GITHUB_RUN_ATTEMPT: '1', PRODUCER_SOURCE: binding ? recovery.producer.source_sha : '2'.repeat(40),
+      PRODUCER_RUN_ID: binding ? '123' : '789', VERSION: 'v0.2.0-beta.6', RELEASE_VERSION: '0.2.0-beta.6', PRERELEASE: 'true',
+      CLI_TARBALL: 'kars-runtime-cli-0.2.0-beta.6.tgz', RELEASE_RECOVERY_MANIFEST: binding ? JSON.stringify(binding) : '',
+    } });
+    assert.equal(result.status, 0, result.stderr);
+    const manifest = JSON.parse(readFileSync(join(root, 'release-artefacts/release-manifest.json'), 'utf8'));
+    assert.equal(manifest.commit, '2'.repeat(40));
+    assert.equal(manifest.packaging.commit, manifest.commit);
+    assert.equal(manifest.packaging.run_id, '789');
+    if (binding) {
+      assert.deepEqual(manifest.producer, recovery.producer);
+      assert.deepEqual(manifest.recovery, { binding: 'release-recovery.json', rebuilt_producers: false });
+      assert.deepEqual(JSON.parse(readFileSync(join(root, 'release-artefacts/release-recovery.json'), 'utf8')), recovery);
+    } else {
+      assert.equal(manifest.producer.source_sha, manifest.commit);
+      assert.equal(manifest.producer.run_id, manifest.packaging.run_id);
+      assert.equal(manifest.recovery, null);
+      assert.ok(!readdirSync(join(root, 'release-artefacts')).includes('release-recovery.json'));
     }
   }
 });

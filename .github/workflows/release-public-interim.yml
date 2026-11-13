@@ -37,6 +37,11 @@ on:
       version:
         description: 'Version to tag (e.g. v0.1.0 or v0.1.0-interim.1).'
         required: true
+      recovery_run_id:
+        description: 'Packaging-only recovery: reuse the successful producers of this failed release run; leave empty for a full release.'
+        required: false
+        type: string
+        default: ''
 
 concurrency:
   group: public-release
@@ -52,7 +57,14 @@ jobs:
   prepare:
     name: Validate release version and source
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      actions: read
     outputs:
+      recovery: ${{ steps.recovery.outputs.recovery || 'false' }}
+      recoveryManifest: ${{ steps.recovery.outputs.manifest }}
+      producerSource: ${{ steps.recovery.outputs.source_sha || github.sha }}
+      producerRunId: ${{ steps.recovery.outputs.run_id || github.run_id }}
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
       imageTag: ${{ steps.version.outputs.imageTag }}
@@ -84,9 +96,18 @@ jobs:
             cat release-lookup-error.log
             echo '::error::Could not establish whether this release already exists'; exit 1
           fi
+      - name: Validate immutable producer artifacts for packaging-only recovery
+        id: recovery
+        if: ${{ inputs.recovery_run_id != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RECOVERY_RUN_ID: ${{ inputs.recovery_run_id }}
+          RELEASE_VERSION: ${{ steps.version.outputs.tag }}
+        run: python3 ci/release_recovery.py prepare --run-id "$RECOVERY_RUN_ID" --version "$RELEASE_VERSION"
 
   # ─── Stage 1: multi-arch Rust binaries ─────────────────────────
   build-binaries:
+    if: ${{ needs.prepare.outputs.recovery != 'true' }}
     needs: prepare
     env:
       VERSION: ${{ needs.prepare.outputs.tag }}
@@ -151,6 +172,7 @@ jobs:
 
   # ─── Stage 2: build + push container images to PUBLIC GHCR ─────
   build-images:
+    if: ${{ needs.prepare.outputs.recovery != 'true' }}
     name: Build + push ${{ matrix.image.name }} ${{ matrix.image.arch }} (PUBLIC GHCR)
     needs: [prepare, build-binaries]
     env:
@@ -448,6 +470,7 @@ jobs:
   # Native source builds keep per-architecture SBOMs; only signed multi-arch
   # manifests become authoritative chart image receipts.
   merge-native-images:
+    if: ${{ needs.prepare.outputs.recovery != 'true' }}
     name: Merge + sign ${{ matrix.image }} native manifests
     needs: [prepare, build-images]
     runs-on: ubuntu-22.04
@@ -523,6 +546,7 @@ jobs:
   # crashes with rt_tgsigqueueinfo). The vendored sandbox wheels ship aarch64
   # variants, so the arm64 base installs pre-built wheels (no source compile).
   build-sandbox-base:
+    if: ${{ needs.prepare.outputs.recovery != 'true' }}
     env:
       VERSION: ${{ needs.prepare.outputs.tag }}
       IMAGE_VERSION: ${{ needs.prepare.outputs.imageTag }}
@@ -566,6 +590,7 @@ jobs:
             VERSION=${{ env.VERSION }}
 
   build-sandbox:
+    if: ${{ needs.prepare.outputs.recovery != 'true' }}
     env:
       VERSION: ${{ needs.prepare.outputs.tag }}
       IMAGE_VERSION: ${{ needs.prepare.outputs.imageTag }}
@@ -630,6 +655,7 @@ jobs:
 
   # Merge the per-arch tags into multi-arch manifests + sign/attest/SBOM.
   merge-sandbox:
+    if: ${{ needs.prepare.outputs.recovery != 'true' }}
     env:
       VERSION: ${{ needs.prepare.outputs.tag }}
       IMAGE_VERSION: ${{ needs.prepare.outputs.imageTag }}
@@ -767,6 +793,7 @@ jobs:
   # from the checkout). Only the upstream wheels need building here; they
   # come from the pinned AGT checkout (vendor/agt/pin.json).
   build-agt-wheels:
+    if: ${{ needs.prepare.outputs.recovery != 'true' }}
     env:
       VERSION: ${{ needs.prepare.outputs.tag }}
       IMAGE_VERSION: ${{ needs.prepare.outputs.imageTag }}
@@ -813,6 +840,7 @@ jobs:
   # runtime adapter. Hermes uses native runners for both default Kind arches;
   # other adapters retain their existing amd64 builds.
   build-runtimes:
+    if: ${{ needs.prepare.outputs.recovery != 'true' }}
     env:
       VERSION: ${{ needs.prepare.outputs.tag }}
       IMAGE_VERSION: ${{ needs.prepare.outputs.imageTag }}
@@ -953,6 +981,7 @@ jobs:
   # error" on an arm64 kind cluster, blocking `kars dev --release
   # --target local-k8s` on a Mac. merge-mesh fuses the per-arch tags below.
   build-mesh:
+    if: ${{ needs.prepare.outputs.recovery != 'true' }}
     env:
       VERSION: ${{ needs.prepare.outputs.tag }}
       IMAGE_VERSION: ${{ needs.prepare.outputs.imageTag }}
@@ -1008,6 +1037,7 @@ jobs:
 
   # Merge the per-arch relay/registry tags into multi-arch manifests + sign.
   merge-mesh:
+    if: ${{ needs.prepare.outputs.recovery != 'true' }}
     env:
       VERSION: ${{ needs.prepare.outputs.tag }}
       IMAGE_VERSION: ${{ needs.prepare.outputs.imageTag }}
@@ -1110,13 +1140,16 @@ jobs:
   cli-pack:
     name: Package release-bound charts and CLI; attempt npm OIDC publication
     needs: [prepare, build-images, merge-native-images, merge-sandbox, build-runtimes, merge-mesh]
+    if: ${{ !cancelled() && !failure() && needs.prepare.result == 'success' && (needs.prepare.outputs.recovery == 'true' || !contains(needs.*.result, 'skipped')) }}
     env:
       VERSION: ${{ needs.prepare.outputs.tag }}
       IMAGE_VERSION: ${{ needs.prepare.outputs.imageTag }}
       NPM_CHANNEL: ${{ needs.prepare.outputs.npmTag }}
+      RELEASE_RECOVERY_MANIFEST: ${{ needs.prepare.outputs.recoveryManifest }}
     runs-on: ubuntu-22.04
     permissions:
       contents: read
+      actions: read
       id-token: write
       attestations: write
     timeout-minutes: 25
@@ -1133,10 +1166,16 @@ jobs:
           version: v4.1.3
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ needs.prepare.outputs.recovery != 'true' }}
         with:
           pattern: image-*-${{ env.VERSION }}
           path: image-receipts
           merge-multiple: true
+      - name: Recover original image receipts by verified artifact IDs and archive digests
+        if: ${{ needs.prepare.outputs.recovery == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 ci/release_recovery.py download --kind images --destination image-receipts
       - name: Verify anonymous image access and resolve external seccomp prerequisite
         run: |
           # No registry login in this job: private packages must block public packaging.
@@ -1157,6 +1196,7 @@ jobs:
         run: node cli/scripts/release-artifacts.mjs prepare . release-packages "$VERSION" image-receipts
       - name: Restore exact locked chart dependencies before CLI bundling
         run: |
+          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
           helm dependency build deploy/helm/kars
           git diff --exit-code -- deploy/helm/kars/Chart.lock
           helm dependency build bridge/deploy/helm/kars-bridge
@@ -1227,10 +1267,15 @@ jobs:
       VERSION: ${{ needs.prepare.outputs.tag }}
       IMAGE_VERSION: ${{ needs.prepare.outputs.imageTag }}
       PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+      PRODUCER_SOURCE: ${{ needs.prepare.outputs.producerSource }}
+      PRODUCER_RUN_ID: ${{ needs.prepare.outputs.producerRunId }}
+      RELEASE_RECOVERY_MANIFEST: ${{ needs.prepare.outputs.recoveryManifest }}
     name: Create PUBLIC GitHub Release
     needs: [prepare, build-binaries, build-images, build-sandbox-base, build-sandbox, merge-sandbox, build-runtimes, build-mesh, merge-mesh, cli-pack]
+    if: ${{ !cancelled() && !failure() && needs.prepare.result == 'success' && needs.cli-pack.result == 'success' && (needs.prepare.outputs.recovery == 'true' || !contains(needs.*.result, 'skipped')) }}
     runs-on: ubuntu-22.04
     permissions:
+      actions: read
       contents: write       # create the GitHub Release + upload assets
       id-token: write        # cosign keyless sign-blob + provenance OIDC
       attestations: write    # actions/attest-build-provenance for assets
@@ -1238,10 +1283,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Download Rust binaries
+        if: ${{ needs.prepare.outputs.recovery != 'true' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: kars-binaries-${{ env.VERSION }}
           path: ./release-binaries
+
+      - name: Recover original binaries by verified artifact IDs and archive digests
+        if: ${{ needs.prepare.outputs.recovery == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 ci/release_recovery.py download --kind binaries --destination release-binaries
 
       - name: Package per-architecture binary archives
         run: |
@@ -1258,6 +1310,7 @@ jobs:
           merge-multiple: true
 
       - name: Download SBOMs
+        if: ${{ needs.prepare.outputs.recovery != 'true' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: sbom-*-${{ env.VERSION }}
@@ -1265,11 +1318,18 @@ jobs:
           merge-multiple: true
 
       - name: Download per-architecture runtime SBOMs
+        if: ${{ needs.prepare.outputs.recovery != 'true' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: sbom-*-${{ env.VERSION }}-*
           path: ./release-artefacts
           merge-multiple: true
+
+      - name: Recover original SBOMs by verified artifact IDs and archive digests
+        if: ${{ needs.prepare.outputs.recovery == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 ci/release_recovery.py download --kind sboms --destination release-artefacts
 
       - name: List artefacts
         run: find ./release-artefacts -type f | sort
@@ -1297,9 +1357,14 @@ jobs:
           const npm = JSON.parse(readFileSync(root + 'npm-publication.json'));
           const base = `https://github.com/${process.env.GITHUB_REPOSITORY}/releases/download/${process.env.VERSION}`;
           const version = process.env.RELEASE_VERSION;
+          const recovery = process.env.RELEASE_RECOVERY_MANIFEST ? JSON.parse(process.env.RELEASE_RECOVERY_MANIFEST) : null;
+          const packaging = { commit: process.env.GITHUB_SHA, ref: process.env.GITHUB_REF, run_id: process.env.GITHUB_RUN_ID, run_attempt: process.env.GITHUB_RUN_ATTEMPT };
           const manifest = {
             schema_version: '2', version: process.env.VERSION,
             commit: process.env.GITHUB_SHA, ref: process.env.GITHUB_REF,
+            packaging,
+            producer: recovery?.producer ?? { repository: process.env.GITHUB_REPOSITORY, source_sha: process.env.PRODUCER_SOURCE, run_id: process.env.PRODUCER_RUN_ID, run_attempt: process.env.GITHUB_RUN_ATTEMPT },
+            recovery: recovery ? { binding: 'release-recovery.json', rebuilt_producers: false } : null,
             build_time: new Date().toISOString(), prerelease: process.env.PRERELEASE === 'true',
             containers: images, npm,
             cli_install: `npm i -g ${base}/${process.env.CLI_TARBALL}`,
@@ -1308,6 +1373,7 @@ jobs:
             excluded: ['langgraph-ts (not published; requires a separately qualified operator image)', 'optional external Entra sidecar and standalone Inspektor Gadget (operator-qualified)'],
           };
           writeFileSync(root + 'release-manifest.json', JSON.stringify(manifest, null, 2) + '\n');
+          if (recovery) writeFileSync(root + 'release-recovery.json', JSON.stringify(recovery, null, 2) + '\n');
           JS
 
       # ── Sign the release ASSETS (Scorecard: Signed-Releases) ─────────
@@ -1379,7 +1445,12 @@ jobs:
             helm install kars-bridge "$RELEASE/kars-bridge-${{ needs.prepare.outputs.version }}.tgz" --namespace kars-system --values bridge.yaml --values "$RELEASE/bridge-release-images.yaml" --wait --timeout 20m
             ```
 
-            Charts include locked dependencies and bind images to this build's immutable digests.
+            Charts include locked dependencies and bind images to the verified producer's immutable digests.
+            Producer source: `${{ needs.prepare.outputs.producerSource }}`;
+            producer run: https://github.com/${{ github.repository }}/actions/runs/${{ needs.prepare.outputs.producerRunId }}.
+            Packaging-only recovery: `${{ needs.prepare.outputs.recovery }}`. When recovered,
+            `release-recovery.json` retains the original artifact IDs, archive hashes and build attribution;
+            chart/CLI and checksum attestations identify this packaging workflow, not a new image/binary build.
             Downloadable generic/Kind overlays preserve the maintained profile checks;
             configure the reviewed values before either install. No automatic rollback for the cold lifecycle.
             Existing independently installed Core needs only the separately reviewed Bridge command.

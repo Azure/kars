@@ -120,10 +120,41 @@ packages may initially be private: set all required packages (including
 the failed packaging job. Configure the npm OIDC trusted publisher for
 `Azure/kars` and this exact workflow; token-based fallback is not assumed.
 
+A failed-job rerun uses the original workflow revision. If packaging needs a
+workflow repair, publish that repair first, then use the **same unpublished
+version** with the original failed run ID:
+
+```bash
+gh workflow run release-public-interim.yml --repo Azure/kars --ref kars-bridge \
+  -f version=v0.2.0-beta.6 -f recovery_run_id=43395564436
+```
+
+This optional recovery mode validates the original successful producers and
+skips every image, binary, wheel and manifest build. It reuses retained receipts,
+binaries and SBOMs by immutable artifact IDs and verified archive SHA256 hashes;
+only validation, chart/CLI packaging and publication run again. It refuses
+expired/missing artifacts, incomplete producers, source/version mismatch and
+product changes outside the packaging-repair allowlist. Protected-source
+ancestry, anonymous image access, lockfile checks and signing remain required.
+An existing release is never overwritten. Omit `recovery_run_id` for a normal
+full release; do not omit it when recovering successful producer work.
+
+In recovery releases, `release-manifest.json` distinguishes `producer` from
+`packaging`. The checksum-covered `release-recovery.json` records original run,
+source, attempt, artifact IDs and archive hashes. Images and original binaries
+retain their original producer provenance; newly assembled chart/CLI tarballs
+and checksum attestations identify the recovery workflow commit/run instead.
+
 Run `node --test cli/scripts/release-artifacts.test.mjs` for the lightweight
 packaging regression tests (Node, locked CLI dependencies and Helm required).
-Those checks cover versioning, receipts, offline chart rendering/packaging and
-bundled dependencies, not full image builds or cluster acceptance. Public
+Add `KARS_RELEASE_NETWORK_TESTS=1` to reproduce the missing-repository error in an
+isolated empty Helm configuration, then verify that the actual fixed workflow
+step restores the exact locked dependencies. This does not change your Helm
+configuration. Run
+`PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s ci/tests -p release_recovery_test.py`
+for the artifact-recovery checks. These checks cover versioning, receipts,
+recovery scheduling/provenance, chart rendering/packaging and bundled
+dependencies, not full image builds or cluster acceptance. Public
 multiarchitecture builds/scans/signatures, registry visibility, artifact download
 verification and the actual Helm/customer journeys still need successful release
 and acceptance evidence. Until then, this remains the unqualified preview.
