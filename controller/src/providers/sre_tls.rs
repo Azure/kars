@@ -41,6 +41,7 @@ pub fn issue_for(names: Vec<String>) -> Result<Identity, String> {
     leaf.not_after = expiry;
     leaf.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
     leaf.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    leaf.use_authority_key_identifier_extension = true;
     let key = KeyPair::generate().map_err(|_| "SRE TLS key generation failed")?;
     let certificate = leaf
         .signed_by(&key, &ca, &root_key)
@@ -51,4 +52,71 @@ pub fn issue_for(names: Vec<String>) -> Result<Identity, String> {
         private_key: key.serialize_pem(),
         expires_at: expiry.unix_timestamp(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{path::PathBuf, process::Command};
+
+    struct Certificates(PathBuf);
+
+    impl Drop for Certificates {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn issued_certificates_pass_strict_server_verification() {
+        let files = Certificates(std::env::temp_dir().join(format!(
+            "kars-sre-tls-{}-{}",
+            std::process::id(),
+            time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+        )));
+        std::fs::create_dir(&files.0).unwrap();
+        let ca = files.0.join("ca.pem");
+        let leaf = files.0.join("leaf.pem");
+        let unrelated_ca = files.0.join("unrelated-ca.pem");
+        std::fs::write(&unrelated_ca, issue().unwrap().ca).unwrap();
+        for (identity, flag, name) in [
+            (issue().unwrap(), "-verify_ip", "127.0.0.1"),
+            (
+                issue_for(vec!["kars-private.kars-system.svc".into()]).unwrap(),
+                "-verify_hostname",
+                "kars-private.kars-system.svc",
+            ),
+        ] {
+            std::fs::write(&ca, identity.ca).unwrap();
+            std::fs::write(&leaf, identity.certificate).unwrap();
+            let verify = |trust: &std::path::Path, flag: &str, name: &str| {
+                Command::new("openssl")
+                    .args([
+                        "verify",
+                        "-x509_strict",
+                        "-purpose",
+                        "sslserver",
+                        flag,
+                        name,
+                        "-CAfile",
+                    ])
+                    .arg(trust)
+                    .arg(&leaf)
+                    .output()
+                    .expect("OpenSSL is required for strict certificate interoperability tests")
+            };
+            let valid = verify(&ca, flag, name);
+            assert!(
+                valid.status.success(),
+                "Strict server verification failed: {}",
+                String::from_utf8_lossy(&valid.stderr)
+            );
+            assert!(!verify(&unrelated_ca, flag, name).status.success());
+            assert!(
+                !verify(&ca, "-verify_hostname", "unrelated.invalid")
+                    .status
+                    .success()
+            );
+        }
+    }
 }

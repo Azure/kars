@@ -34,6 +34,19 @@ function command(stage, binary, args) {
   }
 }
 
+export function builtImageIdentity(image) {
+  assert(image && DIGEST.test(image.Id), "Built image identity is unavailable");
+  // Classic Docker IDs are config digests; containerd exposes a typed target.
+  const descriptor = image.Descriptor;
+  if (descriptor != null) {
+    assert(DIGEST.test(descriptor.digest)
+      && (MANIFESTS.has(descriptor.mediaType) || INDEXES.has(descriptor.mediaType)),
+    "Built image descriptor must identify a manifest or index");
+    return { kind: "target", digest: descriptor.digest, mediaType: descriptor.mediaType };
+  }
+  return { kind: "config", digest: image.Id };
+}
+
 export function imageRow(output, name) {
   const rows = output.toString("utf8").trim().split("\n")
     .map(line => line.trim().split(/\s+/)).filter(fields => fields[0] === name);
@@ -82,12 +95,15 @@ function completeImage(output, name, digest) {
     "Platform image content must be complete and unpacked");
 }
 
-export async function qualifyNodes({ nodes, platformFor, expectedConfig, run, report, pause = ms =>
+export async function qualifyNodes({ nodes, platformFor, expectedImage, run, report, pause = ms =>
   new Promise(resolve => setTimeout(resolve, ms)) }) {
-  assert(DIGEST.test(expectedConfig) && nodes.length > 0
+  assert(DIGEST.test(expectedImage?.digest)
+    && (expectedImage.kind === "config" || (expectedImage.kind === "target"
+      && (MANIFESTS.has(expectedImage.mediaType) || INDEXES.has(expectedImage.mediaType))))
+    && nodes.length > 0
     && new Set(nodes).size === nodes.length
     && nodes.every(name => /^kars-e2e-(?:control-plane|worker)(?:\d+)?$/.test(name)),
-  "Only exact owned Kind nodes and the built image config may be used");
+  "Only exact owned Kind nodes and the built image identity may be used");
   let manifestDigest;
   const proofs = [];
   for (const node of nodes) {
@@ -99,13 +115,19 @@ export async function qualifyNodes({ nodes, platformFor, expectedConfig, run, re
     const filter = name => `name==${JSON.stringify(name)}`;
     const source = imageRow(ctr("images", "list", filter(TAG)), TAG);
     assert(source, "The existing loaded router tag is missing");
-    assert(source.digest !== expectedConfig, "An image config ID cannot be an enforcement manifest");
+    if (expectedImage.kind === "target") {
+      assert(source.digest === expectedImage.digest && source.mediaType === expectedImage.mediaType,
+        "Loaded router is not the same manifest or index built by this fixture");
+    }
     if (manifestDigest === undefined) manifestDigest = source.digest;
     assert(source.digest === manifestDigest, "Kind nodes contain different router manifests");
     const load = digest => checkedObject(ctr("content", "get", digest), digest);
     const root = load(source.digest);
     const configDigest = platformConfig(root, load, platform, source.mediaType);
-    assert(configDigest === expectedConfig, "Loaded router is not the same image built by this fixture");
+    assert(source.digest !== configDigest, "An image config ID cannot be an enforcement manifest");
+    if (expectedImage.kind === "config") {
+      assert(configDigest === expectedImage.digest, "Loaded router is not the same image built by this fixture");
+    }
     completeImage(ctr("images", "check", "--snapshotter", "overlayfs", filter(TAG)), TAG, source.digest);
     const tagStatus = cri("inspecti", "--output", "json", TAG).status;
     assert(tagStatus?.id === configDigest, "CRI tag does not resolve the verified platform config");
@@ -165,8 +187,8 @@ export async function prepareRouterImage({ nodes, kube, values, report }) {
     && values.inferenceRouter.image.tag === "e2e"
     && !(values.controller?.extraEnv ?? []).some(entry => entry.name === "INFERENCE_ROUTER_IMAGE"),
   "Only the unchanged loaded router fixture reference is allowed");
-  const expectedConfig = command("built-image-identity", "docker",
-    ["image", "inspect", "--format", "{{.Id}}", FIXTURE]).toString("utf8").trim();
+  const expectedImage = builtImageIdentity(JSON.parse(command("built-image-identity", "docker",
+    ["image", "inspect", "--format", "{{json .}}", FIXTURE]).toString("utf8")));
   const metadata = JSON.parse(kube(["get", "nodes", "-o", "json"]));
   const byName = new Map(metadata.items.map(node => [node.metadata.name, node]));
   for (const node of nodes) {
@@ -176,7 +198,7 @@ export async function prepareRouterImage({ nodes, kube, values, report }) {
     assert(cluster === "kars-e2e", "Refusing a node outside the owned Kind fixture");
   }
   return qualifyNodes({
-    nodes, expectedConfig, report,
+    nodes, expectedImage, report,
     platformFor: node => ({ os: byName.get(node).status.nodeInfo.operatingSystem,
       architecture: byName.get(node).status.nodeInfo.architecture }),
     run: (binary, args) => {

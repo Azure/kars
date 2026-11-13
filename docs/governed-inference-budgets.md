@@ -1934,7 +1934,11 @@ It verifies the built router's manifest and platform content on **every** Kind
 node, adds only a missing same-image canonical containerd alias, and checks both
 canonical and literal `image:tag@manifest` references through CRI. It never
 force-tags, substitutes a config ID for a manifest, or changes production image
-pins or pull policies. The fixture registers its named local provider before
+pins or pull policies. Docker's classic image store is matched by config digest;
+its containerd image store is matched by the typed manifest/index `Descriptor`,
+not by assuming `.Id` is always a config digest. Both paths verify the node's
+content hashes, platform config, unpacked layers and CRI resolution before use.
+The fixture registers its named local provider before
 launch, and uses an ephemeral `CA:FALSE`, `serverAuth` TLS leaf with the exact
 private broker DNS SAN. Certificate files and UID-owned fixture Secrets are
 removed during cleanup; diagnostics contain only bounded, fixed stage facts.

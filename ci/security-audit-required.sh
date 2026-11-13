@@ -17,7 +17,7 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
 # Capability-introducing paths — mirrors §4.4 of the plan.
-CAP_RE='^(controller/src/(crd|reconcilers|admission)|inference-router/src/(mcp|a2a|providers|routes)|cli/src/(commands|migrate|adapters)|runtimes/openclaw/src/(core|index\.ts)|sandbox-images/[^/]+/(Dockerfile|entrypoint\.sh)|cli/profiles/|deploy/seccomp/|deploy/helm/kars/files/|shared/.*\.rs$|bridge/(bff/src/|web/src/|teams-gateway/src/|deploy/|[^/]+/Dockerfile|start-bff\.sh))'
+CAP_RE='^(controller/src/(crd|reconcilers|admission)|inference-router/src/(mcp|a2a|providers|routes)|cli/src/(commands|migrate|adapters)|runtimes/openclaw/src/(core|index\.ts)|(mesh-plugin|runtimes/openclaw)/package-lock\.json$|sandbox-images/[^/]+/(Dockerfile|entrypoint\.sh)|cli/profiles/|deploy/seccomp/|deploy/helm/kars/files/|shared/.*\.rs$|bridge/(bff/src/|web/src/|teams-gateway/src/|deploy/|[^/]+/Dockerfile|start-bff\.sh))'
 
 if ! changed=$(git diff --no-ext-diff --name-only "${BASE_REF}...HEAD"); then
   echo "fail: cannot determine the reviewed capability diff." >&2
@@ -76,6 +76,22 @@ beta_approval_exception() {
       approved_head=efadcd4932c08844a94e62080e45b6256c29a58a
       approved_base=01548f2c365a94ca2016987f03a496a237ea46ff
       approved_pr=621 ;;
+    docs/security-audits/2026-11-12-openclaw-npm-registry.md)
+      approved_head=28ca292c01bbd4310af90563fc2496281fce7141
+      approved_base=af5ff64796898060f8f9d4a9dc853013f1d51981
+      approved_pr=622 ;;
+    docs/security-audits/2026-11-12-headlamp-evidence-permissions.md)
+      approved_head=15281ad70925895f3f7c646b6503a2b1f6bd90d1
+      approved_base=af5ff64796898060f8f9d4a9dc853013f1d51981
+      approved_pr=623 ;;
+    docs/security-audits/2026-11-12-private-tls-authority-key-identifier.md)
+      approved_head=acb9d9a2ccef87003830fa10c2cc3eb08e5129f9
+      approved_base=af5ff64796898060f8f9d4a9dc853013f1d51981
+      approved_pr=623 ;;
+    docs/security-audits/2026-11-12-kind-image-descriptor-identity.md)
+      approved_head=c7a2af366ef0cbbb72418e152c59f0c317c3e856
+      approved_base=af5ff64796898060f8f9d4a9dc853013f1d51981
+      approved_pr=623 ;;
     *) return 1 ;;
   esac
   [[ "$(git rev-parse --verify "${BASE_REF}^{commit}")" == "$approved_base" ]] || return 1
@@ -100,6 +116,32 @@ beta_approval_exception() {
   grep -Fxq 'Signed-off-by: Pal Lakatos-Toth <lakatos.toth.pal@gmail.com>' <<< "$approval_text"
 }
 
+# PR623's TLS scope retains both earlier records, still new against the base.
+# Each successor compares historical files to its exact source, without exclusions.
+# Keep the original Headlamp-only approval path for its unchanged source as well.
+carried_beta_approval() {
+  local audit="$1" successor='docs/security-audits/2026-11-12-kind-image-descriptor-identity.md'
+  # The image-identity successor includes all three immutable prior records.
+  case "$audit" in
+    docs/security-audits/2026-11-12-openclaw-npm-registry.md|docs/security-audits/2026-11-12-headlamp-evidence-permissions.md|docs/security-audits/2026-11-12-private-tls-authority-key-identifier.md)
+      if grep -Fxq "$successor" <<< "$added_audit" && beta_approval_exception "$successor"; then
+        return 0
+      fi ;;
+  esac
+  successor='docs/security-audits/2026-11-12-private-tls-authority-key-identifier.md'
+  case "$audit" in
+    docs/security-audits/2026-11-12-openclaw-npm-registry.md|docs/security-audits/2026-11-12-headlamp-evidence-permissions.md) ;;
+    *) return 1 ;;
+  esac
+  if grep -Fxq "$successor" <<< "$added_audit" && beta_approval_exception "$successor"; then
+    return 0
+  fi
+  successor='docs/security-audits/2026-11-12-headlamp-evidence-permissions.md'
+  [[ "$audit" == 'docs/security-audits/2026-11-12-openclaw-npm-registry.md' ]] || return 1
+  grep -Fxq "$successor" <<< "$added_audit" || return 1
+  beta_approval_exception "$successor"
+}
+
 fail=0
 while IFS= read -r audit; do
   [ -z "$audit" ] && continue
@@ -112,6 +154,8 @@ while IFS= read -r audit; do
   if [ "${#signers[@]}" -lt 2 ]; then
     if beta_approval_exception "$audit"; then
       echo "pass: $audit uses its explicit, source-bound single-maintainer beta exception."
+    elif carried_beta_approval "$audit"; then
+      echo "pass: $audit is unchanged within the explicit, source-bound PR623 successor approval."
     else
       echo "fail: $audit has ${#signers[@]} distinct Signed-off-by emails; need 2 (author + independent reviewer)." >&2
       fail=1

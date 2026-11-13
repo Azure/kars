@@ -4,7 +4,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
-const { TAG, FIXTURE, imageRow, checkedObject, platformConfig, qualifyNodes } = await import(
+const { TAG, FIXTURE, builtImageIdentity, imageRow, checkedObject, platformConfig, qualifyNodes } = await import(
   new URL("../../../tests/e2e/kind-router-image.mjs", import.meta.url).href
 );
 const manifestType = "application/vnd.oci.image.manifest.v1+json";
@@ -74,8 +74,11 @@ function fixture(options: Record<string, boolean> = {}) {
     }
     throw new Error("Unexpected fixture command");
   };
+  const inspected = options.containerd
+    ? { Id: target.digest, Descriptor: { digest: target.digest, mediaType }, Config: { Env: [PRIVATE] } }
+    : { Id: config.digest, Config: { Env: [PRIVATE] } };
   const optionsFor = (report: (value: unknown) => void) => ({
-    nodes, expectedConfig: config.digest, run, report, pause: async () => {},
+    nodes, expectedImage: builtImageIdentity(inspected), run, report, pause: async () => {},
     platformFor: () => ({ os: "linux", architecture: options.wrongPlatform ? "arm64" : "amd64" }),
   });
   return { config, manifest, index, target, canonical, calls, run, optionsFor };
@@ -96,6 +99,48 @@ describe("same-image Kind CRI preload fixture (unit orchestration, not native ev
     expect(f.calls.some(args => args.includes("--force") || args.includes("pull") || args.includes("delete"))).toBe(false);
     expect(f.calls.filter(args => args.at(-1) === result.reference)).toHaveLength(2);
     expect(JSON.stringify(proofs)).not.toContain(PRIVATE);
+  });
+
+  it.each([false, true])("qualifies Docker containerd target identities (index=%s)", async index => {
+    const f = fixture({ containerd: true, index });
+    const proofs: any[] = [];
+    const result = await qualifyNodes(f.optionsFor(value => proofs.push(value)));
+    expect(result.manifestDigest).toBe(f.target.digest);
+    expect(proofs.filter(proof => proof.phase === "verified").map(proof => proof.configDigest))
+      .toEqual([f.config.digest, f.config.digest]);
+    expect(JSON.stringify(proofs)).not.toContain(PRIVATE);
+    expect(f.calls.some(args => args.includes("--force") || args.includes("pull") || args.includes("delete"))).toBe(false);
+  });
+
+  it.each(["configTarget", "tamper", "wrongPlatform", "incomplete", "notUnpacked"])(
+    "retains content and platform rejection for containerd: %s", async fault => {
+      const f = fixture({ containerd: true, [fault]: true });
+      await expect(qualifyNodes(f.optionsFor(() => {}))).rejects.toThrow();
+      expect(f.calls.some(args => args.includes("tag"))).toBe(false);
+    },
+  );
+
+  it("rejects a different built target even when the node content is internally valid", async () => {
+    const f = fixture({ containerd: true });
+    const options = f.optionsFor(() => {});
+    options.expectedImage.digest = f.index.digest;
+    await expect(qualifyNodes(options)).rejects.toThrow("not the same manifest or index");
+    expect(f.calls.some(args => args.includes("tag"))).toBe(false);
+  });
+
+  it("keeps Docker config identities separate and rejects malformed target descriptors", () => {
+    const f = fixture();
+    expect(builtImageIdentity({ Id: f.config.digest })).toEqual({ kind: "config", digest: f.config.digest });
+    expect(builtImageIdentity({ Id: f.config.digest, Descriptor: null }))
+      .toEqual({ kind: "config", digest: f.config.digest });
+    expect(builtImageIdentity({ Id: f.config.digest,
+      Descriptor: { digest: f.target.digest, mediaType: manifestType } }))
+      .toEqual({ kind: "target", digest: f.target.digest, mediaType: manifestType });
+    for (const Descriptor of [{}, { digest: "invalid", mediaType: manifestType },
+      { digest: f.config.digest, mediaType: configType }]) {
+      expect(() => builtImageIdentity({ Id: f.config.digest, Descriptor })).toThrow("descriptor");
+    }
+    expect(() => builtImageIdentity({ Id: "invalid" })).toThrow("identity");
   });
 
   it("checks index platform content and preserves an already-correct alias without rewriting", async () => {

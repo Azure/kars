@@ -235,7 +235,11 @@ class SecurityAuditGateTests(GitFixture):
                    "docs/security-audits/2026-11-10-kind-local-onboarding.md",
                    "docs/security-audits/2026-11-11-headlamp-go-release-repair.md",
                    "docs/security-audits/2026-11-12-openclaw-sdk-compare.md",
-                   "docs/security-audits/2026-11-12-playwright-native-release.md")
+                   "docs/security-audits/2026-11-12-playwright-native-release.md",
+                   "docs/security-audits/2026-11-12-openclaw-npm-registry.md",
+                   "docs/security-audits/2026-11-12-headlamp-evidence-permissions.md",
+                   "docs/security-audits/2026-11-12-private-tls-authority-key-identifier.md",
+                   "docs/security-audits/2026-11-12-kind-image-descriptor-identity.md")
         self.approved_beta()
         for other in records:
             if other != self.audit:
@@ -250,7 +254,7 @@ class SecurityAuditGateTests(GitFixture):
 
     def test_other_beta_pr_cannot_use_this_approval(self):
         self.approved_beta()
-        for other in ("593", "606", "607", "608", "617", "621"):
+        for other in ("593", "606", "607", "608", "617", "621", "622", "623"):
             if other != self.pr_number:
                 with self.subTest(pr=other):
                     result = self.beta_gate(GITHUB_ACTIONS="true", GITHUB_REPOSITORY="Azure/kars",
@@ -333,6 +337,431 @@ class PlaywrightNativeReleaseAuditGateTests(SecurityAuditGateTests):
         self.workflow_only()
         self.commit()
         self.assertEqual(self.gate().returncode, 0)
+
+
+class OpenClawNpmRegistryAuditGateTests(SecurityAuditGateTests):
+    audit = "docs/security-audits/2026-11-12-openclaw-npm-registry.md"
+    pr_number = "622"
+    source_head = "28ca292c01bbd4310af90563fc2496281fce7141"
+    source_base = "af5ff64796898060f8f9d4a9dc853013f1d51981"
+
+    def capability(self):
+        self.write("mesh-plugin/package-lock.json", '{"lockfileVersion": 3}\n')
+        self.write("runtimes/openclaw/package-lock.json", '{"lockfileVersion": 3}\n')
+
+    def assert_lock_requires_approval(self, path):
+        self.write(path, '{"lockfileVersion": 3}\n')
+        self.commit()
+        result = self.gate()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("no new docs/security-audits/", result.stderr)
+        self.assertIn(path, result.stderr)
+
+    def test_mesh_lock_requires_new_capability_approval(self):
+        self.assert_lock_requires_approval("mesh-plugin/package-lock.json")
+
+    def test_runtime_lock_requires_new_capability_approval(self):
+        self.assert_lock_requires_approval("runtimes/openclaw/package-lock.json")
+
+    def test_either_lock_change_invalidates_exact_source_approval(self):
+        self.approved_beta()
+        for path in ("mesh-plugin/package-lock.json", "runtimes/openclaw/package-lock.json"):
+            with self.subTest(path=path):
+                self.write(path, '{"lockfileVersion": 3, "unapproved": true}\n')
+                self.commit()
+                self.assertEqual(self.beta_gate().returncode, 1)
+                self.write(path, '{"lockfileVersion": 3}\n')
+                self.commit()
+                self.assertEqual(self.beta_gate().returncode, 0)
+
+
+class HeadlampEvidencePermissionsAuditGateTests(SecurityAuditGateTests):
+    audit = "docs/security-audits/2026-11-12-headlamp-evidence-permissions.md"
+    pr_number = "623"
+    source_head = "15281ad70925895f3f7c646b6503a2b1f6bd90d1"
+    source_base = "af5ff64796898060f8f9d4a9dc853013f1d51981"
+    inherited_audit = "docs/security-audits/2026-11-12-openclaw-npm-registry.md"
+    inherited_approval = (
+        "# Published PR622 approval, not a PR623 sign-off\n"
+        "Beta-approval-exception: Azure/kars#622; "
+        "source=28ca292c01bbd4310af90563fc2496281fce7141; "
+        "base=af5ff64796898060f8f9d4a9dc853013f1d51981\n"
+        "Signed-off-by: Pal Lakatos-Toth <lakatos.toth.pal@gmail.com>\n"
+    )
+
+    def capability(self):
+        self.write("sandbox-images/headlamp/Dockerfile", "FROM scratch\n")
+
+    def approved_successor_beta(self):
+        self.write(self.inherited_audit, self.inherited_approval)
+        self.approved_beta()
+
+    def test_headlamp_dockerfile_uses_ordinary_capability_gate(self):
+        self.capability()
+        self.commit()
+        result = self.gate()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("no new docs/security-audits/", result.stderr)
+        self.assertIn("sandbox-images/headlamp/Dockerfile", result.stderr)
+
+    def test_document_only_record_has_no_workflow_style_exception(self):
+        self.write(self.audit, "# Voluntary unsigned documentation\n")
+        self.commit()
+        self.assertEqual(self.gate().returncode, 0)
+
+    def test_successor_carries_unchanged_prior_record_in_exact_contexts(self):
+        self.approved_successor_beta()
+        for event, ref in (("pull_request", "refs/pull/623/merge"),
+                           ("push", "refs/heads/kars-bridge")):
+            with self.subTest(event=event):
+                result = self.beta_gate(GITHUB_ACTIONS="true", GITHUB_REPOSITORY="Azure/kars",
+                                        GITHUB_EVENT_NAME=event, GITHUB_REF=ref)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f"{self.inherited_audit} is unchanged", result.stdout)
+                self.assertIn(f"{self.audit} uses its explicit", result.stdout)
+        self.assertEqual((self.root / self.inherited_audit).read_text(), self.inherited_approval)
+
+    def test_inherited_approval_does_not_authorize_any_prior_pr_context(self):
+        self.approved_successor_beta()
+        for other in ("593", "606", "607", "608", "617", "621", "622"):
+            with self.subTest(pr=other):
+                result = self.beta_gate(GITHUB_ACTIONS="true", GITHUB_REPOSITORY="Azure/kars",
+                                        GITHUB_EVENT_NAME="pull_request",
+                                        GITHUB_REF=f"refs/pull/{other}/merge")
+                self.assertEqual(result.returncode, 1, result.stdout)
+
+    def test_inherited_record_remains_immutable(self):
+        self.approved_successor_beta()
+        self.write(self.inherited_audit, self.inherited_approval + "\nRepointed historical scope.\n")
+        self.commit()
+        self.assertEqual(self.beta_gate().returncode, 1)
+
+    def test_inherited_record_cannot_replace_missing_successor_record(self):
+        self.approved_successor_beta()
+        self.git("rm", self.audit)
+        self.commit()
+        result = self.beta_gate()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(self.inherited_audit, result.stderr)
+
+    def test_inherited_record_cannot_hold_successor_marker(self):
+        self.approved_successor_beta()
+        self.git("rm", self.audit)
+        self.write(self.inherited_audit, self.approval)
+        self.commit()
+        self.assertEqual(self.beta_gate().returncode, 1)
+
+    def test_inherited_record_cannot_bypass_successor_fields_or_signer(self):
+        self.approved_successor_beta()
+        for old, new in ((self.signer, ""), (self.signer, "Signed-off-by: Other <other@example.invalid>"),
+                         ("Azure/kars#623", "Azure/kars#622"),
+                         (self.approved_head, "0" * 40), (self.base, "1" * 40)):
+            with self.subTest(field=old):
+                self.write(self.audit, self.approval.replace(old, new))
+                self.commit()
+                self.assertEqual(self.beta_gate().returncode, 1)
+
+    def test_two_signer_record_without_exact_marker_cannot_carry_prior_record(self):
+        self.approved_successor_beta()
+        self.write(self.audit, SIGNED)
+        self.commit()
+        result = self.beta_gate()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(self.inherited_audit, result.stderr)
+
+    def test_inherited_record_does_not_hide_another_unsigned_scope(self):
+        self.approved_successor_beta()
+        self.write(NEW, "# Another unsigned scope\n")
+        self.commit()
+        result = self.beta_gate()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(NEW, result.stderr)
+
+    def test_inherited_record_does_not_allow_implementation_or_lock_drift(self):
+        self.approved_successor_beta()
+        for path in ("sandbox-images/headlamp/Dockerfile", "mesh-plugin/package-lock.json",
+                     "runtimes/openclaw/package-lock.json"):
+            with self.subTest(path=path):
+                original = (self.root / path).read_text() if (self.root / path).exists() else None
+                self.write(path, "Unapproved implementation\n")
+                self.commit()
+                self.assertEqual(self.beta_gate().returncode, 1)
+                if original is None:
+                    self.git("rm", path)
+                else:
+                    self.write(path, original)
+                self.commit()
+                self.assertEqual(self.beta_gate().returncode, 0)
+
+    def test_inherited_record_does_not_allow_base_drift(self):
+        self.approved_successor_beta()
+        self.base += "~1"
+        self.assertEqual(self.beta_gate().returncode, 1)
+
+    def test_inherited_record_does_not_allow_source_ancestry_bypass(self):
+        self.approved_successor_beta()
+        tree = self.git("rev-parse", "HEAD^{tree}").strip()
+        unrelated = self.git("commit-tree", tree, "-p", self.base,
+                             "-m", "unreviewed successor tree").strip()
+        self.git("update-ref", "HEAD", unrelated)
+        self.assertEqual(self.beta_gate().returncode, 1)
+
+    def test_successor_synthetic_merge_preserves_both_records(self):
+        self.approved_successor_beta()
+        candidate = self.git("rev-parse", "HEAD").strip()
+        self.git("checkout", "-qb", "successor-merge", self.base)
+        self.git("merge", "--no-ff", "--no-edit", candidate)
+        result = self.beta_gate(GITHUB_ACTIONS="true", GITHUB_REPOSITORY="Azure/kars",
+                                GITHUB_EVENT_NAME="pull_request", GITHUB_REF="refs/pull/623/merge")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.beta_gate(BASE_REF="HEAD~1", GITHUB_ACTIONS="true",
+                                       GITHUB_REPOSITORY="Azure/kars", GITHUB_EVENT_NAME="push",
+                                       GITHUB_REF="refs/heads/kars-bridge").returncode, 0)
+
+
+class PrivateTlsAuthorityKeyIdentifierAuditGateTests(HeadlampEvidencePermissionsAuditGateTests):
+    audit = "docs/security-audits/2026-11-12-private-tls-authority-key-identifier.md"
+    source_head = "acb9d9a2ccef87003830fa10c2cc3eb08e5129f9"
+    headlamp_audit = HeadlampEvidencePermissionsAuditGateTests.audit
+    headlamp_approval = (
+        "# Published Headlamp approval, not a TLS sign-off\n"
+        "Beta-approval-exception: Azure/kars#623; "
+        "source=15281ad70925895f3f7c646b6503a2b1f6bd90d1; "
+        "base=af5ff64796898060f8f9d4a9dc853013f1d51981\n"
+        "Signed-off-by: Pal Lakatos-Toth <lakatos.toth.pal@gmail.com>\n"
+    )
+
+    def capability(self):
+        super().capability()
+        self.write("controller/src/providers/sre_tls.rs",
+                   "leaf.use_authority_key_identifier_extension = true;\n")
+        self.write("CONTRIBUTING.md", "Strict certificate tests require OpenSSL.\n")
+
+    def approved_successor_beta(self):
+        self.write(self.headlamp_audit, self.headlamp_approval)
+        super().approved_successor_beta()
+
+    def test_tls_scope_carries_both_records_unchanged_in_exact_contexts(self):
+        self.approved_successor_beta()
+        for event, ref in (("pull_request", "refs/pull/623/merge"),
+                           ("push", "refs/heads/kars-bridge")):
+            with self.subTest(event=event):
+                result = self.beta_gate(GITHUB_ACTIONS="true", GITHUB_REPOSITORY="Azure/kars",
+                                        GITHUB_EVENT_NAME=event, GITHUB_REF=ref)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                for path, expected in ((self.inherited_audit, self.inherited_approval),
+                                       (self.headlamp_audit, self.headlamp_approval)):
+                    self.assertIn(f"{path} is unchanged", result.stdout)
+                    self.assertEqual((self.root / path).read_text(), expected)
+                    self.assertEqual(self.git("show", f"{self.approved_head}:{path}"), expected)
+                self.assertIn(f"{self.audit} uses its explicit", result.stdout)
+
+    def test_either_prior_record_tamper_invalidates_tls_approval(self):
+        self.approved_successor_beta()
+        for path, original in ((self.inherited_audit, self.inherited_approval),
+                               (self.headlamp_audit, self.headlamp_approval)):
+            with self.subTest(record=path):
+                self.write(path, original + "\nHistorical scope tampered.\n")
+                self.commit()
+                self.assertEqual(self.beta_gate().returncode, 1)
+                self.write(path, original)
+                self.commit()
+                self.assertEqual(self.beta_gate().returncode, 0)
+
+    def test_either_prior_record_deletion_invalidates_tls_approval(self):
+        self.approved_successor_beta()
+        for path, original in ((self.inherited_audit, self.inherited_approval),
+                               (self.headlamp_audit, self.headlamp_approval)):
+            with self.subTest(record=path):
+                self.git("rm", path)
+                self.commit()
+                self.assertEqual(self.beta_gate().returncode, 1)
+                self.write(path, original)
+                self.commit()
+                self.assertEqual(self.beta_gate().returncode, 0)
+
+    def test_missing_tls_record_rejects_both_prior_records(self):
+        self.approved_successor_beta()
+        self.git("rm", self.audit)
+        self.commit()
+        result = self.beta_gate()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(self.inherited_audit, result.stderr)
+        self.assertIn(self.headlamp_audit, result.stderr)
+
+    def test_prior_headlamp_source_marker_cannot_approve_tls(self):
+        self.approved_successor_beta()
+        self.write(self.audit, self.approval.replace(
+            self.approved_head, HeadlampEvidencePermissionsAuditGateTests.source_head))
+        self.commit()
+        result = self.beta_gate()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(self.inherited_audit, result.stderr)
+        self.assertIn(self.headlamp_audit, result.stderr)
+
+    def test_tls_or_prerequisite_document_drift_invalidates_approval(self):
+        self.approved_successor_beta()
+        for path in ("controller/src/providers/sre_tls.rs", "CONTRIBUTING.md"):
+            with self.subTest(path=path):
+                original = (self.root / path).read_text()
+                self.write(path, original + "Unapproved change\n")
+                self.commit()
+                self.assertEqual(self.beta_gate().returncode, 1)
+                self.write(path, original)
+                self.commit()
+                self.assertEqual(self.beta_gate().returncode, 0)
+
+    def test_tls_scope_rejects_wrong_repository_event_and_branch_with_both_records(self):
+        self.approved_successor_beta()
+        context = {"GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": "Azure/kars",
+                   "GITHUB_EVENT_NAME": "pull_request", "GITHUB_REF": "refs/pull/623/merge"}
+        for change in ({"GITHUB_REPOSITORY": "other/kars"},
+                       {"GITHUB_EVENT_NAME": "workflow_dispatch"},
+                       {"GITHUB_REF": "refs/pull/624/merge"},
+                       {"GITHUB_EVENT_NAME": "push", "GITHUB_REF": "refs/heads/main"}):
+            with self.subTest(context=change):
+                result = self.beta_gate(**{**context, **change})
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(self.inherited_audit, result.stderr)
+                self.assertIn(self.headlamp_audit, result.stderr)
+
+    def test_tls_policy_plumbing_preserves_both_historical_records(self):
+        self.approved_successor_beta()
+        for path in ("ci/security-audit-required.sh", "ci/tests/security_audit_gate_test.py",
+                     "docs/security-audits/README.md"):
+            self.write(path, "Reviewed TLS approval plumbing\n")
+        self.commit()
+        self.assertEqual(self.beta_gate().returncode, 0)
+        self.assertEqual((self.root / self.inherited_audit).read_text(), self.inherited_approval)
+        self.assertEqual((self.root / self.headlamp_audit).read_text(), self.headlamp_approval)
+
+
+class KindImageDescriptorIdentityAuditGateTests(PrivateTlsAuthorityKeyIdentifierAuditGateTests):
+    audit = "docs/security-audits/2026-11-12-kind-image-descriptor-identity.md"
+    source_head = "c7a2af366ef0cbbb72418e152c59f0c317c3e856"
+    tls_audit = PrivateTlsAuthorityKeyIdentifierAuditGateTests.audit
+    tls_approval = (
+        "# Published TLS approval, not an image-identity sign-off\n"
+        "Beta-approval-exception: Azure/kars#623; "
+        "source=acb9d9a2ccef87003830fa10c2cc3eb08e5129f9; "
+        "base=af5ff64796898060f8f9d4a9dc853013f1d51981\n"
+        "Signed-off-by: Pal Lakatos-Toth <lakatos.toth.pal@gmail.com>\n"
+    )
+
+    def capability(self):
+        super().capability()
+        self.write("tests/e2e/kind-router-image.mjs", "// Typed Docker descriptor binding\n")
+        self.write("cli/src/testing/kind-router-image.test.ts", "// Image identity regression\n")
+        self.write("docs/governed-inference-budgets.md", "Docker descriptor identity checks.\n")
+
+    def prior_records(self):
+        return ((self.inherited_audit, self.inherited_approval),
+                (self.headlamp_audit, self.headlamp_approval),
+                (self.tls_audit, self.tls_approval))
+
+    def approved_successor_beta(self):
+        self.write(self.tls_audit, self.tls_approval)
+        super().approved_successor_beta()
+
+    def test_image_scope_carries_three_unchanged_records_in_exact_contexts(self):
+        self.approved_successor_beta()
+        for event, ref in (("pull_request", "refs/pull/623/merge"),
+                           ("push", "refs/heads/kars-bridge")):
+            with self.subTest(event=event):
+                result = self.beta_gate(GITHUB_ACTIONS="true", GITHUB_REPOSITORY="Azure/kars",
+                                        GITHUB_EVENT_NAME=event, GITHUB_REF=ref)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                for path, expected in self.prior_records():
+                    self.assertIn(f"{path} is unchanged", result.stdout)
+                    self.assertEqual((self.root / path).read_text(), expected)
+                    self.assertEqual(self.git("show", f"{self.approved_head}:{path}"), expected)
+                self.assertIn(f"{self.audit} uses its explicit", result.stdout)
+
+    def test_any_prior_record_tamper_invalidates_image_approval(self):
+        self.approved_successor_beta()
+        for path, original in self.prior_records():
+            with self.subTest(record=path):
+                self.write(path, original + "\nHistorical scope tampered.\n")
+                self.commit()
+                self.assertEqual(self.beta_gate().returncode, 1)
+                self.write(path, original)
+                self.commit()
+                self.assertEqual(self.beta_gate().returncode, 0)
+
+    def test_any_prior_record_deletion_invalidates_image_approval(self):
+        self.approved_successor_beta()
+        for path, original in self.prior_records():
+            with self.subTest(record=path):
+                self.git("rm", path)
+                self.commit()
+                self.assertEqual(self.beta_gate().returncode, 1)
+                self.write(path, original)
+                self.commit()
+                self.assertEqual(self.beta_gate().returncode, 0)
+
+    def test_missing_image_record_rejects_all_three_prior_records(self):
+        self.approved_successor_beta()
+        self.git("rm", self.audit)
+        self.commit()
+        result = self.beta_gate()
+        self.assertEqual(result.returncode, 1)
+        for path, _ in self.prior_records():
+            self.assertIn(path, result.stderr)
+
+    def test_invalid_image_fields_cannot_carry_any_prior_record(self):
+        self.approved_successor_beta()
+        for old, new in ((self.signer, ""), (self.signer, "Signed-off-by: Other <other@example.invalid>"),
+                         ("Azure/kars#623", "Azure/kars#622"),
+                         (self.approved_head, PrivateTlsAuthorityKeyIdentifierAuditGateTests.source_head),
+                         (self.approved_head, "0" * 40), (self.base, "1" * 40)):
+            with self.subTest(field=old, replacement=new):
+                self.write(self.audit, self.approval.replace(old, new))
+                self.commit()
+                result = self.beta_gate()
+                self.assertEqual(result.returncode, 1)
+                for path, _ in self.prior_records():
+                    self.assertIn(path, result.stderr)
+        self.write(self.audit, self.approval)
+        self.commit()
+        self.assertEqual(self.beta_gate().returncode, 0)
+
+    def test_image_helper_test_or_document_drift_invalidates_approval(self):
+        self.approved_successor_beta()
+        for path in ("tests/e2e/kind-router-image.mjs", "cli/src/testing/kind-router-image.test.ts",
+                     "docs/governed-inference-budgets.md"):
+            with self.subTest(path=path):
+                original = (self.root / path).read_text()
+                self.write(path, original + "Unapproved change\n")
+                self.commit()
+                self.assertEqual(self.beta_gate().returncode, 1)
+                self.write(path, original)
+                self.commit()
+                self.assertEqual(self.beta_gate().returncode, 0)
+
+    def test_image_policy_plumbing_preserves_all_three_historical_records(self):
+        self.approved_successor_beta()
+        for path in ("ci/security-audit-required.sh", "ci/tests/security_audit_gate_test.py",
+                     "docs/security-audits/README.md"):
+            self.write(path, "Reviewed image-identity approval plumbing\n")
+        self.commit()
+        self.assertEqual(self.beta_gate().returncode, 0)
+        for path, expected in self.prior_records():
+            self.assertEqual((self.root / path).read_text(), expected)
+
+    def test_image_synthetic_merge_preserves_all_three_historical_records(self):
+        self.approved_successor_beta()
+        candidate = self.git("rev-parse", "HEAD").strip()
+        self.git("checkout", "-qb", "image-successor-merge", self.base)
+        self.git("merge", "--no-ff", "--no-edit", candidate)
+        for env in ({"GITHUB_EVENT_NAME": "pull_request", "GITHUB_REF": "refs/pull/623/merge"},
+                    {"BASE_REF": "HEAD~1", "GITHUB_EVENT_NAME": "push",
+                     "GITHUB_REF": "refs/heads/kars-bridge"}):
+            with self.subTest(context=env):
+                result = self.beta_gate(GITHUB_ACTIONS="true", GITHUB_REPOSITORY="Azure/kars", **env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                for path, expected in self.prior_records():
+                    self.assertIn(f"{path} is unchanged", result.stdout)
+                    self.assertEqual((self.root / path).read_text(), expected)
 
 
 if __name__ == "__main__":

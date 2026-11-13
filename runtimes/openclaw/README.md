@@ -13,6 +13,23 @@ plugin and CLI. Generated tests under `dist/` are not a second test suite:
 TypeScript can leave old outputs there after a source test is removed or renamed.
 Source-test success does not establish image or installed-runtime acceptance.
 
+The OpenClaw image's npm 12 builder uses canonical `https://registry.npmjs.org/`
+URLs in both the mesh plugin and runtime locks. Keep these URLs when updating
+locks: environment-specific mirror URLs are classified as remote tarballs when
+that mirror is not the configured registry (`EALLOWREMOTE`). Canonical URLs also
+retain npm's built-in substitution for a registry configured by the build secret.
+Do not enable arbitrary remote fetches, remove integrity hashes, or run dependency
+lifecycle scripts to work around this error. Vendored AGT archives stay `file:`
+dependencies with their existing checksums.
+
+From the repository root, run
+`python3 -m unittest runtimes.tests.test_openclaw_npm_sources -v`.
+The install regressions use only a loopback registry and disposable fixtures;
+set `KARS_NPM_CLI` to npm 12's `bin/npm-cli.js` if the default npm is older
+(otherwise those install cases are explicitly skipped). They check mirror
+misclassification, canonical URL substitution, integrity enforcement, disabled
+lifecycle scripts, and rejection of unrelated remote tarballs.
+
 ## Scoped human approval
 
 `kars_access_request` uses the active assignment scope when a new request or list
