@@ -5163,9 +5163,9 @@ dependencies = [
 
 [[package]]
 name = "sigstore_protobuf_specs"
-version = "0.5.1"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cd627b4d5240ac660de3357b5d0156d5c63b872be1deae5046c3c8eb65d488e2"
+checksum = "423fc484041de8195cf21dc8888463e74e8cbb3487e36c14373abeaef1f96125"
 dependencies = [
  "anyhow",
  "glob",
