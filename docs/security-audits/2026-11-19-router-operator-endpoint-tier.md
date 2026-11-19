@@ -131,11 +131,14 @@ moving the remaining CLI `inspect` and `egress blocked` reads onto `probe`.
   without the token, that Learn mode stays off, that the router-container
   `probe` path still works, and that agent-facing `/agt/status` still returns
   `200`.
-- Docker-mode simulation (router started as UID 1001 in a root container):
-  root `docker exec` received `200` for `POST /egress/learn` and
-  `GET /egress/allowlist`, and `probe /agt/audit` succeeded. UID 1000 received
-  `403` with and without the token, `/agt/status` stayed `200`, and Learn mode
-  stayed off.
+- Docker-mode simulation, run with Podman because the validation host has no
+  Docker Engine. The router was started as UID 1001 in a root container.
+  A root `podman exec`, the equivalent of Docker mode's root `docker exec`,
+  received `200` for `POST /egress/learn` and `GET /egress/allowlist`, and
+  `probe /agt/audit` succeeded. UID 1000 received `403` with and without the
+  token, `/agt/status` stayed `200`, and Learn mode stayed off. Docker Engine
+  itself was not exercised.
+- AKS staging was not run for this change.
 - `ci/check-loc.sh`, `ci/no-stubs.sh`, `ci/no-custom-crypto.sh`,
   `ci/no-null-provider-prod.sh`, `ci/a2a-module-isolation.sh`, and
   `ci/check-copyright-headers.sh` pass against `main`.
@@ -144,8 +147,13 @@ moving the remaining CLI `inspect` and `egress blocked` reads onto `probe`.
 
 Author review and the evidence above support restricting these endpoints to
 operator callers without breaking supported CLI, port-forward, or Docker-mode
-operator workflows. Copilot is the implementation author, not an independent
-human reviewer. No approval given for another PR is reused. The audit check is
-unchanged. This record does not itself merge or deploy the change.
+operator workflows. On 2026-11-19, sole maintainer @pallakatos explicitly
+stated, "I can be the signoff for the security audit and there is no other
+maintainer", and authorized recording the second sign-off under their GitHub
+identity for this change. Copilot is the implementation author, not an
+independent human reviewer. No approval given for another PR is reused. The
+audit check is unchanged. This record does not itself merge or deploy the
+change.
 
 Signed-off-by: Copilot App <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: pallakatos <191481949+pallakatos@users.noreply.github.com>
