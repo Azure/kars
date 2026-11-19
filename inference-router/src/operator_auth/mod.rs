@@ -128,9 +128,10 @@ fn parse_hex_socket_addr(field: &str) -> Option<SocketAddr> {
         }
         32 => {
             let mut bytes = [0u8; 16];
-            for (i, chunk) in bytes.chunks_exact_mut(4).enumerate() {
+            let (chunks, _) = bytes.as_chunks_mut::<4>();
+            for (i, chunk) in chunks.iter_mut().enumerate() {
                 let word = u32::from_str_radix(addr_hex.get(i * 8..i * 8 + 8)?, 16).ok()?;
-                chunk.copy_from_slice(&word.to_ne_bytes());
+                *chunk = word.to_ne_bytes();
             }
             IpAddr::V6(Ipv6Addr::from(bytes))
         }

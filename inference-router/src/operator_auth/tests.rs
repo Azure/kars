@@ -29,8 +29,10 @@ fn hex_v4(addr: Ipv4Addr) -> String {
 
 fn hex_v6(addr: Ipv6Addr) -> String {
     addr.octets()
-        .chunks_exact(4)
-        .map(|c| format!("{:08X}", u32::from_ne_bytes([c[0], c[1], c[2], c[3]])))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| format!("{:08X}", u32::from_ne_bytes(*c)))
         .collect()
 }
 
