@@ -18,7 +18,8 @@ use super::mesh::lookup_parent_amid;
 use super::{AppState, extract_admin_token};
 use crate::errors;
 
-/// AGT governance routes that expose sensitive data — require admin token.
+/// AGT governance routes the in-sandbox plugin uses — require the admin
+/// token for callers outside the pod.
 pub fn sensitive_agt_routes() -> Router<AppState> {
     Router::new()
         // Policy evaluation
@@ -29,15 +30,22 @@ pub fn sensitive_agt_routes() -> Router<AppState> {
             "/agt/trust/{agent_id}",
             get(agt_trust_get).delete(agt_trust_delete),
         )
-        // Audit log
-        .route("/agt/audit", get(agt_audit))
-        .route("/agt/audit/verify", get(agt_audit_verify))
         // Status (exposes trust scores, audit entries, inbox count)
         .route("/agt/status", get(agt_status))
         // Trust update (plugin pushes reputation changes to the router's trust store)
         .route("/agt/trust", post(agt_trust_update))
         // Ed25519 signing counter (plugin pushes signed/verified/rejected counts)
         .route("/agt/signing-counter", post(agt_signing_counter))
+}
+
+/// AGT governance routes reserved for operators. Mounted behind
+/// [`crate::operator_auth::operator_auth_middleware`] so the sandboxed
+/// agent cannot read the audit chain or change its own rate limits.
+pub fn operator_agt_routes() -> Router<AppState> {
+    Router::new()
+        // Audit log
+        .route("/agt/audit", get(agt_audit))
+        .route("/agt/audit/verify", get(agt_audit_verify))
         // Dynamic rate-limit update (admin only)
         .route(
             "/agt/rate-limit",

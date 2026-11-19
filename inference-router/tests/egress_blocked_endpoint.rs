@@ -27,7 +27,7 @@ use kars_inference_router::handoff::{
 };
 use kars_inference_router::mesh::{MeshInbox, MeshMetrics};
 use kars_inference_router::providers::{AuditSink, PolicyDecisionProvider, SigningProvider};
-use kars_inference_router::routes::{AppState, egress_routes};
+use kars_inference_router::routes::{AppState, egress_routes, operator_egress_routes};
 
 fn test_state() -> AppState {
     let policy_status = Arc::new(kars_inference_router::policy_status::PolicyStatusRegistry::new());
@@ -88,7 +88,10 @@ fn test_state() -> AppState {
 }
 
 fn app(state: AppState) -> Router {
-    Router::new().merge(egress_routes()).with_state(state)
+    Router::new()
+        .merge(egress_routes())
+        .merge(operator_egress_routes())
+        .with_state(state)
 }
 
 async fn get_json(app: &Router, uri: &str) -> (StatusCode, Value) {

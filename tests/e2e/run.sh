@@ -2325,6 +2325,148 @@ EOF
     kubectl delete namespace "${ns}" --wait=false >/dev/null 2>&1 || true
 }
 
+# Operator-tier routes (egress learn/allowlist, AGT audit/rate-limit/
+# reputation) must only answer the router's own UID (CLI `probe` via
+# `kubectl exec -c inference-router`) or root (`kubectl port-forward`).
+# A workload sharing the pod network namespace — UID 1000, like the
+# agent container — must be refused on loopback and on the pod IP, even
+# when it presents the admin token. Agent-tier routes stay reachable.
+test_operator_routes_reject_sandbox_workloads() {
+    local ns="kars-e2e-opgate"
+    local pod="operator-gate-probe"
+    local token
+    token="opgate-$(date +%s)-${RANDOM}"
+
+    kubectl create namespace "${ns}" >/dev/null 2>&1 || true
+
+    local apply_err
+    apply_err=$(cat <<EOF | kubectl apply -f - 2>&1
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${pod}
+  namespace: ${ns}
+spec:
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: router
+      image: kars-inference-router:e2e
+      imagePullPolicy: Never
+      env:
+        - {name: ROUTER_PORT, value: "8443"}
+        - {name: EGRESS_MODE, value: "strict"}
+        - {name: ADMIN_TOKEN, value: "${token}"}
+        - {name: CONTENT_SAFETY_ENABLED, value: "false"}
+        - {name: PROMPT_SHIELDS_ENABLED, value: "false"}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: ["ALL"]}
+        runAsUser: 1001
+    - name: agent
+      image: curlimages/curl:8.10.1
+      imagePullPolicy: IfNotPresent
+      command: ["sleep", "600"]
+      env:
+        - {name: ADMIN_TOKEN, value: "${token}"}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: ["ALL"]}
+        runAsUser: 1000
+EOF
+    )
+    if [ -n "$apply_err" ] && ! echo "$apply_err" | grep -q "created\|configured\|unchanged"; then
+        warn "operator-gate pod apply: $apply_err"
+        fail "Operator gate: probe pod apply failed"
+        kubectl delete namespace "${ns}" --wait=false >/dev/null 2>&1 || true
+        return
+    fi
+
+    local deadline=$(($(date +%s) + 120)) code=""
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        code=$(kubectl exec -n "${ns}" "${pod}" -c agent -- \
+            curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8443/healthz 2>/dev/null || true)
+        [ "$code" = "200" ] && break
+        sleep 3
+    done
+    if [ "$code" != "200" ]; then
+        kubectl describe pod "${pod}" -n "${ns}" 2>&1 | tail -30 || true
+        kubectl logs "${pod}" -n "${ns}" -c router --tail=30 2>&1 || true
+        fail "Operator gate: router never became reachable from the agent container"
+        kubectl delete namespace "${ns}" --wait=false >/dev/null 2>&1 || true
+        return
+    fi
+
+    local pod_ip
+    pod_ip=$(kubectl get pod "${pod}" -n "${ns}" -o jsonpath='{.status.podIP}' 2>/dev/null || true)
+
+    # Agent (UID 1000) attempts. The token is read from the agent's own
+    # environment, mirroring the admin-token mount in real sandboxes.
+    local agent_learn='curl -s -o /dev/null -w "%{http_code}" -X POST -H "Content-Type: application/json" --data "{\"enabled\":true}"'
+    local c_noauth c_token c_podip c_read body
+    c_noauth=$(kubectl exec -n "${ns}" "${pod}" -c agent -- sh -c \
+        "${agent_learn} http://127.0.0.1:8443/egress/learn" 2>/dev/null || true)
+    c_token=$(kubectl exec -n "${ns}" "${pod}" -c agent -- sh -c \
+        "${agent_learn} -H \"Authorization: Bearer \$ADMIN_TOKEN\" http://127.0.0.1:8443/egress/learn" 2>/dev/null || true)
+    c_podip=$(kubectl exec -n "${ns}" "${pod}" -c agent -- sh -c \
+        "${agent_learn} -H \"Authorization: Bearer \$ADMIN_TOKEN\" http://${pod_ip}:8443/egress/learn" 2>/dev/null || true)
+    c_read=$(kubectl exec -n "${ns}" "${pod}" -c agent -- \
+        curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8443/agt/audit 2>/dev/null || true)
+    body=$(kubectl exec -n "${ns}" "${pod}" -c agent -- \
+        curl -s http://127.0.0.1:8443/egress/allowlist 2>/dev/null || true)
+
+    if [ "$c_noauth" = "403" ]; then
+        pass "Operator gate: agent loopback POST /egress/learn refused (403)"
+    else
+        fail "Operator gate: agent loopback POST /egress/learn returned '${c_noauth}', expected 403"
+    fi
+    if [ "$c_token" = "403" ]; then
+        pass "Operator gate: agent loopback with admin token refused (403)"
+    else
+        fail "Operator gate: agent loopback with admin token returned '${c_token}', expected 403"
+    fi
+    if [ -n "$pod_ip" ] && [ "$c_podip" = "403" ]; then
+        pass "Operator gate: agent via pod IP with admin token refused (403)"
+    else
+        fail "Operator gate: agent via pod IP '${pod_ip}' with admin token returned '${c_podip}', expected 403"
+    fi
+    if [ "$c_read" = "403" ] && echo "$body" | grep -q "Operator endpoint not available to sandbox workloads"; then
+        pass "Operator gate: read-only operator routes refused to the agent"
+    else
+        warn "agent /egress/allowlist body: ${body}"
+        fail "Operator gate: agent read of /agt/audit returned '${c_read}' or /egress/allowlist was not refused"
+    fi
+
+    # Agent-tier routes are unchanged, and strict mode survived the attempts.
+    local status
+    status=$(kubectl exec -n "${ns}" "${pod}" -c agent -- \
+        curl -s http://127.0.0.1:8443/agt/status 2>/dev/null || true)
+    if echo "$status" | grep -q '"egress_learn_mode":false'; then
+        pass "Operator gate: agent-tier /agt/status reachable; learn mode still off"
+    else
+        warn "agent /agt/status body: ${status}"
+        fail "Operator gate: /agt/status unreachable from agent or learn mode was enabled"
+    fi
+
+    # The router's own UID (the CLI's `kubectl exec ... probe` path) keeps access.
+    local probe_read
+    if probe_read=$(kubectl exec -n "${ns}" "${pod}" -c router -- \
+        /usr/local/bin/kars-inference-router probe /egress/learned 2>&1) \
+        && echo "$probe_read" | grep -q '"learn_mode":false' \
+        && kubectl exec -n "${ns}" "${pod}" -c router -- \
+            /usr/local/bin/kars-inference-router probe POST /egress/learn '{"enabled":false}' >/dev/null 2>&1; then
+        pass "Operator gate: router-UID probe can read and toggle egress learn mode"
+    else
+        warn "router probe /egress/learned: ${probe_read}"
+        fail "Operator gate: router-UID probe lost access to operator routes"
+    fi
+
+    kubectl delete namespace "${ns}" --wait=false >/dev/null 2>&1 || true
+}
+
 test_mcp_initialize_version_negotiation() {
     local ns="kars-e2e-mcp"
     local pod="mcp-init-probe"
@@ -2898,6 +3040,7 @@ main() {
     test_karssandbox_cel_rejects_cross_namespace_toolpolicy_ref || true
     test_controller_emits_events || true
     test_ap2_commerce_required_route_gate || true
+    test_operator_routes_reject_sandbox_workloads || true
     test_mcp_initialize_version_negotiation || true
     test_a2a_v1_message_send_route || true
     # Phase 2/3 CRD reconciler coverage. These run before
