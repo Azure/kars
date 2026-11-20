@@ -69,4 +69,16 @@ ignore = [
     # not remove it while kube and agentmesh still depend on it.
     # Expires 2027-02-04 — remove or re-justify; tracked in Azure/kars#595.
     "RUSTSEC-2024-0449",
+    # RUSTSEC-2026-0543 — `chrono 0.4.45` is unmaintained
+    # https://rustsec.org/advisories/RUSTSEC-2026-0543
+    #
+    # Severity: informational ("unmaintained"), NOT a vulnerability.
+    # No patched version exists; RustSec suggests `jiff` or `time`.
+    # Source: cedar-policy-core 4.11.1 (via AGT agentmesh 4.1.0),
+    # sigstore 0.15.0, openidconnect 4.1.0, oauth2 5.0.0, oci-client
+    # 0.16.1 / 0.18.0, plus direct use in kars-controller,
+    # kars-inference-router and kars-conformance-runner. Migrating only
+    # our direct use would not remove it while those crates depend on it.
+    # Expires 2027-02-20 — remove or re-justify; tracked in Azure/kars#634.
+    "RUSTSEC-2026-0543",
 ]

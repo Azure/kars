@@ -61,6 +61,13 @@ ignore = [
     # would not drop it. Expires 2027-02-04 — tracked in
     # Azure/kars#595. Mirrors `.cargo/audit.toml`.
     "RUSTSEC-2024-0449",
+    # RUSTSEC-2026-0543 — `chrono` is unmaintained (not a vulnerability;
+    # no patched version exists). Pulled via cedar-policy-core (AGT
+    # agentmesh), sigstore, openidconnect, oauth2, oci-client 0.16 + 0.18
+    # and our own crates; migrating only our direct use would not drop
+    # it. Expires 2027-02-20 — tracked in Azure/kars#634. Mirrors
+    # `.cargo/audit.toml`.
+    "RUSTSEC-2026-0543",
 ]
 
 # ─── Licenses ───────────────────────────────────────────────────────────
