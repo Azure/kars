@@ -57,7 +57,7 @@ serde_yaml = "0.9"
 # Azure identity (via REST — no SDK dependency). AWS-LC handles signing and
 # non-RSA verification; the router wraps released RSA 0.10 for compatible
 # public-key verification without the older RustCrypto elliptic-curve stack.
-jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "12", features = ["aws_lc_rs"] }
 
 # Observability
 tracing = "0.1"
