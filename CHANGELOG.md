@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+## [0.1.27] — 2026-11-20
+
+### Security
+
+- Inference-router endpoints that change or reveal a sandbox's own security
+  controls (`/egress/learn`, `/egress/learned*`, `/egress/allowlist`,
+  `/agt/audit*`, `/agt/rate-limit`, `/agt/reputation`) now accept only
+  operator callers. Same-pod callers must run as root or as the router's own
+  UID; callers outside the pod keep the existing `ROUTER_ADMIN_ALLOW_IPS` and
+  admin-token checks. Agent-facing endpoints and supported operator workflows
+  (`kubectl exec … kars-inference-router probe`, `kubectl port-forward`,
+  Docker-mode `docker exec`) are unchanged (#633).
+- Signed OCI policy verification upgraded to Sigstore 0.15. Legacy Rekor
+  evidence is bound to the exact signed layer, the Sigstore-validated signer
+  and the manifest digest pinned in the policy reference; Rekor certificate
+  chains bind only the leaf certificate. The locked dependency graph no longer
+  contains `crypto-bigint` 0.5.x (RUSTSEC-2026-0387) (#620).
+- OAuth issuer verification keeps existing RSA, ECDSA and Ed25519 key
+  compatibility. Weak or small-order Ed25519 issuer keys are now rejected;
+  issuers using such keys must rotate them (#620).
+
+### Changed
+
+- Blocklist: the retired URLhaus hostfile (410 Gone since 2026-10-21) is no
+  longer fetched; OISD remains the only built-in feed. Operators can opt in to
+  up to eight extra HTTPS `hosts:`/`domains:` feeds with
+  `BLOCKLIST_EXTRA_FEEDS` (set through Helm `controller.extraEnv`; empty by
+  default). Thanks @slavaolesik (#585).
+
+### Added
+
+- Multi-cloud LLM providers (Anthropic, Ollama) and a pluggable guardrail
+  pipeline (OpenAI Moderation) for `InferencePolicy`. Both fields are optional
+  and existing policies keep their Azure upstream; details below (#488).
+
+### Dependency and CI maintenance
+
+- Consolidated Dependabot updates across Rust, CLI, runtimes, Headlamp and
+  GitHub Actions, including `rustix` 1.1.6 (RUSTSEC-2026-0486) and an AES-GCM
+  0.11 adaptation pinned by an HKDF/AES-GCM v1 wire-format compatibility
+  vector (#512, #592, #605, #616).
+- GitHub Actions pinned to full-length commit SHAs with a Dependabot cooldown
+  (#513, #514); Headlamp Webpack dev-middleware compatibility verified in CI
+  (#619).
+- `quinn-udp` 0.5.16 (RUSTSEC-2026-0538) and a scoped, expiring exception for
+  the unmaintained-`chrono` advisory RUSTSEC-2026-0543, tracked in #634
+  (#635).
+
 ### Multi-cloud LLM providers + pluggable guardrails (slice 1: Anthropic, Ollama, OpenAI Moderation)
 
 First slice of the "multi-cloud LLM providers + native guardrails"
