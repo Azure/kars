@@ -27,7 +27,9 @@ use kars_inference_router::handoff::{
 };
 use kars_inference_router::mesh::{MeshInbox, MeshMetrics};
 use kars_inference_router::providers::{AuditSink, PolicyDecisionProvider, SigningProvider};
-use kars_inference_router::routes::{AppState, mesh_routes, sensitive_agt_routes};
+use kars_inference_router::routes::{
+    AppState, mesh_routes, operator_agt_routes, sensitive_agt_routes,
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -95,6 +97,7 @@ fn test_state(sandbox: &str, admin_token: Option<&str>) -> AppState {
 fn test_app(state: AppState) -> Router {
     Router::new()
         .merge(sensitive_agt_routes())
+        .merge(operator_agt_routes())
         .merge(mesh_routes())
         .with_state(state)
 }

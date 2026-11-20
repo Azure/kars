@@ -177,22 +177,29 @@ The runtime plugin talks to the inference-router via `http://127.0.0.1:8443`. **
 | `/agt/evaluate` | POST | Policy decision per action verb |
 | `/agt/trust` | GET (list), POST (update) | Trust manager |
 | `/agt/trust/{agent_id}` | GET, DELETE | Per-peer trust |
-| `/agt/audit`, `/agt/audit/verify` | GET | Audit log + integrity |
 | `/agt/status` | GET | Governance summary |
 | `/agt/signing-counter` | POST | Plugin pushes Ed25519 sign/verify/reject counts |
-| `/agt/rate-limit` | GET, PUT | Dynamic per-tool rate-limit config |
-| `/agt/reputation` | GET | Registry-side reputation record (proxied) |
 | `/sandbox/spawn` | POST | Create sub-agent CRD (k8s) or container (docker) |
 | `/sandbox/list` | GET | List sub-agents |
 | `/sandbox/{name}/status` | GET | Sub-agent phase |
 | `/sandbox/{name}` | DELETE | Destroy sub-agent |
 | `/egress/fetch` | POST | HTTP egress via router (subject to allowlist + Learn-mode rules) |
+| `/internal/*` | various | Controller↔router (runtimes MUST NOT call) |
+
+### Operator-only router endpoints (runtimes cannot call)
+
+These endpoints change or reveal the sandbox's own security controls, so the router refuses them to sandbox workloads with `403`, even when the admin token is sent. From inside the pod, the router serves them only to UID 0 or its own UID, which is the path used by `kubectl exec -c inference-router -- kars-inference-router probe` and `docker exec`. Callers outside the pod (for example through `kubectl port-forward`) keep the admin-token and allowed-IP checks.
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/agt/audit`, `/agt/audit/verify` | GET | Audit log + integrity |
+| `/agt/rate-limit` | GET, PUT | Dynamic per-tool rate-limit config |
+| `/agt/reputation` | GET | Registry-side reputation record (proxied) |
 | `/egress/learn` | POST | Toggle Learn mode |
 | `/egress/learned` | GET | Domains seen in Learn mode |
 | `/egress/learned/blocked` | GET | Domains blocked but seen |
 | `/egress/learned/clear` | POST | Clear learned set |
 | `/egress/allowlist` | GET | Current allowlist |
-| `/internal/*` | various | Controller↔router (runtimes MUST NOT call) |
 
 ### Handoff endpoints (three auth tiers)
 
@@ -202,7 +209,7 @@ The runtime plugin talks to the inference-router via `http://127.0.0.1:8443`. **
 | `/agt/handoff/snapshot`, `/restore`, `/verify`, `/drain`, `/decommission`, `/abort`, `/succession` | POST | Admin token + handoff token **no loopback bypass** | Handoff orchestration mutations |
 | `/agt/handoff/status`, `/sub-agents`, `/pending`, `/confirm`, `/resume` | GET/POST | Admin token, loopback bypass allowed (read-only) | Handoff status queries |
 
-**Admin token discovery**: read `/etc/kars/secrets/admin-token` synchronously at plugin init. Cache for the process lifetime. The router accepts `Authorization: Bearer <token>` for the protected set; **loopback connections (127.0.0.1 / ::1) bypass the bearer check for admin endpoints** (see `inference-router/src/main.rs:788-804`), but **handoff init + mutation endpoints reject loopback bypass deliberately**. Plugins should always send the token to remain platform-agnostic and to work with handoff endpoints.
+**Admin token discovery**: read `/etc/kars/secrets/admin-token` synchronously at plugin init. Cache for the process lifetime. The router accepts `Authorization: Bearer <token>` for the protected set; **loopback connections (127.0.0.1 / ::1) bypass the bearer check for admin endpoints** (see `admin_auth_middleware` in `inference-router/src/main.rs`), but **handoff init + mutation endpoints reject loopback bypass deliberately**, and operator-only endpoints are refused to runtimes regardless of token. Plugins should always send the token to remain platform-agnostic and to work with handoff endpoints.
 
 ---
 

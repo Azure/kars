@@ -28,20 +28,32 @@ pub fn egress_routes() -> Router<AppState> {
     //   `/egress/learned/blocked`) remains the observability surface.
     //   Operator-driven runtime approvals will land in Slice 5c.2 as a
     //   separate `EgressApproval` CRD.
+    //
+    // Only the agent-facing fetch tool lives here; the routes that
+    // toggle learn mode or reveal the learned/effective allowlist are in
+    // `operator_egress_routes` behind the operator-tier gate.
+    Router::new().route("/egress/fetch", post(egress_fetch))
+}
+
+/// Egress routes reserved for operators (`kubectl exec … probe`,
+/// `kubectl port-forward`). Mounted behind
+/// [`crate::operator_auth::operator_auth_middleware`] so the sandboxed
+/// agent cannot disable the signed allowlist or enumerate it.
+pub fn operator_egress_routes() -> Router<AppState> {
     Router::new()
         .route("/egress/learn", post(egress_learn_toggle))
         .route("/egress/learned", get(egress_learned))
         .route("/egress/learned/clear", post(egress_learned_clear))
         .route("/egress/learned/blocked", get(egress_learned_blocked))
-        .route("/egress/fetch", post(egress_fetch))
         .route("/egress/allowlist", get(egress_allowlist))
 }
 
 /// GET /egress/learned/blocked — list blocked egress attempts captured in
 /// enforce mode. S12.f: sibling of `/egress/learned` (allowed-observation
 /// learn buffer). Hostname + port only — no paths, headers, or payload data.
-/// RBAC: mounted in the `protected` router that already gates `/egress/*`
-/// behind `Authorization: Bearer <admin-token>` — no new auth path.
+/// RBAC: mounted in the operator tier (`operator_egress_routes`) — same-pod
+/// callers must be the router UID or root; remote callers need the admin
+/// token.
 async fn egress_learned_blocked(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,

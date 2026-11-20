@@ -39,7 +39,7 @@ pub(crate) mod signing_ops;
 pub(crate) mod spawn_policy;
 
 mod governance;
-pub use governance::sensitive_agt_routes;
+pub use governance::{operator_agt_routes, sensitive_agt_routes};
 
 mod mesh;
 pub use mesh::mesh_routes;
@@ -48,7 +48,7 @@ mod mesh_token;
 pub use mesh_token::mesh_token_routes;
 
 mod egress;
-pub use egress::egress_routes;
+pub use egress::{egress_routes, operator_egress_routes};
 
 mod internal;
 pub use internal::internal_routes;

@@ -39,6 +39,7 @@ pub mod mcp;
 pub mod memory_binding_loader;
 pub mod mesh;
 pub mod metrics;
+pub mod operator_auth;
 pub mod policy_envelope;
 pub mod policy_status;
 pub mod provider;

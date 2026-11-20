@@ -25,7 +25,9 @@
 //! - **Audit logging:** Every inference call logged with sandbox ID, model,
 //!   token counts, latency, and content safety results.
 
-use kars_inference_router::{a2a, a2a_mtls, config, forward_proxy, governance, handoff, routes};
+use kars_inference_router::{
+    a2a, a2a_mtls, config, forward_proxy, governance, handoff, operator_auth, routes,
+};
 
 use anyhow::Result;
 use axum::{
@@ -338,18 +340,37 @@ async fn main() -> Result<()> {
             .merge(routes::sensitive_agt_routes())
             .merge(routes::internal_routes());
 
-        let protected = if let Some(ref token) = admin_token {
+        // Operator routes — same-pod callers are attributed to the UID that
+        // owns the client socket; only the router UID (probe) and root
+        // (port-forward / docker exec) are admitted. The agent shares the
+        // pod network namespace and can read the admin token, so neither
+        // loopback nor the token identifies an operator inside the pod.
+        let operator = Router::new()
+            .merge(routes::operator_egress_routes())
+            .merge(routes::operator_agt_routes());
+
+        let (protected, operator) = if let Some(ref token) = admin_token {
             let token = token.clone();
             let allow_ips = admin_allow_ips.clone();
-            protected.layer(axum::middleware::from_fn(move |req, next| {
-                let token = token.clone();
-                let allow_ips = allow_ips.clone();
-                admin_auth_middleware(token, allow_ips, req, next)
-            }))
+            let operator_auth = Arc::new(operator_auth::OperatorAuth::new(
+                token.clone(),
+                allow_ips.clone(),
+                config.port,
+            ));
+            (
+                protected.layer(axum::middleware::from_fn(move |req, next| {
+                    let token = token.clone();
+                    let allow_ips = allow_ips.clone();
+                    admin_auth_middleware(token, allow_ips, req, next)
+                })),
+                operator.layer(axum::middleware::from_fn(move |req, next| {
+                    operator_auth::operator_auth_middleware(operator_auth.clone(), req, next)
+                })),
+            )
         } else {
             // Unreachable — auto-generated token above guarantees Some
             tracing::error!("ADMIN_TOKEN is None — this should be unreachable");
-            protected
+            (protected, operator)
         };
 
         // Handoff routes — three auth tiers, all stricter than admin_auth_middleware:
@@ -447,6 +468,7 @@ async fn main() -> Result<()> {
         let policy_status_for_platform = state.policy_status.clone();
         let merged = public
             .merge(protected)
+            .merge(operator)
             .merge(handoff_init)
             .merge(handoff_mutations)
             .merge(handoff_status)
@@ -852,7 +874,9 @@ async fn connection_close_middleware(req: Request, next: Next) -> impl IntoRespo
     response
 }
 
-/// Middleware that gates protected endpoints for non-localhost callers.
+/// Middleware that gates agent-tier protected endpoints for non-localhost
+/// callers. Operator-tier endpoints use
+/// [`operator_auth::operator_auth_middleware`] instead.
 ///
 /// Three-layer gate:
 /// 1. Localhost (127.0.0.1 / ::1) → always allowed (agent + kubectl exec are same-pod).
@@ -881,59 +905,7 @@ async fn admin_auth_middleware(
         return next.run(req).await.into_response();
     }
 
-    // s3 — origin allowlist (defence in depth against admin-token theft).
-    if !allow_ips.is_empty() {
-        match remote_ip {
-            Some(ip) if allow_ips.contains(&ip) => {}
-            Some(ip) => {
-                tracing::warn!(
-                    path = %req.uri().path(),
-                    remote = %ip,
-                    "Admin auth: remote IP not in ROUTER_ADMIN_ALLOW_IPS"
-                );
-                return (StatusCode::FORBIDDEN, "Admin origin not allowed").into_response();
-            }
-            None => {
-                tracing::warn!(
-                    path = %req.uri().path(),
-                    "Admin auth: missing ConnectInfo while allowlist is set"
-                );
-                return (StatusCode::FORBIDDEN, "Admin origin not allowed").into_response();
-            }
-        }
-    }
-
-    // Non-localhost: require bearer token
-    let auth_header = req
-        .headers()
-        .get("authorization")
-        .and_then(|v| v.to_str().ok());
-
-    match auth_header {
-        Some(value) if value.starts_with("Bearer ") => {
-            let provided = &value[7..];
-            if handoff::constant_time_eq(provided.as_bytes(), expected_token.as_bytes()) {
-                next.run(req).await.into_response()
-            } else {
-                tracing::warn!(
-                    path = %req.uri().path(),
-                    "Admin auth: invalid token from non-localhost"
-                );
-                (StatusCode::UNAUTHORIZED, "Invalid admin token").into_response()
-            }
-        }
-        _ => {
-            tracing::warn!(
-                path = %req.uri().path(),
-                "Admin auth: non-localhost request without token"
-            );
-            (
-                StatusCode::UNAUTHORIZED,
-                "Admin token required for non-localhost access",
-            )
-                .into_response()
-        }
-    }
+    operator_auth::check_remote_admin(&expected_token, &allow_ips, remote_ip, req, next).await
 }
 
 // ── Trace-id middleware (r6) ────────────────────────────────────────────────
