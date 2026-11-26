@@ -38,6 +38,20 @@ technical gates were waived. No delegation is inferred by default.
 
 ## Source-bound beta approval exceptions
 
+For Azure/kars#638, the maintainer selected **"Authorize my source-bound sign-off for PR638"**
+on 2026-11-26 after being shown concierge source
+`7a791e8b020cf29e68acb3f593f9cbb0cb547d92` against Azure integration base
+`754110953bf9cccbb7545a71782c38a59087ea2f`. Its separate record is
+[`2026-11-26-browser-concierge.md`](2026-11-26-browser-concierge.md).
+This covers only the browser concierge and necessary installer support in that
+source, including its focused CI repairs and four documented input-hint
+no-stubs annotations. The review agent is automated, not a second human.
+Only the second-human requirement is waived; dependency scans, other CI,
+artifact qualification and installed acceptance remain required. This does
+not authorize merging or waive branch protection, and changes no earlier
+approval. Additional implementation changes invalidate this exact-source
+approval.
+
 For Azure/kars#593 only, maintainer `pallakatos` explicitly authorized a
 single-maintainer approval of source `28ff64372ca97e6bdd6db833d68afa90239cde7c`
 against base `b2ec2094cc663d5b747fec7f3c9d37cce667a24a`. The authorization and

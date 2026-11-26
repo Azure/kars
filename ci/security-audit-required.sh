@@ -52,6 +52,10 @@ fi
 beta_approval_exception() {
   local audit="$1" approval_text approved_head approved_base approved_pr
   case "$audit" in
+    docs/security-audits/2026-11-26-browser-concierge.md)
+      approved_head=7a791e8b020cf29e68acb3f593f9cbb0cb547d92
+      approved_base=754110953bf9cccbb7545a71782c38a59087ea2f
+      approved_pr=638 ;;
     docs/security-audits/2026-11-04-beta-publication.md)
       approved_head=28ff64372ca97e6bdd6db833d68afa90239cde7c
       approved_base=b2ec2094cc663d5b747fec7f3c9d37cce667a24a

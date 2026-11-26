@@ -239,7 +239,8 @@ class SecurityAuditGateTests(GitFixture):
                    "docs/security-audits/2026-11-12-openclaw-npm-registry.md",
                    "docs/security-audits/2026-11-12-headlamp-evidence-permissions.md",
                    "docs/security-audits/2026-11-12-private-tls-authority-key-identifier.md",
-                   "docs/security-audits/2026-11-12-kind-image-descriptor-identity.md")
+                   "docs/security-audits/2026-11-12-kind-image-descriptor-identity.md",
+                   "docs/security-audits/2026-11-26-browser-concierge.md")
         self.approved_beta()
         for other in records:
             if other != self.audit:
@@ -254,13 +255,20 @@ class SecurityAuditGateTests(GitFixture):
 
     def test_other_beta_pr_cannot_use_this_approval(self):
         self.approved_beta()
-        for other in ("593", "606", "607", "608", "617", "621", "622", "623"):
+        for other in ("593", "606", "607", "608", "617", "621", "622", "623", "638"):
             if other != self.pr_number:
                 with self.subTest(pr=other):
                     result = self.beta_gate(GITHUB_ACTIONS="true", GITHUB_REPOSITORY="Azure/kars",
                                             GITHUB_EVENT_NAME="pull_request",
                                             GITHUB_REF=f"refs/pull/{other}/merge")
                     self.assertEqual(result.returncode, 1)
+
+
+class BrowserConciergeAuditGateTests(SecurityAuditGateTests):
+    audit = "docs/security-audits/2026-11-26-browser-concierge.md"
+    pr_number = "638"
+    source_head = "7a791e8b020cf29e68acb3f593f9cbb0cb547d92"
+    source_base = "754110953bf9cccbb7545a71782c38a59087ea2f"
 
 
 class ReleaseRepairAuditGateTests(SecurityAuditGateTests):
