@@ -28,7 +28,6 @@ metadata:
 spec:
   group: kars.azure.com
   names:
-    categories: []
     kind: TrustGraph
     plural: trustgraphs
     shortNames:
