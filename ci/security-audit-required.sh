@@ -52,6 +52,10 @@ fi
 beta_approval_exception() {
   local audit="$1" approval_text approved_head approved_base approved_pr
   case "$audit" in
+    docs/security-audits/2026-11-26-browser-concierge-qualified.md)
+      approved_head=a639732d65eacefa7c639afc266fa28aa640f57a
+      approved_base=754110953bf9cccbb7545a71782c38a59087ea2f
+      approved_pr=638 ;;
     docs/security-audits/2026-11-26-browser-concierge-dependencies.md)
       approved_head=6b6831148955e3d3a28dda0c4ac229d48fef3e9e
       approved_base=754110953bf9cccbb7545a71782c38a59087ea2f
@@ -129,6 +133,13 @@ beta_approval_exception() {
 # Keep the original Headlamp-only approval path for its unchanged source as well.
 carried_beta_approval() {
   local audit="$1" successor='docs/security-audits/2026-11-12-kind-image-descriptor-identity.md'
+  case "$audit" in
+    docs/security-audits/2026-11-26-browser-concierge.md|docs/security-audits/2026-11-26-browser-concierge-dependencies.md)
+      successor='docs/security-audits/2026-11-26-browser-concierge-qualified.md'
+      if grep -Fxq "$successor" <<< "$added_audit" && beta_approval_exception "$successor"; then
+        return 0
+      fi ;;
+  esac
   if [[ "$audit" == 'docs/security-audits/2026-11-26-browser-concierge.md' ]]; then
     successor='docs/security-audits/2026-11-26-browser-concierge-dependencies.md'
     grep -Fxq "$successor" <<< "$added_audit" || return 1

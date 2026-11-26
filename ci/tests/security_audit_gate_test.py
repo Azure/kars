@@ -241,7 +241,8 @@ class SecurityAuditGateTests(GitFixture):
                    "docs/security-audits/2026-11-12-private-tls-authority-key-identifier.md",
                    "docs/security-audits/2026-11-12-kind-image-descriptor-identity.md",
                    "docs/security-audits/2026-11-26-browser-concierge.md",
-                   "docs/security-audits/2026-11-26-browser-concierge-dependencies.md")
+                   "docs/security-audits/2026-11-26-browser-concierge-dependencies.md",
+                   "docs/security-audits/2026-11-26-browser-concierge-qualified.md")
         self.approved_beta()
         for other in records:
             if other != self.audit:
@@ -313,6 +314,81 @@ class BrowserConciergeDependenciesAuditGateTests(SecurityAuditGateTests):
                      "sandbox-images/headlamp/build-frontend.mjs"):
             with self.subTest(path=path):
                 self.write(path, "Unapproved dependency change\n")
+                self.commit()
+                self.assertEqual(self.beta_gate().returncode, 1)
+                self.git("rm", path)
+                self.commit()
+                self.assertEqual(self.beta_gate().returncode, 0)
+
+
+class BrowserConciergeQualifiedAuditGateTests(SecurityAuditGateTests):
+    audit = "docs/security-audits/2026-11-26-browser-concierge-qualified.md"
+    pr_number = "638"
+    source_head = "a639732d65eacefa7c639afc266fa28aa640f57a"
+    source_base = BrowserConciergeAuditGateTests.source_base
+    prior_records = (BrowserConciergeAuditGateTests,
+                     BrowserConciergeDependenciesAuditGateTests)
+
+    def approved_successor_beta(self):
+        for record in self.prior_records:
+            self.write(record.audit,
+                       "# Immutable prior concierge approval\n"
+                       "Beta-approval-exception: Azure/kars#638; "
+                       f"source={record.source_head}; base={self.source_base}\n"
+                       f"{self.signer}\n")
+        self.approved_beta()
+
+    def test_qualified_successor_carries_both_records_in_exact_contexts(self):
+        self.approved_successor_beta()
+        for event, ref in (("pull_request", "refs/pull/638/merge"),
+                           ("push", "refs/heads/kars-bridge")):
+            result = self.beta_gate(GITHUB_ACTIONS="true", GITHUB_REPOSITORY="Azure/kars",
+                                    GITHUB_EVENT_NAME=event, GITHUB_REF=ref)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for record in self.prior_records:
+                self.assertIn(f"{record.audit} is unchanged", result.stdout)
+                self.assertEqual((self.root / record.audit).read_text(),
+                                 self.git("show", f"{self.approved_head}:{record.audit}"))
+
+    def test_either_historical_record_cannot_be_modified_or_deleted(self):
+        self.approved_successor_beta()
+        for record in self.prior_records:
+            with self.subTest(record=record.audit):
+                original = (self.root / record.audit).read_text()
+                self.write(record.audit, original + "\nUnapproved scope extension.\n")
+                self.commit()
+                self.assertEqual(self.beta_gate().returncode, 1)
+                self.git("rm", record.audit)
+                self.commit()
+                self.assertEqual(self.beta_gate().returncode, 1)
+                self.write(record.audit, original)
+                self.commit()
+                self.assertEqual(self.beta_gate().returncode, 0)
+
+    def test_both_records_require_valid_final_authorization(self):
+        self.approved_successor_beta()
+        for old, new in ((self.signer, ""), (self.approved_head, "0" * 40),
+                         (self.base, "1" * 40), ("Azure/kars#638", "Azure/kars#639")):
+            with self.subTest(field=old):
+                self.write(self.audit, self.approval.replace(old, new))
+                self.commit()
+                result = self.beta_gate()
+                self.assertEqual(result.returncode, 1)
+                for record in self.prior_records:
+                    self.assertIn(record.audit, result.stderr)
+        self.git("rm", self.audit)
+        self.commit()
+        self.assertEqual(self.beta_gate().returncode, 1)
+        self.write(self.audit, self.approval)
+        self.commit()
+        self.assertEqual(self.beta_gate().returncode, 0)
+
+    def test_qualified_successor_rejects_rust_chart_or_tracing_drift(self):
+        self.approved_successor_beta()
+        for path in ("Cargo.lock", "deploy/helm/kars/templates/crd-karsteam.yaml",
+                     "sandbox-images/headlamp/patch-backend.go"):
+            with self.subTest(path=path):
+                self.write(path, "Unapproved implementation change\n")
                 self.commit()
                 self.assertEqual(self.beta_gate().returncode, 1)
                 self.git("rm", path)

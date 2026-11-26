@@ -38,6 +38,18 @@ technical gates were waived. No delegation is inferred by default.
 
 ## Source-bound beta approval exceptions
 
+For Azure/kars#638's qualified successor, the maintainer selected
+**"Authorize final source-bound sign-off for PR638"** for implementation
+`a639732d65eacefa7c639afc266fa28aa640f57a` against base
+`754110953bf9cccbb7545a71782c38a59087ea2f`. The separate record,
+[`2026-11-26-browser-concierge-qualified.md`](2026-11-26-browser-concierge-qualified.md),
+includes the authorized root Rust dependency updates, Headlamp tracing
+compatibility and strict CRD parity repair. Both earlier concierge records
+remain unchanged and included in the exact-source comparison. Hosted build,
+Kind, native and component qualification passed at this source; URL #639 and
+Chrono #634 remain blocking, separately scoped issues. The authorization waives
+only the second-human requirement, not technical gates or merge permission.
+
 For Azure/kars#638's dependency successor, the maintainer separately selected
 **"Authorize updated source-bound sign-off for PR638"** for source
 `6b6831148955e3d3a28dda0c4ac229d48fef3e9e` against the same base
