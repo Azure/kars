@@ -592,7 +592,7 @@ describe("Core-managed AL3 Headlamp", () => {
       writeFileSync(join(directory, "app/package.json"), JSON.stringify({ version: "0.41.0", productName: "Headlamp" }));
       const manifest = {
         dependencies: {
-          "js-yaml": "^4.1.1", yaml: "^2.7.0", lodash: "^4.17.23", vite: "^6.4.1", react: "^18.3.1",
+          "js-yaml": "^4.1.1", yaml: "^2.7.0", lodash: "^4.17.23", vite: "^6.4.1", react: "^18.3.1", i18next: "^23.15.1",
           "vite-plugin-node-polyfills": "^0.23.0", "vite-plugin-svgr": "^4.3.0", eslint: "^8.57.0",
         },
         overrides: { "js-yaml": "^4.1.1", cheerio: "1.0.0-rc.12" },
@@ -626,14 +626,14 @@ export default {
       await prepare();
       const result = JSON.parse(readFileSync(file, "utf8"));
       expect(result.dependencies).toEqual({
-        "js-yaml": "4.3.2", yaml: "2.8.3", lodash: "4.18.1", vite: "6.4.5", react: "^18.3.1",
+        "js-yaml": "4.3.2", yaml: "2.8.3", lodash: "4.18.1", vite: "6.4.5", react: "^18.3.1", i18next: "26.3.4",
         "vite-plugin-svgr": "^4.3.0", "@rollup/plugin-inject": "5.0.5", buffer: "6.0.3", process: "0.11.10", "stream-browserify": "3.0.0",
       });
       expect(result.devDependencies).toBeUndefined();
       expect(result.eslintConfig).toBeUndefined();
       expect(result.scripts).toEqual({ build: "node --max-old-space-size=3072 kars-build.mjs build" });
       expect(result.overrides).toEqual({
-        "js-yaml": "$js-yaml", lodash: "$lodash", cheerio: "1.0.0-rc.12",
+        "js-yaml": "$js-yaml", lodash: "$lodash", cheerio: "1.0.0-rc.12", i18next: "$i18next",
         "fast-uri@^3.0.0": "3.1.9", "nanoid@^3.0.0": "3.3.18",
         "@babel/core": "7.29.6", browserslist: "4.28.7", "picomatch@^2.0.0": "2.3.2", "picomatch@^4.0.0": "4.0.4",
         postcss: "8.5.23", "source-map-js": "1.2.2", "yaml@^1.0.0": "1.10.3", "yaml@^2.0.0": "$yaml",

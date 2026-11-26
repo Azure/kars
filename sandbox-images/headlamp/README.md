@@ -10,6 +10,9 @@ evidence must contain the patched i18next package. Headlamp's pinned source,
 Go toolchain, shipped upstream plugins and AL3 runtime base are unchanged.
 Fresh hosted build, backend tests and all-severity image/lock/inventory scans
 remain required; prior qualification does not cover these dependency changes.
+The backend patch also makes the existing service-name span formatter explicit:
+the updated `otelhttp` default names requests by method instead. The original
+upstream tracing and propagation tests remain unchanged and required.
 
 Build from the repository root with `make image-headlamp` or:
 
