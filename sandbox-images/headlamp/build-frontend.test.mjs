@@ -42,7 +42,7 @@ function fixture(t, app = { version: "0.41.0", productName: "Headlamp" }) {
     name: "headlamp-frontend",
     dependencies: {
       ...Object.fromEntries(lintOnly.map(name => [name, "1.0.0"])),
-      "js-yaml": "4.1.0", yaml: "^2.7.0", lodash: "4.17.21", vite: "6.4.3", react: "18.3.1",
+      "js-yaml": "4.1.0", yaml: "^2.7.0", lodash: "4.17.21", vite: "6.4.3", react: "18.3.1", i18next: "23.15.1",
       "vite-plugin-node-polyfills": "^0.23.0", "vite-plugin-svgr": "^4.3.0",
       "vite-plugin-static-copy": "^3.1.2", "monaco-editor": "^0.52.0", typescript: "5.6.2",
     },
@@ -82,10 +82,10 @@ test("preparation pins patched dependencies while preserving upstream build sett
   delete expected.overrides["domain-browser"];
   Object.assign(expected.dependencies, {
     "@rollup/plugin-inject": "5.0.5", buffer: "6.0.3", process: "0.11.10", "stream-browserify": "3.0.0",
-    "js-yaml": "4.3.2", lodash: "4.18.1", vite: "6.4.5", yaml: "2.8.3",
+    "js-yaml": "4.3.2", lodash: "4.18.1", vite: "6.4.5", yaml: "2.8.3", i18next: "26.3.4",
   });
   Object.assign(expected.overrides, {
-    "js-yaml": "$js-yaml", lodash: "$lodash", "fast-uri@^3.0.0": "3.1.9", "nanoid@^3.0.0": "3.3.18",
+    "js-yaml": "$js-yaml", lodash: "$lodash", i18next: "$i18next", "fast-uri@^3.0.0": "3.1.9", "nanoid@^3.0.0": "3.3.18",
     "@babel/core": "7.29.6", browserslist: "4.28.7", "picomatch@^2.0.0": "2.3.2", "picomatch@^4.0.0": "4.0.4",
     postcss: "8.5.23", "source-map-js": "1.2.2", "yaml@^1.0.0": "1.10.3", "yaml@^2.0.0": "$yaml",
   });
@@ -212,6 +212,32 @@ test("real Rollup injection preserves free globals and local bindings", t => {
   for (const name of ["Buffer", "process", "global"]) assert(output.code.includes(`import { default as ${name} }`));
   const local = "export function local(Buffer, process, global) { return [Buffer, process, global]; }";
   assert.equal(inject.transform.call(context, local, "/fixture/local.js")?.code ?? local, local);
+});
+
+test("patched i18next preserves React translation, plurals, interpolation and language changes", async t => {
+  const require = installedDependencies(t);
+  if (!require) return;
+  const i18n = require("i18next").createInstance();
+  const { createElement } = require("react");
+  const { renderToStaticMarkup } = require("react-dom/server");
+  const { I18nextProvider, initReactI18next, useTranslation } = require("react-i18next");
+  await i18n.use(initReactI18next).init({
+    lng: "en", fallbackLng: "en", interpolation: { escapeValue: false },
+    resources: {
+      en: { translation: { item_one: "{{count}} item", item_other: "{{count}} items", greeting: "Hello {{name}}" } },
+      fr: { translation: { item_one: "{{count}} objet", item_other: "{{count}} objets" } },
+    },
+  });
+  function Translation({ count }) {
+    const { t: translate } = useTranslation();
+    return createElement("span", null, translate("item", { count }));
+  }
+  const render = count => renderToStaticMarkup(createElement(I18nextProvider, { i18n }, createElement(Translation, { count })));
+  assert.equal(render(1), "<span>1 item</span>");
+  assert.equal(render(2), "<span>2 items</span>");
+  await i18n.changeLanguage("fr");
+  assert.equal(render(2), "<span>2 objets</span>");
+  assert.equal(i18n.t("greeting", { name: "Headlamp" }), "Hello Headlamp");
 });
 
 test("real package shims preserve Buffer and process default/named exports", async t => {

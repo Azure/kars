@@ -102,6 +102,7 @@ if (command === "prepare") {
     buffer: "6.0.3",
     process: "0.11.10",
     "stream-browserify": "3.0.0",
+    i18next: "26.3.4",
     "js-yaml": "4.3.2",
     lodash: "4.18.1",
     vite: "6.4.5",
@@ -118,6 +119,7 @@ if (command === "prepare") {
     "yaml@^2.0.0": "$yaml",
     "js-yaml": "$js-yaml",
     lodash: "$lodash",
+    i18next: "$i18next",
     "fast-uri@^3.0.0": "3.1.9",
     "nanoid@^3.0.0": "3.3.18",
   });
@@ -176,6 +178,7 @@ if (command === "prepare") {
   assert(packages.has("yaml@2.8.3"), "Patched yaml library absent from bundle evidence");
   assert(packages.has("js-yaml@4.3.2"), "Patched js-yaml library absent from bundle evidence");
   assert(packages.has("lodash@4.18.1"), "Patched lodash absent from bundle evidence");
+  assert(packages.has("i18next@26.3.4"), "Patched i18next absent from bundle evidence");
   const staticPackage = recordPackage(path.join(root, "node_modules/monaco-editor"));
   assert(fs.existsSync("build/assets/vs"), "Dynamically loaded Monaco assets missing");
   // Match the upstream post-build cleanup without invoking npx at build time.

@@ -392,7 +392,7 @@ fields and changed account, source, or privacy-epoch bindings still fail closed.
 
 Prerequisites:
 
-- Rust 1.88+
+- Rust 1.89+ (the BFF's patched kube client minimum)
 - Node.js 22+
 - access to a compatible Kars cluster for integration testing
 

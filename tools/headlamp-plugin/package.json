@@ -21,6 +21,7 @@
     "vite": "6.4.5"
   },
   "overrides": {
+    "i18next": "26.3.4",
     "@joshwooding/vite-plugin-react-docgen-typescript": {
       "glob": "14.0.2"
     },
