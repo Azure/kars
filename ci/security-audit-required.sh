@@ -52,6 +52,10 @@ fi
 beta_approval_exception() {
   local audit="$1" approval_text approved_head approved_base approved_pr
   case "$audit" in
+    docs/security-audits/2026-11-26-browser-concierge-dependencies.md)
+      approved_head=6b6831148955e3d3a28dda0c4ac229d48fef3e9e
+      approved_base=754110953bf9cccbb7545a71782c38a59087ea2f
+      approved_pr=638 ;;
     docs/security-audits/2026-11-26-browser-concierge.md)
       approved_head=7a791e8b020cf29e68acb3f593f9cbb0cb547d92
       approved_base=754110953bf9cccbb7545a71782c38a59087ea2f
@@ -125,6 +129,12 @@ beta_approval_exception() {
 # Keep the original Headlamp-only approval path for its unchanged source as well.
 carried_beta_approval() {
   local audit="$1" successor='docs/security-audits/2026-11-12-kind-image-descriptor-identity.md'
+  if [[ "$audit" == 'docs/security-audits/2026-11-26-browser-concierge.md' ]]; then
+    successor='docs/security-audits/2026-11-26-browser-concierge-dependencies.md'
+    grep -Fxq "$successor" <<< "$added_audit" || return 1
+    beta_approval_exception "$successor"
+    return
+  fi
   # The image-identity successor includes all three immutable prior records.
   case "$audit" in
     docs/security-audits/2026-11-12-openclaw-npm-registry.md|docs/security-audits/2026-11-12-headlamp-evidence-permissions.md|docs/security-audits/2026-11-12-private-tls-authority-key-identifier.md)
@@ -159,7 +169,7 @@ while IFS= read -r audit; do
     if beta_approval_exception "$audit"; then
       echo "pass: $audit uses its explicit, source-bound single-maintainer beta exception."
     elif carried_beta_approval "$audit"; then
-      echo "pass: $audit is unchanged within the explicit, source-bound PR623 successor approval."
+      echo "pass: $audit is unchanged within the explicit, source-bound successor approval."
     else
       echo "fail: $audit has ${#signers[@]} distinct Signed-off-by emails; need 2 (author + independent reviewer)." >&2
       fail=1

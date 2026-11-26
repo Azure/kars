@@ -240,7 +240,8 @@ class SecurityAuditGateTests(GitFixture):
                    "docs/security-audits/2026-11-12-headlamp-evidence-permissions.md",
                    "docs/security-audits/2026-11-12-private-tls-authority-key-identifier.md",
                    "docs/security-audits/2026-11-12-kind-image-descriptor-identity.md",
-                   "docs/security-audits/2026-11-26-browser-concierge.md")
+                   "docs/security-audits/2026-11-26-browser-concierge.md",
+                   "docs/security-audits/2026-11-26-browser-concierge-dependencies.md")
         self.approved_beta()
         for other in records:
             if other != self.audit:
@@ -269,6 +270,54 @@ class BrowserConciergeAuditGateTests(SecurityAuditGateTests):
     pr_number = "638"
     source_head = "7a791e8b020cf29e68acb3f593f9cbb0cb547d92"
     source_base = "754110953bf9cccbb7545a71782c38a59087ea2f"
+
+
+class BrowserConciergeDependenciesAuditGateTests(SecurityAuditGateTests):
+    audit = "docs/security-audits/2026-11-26-browser-concierge-dependencies.md"
+    pr_number = "638"
+    source_head = "6b6831148955e3d3a28dda0c4ac229d48fef3e9e"
+    source_base = BrowserConciergeAuditGateTests.source_base
+    prior_audit = BrowserConciergeAuditGateTests.audit
+
+    def approved_successor_beta(self):
+        self.write(self.prior_audit,
+                   "# Original concierge-only approval\n"
+                   "Beta-approval-exception: Azure/kars#638; "
+                   f"source={BrowserConciergeAuditGateTests.source_head}; base={self.source_base}\n"
+                   f"{self.signer}\n")
+        self.approved_beta()
+
+    def test_dependency_successor_carries_only_unchanged_concierge_record(self):
+        self.approved_successor_beta()
+        for event, ref in (("pull_request", "refs/pull/638/merge"),
+                           ("push", "refs/heads/kars-bridge")):
+            result = self.beta_gate(GITHUB_ACTIONS="true", GITHUB_REPOSITORY="Azure/kars",
+                                    GITHUB_EVENT_NAME=event, GITHUB_REF=ref)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(f"{self.prior_audit} is unchanged", result.stdout)
+        original = (self.root / self.prior_audit).read_text()
+        self.write(self.prior_audit, original + "\nExtended historical scope.\n")
+        self.commit()
+        self.assertEqual(self.beta_gate().returncode, 1)
+        self.write(self.prior_audit, original)
+        self.commit()
+        self.assertEqual(self.beta_gate().returncode, 0)
+        self.git("rm", self.audit)
+        self.commit()
+        self.assertEqual(self.beta_gate().returncode, 1)
+
+    def test_dependency_successor_rejects_lock_or_recipe_drift(self):
+        self.approved_successor_beta()
+        for path in ("bridge/bff/Cargo.lock", "tools/headlamp-plugin/package-lock.json",
+                     "sandbox-images/headlamp/build-backend.sh",
+                     "sandbox-images/headlamp/build-frontend.mjs"):
+            with self.subTest(path=path):
+                self.write(path, "Unapproved dependency change\n")
+                self.commit()
+                self.assertEqual(self.beta_gate().returncode, 1)
+                self.git("rm", path)
+                self.commit()
+                self.assertEqual(self.beta_gate().returncode, 0)
 
 
 class ReleaseRepairAuditGateTests(SecurityAuditGateTests):

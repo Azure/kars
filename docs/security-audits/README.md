@@ -38,6 +38,17 @@ technical gates were waived. No delegation is inferred by default.
 
 ## Source-bound beta approval exceptions
 
+For Azure/kars#638's dependency successor, the maintainer separately selected
+**"Authorize updated source-bound sign-off for PR638"** for source
+`6b6831148955e3d3a28dda0c4ac229d48fef3e9e` against the same base
+`754110953bf9cccbb7545a71782c38a59087ea2f`. The new record,
+[`2026-11-26-browser-concierge-dependencies.md`](2026-11-26-browser-concierge-dependencies.md),
+covers the retained concierge plus the explicitly authorized minimal Bridge
+and Headlamp dependency repairs. It carries the original concierge record
+unchanged; the source comparison includes that historical file. Dependency
+and recipe drift, an invalid or missing successor approval, and another PR
+context still fail. No technical gate or merge approval is waived.
+
 For Azure/kars#638, the maintainer selected **"Authorize my source-bound sign-off for PR638"**
 on 2026-11-26 after being shown concierge source
 `7a791e8b020cf29e68acb3f593f9cbb0cb547d92` against Azure integration base
