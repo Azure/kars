@@ -636,7 +636,10 @@ async fn reconcile_provisioning_inner(
         .and_then(|b| b.per_request_tokens)
         .unwrap_or(0) as i64;
 
-    if ctx.foundry_endpoint.is_empty() && ctx.openai_endpoint.is_empty() {
+    if inference::requires_azure_endpoint(&inference_policy_spec)
+        && ctx.foundry_endpoint.is_empty()
+        && ctx.openai_endpoint.is_empty()
+    {
         tracing::error!("No inference endpoint configured");
         degrade!(
             DEPENDENCY_MISSING,

@@ -20,6 +20,7 @@
  * picking the provider.
  */
 
+import { setTimeout as delay } from "node:timers/promises";
 import { detectGhAccounts, getGhToken, type GhAccount } from "./github-models.js";
 
 /** Public OpenAI-compatible base. The router rewrites /v1/* through to here. */
@@ -52,9 +53,12 @@ export const GITHUB_OAUTH_TOKEN_URL = "https://github.com/login/oauth/access_tok
  */
 export async function copilotDeviceLogin(
   onPrompt: (info: { userCode: string; verificationUri: string; expiresInSec: number }) => void | Promise<void>,
+  options: { signal?: AbortSignal; request?: typeof fetch } = {},
 ): Promise<string> {
-  const initResp = await fetch(GITHUB_DEVICE_CODE_URL, {
-    method: "POST",
+  const request = options.request ?? fetch;
+  const requestSignal = () => options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000);
+  const initResp = await request(GITHUB_DEVICE_CODE_URL, {
+    method: "POST", redirect: "error", signal: requestSignal(),
     headers: { Accept: "application/json", "Content-Type": "application/json", "User-Agent": "GitHubCopilotChat/0.26.7" },
     body: JSON.stringify({ client_id: COPILOT_OAUTH_CLIENT_ID, scope: "read:user" }),
   });
@@ -69,15 +73,23 @@ export async function copilotDeviceLogin(
     interval: number;
   };
 
+  if (typeof init.device_code !== "string" || !init.device_code || typeof init.user_code !== "string"
+    || !/^[A-Z0-9-]{4,32}$/.test(init.user_code) || init.verification_uri !== "https://github.com/login/device"
+    || !Number.isFinite(init.expires_in) || init.expires_in <= 0 || init.expires_in > 1800
+    || (init.interval !== undefined && (!Number.isFinite(init.interval) || init.interval < 0 || init.interval > 60))) {
+    throw new Error("Invalid GitHub device authorization response");
+  }
+  options.signal?.throwIfAborted();
   await onPrompt({ userCode: init.user_code, verificationUri: init.verification_uri, expiresInSec: init.expires_in });
 
   const startedAt = Date.now();
   let intervalSec = Math.max(5, init.interval || 5);
 
   while ((Date.now() - startedAt) / 1000 < init.expires_in) {
-    await new Promise((r) => setTimeout(r, intervalSec * 1000));
-    const pollResp = await fetch(GITHUB_OAUTH_TOKEN_URL, {
-      method: "POST",
+    await delay(Math.min(intervalSec * 1000, init.expires_in * 1000 - (Date.now() - startedAt)), undefined, { signal: options.signal });
+    if (Date.now() - startedAt >= init.expires_in * 1000) break;
+    const pollResp = await request(GITHUB_OAUTH_TOKEN_URL, {
+      method: "POST", redirect: "error", signal: requestSignal(),
       headers: { Accept: "application/json", "Content-Type": "application/json", "User-Agent": "GitHubCopilotChat/0.26.7" },
       body: JSON.stringify({
         client_id: COPILOT_OAUTH_CLIENT_ID,
@@ -94,11 +106,13 @@ export async function copilotDeviceLogin(
       error_description?: string;
       interval?: number;
     };
-    if (body.access_token) return body.access_token;
+    options.signal?.throwIfAborted();
+    if (typeof body.access_token === "string" && body.access_token.length <= 4096 && /^[\x21-\x7e]+$/.test(body.access_token)) return body.access_token;
     switch (body.error) {
       case "authorization_pending":
         continue;
       case "slow_down":
+        if (body.interval !== undefined && (!Number.isFinite(body.interval) || body.interval < 0 || body.interval > 1800)) throw new Error("Invalid GitHub polling interval");
         intervalSec = Math.max(intervalSec + 5, body.interval ?? intervalSec + 5);
         continue;
       case "expired_token":

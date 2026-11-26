@@ -65,6 +65,54 @@ describe("workspace provider installation", () => {
     expect(applyReviewedGrant).not.toHaveBeenCalled();
   });
 
+  it("enrolls a Core-only installer without Bridge or unrelated integration stores", async () => {
+    const f = fixture();
+    delete f.objects["deployment/kars-bridge-bff"];
+    f.objects["serviceaccount/kars-provider-installer"] = { ...object("kars-provider-installer"), automountServiceAccountToken: false };
+    const consumers = ["kars-sre/Deployment/sre"];
+    const document = await prepareWorkspaceProviderGrant(f.execute, {
+      namespace: options.namespace, controllerProfile: options.controllerProfile, consumers,
+      installerWriter: { name: "kars-provider-installer", uid: "kars-provider-installer-uid" },
+    });
+    expect(document.spec.writers).toEqual([{ namespace: "kars-system", name: "kars-provider-installer", uid: "kars-provider-installer-uid" }]);
+    expect(document.spec.integrationStores).toEqual([{ secret: { name: "kars-inference-providers", uid: "kars-inference-providers-uid" }, purpose: "providers" }]);
+    expect(document.spec.controller).toEqual({ name: "kars-controller", uid: "kars-controller-uid" });
+    expect(f.execute.mock.calls.some(([args]) => args.includes("kars-bridge-bff"))).toBe(false);
+    expect(f.execute.mock.calls.filter(([args]) => args[0] === "create")).toHaveLength(1);
+    expect(previewPrivateActivation).toHaveBeenCalledWith(f.execute, "kars-system", document.spec.writers, [], "kars-system", "service-accounts", consumers);
+    expect(validateGrantDocument).toHaveBeenCalledWith(f.execute, document);
+  });
+
+  it.each(["uid", "automount", "controller", "ambiguous", "missing"])("rejects invalid Core-only %s authority before store creation", async fault => {
+    const f = fixture();
+    f.objects["serviceaccount/kars-provider-installer"] = { ...object("kars-provider-installer"), automountServiceAccountToken: fault === "automount" };
+    const requested: any = { namespace: options.namespace, controllerProfile: options.controllerProfile,
+      installerWriter: { name: "kars-provider-installer", uid: fault === "uid" ? "replaced" : "kars-provider-installer-uid" } };
+    if (fault === "controller") {
+      requested.installerWriter.name = "kars-controller";
+      f.objects["serviceaccount/kars-controller"] = { ...object("kars-controller"), automountServiceAccountToken: false };
+    }
+    if (fault === "ambiguous") requested.bridgeNamespace = "kars-system";
+    if (fault === "missing") delete requested.installerWriter;
+    await expect(prepareWorkspaceProviderGrant(f.execute, requested)).rejects.toThrow(/writer/);
+    expect(f.execute.mock.calls.some(([args]) => args[0] === "create")).toBe(false);
+    expect(applyReviewedGrant).not.toHaveBeenCalled();
+  });
+
+  it("preserves prior writers, integrations and consumers when enrolling an installer", async () => {
+    const f = fixture();
+    f.objects["serviceaccount/kars-provider-installer"] = { ...object("kars-provider-installer"), automountServiceAccountToken: false };
+    const prior = { namespace: "kars-system", name: "actual-bridge-account", uid: "actual-bridge-account-uid" };
+    f.grant.spec.writers = [prior];
+    f.grant.spec.integrationStores = [{ secret: { name: "teams-store", uid: "teams-uid" }, purpose: "teams" }];
+    f.grant.spec.privateActivation = { namespaces: [{ namespace: { name: "kars-system" }, consumers: [{ kind: "Deployment", object: { name: "kars-bridge-bff" } }] }] };
+    const document = await prepareWorkspaceProviderGrant(f.execute, { namespace: options.namespace, controllerProfile: options.controllerProfile,
+      installerWriter: { name: "kars-provider-installer", uid: "kars-provider-installer-uid" } });
+    expect(document.spec.writers).toContainEqual(prior);
+    expect(document.spec.integrationStores).toContainEqual(f.grant.spec.integrationStores[0]);
+    expect(vi.mocked(previewPrivateActivation).mock.calls[0]![6]).toEqual(["kars-system/Deployment/kars-bridge-bff"]);
+  });
+
   it("preserves existing provider data and other enrolled capabilities", async () => {
     const f = fixture();
     f.objects["secret/kars-inference-providers"] = { ...object("kars-inference-providers"), type: "Opaque", data: { KARS_PROVIDER_OPENAI_API_KEY: "c2VjcmV0" } };

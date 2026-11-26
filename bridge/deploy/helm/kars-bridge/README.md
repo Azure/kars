@@ -213,6 +213,16 @@ It requires the CiliumNetworkPolicy API,
 Check actual API-server discovery/JWKS access and per-user resource access,
 not merely a successful browser login.
 
+The managed local installer enables `nodeSelectorLabels` and waits for Dex's
+Cilium policy to be valid before changing host trust. Browser ingress remains
+limited to Dex TCP **5557**, from the discovered Kind gateway `/32` and, for
+an SSH-backed local Podman machine, its host-forwarding gateway `/32`.
+The latter is bound to the selected runtime endpoint and SSH identity, not the
+default machine. Missing or ambiguous discovery fails rather than allowing a
+subnet or all external traffic. These are installer-generated
+`idp.dex.kindGatewayCIDR` and `idp.dex.kindHostGatewayCIDR` values; no gateway
+address is hardcoded.
+
 Bridge also uses authenticated Kubernetes `pods/proxy` requests to sandbox
 routers. On a multi-node Cilium cluster, set
 `networkPolicy.routerApiServerIngress=true`. This requires

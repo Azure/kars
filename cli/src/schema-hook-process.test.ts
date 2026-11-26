@@ -15,6 +15,9 @@ const entries = [
 const releaseArgs = ["--release", "kars", "--namespace", "kars-system", "--revision", "1",
   "--operation", "install", "--installer-helm-version", "v4.1.3"];
 const phases = entries.flatMap(entry => ["schemas", "sre"].map(phase => ({ ...entry, phase })));
+const credentialFailure = "KARS_CORE_HOOK_FAILURE Credentials\n"
+  + "Core installation hook failed: Schema hook requires its own projected service-account credentials\n"
+  + "Helm must not proceed; no cluster cleanup, force or automatic write retry was attempted.\n";
 
 describe.each(phases)("$name $phase hook process", ({ entry, phase }) => {
   const args = [...releaseArgs, "--phase", phase];
@@ -33,7 +36,7 @@ describe.each(phases)("$name $phase hook process", ({ entry, phase }) => {
       expect(result.signal).toBeNull();
       expect(result.status).toBe(1);
       expect(result.stdout).toBe("");
-      expect(result.stderr).toBe("Core schema staging failed. Helm must not proceed; no cluster cleanup, force or automatic write retry was attempted.\n");
+      expect(result.stderr).toBe(credentialFailure);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -58,7 +61,7 @@ describe.each(phases)("$name $phase hook process", ({ entry, phase }) => {
     expect(result.signal).toBeNull();
     expect(result.status).toBe(1);
     expect(result.stdout).toBe("");
-    expect(result.stderr).toBe("Core schema staging failed. Helm must not proceed; no cluster cleanup, force or automatic write retry was attempted.\n");
+    expect(result.stderr).toBe(credentialFailure);
   });
 
   it("refuses local-cluster fallback before starting Helm or kubectl", () => {
@@ -68,7 +71,7 @@ describe.each(phases)("$name $phase hook process", ({ entry, phase }) => {
     expect(result.signal).toBeNull();
     expect(result.status).toBe(1);
     expect(result.stdout).toBe("");
-    expect(result.stderr).toMatch(/^Core schema staging failed\./);
+    expect(result.stderr).toMatch(/^KARS_CORE_HOOK_FAILURE Endpoint\n/);
     expect(result.stderr).not.toMatch(/ENOENT|spawn|stack|at /);
   });
 
@@ -78,7 +81,7 @@ describe.each(phases)("$name $phase hook process", ({ entry, phase }) => {
       env: { PATH: "/nonexistent", PRIVATE_TEST_CREDENTIAL: marker } });
     expect(result.status).toBe(1);
     expect(result.stdout).toBe("");
-    expect(result.stderr).toMatch(/^Core schema staging failed\./);
+    expect(result.stderr).toMatch(/^KARS_CORE_HOOK_FAILURE Options\n/);
     expect(result.stderr).not.toContain(marker);
     expect(result.stderr).not.toContain("--token");
   });

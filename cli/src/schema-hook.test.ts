@@ -4,11 +4,28 @@
 import { describe, expect, it, vi } from "vitest";
 import { runSchemaHook } from "./schema-hook.js";
 import { schemaFixture } from "./lib/schema-stage.test-support.js";
+import { coreHookFailureCode, coreHookFailureMessage, readCoreHookFailure } from "./lib/core-hook-diagnostics.js";
+import { privateCommandFailure } from "./lib/private-activation-command-diagnostics.js";
 
 const args = ["--release", "kars", "--namespace", "kars-system", "--revision", "1",
   "--operation", "install", "--installer-helm-version", "v4.1.3", "--timeout-ms", "1500"];
 
 describe("schema hook command", () => {
+  it("projects an API refusal to a fixed diagnosis without retaining command or credential material", () => {
+    const marker = "private-command-credential";
+    const error = privateCommandFailure({ stderr: `Error from server (Forbidden): ${marker}`, exitCode: 1 },
+      ["create", "-f", marker]);
+    const code = coreHookFailureCode(error);
+    expect(code).toBe("CommandForbidden");
+    expect(readCoreHookFailure(`KARS_CORE_HOOK_FAILURE ${code}\n${marker}`)).toBe(code);
+    expect(coreHookFailureMessage(code)).toContain("RBAC and admission");
+    expect(coreHookFailureMessage(code)).not.toContain(marker);
+    expect(coreHookFailureCode(new Error(marker))).toBe("Unexpected");
+    for (const value of [`KARS_CORE_HOOK_FAILURE ${marker}`, "KARS_CORE_HOOK_FAILURE __proto__",
+      "KARS_CORE_HOOK_FAILURE CommandForbidden\nKARS_CORE_HOOK_FAILURE Unexpected", "x".repeat(4097)]) {
+      expect(readCoreHookFailure(value)).toBeUndefined();
+    }
+  });
   it("executes the real pending-release orchestration with exact parsed arguments", async () => {
     const f = schemaFixture();
     f.history[0].status = "pending-install";

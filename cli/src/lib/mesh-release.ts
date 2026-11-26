@@ -35,7 +35,7 @@ function parseObject(raw: string, label: string): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
-export async function readReleaseValues(execute: Execute, release = "kars", namespace = "kars-system"): Promise<Record<string, unknown>> {
+export async function readReleaseValues(execute: (tool: string, args: string[], options: { stdio: "pipe" }) => Promise<{ stdout: unknown }>, release = "kars", namespace = "kars-system"): Promise<Record<string, unknown>> {
   const { stdout } = await execute("helm", ["get", "values", release, "-n", namespace, "--all", "-o", "json"], { stdio: "pipe" });
   return String(stdout).trim() === "null" ? {} : parseObject(String(stdout), "Helm values");
 }

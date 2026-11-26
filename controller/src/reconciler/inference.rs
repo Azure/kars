@@ -13,6 +13,22 @@ use std::collections::BTreeMap;
 
 const PROVIDERS_SECRET: &str = "kars-inference-providers";
 
+pub(super) fn requires_azure_endpoint(
+    policy: &crate::inference_policy::InferencePolicySpec,
+) -> bool {
+    if let Some(provider) = policy.provider {
+        return provider == crate::inference_policy::InferenceProvider::AzureOpenAI;
+    }
+    // Named routes resolve their endpoint and credentials in the router's
+    // governed provider store, not through the controller's Azure settings.
+    policy.model_preference.as_ref().is_none_or(|preference| {
+        let provider = preference.primary.provider.trim();
+        provider.is_empty()
+            || provider.eq_ignore_ascii_case("azure-openai")
+            || provider.eq_ignore_ascii_case("foundry")
+    })
+}
+
 pub(super) fn model_deployment(
     policy: &crate::inference_policy::InferencePolicySpec,
     cluster_default: Option<&str>,
@@ -156,6 +172,58 @@ pub(super) async fn mirror_providers(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn named_inference_routes_do_not_require_an_unrelated_azure_endpoint() {
+        for provider in [
+            "github-copilot",
+            "openai",
+            "anthropic",
+            "openai-compatible",
+            "ollama",
+            "custom-gateway",
+        ] {
+            let policy: crate::inference_policy::InferencePolicySpec =
+                serde_json::from_value(json!({
+                    "appliesTo": {},
+                    "modelPreference": {
+                        "primary": {"provider": provider, "deployment": "selected-model"},
+                        "fallback": []
+                    }
+                }))
+                .unwrap();
+            assert!(!requires_azure_endpoint(&policy), "{provider}");
+        }
+    }
+
+    #[test]
+    fn azure_endpoint_requirement_preserves_default_and_explicit_provider_precedence() {
+        use crate::inference_policy::InferenceProvider;
+        let mut policy = crate::inference_policy::InferencePolicySpec::default();
+        assert!(requires_azure_endpoint(&policy));
+        for provider in [
+            "",
+            " ",
+            "azure-openai",
+            "foundry",
+            " AZURE-OPENAI ",
+            "Foundry",
+        ] {
+            policy.model_preference = Some(crate::inference_policy::ModelPreference {
+                primary: crate::inference_policy::ModelRef {
+                    provider: provider.into(),
+                    deployment: "selected-model".into(),
+                },
+                fallback: vec![],
+            });
+            assert!(requires_azure_endpoint(&policy), "{provider}");
+        }
+        policy.provider = Some(InferenceProvider::Anthropic);
+        assert!(!requires_azure_endpoint(&policy));
+        policy.model_preference.as_mut().unwrap().primary.provider = "github-copilot".into();
+        policy.provider = Some(InferenceProvider::AzureOpenAI);
+        assert!(requires_azure_endpoint(&policy));
+    }
 
     #[test]
     fn provider_revision_preserves_running_routes_when_only_default_metadata_changes() {

@@ -7,6 +7,7 @@ import { bridgeReactivationDigest } from "../commands/budget-topup.js";
 import { runSchemaHook } from "../schema-hook.js";
 import { claimAnnotations } from "./namespace-ownership.js";
 import type { ObjectMap, SchemaExecute } from "./schema-documents.js";
+import { coreHookFailureCode } from "./core-hook-diagnostics.js";
 
 function fixture(unbounded = false) {
   const ns = "kars-system";
@@ -143,6 +144,49 @@ describe("Core original-install SRE enrollment", () => {
     expect(ledger.meters.settled.tokens).toBe(0);
   });
 
+  function emptyCatalogFixture(unbounded = true) {
+    const f = fixture(unbounded);
+    f.intent.budget.contracts = [];
+    Object.assign(f.intent.budget, { calendarPolicy: "record-only" });
+    f.controller.metadata.annotations["kars.azure.com/installation-profile"] = "kind-beta";
+    f.catalog.data["calendar-policy"] = "record-only";
+    f.catalog.data["contracts.json"] = JSON.stringify({ version: "fresh", contracts: [], nonInferenceEgressHosts: [] });
+    f.map.data["intent.json"] = JSON.stringify(f.intent);
+    f.documents[0] = structuredClone(f.map);
+    f.documents[1] = structuredClone(f.catalog);
+    f.documents[2] = structuredClone(f.controller);
+    return f;
+  }
+
+  it("enrolls the managed Kind empty catalog without inventing contracts or finite funding", async () => {
+    const f = emptyCatalogFixture();
+    await expect(f.run()).resolves.toMatchObject({ enrolled: true, unboundedTokenAllowance: { originalLimits: {} } });
+    expect(JSON.parse(f.catalog.data["contracts.json"]).contracts).toEqual([]);
+    expect(f.writes.at(-1)!.spec.firstInstallFunding.grant).toMatchObject({ limits: {}, unboundedTokens: true });
+    expect(f.writes.at(-1)!.spec.firstInstallFunding.grant).not.toHaveProperty("expiresAt");
+    await expect(f.run()).rejects.toThrow("no adoption");
+  });
+
+  it.each(["finite", "profile", "calendar", "live-profile", "live-calendar", "malformed"])(
+    "rejects empty-catalog bootstrap with %s before creating resources", async fault => {
+      const f = emptyCatalogFixture(fault !== "finite");
+      if (fault === "profile") delete f.documents[2].metadata.annotations["kars.azure.com/installation-profile"];
+      if (fault === "calendar") {
+        Object.assign(f.intent.budget, { calendarPolicy: "enforce" });
+        f.map.data["intent.json"] = JSON.stringify(f.intent);
+        f.documents[0] = structuredClone(f.map);
+      }
+      if (fault === "live-profile") delete f.controller.metadata.annotations["kars.azure.com/installation-profile"];
+      if (fault === "live-calendar") f.catalog.data["calendar-policy"] = "enforce";
+      if (fault === "malformed") {
+        const intent = { ...f.intent, budget: { ...f.intent.budget, contracts: null } };
+        f.map.data["intent.json"] = JSON.stringify(intent);
+        f.documents[0] = structuredClone(f.map);
+      }
+      await expect(f.run()).rejects.toThrow(/Empty SRE catalog|catalog changed|Incomplete operator/);
+      expect(f.writes).toEqual([]);
+    });
+
   it.each(["unconsumed", "changed", "revoked"])("does not complete with an %s allowance", async fault => {
     const f = fixture(true);
     let clock = 0;
@@ -189,7 +233,10 @@ describe("Core original-install SRE enrollment", () => {
       if (fault === "literal") container.env[0].value = "unexpected";
       if (fault === "reference") container.env[0] = { name: "EMPTY", valueFrom: { secretKeyRef: { name: "unreviewed", key: "key" } } };
       if (fault === "missing-env") delete container.env;
-      await expect(f.run()).rejects.toThrow("Core controller intent changed");
+      const failure = await f.run().catch(error => error);
+      expect(failure).toBeInstanceOf(Error);
+      expect(failure.message).toBe("Core controller intent changed");
+      expect(coreHookFailureCode(failure)).toBe("ControllerChanged");
       expect(f.writes).toEqual([]);
     }
   });

@@ -13,11 +13,27 @@ Licensed under the MIT License. */}}
 {{- end }}
 {{- if .Values.idp.enabled }}
 {{- $managed := .Values.idp.dex.kindPrerequisite | default false }}
+{{- $servicePort := 443 }}
+{{- if $managed }}
+{{- $authority := splitList ":" (urlParse .Values.idp.issuer).host }}
+{{- if eq (len $authority) 2 }}
+{{- $port := last $authority }}
+{{- if or (not (regexMatch "^[0-9]+$" $port)) (lt (int $port) 1024) (gt (int $port) 65535) }}
+{{- fail "Managed Dex requires an unprivileged explicit HTTPS port or the legacy default 443" }}
+{{- end }}
+{{- $servicePort = int $port }}
+{{- end }}
+{{- end }}
 {{- if and $managed (not (and (kindIs "bool" $managed) .Values.idp.dex.tls.enabled .Values.idp.dex.persistence.enabled .Values.idp.dex.persistence.existingClaim .Values.networkPolicy.dexApiServerIngress (regexMatch "^[^[:space:]@]+@sha256:[a-f0-9]{64}$" .Values.idp.dex.image))) }}
 {{- fail "idp.dex.kindPrerequisite requires immutable Dex, TLS, an owned persistent claim and Cilium API-server ingress" }}
 {{- end }}
 {{- if and $managed (not (regexMatch "^([0-9]{1,3}\\.){3}[0-9]{1,3}/32$" (.Values.idp.dex.kindGatewayCIDR | default ""))) }}
 {{- fail "idp.dex.kindPrerequisite requires the discovered Kind gateway IPv4 /32" }}
+{{- end }}
+{{- if .Values.idp.dex.kindHostGatewayCIDR }}
+{{- if or (not $managed) (not (regexMatch "^([0-9]{1,3}\\.){3}[0-9]{1,3}/32$" .Values.idp.dex.kindHostGatewayCIDR)) }}
+{{- fail "idp.dex.kindHostGatewayCIDR requires managed Kind and the discovered host-forwarding IPv4 /32" }}
+{{- end }}
 {{- end }}
 {{- $tls := .Values.idp.dex.tls | default dict }}
 {{- $persistence := .Values.idp.dex.persistence | default dict }}
@@ -112,7 +128,7 @@ data:
     oauth2: { skipApprovalScreen: true }
     staticClients:
       - id: {{ .Values.idp.clientId | quote }}
-        name: kars Bridge
+        name: {{ .Values.idp.clientId | quote }}
         secretEnv: DEX_CLIENT_SECRET
         redirectURIs: {{ .Values.idp.redirectURIs | toJson }}
       {{- if $headlamp.enabled }}
@@ -292,7 +308,7 @@ spec:
     {{- end }}
     {{- if $tls.enabled }}
     - name: https
-      port: {{ ternary 443 5557 $managed }}
+      port: {{ ternary $servicePort 5557 $managed }}
       {{- if $managed }}
       nodePort: 30443
       {{- end }}
@@ -301,7 +317,7 @@ spec:
 {{- if .Values.networkPolicy.create }}
 ---
 # Compatibility allows the same-origin /dex proxy. Managed local beta admits
-# only its gateway and named web clients over TLS, with deny-all egress;
+# only its discovered gateways and named web clients over TLS, with deny-all egress;
 # API-server/control-plane ingress is governed separately by Cilium.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -323,6 +339,10 @@ spec:
         {{- if $managed }}
         - ipBlock:
             cidr: {{ .Values.idp.dex.kindGatewayCIDR | quote }}
+        {{- with .Values.idp.dex.kindHostGatewayCIDR }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: headlamp

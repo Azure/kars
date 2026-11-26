@@ -224,7 +224,7 @@ describe("Core-managed AL3 Headlamp", () => {
       const config = dexConfig(objects);
       expect(config.web).toEqual({ http: "0.0.0.0:5556" });
       expect(config.staticClients).toEqual([{
-        id: "kars-bridge", name: "kars Bridge", secretEnv: "DEX_CLIENT_SECRET",
+        id: "kars-bridge", name: "kars-bridge", secretEnv: "DEX_CLIENT_SECRET",
         redirectURIs: ["http://localhost:3000/auth/callback"],
       }]);
       const pod = dexPod(objects);

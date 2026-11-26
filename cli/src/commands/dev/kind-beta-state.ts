@@ -5,11 +5,12 @@ import { randomUUID } from "node:crypto";
 import { existsSync, lstatSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { BetaExecute, BetaTools } from "./kind-beta.js";
+import { isCoreHookFailureCode, type CoreHookFailureCode } from "../../lib/core-hook-diagnostics.js";
 
 export interface KindBetaState {
   version: 1; owner: string; cluster: string; phase: "preparing" | "installing" | "ready" | "failed" | "deleted";
   runtime: string; endpoint: string; sshKey?: string; nodeId?: string; setupPid?: number;
-  failure?: { at: string; message: string };
+  failure?: { at: string; message: string; coreHookFailures?: CoreHookFailureCode[] };
   trust?: { hostname: string; fingerprint: string; certificate: string; installed: boolean };
 }
 export function betaDirectory(cluster: string, root = process.cwd()): string {
@@ -42,6 +43,10 @@ export function readBetaState(directory: string): KindBetaState | undefined {
   if (state.trust && (state.trust.hostname !== `${state.cluster}-${state.owner.slice(0, 8)}.kars.test`
     || state.trust.certificate !== path.join(directory, "oidc-ca.pem") || typeof state.trust.installed !== "boolean"
     || !/^([0-9A-F]{2}:){31}[0-9A-F]{2}$/.test(state.trust.fingerprint ?? ""))) throw new Error("Invalid owned local trust receipt");
+  const failures = state.failure?.coreHookFailures;
+  if (failures !== undefined && (!Array.isArray(failures) || failures.length > 64 || !failures.every(isCoreHookFailureCode))) {
+    throw new Error("Invalid retained Core hook diagnostics");
+  }
   return state;
 }
 export function pinnedBetaTools(tools: BetaTools, state: KindBetaState): BetaTools {

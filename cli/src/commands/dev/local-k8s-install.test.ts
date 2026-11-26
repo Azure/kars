@@ -48,13 +48,13 @@ describe("existing kind core installation target", () => {
   it("refuses cold beta against an existing cluster before any mutation", async () => {
     execute.mockResolvedValue({ stdout: "chosen\n" });
     await expect(ensureCluster("kind", "chosen", {}, "docker", { config: "kind.yaml", kubeconfig: "dedicated", image: "reviewed" })).rejects.toThrow(/fresh cluster/);
-    expect(execute).toHaveBeenCalledExactlyOnceWith("kind", ["get", "clusters"], { env: {} });
+    expect(execute).toHaveBeenCalledExactlyOnceWith("kind", ["get", "clusters"], { env: {}, stdio: "pipe" });
   });
 
   it("does not treat failed cluster inventory as permission to create", async () => {
     execute.mockRejectedValue(new Error("runtime inventory unavailable"));
-    await expect(ensureCluster("kind", "chosen", {}, "docker", { config: "kind.yaml", kubeconfig: "dedicated", image: "reviewed" })).rejects.toThrow(/inventory unavailable/);
-    expect(execute).toHaveBeenCalledExactlyOnceWith("kind", ["get", "clusters"], { env: {} });
+    await expect(ensureCluster("kind", "chosen", {}, "docker", { config: "kind.yaml", kubeconfig: "dedicated", image: "reviewed" })).rejects.toThrow(/absence was not established/);
+    expect(execute).toHaveBeenCalledExactlyOnceWith("kind", ["get", "clusters"], { env: {}, stdio: "pipe" });
   });
 
   it.each([false, true])("captures managed custody immediately after Kind creation, including retained failure (%s)", async failed => {
@@ -199,6 +199,7 @@ describe("new Kind node journal retention", () => {
         if (args[0] === "create") return { stdout: "" };
         return { stdout: args[1] === "clusters" ? "" : inventory };
       }
+      if (file === "podman" && args[0] === "ps") return { stdout: "[]" };
       if (args[0] === "inspect") {
         return { stdout: `${(args.at(-1)?.endsWith("worker") ? "2" : "1").repeat(64)} ${owner}` };
       }

@@ -4,10 +4,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { devCommand, requiredToolsFor } from "./dev.js";
 import { createCli } from "../cli.js";
+import * as lifecycle from "./dev/kind-beta-state.js";
 
 const { local, providers } = vi.hoisted(() => ({ local: vi.fn(async () => {}), providers: vi.fn(async () => {}) }));
 vi.mock("./dev/local-k8s.js", () => ({ runLocalK8s: local, setupLocalKindBetaProviders: providers }));
-afterEach(() => { local.mockClear(); providers.mockClear(); });
+afterEach(() => { local.mockClear(); providers.mockClear(); vi.restoreAllMocks(); });
 
 function renderHelp(): string {
   let output = "";
@@ -42,6 +43,23 @@ describe("standalone dev onboarding help", () => {
     await createCli().exitOverride().parseAsync(["dev", "setup-providers", "--kind-cluster", "retained-beta", "--kubeconfig", "/private/config",
       "--state-directory", "/private/state"], { from: "user" });
     expect(providers).toHaveBeenCalledExactlyOnceWith({ clusterName: "retained-beta", kubeconfig: "/private/config", stateDirectory: "/private/state" });
+    expect(local).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["dev", "down", "--target", "local-k8s", "--cluster-name", "owned-failed"],
+    ["dev", "--target", "local-k8s", "--cluster-name", "owned-failed", "down"],
+    ["dev", "--cluster-name", "parent-target", "down", "--cluster-name", "owned-failed"],
+  ])("routes cleanup to the explicitly selected ownership receipt: %j", async (...args) => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const state: lifecycle.KindBetaState = { version: 1, cluster: "owned-failed", owner: "fixture-owner",
+      phase: "failed", runtime: "podman", endpoint: "unix:///fixture.sock", nodeId: "a".repeat(64) };
+    const read = vi.spyOn(lifecycle, "readBetaState").mockReturnValue(state);
+    const teardown = vi.spyOn(lifecycle, "teardownManagedBeta").mockResolvedValue();
+    await createCli().exitOverride().parseAsync(args, { from: "user" });
+    expect(read).toHaveBeenCalledExactlyOnceWith(lifecycle.betaDirectory("owned-failed"));
+    expect(teardown).toHaveBeenCalledExactlyOnceWith(lifecycle.betaDirectory("owned-failed"),
+      expect.objectContaining({ runtime: "podman" }), expect.any(Function), expect.any(Function));
     expect(local).not.toHaveBeenCalled();
   });
 

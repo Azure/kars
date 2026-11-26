@@ -42,7 +42,9 @@
 {{- if not (dig $name "value" "" $env | trim) -}}{{- fail (printf "kind-beta Bridge requires explicit %s" $name) -}}{{- end -}}
 {{- end -}}
 {{- $issuer := dig "BRIDGE_OIDC_ISSUER" "value" "" $env -}}
-{{- if not (regexMatch "^https://[A-Za-z0-9][A-Za-z0-9.-]*(:443)?(/[^[:space:]?#]*)?$" $issuer) -}}
+{{- $localPort := int (regexFind "[0-9]+$" $issuer) -}}
+{{- $localIssuer := and (eq ((.Values.web.oidc | default dict).localDexNamespace | default "") "kars-local-idp") $oidcCA (regexMatch "^https://[a-z0-9][a-z0-9-]*[.]kars[.]test:[0-9]+$" $issuer) (ge $localPort 1024) (le $localPort 65535) -}}
+{{- if and (not $localIssuer) (not (regexMatch "^https://[A-Za-z0-9][A-Za-z0-9.-]*(:443)?(/[^[:space:]?#]*)?$" $issuer)) -}}
 {{- fail "kind-beta Bridge requires genuine HTTPS OIDC on port 443" -}}
 {{- end -}}
 {{- $redirect := dig "BRIDGE_OIDC_REDIRECT_URI" "value" "" $env -}}
