@@ -81,8 +81,8 @@ async function prepareNamedProvider(core: Values, resources: Values[], connectio
   }
   const prefix = `KARS_PROVIDER_${kind.toUpperCase().replaceAll("-", "_")}_`;
   const data: Record<string, string> = { [`${prefix}ENDPOINT`]: endpoint };
-  if (apiKey !== undefined) data[`${prefix}${kind === "github-copilot" ? "TOKEN" : "API_KEY"}`] = apiKey;
-  if (kind === "github-copilot") data.COPILOT_GITHUB_TOKEN = apiKey!;
+  data[`${prefix}${kind === "github-copilot" ? "TOKEN" : "API_KEY"}`] = apiKey;
+  if (kind === "github-copilot") data.COPILOT_GITHUB_TOKEN = apiKey;
   if ((core.controller?.extraEnv ?? []).some((entry: Values) => entry.name?.startsWith(prefix)
     || ["COPILOT_GITHUB_TOKEN", "KARS_TASK_DEFAULT_MODEL", "AZURE_OPENAI_DEPLOYMENT", "KARS_TASK_DEFAULT_PROVIDER"].includes(entry.name))) {
     throw new Error("Controller environment must not shadow the selected provider or Core defaults");

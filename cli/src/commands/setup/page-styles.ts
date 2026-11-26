@@ -171,7 +171,7 @@ details p { font-size: 13px; margin: 12px 0 0; }
 .hint[data-valid="true"] { color: var(--cp-success); }
 .hint[data-valid="false"],input[aria-invalid="true"] { color: var(--cp-danger); }
 input[aria-invalid="true"] { border-color: var(--cp-danger); }
-.field input::placeholder { color: var(--cp-text-muted); opacity: 1; }
+.field input::placeholder { color: var(--cp-text-muted); opacity: 1; } /* ci:stub-ok: Standard CSS input-hint pseudo-element. */
 .device-code { font: 600 24px/1.4 Consolas, monospace; letter-spacing: .08em; padding: 8px 0; user-select: all; }
 #copilot-fields { margin-top: 28px; }
 #copilot-fields small { display: block; color: var(--cp-text-muted); }

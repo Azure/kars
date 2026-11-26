@@ -84,7 +84,7 @@ export function renderSetupPage(): string {
      <p class="hint">No Azure account is required for non-Azure providers.</p>
      <div id="provider-note" class="notice" role="status"></div>
      <label class="field" id="endpoint-field">API base URL<input id="endpoint" type="url" required spellcheck="false"><small>Use the API base URL, not a chat/completions URL. Keys never belong in the URL.</small></label>
-     <label class="field" id="model-field"><span id="model-label">Model</span><input id="model" placeholder="Model ID available to your account" maxlength="256" pattern="[A-Za-z0-9][A-Za-z0-9._:\/\-]*" required spellcheck="false"><small>The provider and model become Core defaults for SRE, and for Bridge when installed.</small></label>
+     <label class="field" id="model-field"><span id="model-label">Model</span><input id="model" placeholder="Model ID available to your account" maxlength="256" pattern="[A-Za-z0-9][A-Za-z0-9._:\/\-]*" required spellcheck="false"><small>The provider and model become Core defaults for SRE, and for Bridge when installed.</small></label><!-- ci:stub-ok: HTML input hint, not an unfinished implementation. -->
      <label class="field" id="api-key-field">API key<input id="api-key" type="password" autocomplete="new-password" required spellcheck="false"><small>Sent only to this local installer and the configured provider/in-cluster credential path. Never saved in browser storage.</small></label>
      <div id="copilot-fields" hidden>
       <p id="copilot-status" role="status">Sign in with a GitHub account that has Copilot access.</p>
@@ -262,12 +262,12 @@ export function renderSetupPage(): string {
   function configureFields() {
     const local = target() === 'kind', account = wantsLocalAccount();
     const provider = $('provider').value, copilot = provider === 'github-copilot', azure = provider === 'foundry' || provider === 'azure-openai';
-    $('endpoint').placeholder = provider === 'foundry' ? 'https://your-resource.services.ai.azure.com' : provider === 'azure-openai' ? 'https://your-resource.openai.azure.com' : 'https://models.example.com/v1';
+    $('endpoint').placeholder = provider === 'foundry' ? 'https://your-resource.services.ai.azure.com' : provider === 'azure-openai' ? 'https://your-resource.openai.azure.com' : 'https://models.example.com/v1'; // ci:stub-ok: DOM input hint, not an endpoint default.
     $('endpoint').readOnly = Boolean(providerEndpoints[provider]);
     $('endpoint-field').hidden = Boolean(providerEndpoints[provider]);
     $('provider-note').textContent = providerNotes[provider] + (local && !$('bridge').checked && !azure ? ' Core-only uses a dedicated installer identity and short-lived credentials to enroll this provider. Bridge is not required or added.' : '');
     $('model-label').textContent = azure ? 'Model deployment' : 'Model';
-    $('model').placeholder = azure ? 'Your deployment name' : 'Model ID available to your account';
+    $('model').placeholder = azure ? 'Your deployment name' : 'Model ID available to your account'; // ci:stub-ok: DOM input hint; the operator must select a real model.
     $('model-field').hidden = copilot;
     $('api-key-field').hidden = copilot;
     $('copilot-fields').hidden = !copilot;

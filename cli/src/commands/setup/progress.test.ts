@@ -42,7 +42,7 @@ describe("safe setup workload observations", () => {
     const deployment = { kind: "Deployment", metadata: { name: "kars-controller", namespace: "kars-system" } };
     const source = { kind: "KarsSandbox", metadata: { name: "sre", namespace: "kars-system", generation: 1 } };
     const execute = vi.fn<BetaExecute>(async (_file, args) => ({ stdout: JSON.stringify(
-      args.includes("karssandboxes.kars.azure.com") ? source : { items: [deployment] }) }));
+      args[args.indexOf("get") + 1] === "karssandboxes.kars.azure.com" ? source : { items: [deployment] }) }));
     const snapshots: SetupObservation[] = [];
     const observer = observeSetupCluster(tools, "unit", "/owned/kubeconfig", execute, value => snapshots.push(value));
     try {

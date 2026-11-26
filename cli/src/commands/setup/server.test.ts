@@ -2,12 +2,14 @@
 // Licensed under the MIT License.
 
 import { request } from "node:http";
+import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { startSetupServer, type SetupService } from "./server.js";
 import { SetupError, type SetupState } from "./types.js";
+import * as setupPage from "./page.js";
 
 const servers: Awaited<ReturnType<typeof startSetupServer>>[] = [];
-afterEach(async () => { for (const server of servers.splice(0)) { server.close(); await server.closed; } });
+afterEach(async () => { for (const server of servers.splice(0)) { server.close(); await server.closed; } vi.restoreAllMocks(); });
 async function fixture() {
   const state: SetupState = { phase: "draft", busy: false, contexts: [], checks: [], steps: [], providerConfigured: false };
   const backend: SetupService = { state, initialize: vi.fn(async () => {}), preflight: vi.fn(async () => state), install: vi.fn(async () => { throw new SetupError("Not approved"); }) };
@@ -66,6 +68,21 @@ describe("private loopback setup server", () => {
     expect(response.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(await response.text()).not.toContain(new URL(server.url).hash.slice(1));
+  });
+  it("hashes generated script and style contents with mixed-case HTML tags", async () => {
+    const page = setupPage.renderSetupPage().replace(/<(\/?)(script|style)>/gi,
+      (_match, slash: string, tag: string) => `<${slash}${tag === "script" ? "SCRIPT" : "StYlE"}>`);
+    vi.spyOn(setupPage, "renderSetupPage").mockReturnValueOnce(page);
+    const { server } = await fixture();
+    const response = await fetch(server.origin);
+    const csp = response.headers.get("content-security-policy");
+    const blocks = [...page.matchAll(/<(script|style)>([\s\S]*?)<\/\1>/gi)];
+    expect(blocks).toHaveLength(2);
+    for (const [, tag, content] of blocks) {
+      const hash = createHash("sha256").update(content).digest("base64");
+      expect(csp).toContain(`${tag.toLowerCase()}-src 'sha256-${hash}'`);
+    }
+    expect(await response.text()).toBe(page);
   });
   it("opens an external top-level link without consuming its private fragment or invoking setup", async () => {
     const { server, login, backend } = await fixture();

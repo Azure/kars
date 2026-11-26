@@ -39,6 +39,11 @@ function render(input: any, upgrade = true, section: "registration" | "admission
     expect(start).toBeGreaterThan(0);
     expect(end).toBeGreaterThan(start);
     let gate = profile.slice(start, end);
+    if (section === "oidc") {
+      const declarations = profile.split("\n").filter(line => line.startsWith("{{- $oidcCA :="));
+      expect(declarations).toHaveLength(1);
+      gate = declarations[0] + "\n" + gate;
+    }
     for (const [lookup, field] of [
       ['lookup "kars.azure.com/v1alpha1" "KarsSRERegistration" "" "canonical"', "registration"],
       ['lookup "apps/v1" "Deployment" .Release.Namespace "kars-bridge-bff"', "bff"],
@@ -87,6 +92,24 @@ describe("Kind Bridge Headlamp SSO configuration", () => {
     const values = settings();
     if (value !== undefined) values.web.extraEnv.push({ name: "BRIDGE_HEADLAMP_SSO_ENABLED", value });
     expect(render(values, true, "oidc").trim()).toBe("");
+  });
+  it.each([1024, 9443, 65535])("permits managed local Dex on port %s with its CA and namespace", port => {
+    const values = settings();
+    values.web.oidc = { caConfigMap: "local-dex-ca", localDexNamespace: "kars-local-idp" };
+    values.web.extraEnv[0].value = `https://workspace.kars.test:${port}`;
+    expect(render(values, true, "oidc").trim()).toBe("");
+  });
+  it.each(["missing-ca", "wrong-namespace", "foreign-host", "privileged-port", "invalid-port", "query"])("rejects local Dex with %s", fault => {
+    const values = settings();
+    values.web.oidc = { caConfigMap: "local-dex-ca", localDexNamespace: "kars-local-idp" };
+    values.web.extraEnv[0].value = "https://workspace.kars.test:9443";
+    if (fault === "missing-ca") values.web.oidc.caConfigMap = "";
+    if (fault === "wrong-namespace") values.web.oidc.localDexNamespace = "foreign";
+    if (fault === "foreign-host") values.web.extraEnv[0].value = "https://identity.example:9443";
+    if (fault === "privileged-port") values.web.extraEnv[0].value = "https://workspace.kars.test:1023";
+    if (fault === "invalid-port") values.web.extraEnv[0].value = "https://workspace.kars.test:65536";
+    if (fault === "query") values.web.extraEnv[0].value += "?redirect=9443";
+    expect(() => render(values, true, "oidc")).toThrow(/genuine HTTPS OIDC on port 443/);
   });
   it.each([true, false, "TRUE", "1", "", null])("rejects a non-literal flag %j", value => {
     const values = settings();

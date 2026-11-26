@@ -30,8 +30,8 @@ export async function startSetupServer(backend: SetupService = new SetupBackend(
   await backend.initialize();
   const page = renderSetupPage();
   const hash = (content: string) => `'sha256-${createHash("sha256").update(content).digest("base64")}'`;
-  const scripts = [...page.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(match => hash(match[1])).join(" ");
-  const styles = [...page.matchAll(/<style>([\s\S]*?)<\/style>/g)].map(match => hash(match[1])).join(" ");
+  const scripts = [...page.matchAll(/<script>([\s\S]*?)<\/script>/gi)].map(match => hash(match[1])).join(" ");
+  const styles = [...page.matchAll(/<style>([\s\S]*?)<\/style>/gi)].map(match => hash(match[1])).join(" ");
   let bootstrap = token(), session = "", csrf = "", origin = "", lastActivity = Date.now(), stopped = false;
   const created = Date.now(), cookieName = `kars_setup_${token().slice(0, 12)}`;
   let settle: () => void;

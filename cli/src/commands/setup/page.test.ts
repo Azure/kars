@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { renderSetupPage } from "./page.js";
 
 const page = renderSetupPage();
-const scripts = [...page.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(match => match[1]);
+const scripts = [...page.matchAll(/<script>([\s\S]*?)<\/script>/gi)].map(match => match[1]);
 
 describe("browser setup document", () => {
   it("is self-contained, deterministic, and has executable JavaScript", () => {
