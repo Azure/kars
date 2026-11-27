@@ -70,6 +70,20 @@ func patchBackend(source []byte) ([]byte, error) {
 	return []byte(strings.Replace(string(source), upstreamStaticCopy, packagedStaticCopy, 1)), nil
 }
 
+func patchTracing(source []byte) ([]byte, error) {
+	const original = "return otelhttp.NewHandler(next, serviceName,\n"
+	const replacement = `return otelhttp.NewHandler(next, serviceName,
+			otelhttp.WithSpanNameFormatter(func(operation string, _ *http.Request) string {
+				return operation
+			}),
+`
+	if strings.Count(string(source), original) != 1 ||
+		strings.Contains(string(source), "otelhttp.WithSpanNameFormatter") {
+		return nil, fmt.Errorf("pinned Headlamp tracing implementation changed; refusing to patch")
+	}
+	return []byte(strings.Replace(string(source), original, replacement, 1)), nil
+}
+
 func main() {
 	if len(os.Args) != 2 {
 		panic("usage: patch-backend <extracted backend directory>")
@@ -81,6 +95,16 @@ func main() {
 	}
 	if err == nil {
 		source, err = patchOidcNavigation(source)
+	}
+	if err == nil {
+		err = os.WriteFile(file, source, 0o644)
+	}
+	if err == nil {
+		file = filepath.Join(os.Args[1], "pkg", "telemetry", "tracing.go")
+		source, err = os.ReadFile(file)
+	}
+	if err == nil {
+		source, err = patchTracing(source)
 	}
 	if err == nil {
 		err = os.WriteFile(file, source, 0o644)

@@ -31,6 +31,7 @@ import { sreHelmStageWait } from "../../lib/sre-helm.js";
 import { DEFAULT_OPENCLAW_VERSION } from "../../runtime.js";
 import { MONITORING_IMAGE_TARGETS } from "../../lib/image-targets.js";
 import { monitoringServices } from "../../lib/monitoring-services.js";
+import { listKindClusters } from "./kind-inventory.js";
 
 const LOCAL_HERMES_IMAGE = "kars-runtime-hermes:latest";
 const LOCAL_EVAL_RUNNER_IMAGE = "kars-conformance-runner:latest";
@@ -443,9 +444,13 @@ async function clusterExists(
   kind: string,
   name: string,
   env: NodeJS.ProcessEnv,
+  runtime: string,
 ): Promise<boolean> {
-  const { stdout } = await execa(kind, ["get", "clusters"], { env });
-  return stdout.split(/\r?\n/).map((s) => s.trim()).includes(name);
+  const names = await listKindClusters({ kind, runtime, env }, async (tool, args, options) => {
+    const { stdout } = await execa(tool, args, { ...options, stdio: "pipe" });
+    return { stdout };
+  });
+  return names.includes(name);
 }
 
 export async function ensureCluster(
@@ -455,7 +460,7 @@ export async function ensureCluster(
   runtime: string,
   cold?: { config: string; kubeconfig: string; image: string; onCreated?: () => Promise<void> },
 ): Promise<void> {
-  if (await clusterExists(kind, name, env)) {
+  if (await clusterExists(kind, name, env, runtime)) {
     if (cold) throw new Error(`Kind beta requires a fresh cluster; ${name} already exists. Inspect it; no automatic adoption or replacement.`);
     return;
   }

@@ -239,7 +239,10 @@ class SecurityAuditGateTests(GitFixture):
                    "docs/security-audits/2026-11-12-openclaw-npm-registry.md",
                    "docs/security-audits/2026-11-12-headlamp-evidence-permissions.md",
                    "docs/security-audits/2026-11-12-private-tls-authority-key-identifier.md",
-                   "docs/security-audits/2026-11-12-kind-image-descriptor-identity.md")
+                   "docs/security-audits/2026-11-12-kind-image-descriptor-identity.md",
+                   "docs/security-audits/2026-11-26-browser-concierge.md",
+                   "docs/security-audits/2026-11-26-browser-concierge-dependencies.md",
+                   "docs/security-audits/2026-11-26-browser-concierge-qualified.md")
         self.approved_beta()
         for other in records:
             if other != self.audit:
@@ -254,13 +257,143 @@ class SecurityAuditGateTests(GitFixture):
 
     def test_other_beta_pr_cannot_use_this_approval(self):
         self.approved_beta()
-        for other in ("593", "606", "607", "608", "617", "621", "622", "623"):
+        for other in ("593", "606", "607", "608", "617", "621", "622", "623", "638"):
             if other != self.pr_number:
                 with self.subTest(pr=other):
                     result = self.beta_gate(GITHUB_ACTIONS="true", GITHUB_REPOSITORY="Azure/kars",
                                             GITHUB_EVENT_NAME="pull_request",
                                             GITHUB_REF=f"refs/pull/{other}/merge")
                     self.assertEqual(result.returncode, 1)
+
+
+class BrowserConciergeAuditGateTests(SecurityAuditGateTests):
+    audit = "docs/security-audits/2026-11-26-browser-concierge.md"
+    pr_number = "638"
+    source_head = "7a791e8b020cf29e68acb3f593f9cbb0cb547d92"
+    source_base = "754110953bf9cccbb7545a71782c38a59087ea2f"
+
+
+class BrowserConciergeDependenciesAuditGateTests(SecurityAuditGateTests):
+    audit = "docs/security-audits/2026-11-26-browser-concierge-dependencies.md"
+    pr_number = "638"
+    source_head = "6b6831148955e3d3a28dda0c4ac229d48fef3e9e"
+    source_base = BrowserConciergeAuditGateTests.source_base
+    prior_audit = BrowserConciergeAuditGateTests.audit
+
+    def approved_successor_beta(self):
+        self.write(self.prior_audit,
+                   "# Original concierge-only approval\n"
+                   "Beta-approval-exception: Azure/kars#638; "
+                   f"source={BrowserConciergeAuditGateTests.source_head}; base={self.source_base}\n"
+                   f"{self.signer}\n")
+        self.approved_beta()
+
+    def test_dependency_successor_carries_only_unchanged_concierge_record(self):
+        self.approved_successor_beta()
+        for event, ref in (("pull_request", "refs/pull/638/merge"),
+                           ("push", "refs/heads/kars-bridge")):
+            result = self.beta_gate(GITHUB_ACTIONS="true", GITHUB_REPOSITORY="Azure/kars",
+                                    GITHUB_EVENT_NAME=event, GITHUB_REF=ref)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(f"{self.prior_audit} is unchanged", result.stdout)
+        original = (self.root / self.prior_audit).read_text()
+        self.write(self.prior_audit, original + "\nExtended historical scope.\n")
+        self.commit()
+        self.assertEqual(self.beta_gate().returncode, 1)
+        self.write(self.prior_audit, original)
+        self.commit()
+        self.assertEqual(self.beta_gate().returncode, 0)
+        self.git("rm", self.audit)
+        self.commit()
+        self.assertEqual(self.beta_gate().returncode, 1)
+
+    def test_dependency_successor_rejects_lock_or_recipe_drift(self):
+        self.approved_successor_beta()
+        for path in ("bridge/bff/Cargo.lock", "tools/headlamp-plugin/package-lock.json",
+                     "sandbox-images/headlamp/build-backend.sh",
+                     "sandbox-images/headlamp/build-frontend.mjs"):
+            with self.subTest(path=path):
+                self.write(path, "Unapproved dependency change\n")
+                self.commit()
+                self.assertEqual(self.beta_gate().returncode, 1)
+                self.git("rm", path)
+                self.commit()
+                self.assertEqual(self.beta_gate().returncode, 0)
+
+
+class BrowserConciergeQualifiedAuditGateTests(SecurityAuditGateTests):
+    audit = "docs/security-audits/2026-11-26-browser-concierge-qualified.md"
+    pr_number = "638"
+    source_head = "a639732d65eacefa7c639afc266fa28aa640f57a"
+    source_base = BrowserConciergeAuditGateTests.source_base
+    prior_records = (BrowserConciergeAuditGateTests,
+                     BrowserConciergeDependenciesAuditGateTests)
+
+    def approved_successor_beta(self):
+        for record in self.prior_records:
+            self.write(record.audit,
+                       "# Immutable prior concierge approval\n"
+                       "Beta-approval-exception: Azure/kars#638; "
+                       f"source={record.source_head}; base={self.source_base}\n"
+                       f"{self.signer}\n")
+        self.approved_beta()
+
+    def test_qualified_successor_carries_both_records_in_exact_contexts(self):
+        self.approved_successor_beta()
+        for event, ref in (("pull_request", "refs/pull/638/merge"),
+                           ("push", "refs/heads/kars-bridge")):
+            result = self.beta_gate(GITHUB_ACTIONS="true", GITHUB_REPOSITORY="Azure/kars",
+                                    GITHUB_EVENT_NAME=event, GITHUB_REF=ref)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for record in self.prior_records:
+                self.assertIn(f"{record.audit} is unchanged", result.stdout)
+                self.assertEqual((self.root / record.audit).read_text(),
+                                 self.git("show", f"{self.approved_head}:{record.audit}"))
+
+    def test_either_historical_record_cannot_be_modified_or_deleted(self):
+        self.approved_successor_beta()
+        for record in self.prior_records:
+            with self.subTest(record=record.audit):
+                original = (self.root / record.audit).read_text()
+                self.write(record.audit, original + "\nUnapproved scope extension.\n")
+                self.commit()
+                self.assertEqual(self.beta_gate().returncode, 1)
+                self.git("rm", record.audit)
+                self.commit()
+                self.assertEqual(self.beta_gate().returncode, 1)
+                self.write(record.audit, original)
+                self.commit()
+                self.assertEqual(self.beta_gate().returncode, 0)
+
+    def test_both_records_require_valid_final_authorization(self):
+        self.approved_successor_beta()
+        for old, new in ((self.signer, ""), (self.approved_head, "0" * 40),
+                         (self.base, "1" * 40), ("Azure/kars#638", "Azure/kars#639")):
+            with self.subTest(field=old):
+                self.write(self.audit, self.approval.replace(old, new))
+                self.commit()
+                result = self.beta_gate()
+                self.assertEqual(result.returncode, 1)
+                for record in self.prior_records:
+                    self.assertIn(record.audit, result.stderr)
+        self.git("rm", self.audit)
+        self.commit()
+        self.assertEqual(self.beta_gate().returncode, 1)
+        self.write(self.audit, self.approval)
+        self.commit()
+        self.assertEqual(self.beta_gate().returncode, 0)
+
+    def test_qualified_successor_rejects_rust_chart_or_tracing_drift(self):
+        self.approved_successor_beta()
+        for path in ("Cargo.lock", "deploy/helm/kars/templates/crd-karsteam.yaml",
+                     "sandbox-images/headlamp/patch-backend.go"):
+            with self.subTest(path=path):
+                self.write(path, "Unapproved implementation change\n")
+                self.commit()
+                self.assertEqual(self.beta_gate().returncode, 1)
+                self.git("rm", path)
+                self.commit()
+                self.assertEqual(self.beta_gate().returncode, 0)
 
 
 class ReleaseRepairAuditGateTests(SecurityAuditGateTests):

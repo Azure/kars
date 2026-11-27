@@ -71,9 +71,15 @@ export async function completePendingCoreSre(execute: SchemaExecute, options: Co
   const resources = intent.resources as Array<Record<string, any>>;
   if (intent.version !== 1 || intent.release !== options.release || intent.namespace !== options.namespace
     || !/^[a-f0-9]{64}$/.test(intent.valuesDigest) || !Array.isArray(resources) || resources.length !== 3
-    || !intent.budget?.enabled || !Array.isArray(intent.budget.contracts) || !intent.budget.contracts.length
+    || !intent.budget?.enabled || !Array.isArray(intent.budget.contracts)
     || !intent.funding) throw new Error("Incomplete operator SRE intent");
   const funding = parseFirstInstallFunding(intent.funding);
+  const controllerDesired = documents.find(object => object.kind === "Deployment" && object.metadata.name === "kars-controller");
+  const emptyCatalog = intent.budget.contracts.length === 0;
+  if (emptyCatalog && (controllerDesired?.metadata.annotations?.["kars.azure.com/installation-profile"] !== "kind-beta"
+    || intent.budget.calendarPolicy !== "record-only" || !("unboundedTokens" in funding))) {
+    throw new Error("Empty SRE catalog requires Kind beta, record-only accounting and unbounded token-only funding");
+  }
   for (const [kind, name] of [["KarsSandbox", "sre"], ["InferencePolicy", "sre-inference"], ["ToolPolicy", "sre-tools"]]) {
     const matches = resources.filter(object => object.kind === kind && object.metadata?.name === name
       && object.metadata.namespace === options.namespace && object.apiVersion === "kars.azure.com/v1alpha1");
@@ -90,7 +96,6 @@ export async function completePendingCoreSre(execute: SchemaExecute, options: Co
   const catalog = await get(read, "configmap", "kars-inference-budget-contracts", options.namespace);
   const expectedCatalog = documents.find(object => object.kind === "ConfigMap" && object.metadata.name === "kars-inference-budget-contracts");
   const controller = await get(read, "deployment", "kars-controller", options.namespace);
-  const controllerDesired = documents.find(object => object.kind === "Deployment" && object.metadata.name === "kars-controller");
   const workspace = await get(read, "namespace", options.namespace);
   const cluster = await get(read, "namespace", "kube-system");
   if (!installedIntent || !catalog || !expectedCatalog || !controller || !controllerDesired || !workspace || !cluster) throw new Error("Core prerequisites are absent");
@@ -112,6 +117,10 @@ export async function completePendingCoreSre(execute: SchemaExecute, options: Co
       || liveController.metadata.uid !== controller.metadata.uid || liveController.metadata.deletionTimestamp
       || (liveController.status?.observedGeneration ?? 0) !== liveController.metadata.generation
       || (liveController.status?.availableReplicas ?? 0) < 1) throw new Error("Core identity or immutable intent is not ready");
+    if (emptyCatalog && (liveController.metadata.annotations?.["kars.azure.com/installation-profile"] !== "kind-beta"
+      || liveCatalog.data?.["calendar-policy"] !== "record-only")) {
+      throw new Error("Empty SRE catalog lost its Kind beta record-only policy");
+    }
     if (!matches(controllerEnvironmentDefaults(liveController.spec!), controllerEnvironmentDefaults(controllerDesired.spec))
       || canonicalSchema(liveController.spec) !== canonicalSchema(controller.spec)) {
       throw new Error("Core controller intent changed");

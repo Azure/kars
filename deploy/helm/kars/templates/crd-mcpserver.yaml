@@ -27,7 +27,6 @@ metadata:
 spec:
   group: kars.azure.com
   names:
-    categories: []
     kind: McpServer
     plural: mcpservers
     shortNames:

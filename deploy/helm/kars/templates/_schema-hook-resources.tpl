@@ -233,6 +233,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: schemas
+          terminationMessagePolicy: FallbackToLogsOnError
           image: {{ printf "%s:latest@%s" $repository $digest | quote }}
           imagePullPolicy: IfNotPresent
           command: ["/usr/local/bin/node", "/opt/kars-schema/schema-hook.mjs"]

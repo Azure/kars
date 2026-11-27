@@ -28,6 +28,7 @@ export function upCommand(): Command {
     .description(
       "One command to go from zero to running agent — provisions Azure resources, builds images, deploys controller, creates sandbox"
     )
+    .option("--setup-browser [failed-cluster]", "Open private local setup, or reopen a failed attempt for confirmed cleanup; no Azure provisioning", false)
     // ── Identity ───────────────────────────────────────────────────────
     .option("--name <name>", "Sandbox name", "my-assistant")
     .option("--model <model>", "AI model", "gpt-4.1")
@@ -97,6 +98,7 @@ Flag groups:
   Output / lifecycle: --dry-run, --upgrade, --from-scratch
 
 Examples:
+  kars up --setup-browser                       # Private guided Kind Core + Bridge setup
   kars up                                       # Full provision with defaults
   kars up --name myagent --region westus3       # Pick a name + region
   kars up --skip-infra                          # Reuse existing AKS cluster
@@ -112,6 +114,13 @@ Auto-resume:
   Use --from-scratch to discard it explicitly.
 `)
     .action(async (options) => {
+      if (options.setupBrowser) {
+        const incompatible = Object.keys(options).filter(key => key !== "setupBrowser" && cmd.getOptionValueSource(key) !== "default");
+        if (incompatible.length) throw new Error("--setup-browser is standalone; choose the target and configuration in the browser instead of passing other up flags");
+        const { launchSetupBrowser } = await import("./setup/server.js");
+        await launchSetupBrowser(typeof options.setupBrowser === "string" ? options.setupBrowser : undefined);
+        return;
+      }
       // Up-front validation: reject obviously-wrong values before any Azure work.
       const isolationLevels = ["standard", "enhanced", "confidential"];
       if (options.isolation && !isolationLevels.includes(options.isolation)) {

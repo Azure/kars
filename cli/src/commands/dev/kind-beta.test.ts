@@ -4,16 +4,23 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { chmodSync, linkSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { PassThrough } from "node:stream";
 import { rootCertificates } from "node:tls";
 import * as path from "node:path";
 import { parse } from "yaml";
 import type { execa } from "execa";
-import { assertFreshKindBetaCluster, installKindBeta, kindBetaAccess, kindBetaApiDestinations, kindBetaClusterConfig, kindBetaKubeletTrust, loadKindBetaPlan, probeKindBetaUI, type BetaExecute } from "./kind-beta.js";
+import { assertFreshKindBetaCluster, installKindBeta, kindBetaAccess, kindBetaApiDestinations, kindBetaClusterConfig, kindBetaKubeletTrust, loadKindBetaPlan, type BetaExecute } from "./kind-beta.js";
 import { prepareKindBetaInference } from "./kind-beta-inference.js";
+import { createKindBetaInstallerWriter, withKindBetaInstallerWriter } from "./kind-beta-installer-writer.js";
+vi.mock("./kind-beta-installer-writer.js", () => ({
+  createKindBetaInstallerWriter: vi.fn(async () => ({ name: "kars-provider-installer", uid: "installer-uid" })),
+  withKindBetaInstallerWriter: vi.fn(async (_operator, _writer, _directory, _tools, _execute, work) => work(vi.fn())),
+}));
 import { setupInstalledKindBetaProviders } from "./kind-beta-providers.js";
 vi.mock("./kind-beta-providers.js", () => ({ setupInstalledKindBetaProviders: vi.fn(async () => {}) }));
+import { publishKindBetaProviderInput } from "./kind-beta-provider-input.js";
+vi.mock("./kind-beta-provider-input.js", () => ({ publishKindBetaProviderInput: vi.fn(async () => {}) }));
 
 const certificateDirectory = path.resolve(`.onboarding-kind-cert-${randomUUID()}`);
 let kubeletChain: string;
@@ -85,8 +92,15 @@ const slices = { items: [{ metadata: { namespace: "default", labels: { "kubernet
   endpoints: [{ addresses: ["172.18.0.2"], conditions: { ready: true } }], ports: [{ port: 6443, protocol: "TCP" }] }] };
 const tools = { kind: "/tools/kind", helm: "/tools/helm", kubectl: "/tools/kubectl", runtime: "/tools/docker", env: { KIND_EXPERIMENTAL_PROVIDER: "docker" } };
 
-function installation() {
+function installation(architecture = "amd64") {
   const f = fixture(), plan = f.load(), calls: string[] = [];
+  plan.coreChart = path.join(f.directory, "core-chart");
+  mkdirSync(plan.coreChart);
+  writeFileSync(path.join(plan.coreChart, "values.yaml"), JSON.stringify({ schemaHook: { architecture: "amd64",
+    image: { repository: "example.test/schema", digest: `sha256:${"b".repeat(64)}`, tag: "latest" } } }));
+  for (const file of ["values-generic.yaml", "values-kind-beta.yaml"]) writeFileSync(path.join(plan.coreChart, file), "{}");
+  const node = { ...kubeletNode, metadata: { ...kubeletNode.metadata, labels: { "kubernetes.io/arch": architecture } },
+    status: { ...kubeletNode.status, nodeInfo: { architecture, operatingSystem: "linux" } } };
   const apiServer = { name: "kube-apiserver", command: ["kube-apiserver",
     "--oidc-issuer-url=https://login.example.test/realm", "--oidc-client-id=headlamp",
     "--oidc-username-claim=email", "--oidc-username-prefix=oidc:",
@@ -96,9 +110,12 @@ function installation() {
   const execute = vi.fn<BetaExecute>(async (tool, args) => {
     calls.push(`${path.basename(tool)} ${args.join(" ")}`);
     if (tool === tools.kind) return { stdout: "chosen-control-plane\n" };
+    if (tool === tools.runtime && args[0] === "manifest") return { stdout: JSON.stringify({ manifests: ["amd64", "arm64"].map(architecture => ({
+      digest: `sha256:${"c".repeat(64)}`, platform: { architecture, os: "linux" },
+    })) }) };
     if (tool === tools.runtime && args[0] === "inspect") return { stdout: JSON.stringify([kubeletContainer]) };
     if (tool === tools.runtime && args[0] === "exec") return { stdout: kubeletChain };
-    if (args.includes("get") && args.includes("node")) return { stdout: JSON.stringify(kubeletNode) };
+    if (args.includes("get") && args.includes("node")) return { stdout: JSON.stringify(node) };
     if (args.includes("component=kube-apiserver")) return { stdout: JSON.stringify({ items: [apiServerPod] }) };
     if (args[0] === "version") return { stdout: "v4.1.3+qualified" };
     if (args[0] === "template") return { stdout: JSON.stringify({ apiVersion: "v1", kind: "Namespace", metadata: { name: "kars-system" } }) };
@@ -110,10 +127,29 @@ function installation() {
     if (args.includes("service")) return { stdout: JSON.stringify(service) };
     return { stdout: "" };
   });
-  return { ...f, plan, calls, hooks, execute, apiServer, apiServerPod, install: () => installKindBeta(plan, tools, hooks, execute, f.directory) };
+  return { ...f, load: () => ({ ...f.load(), coreChart: plan.coreChart }), plan, node, calls, hooks, execute, apiServer, apiServerPod,
+    install: () => installKindBeta(plan, tools, hooks, execute, f.directory) };
 }
 
 describe("reviewed Kind beta input", () => {
+  it("loads Core-only without Bridge values or a generated Bridge principal", () => {
+    const f = fixture(); Object.assign(f.config, { bridge: false });
+    Reflect.deleteProperty(f.config, "bridgeValues");
+    f.resources.splice(f.resources.findIndex(resource => resource.metadata.name === "bridge-client"), 1);
+    const plan = f.load();
+    expect(plan.includeBridge).toBe(false); expect(plan.bridgeValues).toBe("");
+    expect(plan.web.origin).toBe("http://localhost:4466");
+    expect(plan.resources.some(resource => resource.metadata.name.includes("bridge"))).toBe(false);
+  });
+  it("rejects contradictory Core-only inputs and disabling secure Headlamp", () => {
+    const f = fixture(); Object.assign(f.config, { bridge: "false" });
+    expect(f.load).toThrow("bridge must be a boolean");
+    Object.assign(f.config, { bridge: false }); expect(f.load).toThrow("cannot contain Bridge values");
+    Reflect.deleteProperty(f.config, "bridgeValues");
+    Object.assign(f.core.headlamp, { enabled: false }); expect(f.load).toThrow("secure OIDC");
+    Object.assign(f.core.headlamp, { enabled: true }); Object.assign(f.core.headlamp.oidc, { enabled: false });
+    expect(f.load).toThrow("secure OIDC");
+  });
   it("resolves files relative to the config, both bundled charts and real signing material", () => {
     const f = fixture(), plan = f.load();
     expect(plan.coreValues).toBe(path.join(f.directory, "core.yaml"));
@@ -286,6 +322,27 @@ describe("reviewed Kind beta input", () => {
 });
 
 describe("additive Bridge lifecycle isolation", () => {
+  it("installs Core-only without Bridge overlays, release, or writer enrollment", async () => {
+    const f = installation(); Object.assign(f.config, { bridge: false });
+    Reflect.deleteProperty(f.config, "bridgeValues");
+    f.resources.splice(f.resources.findIndex(resource => resource.metadata.name === "bridge-client"), 1);
+    Object.assign(f.plan, f.load());
+    vi.mocked(setupInstalledKindBetaProviders).mockClear(); vi.mocked(publishKindBetaProviderInput).mockClear();
+    await f.install();
+    expect(f.hooks.installLocalCoreChart).toHaveBeenCalledOnce();
+    expect(f.calls.some(call => call.includes("install kars-bridge"))).toBe(false);
+    expect(existsSync(path.join(f.directory, "bridge-kind.yaml"))).toBe(false);
+    expect(setupInstalledKindBetaProviders).not.toHaveBeenCalled();
+    expect(publishKindBetaProviderInput).not.toHaveBeenCalled();
+  });
+  it("rejects missing named-provider inputs before any cluster or tool operation", async () => {
+    const f = installation(); f.plan.includeBridge = false;
+    f.plan.inference = { kindBeta: { providerEndpoint: "https://api.openai.com/v1" } };
+    await expect(f.install()).rejects.toThrow("Named bootstrap provider inputs are missing");
+    expect(f.execute).not.toHaveBeenCalled(); expect(f.hooks.ensureCluster).not.toHaveBeenCalled();
+    expect(f.hooks.installLocalCoreChart).not.toHaveBeenCalled();
+    expect(existsSync(path.join(f.directory, "core-kind.yaml"))).toBe(false);
+  });
   it("refuses an existing Kind target without making any install/reset calls", async () => {
     const execute = vi.fn<BetaExecute>(async () => ({ stdout: "existing-core\n" }));
     await expect(assertFreshKindBetaCluster("existing-core", tools, execute)).rejects.toThrow(/install only the separate Bridge Helm release/);
@@ -303,6 +360,49 @@ describe("additive Bridge lifecycle isolation", () => {
     const execute = vi.fn<BetaExecute>(async () => ({ stdout: "other-core\n" }));
     await expect(assertFreshKindBetaCluster("chosen", tools, execute)).resolves.toBeUndefined();
     expect(execute).toHaveBeenCalledTimes(1);
+  });
+  it.each([
+    { bridge: true, failure: "none" }, { bridge: true, failure: "enrollment" },
+    { bridge: false, failure: "none" }, { bridge: false, failure: "enrollment" },
+    { bridge: false, failure: "creation" }, { bridge: false, failure: "authentication" },
+  ])("defers named credentials until successful enrollment (Bridge: $bridge, failure: $failure)", async ({ bridge, failure }) => {
+    const f = installation(); f.plan.includeBridge = bridge;
+    if (!bridge) f.plan.resources = f.plan.resources.filter(resource => resource.metadata.name !== "bridge-client");
+    f.plan.core.inferenceRouter.azure.openai.credentials = {};
+    f.plan.resources = f.plan.resources.filter(resource => resource.metadata.name !== "provider");
+    f.plan.inference = await prepareKindBetaInference(f.plan.core, f.plan.resources, {
+      load: () => null, interactive: false, prompt: async () => { throw new Error("Unexpected prompt"); },
+    }, false, { kind: "openai", endpoint: "https://api.openai.com/v1", model: "test-model", apiKey: "private-named-fixture" });
+    vi.mocked(publishKindBetaProviderInput).mockClear();
+    vi.mocked(setupInstalledKindBetaProviders).mockClear();
+    vi.mocked(createKindBetaInstallerWriter).mockClear(); vi.mocked(withKindBetaInstallerWriter).mockClear();
+    if (failure === "enrollment") vi.mocked(setupInstalledKindBetaProviders).mockRejectedValueOnce(new Error("enrollment failed"));
+    if (failure === "creation") vi.mocked(createKindBetaInstallerWriter).mockRejectedValueOnce(new Error("creation failed"));
+    if (failure === "authentication") vi.mocked(withKindBetaInstallerWriter).mockRejectedValueOnce(new Error("authentication failed"));
+    if (failure !== "none") await expect(f.install()).rejects.toThrow(`${failure} failed`);
+    else await f.install();
+    const core = parse(readFileSync(path.join(f.directory, "core-kind.yaml"), "utf8"));
+    expect(core.kindBeta).toEqual({ cni: "cilium", providerEndpoint: "https://api.openai.com/v1" });
+    expect(JSON.stringify(core)).not.toContain("private-named-fixture");
+    expect(f.execute.mock.calls.some(([, , options]) => options?.input?.includes("private-named-fixture"))).toBe(false);
+    expect(publishKindBetaProviderInput).toHaveBeenCalledTimes(failure === "none" ? 1 : 0);
+    expect(createKindBetaInstallerWriter).toHaveBeenCalledTimes(bridge ? 0 : 1);
+    expect(withKindBetaInstallerWriter).toHaveBeenCalledTimes(!bridge && ["none", "authentication"].includes(failure) ? 1 : 0);
+    expect(setupInstalledKindBetaProviders).toHaveBeenCalledTimes(failure === "creation" ? 0 : 1);
+    if (failure !== "creation") expect(vi.mocked(setupInstalledKindBetaProviders).mock.calls[0][7]).toEqual(
+      bridge ? undefined : { name: "kars-provider-installer", uid: "installer-uid" });
+    if (!bridge) {
+      expect(existsSync(path.join(f.directory, "bridge-kind.yaml"))).toBe(false);
+      expect(f.calls.some(call => call.includes("install kars-bridge") || call.includes("bridge-client"))).toBe(false);
+    }
+    if (failure === "none") {
+      expect(vi.mocked(publishKindBetaProviderInput).mock.invocationCallOrder[0]).toBeGreaterThan(vi.mocked(setupInstalledKindBetaProviders).mock.invocationCallOrder.at(-1)!);
+      expect(vi.mocked(publishKindBetaProviderInput).mock.calls[0][0].stringData.KARS_PROVIDER_OPENAI_API_KEY).toBe("private-named-fixture");
+      if (!bridge) {
+        expect(vi.mocked(withKindBetaInstallerWriter).mock.invocationCallOrder[0]).toBeGreaterThan(vi.mocked(setupInstalledKindBetaProviders).mock.invocationCallOrder[0]);
+        expect(vi.mocked(publishKindBetaProviderInput).mock.calls[0][2]).toEqual(expect.any(Function));
+      }
+    }
   });
   it("passes prompted inference only to Core and preserves distinct releases, auth identities and credentials", async () => {
     const f = installation();
@@ -334,6 +434,40 @@ describe("additive Bridge lifecycle isolation", () => {
 });
 
 describe("Kind creation and cold ordering", () => {
+  it.each(["amd64", "arm64"])("selects the actual %s node for the multiarch schema image without changing its digest", async architecture => {
+    const f = installation(architecture);
+    const values = readFileSync(path.join(f.plan.coreChart, "values.yaml"), "utf8");
+    await f.install();
+    const override = parse(readFileSync(path.join(f.directory, "core-kind.yaml"), "utf8"));
+    expect(override.schemaHook).toEqual({ architecture, apiDestinations: [
+      { cidr: "10.96.0.1/32", port: 443 }, { cidr: "172.18.0.2/32", port: 6443 },
+    ] });
+    expect(readFileSync(path.join(f.plan.coreChart, "values.yaml"), "utf8")).toBe(values);
+    expect(f.calls).toContain(`docker manifest inspect example.test/schema@sha256:${"b".repeat(64)}`);
+    expect(f.calls.some(call => call.includes("label") && call.includes("kubernetes.io/arch"))).toBe(false);
+  });
+  it("verifies the effective reviewed image override rather than the chart default", async () => {
+    const f = installation("arm64"), digest = `sha256:${"d".repeat(64)}`;
+    f.plan.core.schemaHook = { image: { digest } };
+    await f.install();
+    expect(f.calls).toContain(`docker manifest inspect example.test/schema@${digest}`);
+    expect(f.calls).not.toContain(`docker manifest inspect example.test/schema@sha256:${"b".repeat(64)}`);
+  });
+  it.each(["metadata", "labels", "reviewed-selector"])("stops before CNI, host trust or Core when %s does not support the node", async fault => {
+    const f = installation("arm64"), beforeCore = vi.fn();
+    if (fault === "metadata") {
+      const original = f.execute.getMockImplementation()!;
+      f.execute.mockImplementation(async (tool, args, options) => args[0] === "manifest"
+        ? { stdout: JSON.stringify({ manifests: [{ digest: `sha256:${"c".repeat(64)}`, platform: { os: "linux", architecture: "amd64" } }] }) }
+        : original(tool, args, options));
+    } else if (fault === "labels") f.node.metadata.labels["kubernetes.io/arch"] = "amd64";
+    else f.plan.core.schemaHook = { architecture: "amd64" };
+    await expect(installKindBeta(f.plan, tools, { ...f.hooks, beforeCore }, f.execute, f.directory)).rejects.toThrow(/architecture|linux\/arm64/);
+    expect(beforeCore).not.toHaveBeenCalled();
+    expect(f.hooks.installLocalCoreChart).not.toHaveBeenCalled();
+    expect(f.calls.some(call => call.includes("install cilium"))).toBe(false);
+    expect(existsSync(path.join(f.directory, "core-kind.yaml"))).toBe(false);
+  });
   it("accepts an existing private ignore file without replacing it", async () => {
     const f = installation(), ignore = path.join(f.directory, ".gitignore");
     writeFileSync(ignore, "*\n", { mode: 0o600, flag: "wx" });
@@ -389,12 +523,21 @@ describe("Kind creation and cold ordering", () => {
   });
   it.each([false, true])("wires owned custody and the Dex prerequisite before Core (failure=%s)", async failed => {
     const f = installation();
+    const stages: string[] = [];
+    const coreDetails: string[] = [];
     const attempt = installKindBeta(f.plan, tools, { ...f.hooks,
+      progress: (stage, detail) => { stages.push(stage); if (stage === "core" && detail) coreDetails.push(detail); },
       ensureCluster: async (_kind, _cluster, _env, _runtime, cold) => { f.calls.push("kind create"); await cold?.onCreated?.(); },
       afterCluster: async () => { f.calls.push("capture custody"); },
       beforeCore: async () => { f.calls.push("install local Dex"); if (failed) throw new Error("Dex prerequisite failed"); },
     }, f.execute, f.directory);
     if (failed) await expect(attempt).rejects.toThrow("Dex prerequisite failed"); else await attempt;
+    expect(stages.filter((stage, index) => stage !== stages[index - 1])).toEqual(failed ? ["cluster", "network", "dex"] : ["cluster", "network", "dex", "core", "bridge", "providers"]);
+    expect(coreDetails).toEqual(failed ? [] : [
+      expect.stringContaining("Creating Core namespace"), expect.stringContaining("Helm is installing Core"),
+      expect.stringContaining("Core Helm release completed"), expect.stringContaining("create the SRE runtime deployment"),
+      expect.stringContaining("SRE runtime deployment to become ready"), expect.stringContaining("SRE registration to report Ready"),
+    ]);
     expect(f.calls.indexOf("capture custody")).toBe(f.calls.indexOf("kind create") + 1);
     expect(f.calls.indexOf("install local Dex")).toBeGreaterThan(f.calls.findIndex(call => call.includes("install cilium")));
     if (failed) expect(f.calls).not.toContain("core install");
@@ -404,14 +547,15 @@ describe("Kind creation and cold ordering", () => {
     const f = installation(); const result = await f.install();
     expect(readFileSync(path.join(f.directory, ".gitignore"), "utf8")).toBe("*\n");
     expect(f.calls.findIndex(call => call.includes("install cilium"))).toBeGreaterThan(f.calls.indexOf("kind create"));
+    expect(f.calls.find(call => call.includes("install cilium"))).toContain("--set nodeSelectorLabels=true");
     expect(f.calls.indexOf("core install")).toBeGreaterThan(f.calls.findIndex(call => call.includes("install cilium")));
     expect(f.calls.findIndex(call => call.includes("install kars-bridge"))).toBeGreaterThan(f.calls.indexOf("core install"));
     expect(setupInstalledKindBetaProviders).toHaveBeenCalledWith("chosen", result.kubeconfig,
-      path.join(f.directory, "provider-setup"), f.plan.coreChart, tools, f.execute, f.hooks.installLocalCoreChart);
+      path.join(f.directory, "provider-setup"), f.plan.coreChart, tools, f.execute, f.hooks.installLocalCoreChart, undefined);
     expect(f.hooks.ensureCluster).toHaveBeenCalledWith(tools.kind, "chosen", tools.env, tools.runtime,
       { config: path.join(f.directory, "kind.yaml"), kubeconfig: result.kubeconfig, image: f.plan.nodeImage });
     expect(f.hooks.installLocalCoreChart).toHaveBeenCalledWith(tools.helm, tools.kubectl, "chosen", "kars", f.plan.coreChart,
-      ["/bundled/deploy/helm/kars/values-generic.yaml", "/bundled/deploy/helm/kars/values-kind-beta.yaml", f.plan.coreValues, path.join(f.directory, "core-kind.yaml")], [], undefined, { kubeconfig: result.kubeconfig });
+      [path.join(f.plan.coreChart, "values-generic.yaml"), path.join(f.plan.coreChart, "values-kind-beta.yaml"), f.plan.coreValues, path.join(f.directory, "core-kind.yaml")], [], undefined, { kubeconfig: result.kubeconfig });
     for (const [tool, args, options] of f.execute.mock.calls) {
       if (args[0] === "version" || args[0] === "template" || tool === tools.kind || tool === tools.runtime) continue;
       expect(args.slice(0, 4)).toEqual(["--kubeconfig", result.kubeconfig, tool === tools.helm ? "--kube-context" : "--context", "kind-chosen"]);
@@ -525,21 +669,6 @@ describe("fresh Kind kubelet trust", () => {
 });
 
 describe("foreground loopback UI lifecycle", () => {
-  it.each([200, 302, 399])("accepts HTTP %s without following redirects or reading the body", async status => {
-    const cancel = vi.fn(async () => {});
-    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue({ status, body: { cancel } } as unknown as Response);
-    await expect(probeKindBetaUI(new URL("http://localhost:3000/private"))).resolves.toBeUndefined();
-    expect(fetch).toHaveBeenCalledWith(new URL("http://127.0.0.1:3000"), expect.objectContaining({ redirect: "manual" }));
-    expect(cancel).toHaveBeenCalledOnce();
-  });
-  it.each([401, 403, 500, 502, 503, 504])("retains a fixed HTTP %s category for auth and retry handling", async status => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue({ status, body: null } as Response);
-    await expect(probeKindBetaUI(new URL("http://localhost:3000"))).rejects.toThrow(`Kind beta UI is not responsive (HTTP ${status})`);
-  });
-  it.each([199, 400, 501, 599, NaN, "untrusted-private-value", "__proto__"])("does not persist unrecognized HTTP status %s", async status => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue({ status, body: null } as unknown as Response);
-    await expect(probeKindBetaUI(new URL("http://localhost:3000"))).rejects.toThrow("Kind beta UI is not responsive (unexpected HTTP status)");
-  });
   function accessFixture(fail = false) {
     const plan = fixture().load(); const children: any[] = [];
     const spawn = vi.fn((_tool: string, args: string[]) => {
@@ -555,8 +684,17 @@ describe("foreground loopback UI lifecycle", () => {
     const probe = vi.fn(async () => {});
     const open = vi.fn(async (_url: string) => {});
     const start = () => kindBetaAccess(plan, tools, { kubeconfig: "/dedicated/config", context: "kind-chosen" }, { spawn: spawn as unknown as typeof execa, probe, open });
-    return { children, spawn, probe, open, start };
+    return { plan, children, spawn, probe, open, start };
   }
+  it("opens only Headlamp for Core-only and stops its one tunnel", async () => {
+    const f = accessFixture(); f.plan.includeBridge = false; f.plan.web = f.plan.headlamp;
+    vi.spyOn(console, "log").mockImplementation(() => { queueMicrotask(() => process.emit("SIGINT")); });
+    await f.start();
+    expect(f.probe).toHaveBeenCalledExactlyOnceWith(f.plan.headlamp);
+    expect(f.children).toHaveLength(1); expect(f.spawn.mock.calls[0][1]).toContain("service/headlamp");
+    expect(f.open).toHaveBeenCalledExactlyOnceWith("http://localhost:4466");
+    expect(f.children[0].kill).toHaveBeenCalledWith("SIGTERM");
+  });
   it("checks both UI endpoints and stops only its tunnels on SIGINT, without deleting the cluster", async () => {
     const f = accessFixture(); vi.spyOn(console, "log").mockImplementation(() => { queueMicrotask(() => process.emit("SIGINT")); });
     await f.start(); expect(f.probe).toHaveBeenCalledTimes(2); expect(f.children).toHaveLength(2);

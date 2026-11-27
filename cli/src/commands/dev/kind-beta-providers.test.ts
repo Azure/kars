@@ -193,9 +193,18 @@ describe("installed Kind provider setup", () => {
     return { ...f, container, controller, run, installCore, setProfile: (value: string) => { values.global.installationProfile = value; },
       outdated: () => { adoption = "{}"; admission.variables = []; },
       wrongCA: () => { trustedCA = rootCertificates[0]!; }, saved: () => values,
-      setup: () => setupInstalledKindBetaProviders("chosen", "/private/config", f.dir, chart, tools, run, installCore),
+      setup: (writer?: { name: string; uid: string }) => setupInstalledKindBetaProviders("chosen", "/private/config", f.dir, chart, tools, run, installCore, writer),
     };
   }
+  it.each([false, true])("forwards the reviewed writer source through installed qualification (Core-only: %s)", async coreOnly => {
+    const f = installed();
+    const writer = { name: "kars-provider-installer", uid: "installer-uid" };
+    await f.setup(coreOnly ? writer : undefined);
+    expect(setupWorkspaceProviders).toHaveBeenCalledOnce();
+    const options = vi.mocked(setupWorkspaceProviders).mock.calls[0][1];
+    if (coreOnly) { expect(options.installerWriter).toEqual(writer); expect(options.bridgeNamespace).toBeUndefined(); }
+    else { expect(options.bridgeNamespace).toBe("kars-system"); expect(options.installerWriter).toBeUndefined(); }
+  });
   it.each(["production", "foreign-container", "wrong-CA"])("refuses %s before enrollment, issuance or Helm mutation", async fault => {
     const f = installed(); if (fault === "production") f.setProfile("production");
     if (fault === "foreign-container") f.container.Config.Labels["io.x-k8s.kind.cluster"] = "other";

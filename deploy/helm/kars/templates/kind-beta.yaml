@@ -44,20 +44,30 @@
 {{- fail "kind-beta selecting a different SRE provider requires the adopted model route baseline" -}}
 {{- end -}}
 {{- $endpoint := "" -}}
-{{- if eq $provider "azure-openai" -}}
+{{- $namedProvider := has $provider (list "openai" "anthropic" "github-copilot" "openai-compatible") -}}
+{{- if $namedProvider -}}
+{{- $endpoint = (.Values.kindBeta | default dict).providerEndpoint | default "" -}}
+{{- if or .Values.foundry.endpoint .Values.inferenceRouter.azure.openai.endpoint .Values.inferenceRouter.azure.openai.credentials.apiKey .Values.inferenceRouter.azure.openai.credentials.existingSecret -}}
+{{- fail "kind-beta named bootstrap cannot replace or coexist with an Azure bootstrap route" -}}
+{{- end -}}
+{{- $official := dict "openai" "https://api.openai.com/v1" "anthropic" "https://api.anthropic.com/v1" "github-copilot" "https://api.githubcopilot.com" -}}
+{{- if and (hasKey $official $provider) (ne $endpoint (index $official $provider)) -}}
+{{- fail "kind-beta named bootstrap requires the matching official provider endpoint" -}}
+{{- end -}}
+{{- else if eq $provider "azure-openai" -}}
 {{- if .Values.foundry.endpoint -}}{{- fail "kind-beta azure-openai must not be shadowed by foundry.endpoint" -}}{{- end -}}
 {{- $endpoint = .Values.inferenceRouter.azure.openai.endpoint -}}
 {{- else if eq $provider "foundry" -}}
 {{- if .Values.inferenceRouter.azure.openai.endpoint -}}{{- fail "kind-beta foundry requires only foundry.endpoint" -}}{{- end -}}
 {{- $endpoint = .Values.foundry.endpoint -}}
 {{- else -}}
-{{- fail "kind-beta supports the existing authenticated azure-openai or foundry routes; other provider routes require separate qualification" -}}
+{{- fail "kind-beta requires a supported authenticated bootstrap provider" -}}
 {{- end -}}
 {{- if not (regexMatch "^https://[A-Za-z0-9][A-Za-z0-9.-]*(:443)?(/[^[:space:]?#]*)?$" $endpoint) -}}
 {{- fail "kind-beta requires an explicit HTTPS provider endpoint on port 443" -}}
 {{- end -}}
 {{- $credentials := .Values.inferenceRouter.azure.openai.credentials -}}
-{{- if or $credentials.apiKey (not $credentials.existingSecret) (not $credentials.key) .Values.localInference.namespaces .Values.localInference.targets -}}
+{{- if or $credentials.apiKey (and (not $namedProvider) (or (not $credentials.existingSecret) (not $credentials.key))) .Values.localInference.namespaces .Values.localInference.targets -}}
 {{- fail "kind-beta requires an operator provider credential Secret reference, without inline keys or alternate local routes" -}}
 {{- end -}}
 {{- $providerStore := lookup "v1" "Secret" .Release.Namespace "kars-inference-providers" -}}
@@ -146,9 +156,15 @@
 {{- fail "kind-beta selected SRE provider requires a matching provider/model/endpoint contract" -}}
 {{- end -}}
 {{- end -}}
-{{- if $defaultRoute -}}
+{{- if or $defaultRoute $namedProvider -}}
 {{/* Named bootstrap aliases may duplicate the original endpoint/authentication,
      but never replace them. Secret values are compared, not rendered or stored. */}}
+{{- if $namedProvider -}}
+{{- if or (ne (index $defaultRoute (printf "%sENDPOINT" $defaultPrefix) | default "") $endpoint)
+  (not (or (index $defaultRoute (printf "%sAPI_KEY" $defaultPrefix) | default "" | trim) (index $defaultRoute (printf "%sTOKEN" $defaultPrefix) | default "" | trim))) -}}
+{{- fail "kind-beta named default provider must retain its sealed endpoint and enrolled credential" -}}
+{{- end -}}
+{{- else -}}
 {{- $bootstrap := lookup "v1" "Secret" .Release.Namespace $credentials.existingSecret -}}
 {{- $bootstrapKey := index ($bootstrap.data | default dict) $credentials.key | default "" | b64dec -}}
 {{- if or (not $bootstrapKey) (dig "metadata" "deletionTimestamp" "" $bootstrap)
@@ -163,6 +179,7 @@
 {{- end -}}
 {{- end -}}
 {{- end -}}
+{{- end -}}
 {{- include "kars.inferenceBudget.contracts.validate" . -}}
 {{- if or (not .Values.inferenceBudget.catalogVersion) (not .Values.inferenceBudget.caBundle) (not .Values.inferenceBudget.tlsSecretName) .Values.inferenceBudget.tls.privateKey -}}
 {{- fail "kind-beta requires an explicit provider catalogue version and an existing operator budget TLS Secret/CA" -}}
@@ -172,7 +189,10 @@
 {{- if and (not $adoptedRepair) (ne (.Values.sre.firstInstallFunding | toJson) (dict "unboundedTokens" true | toJson)) -}}
 {{- fail "kind-beta requires explicit unbounded non-expiring first-install funding: unboundedTokens: true" -}}
 {{- end -}}
-{{- if not (regexMatch "^https://[A-Za-z0-9][A-Za-z0-9.-]*(:443)?(/[^[:space:]?#]*)?$" .Values.headlamp.oidc.issuerURL) -}}
+{{- $issuer := .Values.headlamp.oidc.issuerURL -}}
+{{- $localPort := int (regexFind "[0-9]+$" $issuer) -}}
+{{- $localIssuer := and (eq (.Values.headlamp.oidc.localDexNamespace | default "") "kars-local-idp") .Values.headlamp.oidc.caConfigMap (regexMatch "^https://[a-z0-9][a-z0-9-]*[.]kars[.]test:[0-9]+$" $issuer) (ge $localPort 1024) (le $localPort 65535) -}}
+{{- if and (not $localIssuer) (not (regexMatch "^https://[A-Za-z0-9][A-Za-z0-9.-]*(:443)?(/[^[:space:]?#]*)?$" $issuer)) -}}
 {{- fail "kind-beta requires genuine external Headlamp HTTPS OIDC on port 443 (available before Core)" -}}
 {{- end -}}
 {{- if ne .Values.controller.image.tag (printf "latest@%s" (.Values.controller.image.digest | default "")) -}}

@@ -85,10 +85,12 @@ describe("in-cluster schema executor", () => {
   it.each(["namespace", "token", "ca.crt"])("refuses a missing projected %s without local fallback", async part => {
     const read = mocked.readFile.getMockImplementation()!;
     mocked.readFile.mockImplementation(async (path: string) => {
-      if (path === `${account}/${part}`) throw new Error("unavailable");
+      if (path === `${account}/${part}`) throw new Error("unavailable: PRIVATE_TEST_CREDENTIAL");
       return read(path);
     });
-    await expect(runSchemaHook(args)).rejects.toThrow("unavailable");
+    await expect(runSchemaHook(args)).rejects.toThrow(
+      new Error("Schema hook requires its own projected service-account credentials"),
+    );
     expect(mocked.execFile).not.toHaveBeenCalled();
     expect(mocked.mkdtemp).not.toHaveBeenCalled();
   });

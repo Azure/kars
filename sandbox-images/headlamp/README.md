@@ -3,6 +3,17 @@ Licensed under the MIT License. -->
 
 # Headlamp on Azure Linux 3
 
+The 2026-11-26 dependency repair pins i18next 26.3.4 in both the production
+frontend and plugin build graph for CVE-2026-63402, and aligns OpenTelemetry's
+SDK and OTLP exporters at 1.47.0 for CVE-2026-128085. The production bundle
+evidence must contain the patched i18next package. Headlamp's pinned source,
+Go toolchain, shipped upstream plugins and AL3 runtime base are unchanged.
+Fresh hosted build, backend tests and all-severity image/lock/inventory scans
+remain required; prior qualification does not cover these dependency changes.
+The backend patch also makes the existing service-name span formatter explicit:
+the updated `otelhttp` default names requests by method instead. The original
+upstream tracing and propagation tests remain unchanged and required.
+
 Build from the repository root with `make image-headlamp` or:
 
 ```bash

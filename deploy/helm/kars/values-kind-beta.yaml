@@ -8,6 +8,9 @@ global:
   installationProfile: kind-beta
 kindBeta:
   cni: ""
+  # Public route for named providers. Credentials are populated only after the
+  # maintained workspace grant enrolls its router-only Secret; never inline here.
+  providerEndpoint: ""
 schemaHook:
   enabled: true
 agentMesh:

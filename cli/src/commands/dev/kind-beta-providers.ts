@@ -161,7 +161,7 @@ export async function rotateKindProviderBudget(execute: Execute, activation: Pri
 }
 
 export async function completeKindBetaProviderSetup(execute: Execute, directory: string, local: BetaExecute,
-  publishCA: (ca: string) => Promise<void>): Promise<void> {
+  publishCA: (ca: string) => Promise<void>, installerWriter?: { name: string; uid: string }): Promise<void> {
   privateDirectory(directory);
   // Check tooling before a private activation can deliberately pause the root.
   try { await local("openssl", ["version"], { stdio: "pipe" }); }
@@ -170,7 +170,8 @@ export async function completeKindBetaProviderSetup(execute: Execute, directory:
   const sandbox = registration.spec?.sandbox, runtime = registration.spec?.runtimeNamespace;
   if (typeof sandbox?.name !== "string" || typeof runtime?.name !== "string") throw new Error("Provider setup requires the installed canonical SRE registration");
   let ca: string | undefined;
-  await setupWorkspaceProviders(execute, { namespace: "kars-system", bridgeNamespace: "kars-system", controllerProfile: "service-accounts",
+  await setupWorkspaceProviders(execute, { namespace: "kars-system", controllerProfile: "service-accounts",
+    ...(installerWriter ? { installerWriter } : { bridgeNamespace: "kars-system" }),
     consumers: [`${runtime.name}/Deployment/${sandbox.name}`] }, async activation => {
     ca = await rotateKindProviderBudget(execute, activation, directory, () => issueKindBudgetIdentity(directory, local));
   });
@@ -203,7 +204,8 @@ export async function completeKindBetaProviderSetup(execute: Execute, directory:
 }
 
 export async function setupInstalledKindBetaProviders(cluster: string, kubeconfig: string, directory: string,
-  chart: string, tools: BetaTools, local: BetaExecute, installCore: typeof installLocalCoreChart): Promise<void> {
+  chart: string, tools: BetaTools, local: BetaExecute, installCore: typeof installLocalCoreChart,
+  installerWriter?: { name: string; uid: string }): Promise<void> {
   if (!/^[a-z0-9][a-z0-9-]{0,39}$/.test(cluster)) throw new Error("Provider setup requires an explicit Kind cluster name");
   const context = `kind-${cluster}`;
   const execute: Execute = async (args, input) => (await local(tools.kubectl,
@@ -266,5 +268,5 @@ export async function setupInstalledKindBetaProviders(cluster: string, kubeconfi
     saved.schemaHook = { ...saved.schemaHook, enabled: false };
     await upgrade(saved, true);
     if ((await values()).inferenceBudget.caBundle !== ca) throw new Error("Core did not persist the rotated public budget trust");
-  });
+  }, installerWriter);
 }

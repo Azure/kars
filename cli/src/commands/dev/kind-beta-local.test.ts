@@ -9,7 +9,7 @@ import path from "node:path";
 import { compare } from "bcryptjs";
 import { parse, parseAllDocuments, stringify } from "yaml";
 import { requirePackagedAsset } from "../../lib/repo-assets.js";
-import { installLocalDex, prepareLocalBeta, validateLocalBetaAccount } from "./kind-beta-local.js";
+import { discoverLocalDexGateways, installLocalDex, localBetaArchitecture, prepareLocalBeta, validateLocalBetaAccount } from "./kind-beta-local.js";
 import { changeManagedHostTrust, ownedHostsContent } from "./kind-beta-host.js";
 import { beginBetaState, betaDirectory, captureBetaNode, pinnedBetaTools, readBetaState, teardownManagedBeta, writeBetaState, type KindBetaState } from "./kind-beta-state.js";
 import { kindBetaClusterConfig, type BetaExecute } from "./kind-beta.js";
@@ -34,6 +34,30 @@ function stateFixture() {
 }
 
 describe("owned local beta lifecycle", () => {
+  it("checks the pinned image index rather than treating the default selector as the image architecture", async () => {
+    const directory = path.join(root, "architecture");
+    mkdirSync(directory);
+    const asset = vi.fn(() => directory);
+    writeFileSync(path.join(directory, "values.yaml"), stringify({ schemaHook: { architecture: "amd64",
+      image: { repository: "example.test/schema", tag: "latest", digest: `sha256:${"a".repeat(64)}` } } }));
+    for (const file of ["values-generic.yaml", "values-kind-beta.yaml"]) writeFileSync(path.join(directory, file), "{}");
+    for (const architecture of ["arm64", "amd64"]) {
+      const run = vi.fn<BetaExecute>(async (_tool, args) => ({ stdout: args[0] === "info" ? architecture : JSON.stringify({
+        manifests: ["amd64", "arm64"].map(architecture => ({ digest: `sha256:${"b".repeat(64)}`, platform: { os: "linux", architecture } })),
+      }) }));
+      expect(await localBetaArchitecture(tools, run, asset)).toBe(architecture);
+      expect(asset).toHaveBeenLastCalledWith("deploy/helm/kars");
+      expect(run.mock.calls[1]).toEqual([tools.runtime, ["manifest", "inspect", `example.test/schema@sha256:${"a".repeat(64)}`],
+        { env: tools.env, stdio: "pipe", cancelSignal: expect.any(AbortSignal) }]);
+    }
+    for (const output of ["{}", "invalid-json", JSON.stringify({ manifests: [
+      { digest: `sha256:${"b".repeat(64)}`, platform: { os: "unknown", architecture: "unknown" } },
+      { digest: `sha256:${"b".repeat(64)}`, platform: { os: "linux", architecture: "amd64" } },
+    ] })]) {
+      await expect(localBetaArchitecture(tools, async (_tool, args) => ({ stdout: args[0] === "info" ? "arm64" : output }), asset)).rejects.toThrow(/platform metadata|does not advertise linux\/arm64/);
+    }
+    await expect(localBetaArchitecture(tools, async () => ({ stdout: "unsupported" }), asset)).rejects.toThrow("supported Kind node architecture");
+  });
   it("pins the selected endpoint, without changing the default context", async () => {
     const run = vi.fn<BetaExecute>(async () => ({ stdout: JSON.stringify([{ Endpoints: { docker: { Host: "unix:///selected.sock" } } }]) }));
     const state = await beginBetaState("unit", tools, run);
@@ -106,10 +130,70 @@ describe("owned local beta lifecycle", () => {
   });
 });
 
+describe("local Dex browser ingress discovery", () => {
+  function fixture() {
+    const { state } = stateFixture();
+    Object.assign(state, { runtime: "podman", endpoint: "ssh://root@127.0.0.1:5555/run/podman/podman.sock", sshKey: "/owned/key" });
+    const machine = { Name: "chosen-machine", Port: 5555, IdentityPath: "/owned/key", RemoteUsername: "core", Running: true };
+    const machines = [{ ...machine, Name: "foreign-default", Port: 6666 }, machine];
+    const routes = [{ dst: "default", gateway: "192.168.127.1" }];
+    const container = { Id: nodeId, NetworkSettings: { Networks: { kind: { Gateway: "10.89.0.1" } } } };
+    const run = vi.fn<BetaExecute>(async (_tool, args) => {
+      if (args[0] === "inspect") return { stdout: JSON.stringify([container]) };
+      if (args[1] === "list") return { stdout: JSON.stringify(machines) };
+      if (args[1] === "ssh") return { stdout: JSON.stringify(routes) };
+      throw new Error("Unexpected gateway discovery command");
+    });
+    return { state, machine, machines, routes, container, run };
+  }
+  it("discovers both exact gateways through the pinned non-default Podman machine", async () => {
+    const f = fixture();
+    expect(await discoverLocalDexGateways(f.state, tools, f.run)).toEqual({
+      kindGatewayCIDR: "10.89.0.1/32", kindHostGatewayCIDR: "192.168.127.1/32",
+    });
+    expect(f.run.mock.calls[2]).toEqual(["podman", ["machine", "ssh", "chosen-machine", "ip", "-j", "-4", "route", "show", "default"],
+      { env: expect.objectContaining({ CONTAINER_HOST: f.state.endpoint, CONTAINER_SSHKEY: "/owned/key", CONTAINER_CONNECTION: "", DOCKER_CONTEXT: "" }) }]);
+  });
+  it.each(["docker", "podman"])("keeps %s Unix-socket discovery on the owned container network", async runtime => {
+    const f = fixture(); Object.assign(f.state, { runtime, endpoint: "unix:///owned.sock" });
+    expect(await discoverLocalDexGateways(f.state, tools, f.run)).toEqual({ kindGatewayCIDR: "10.89.0.1/32" });
+    expect(f.run).toHaveBeenCalledOnce();
+  });
+  it.each(["identity", "port", "stopped", "ambiguous"])("rejects %s machine binding without executing SSH", async fault => {
+    const f = fixture();
+    if (fault === "identity") f.machine.IdentityPath = "/foreign/key";
+    if (fault === "port") f.machine.Port = 7777;
+    if (fault === "stopped") f.machine.Running = false;
+    if (fault === "ambiguous") f.machines.push({ ...f.machine, Name: "duplicate" });
+    await expect(discoverLocalDexGateways(f.state, tools, f.run)).rejects.toThrow(/Cannot bind/);
+    expect(f.run.mock.calls.some(([, args]) => args.includes("ssh"))).toBe(false);
+  });
+  it.each(["missing", "ambiguous", "invalid", "wildcard"])("rejects %s forwarding routes without a broad fallback", async fault => {
+    const f = fixture();
+    if (fault === "missing") f.routes.length = 0;
+    if (fault === "ambiguous") f.routes.push({ dst: "default", gateway: "192.168.128.1" });
+    if (fault === "invalid") f.routes[0].gateway = "192.168.127.0/24";
+    if (fault === "wildcard") f.routes[0].gateway = "0.0.0.0";
+    await expect(discoverLocalDexGateways(f.state, tools, f.run)).rejects.toThrow(/one exact IPv4/);
+  });
+  it("rejects changed node ownership before machine discovery", async () => {
+    const f = fixture(); f.container.Id = "b".repeat(64);
+    await expect(discoverLocalDexGateways(f.state, tools, f.run)).rejects.toThrow(/owned Kind gateway/);
+    expect(f.run).toHaveBeenCalledOnce();
+  });
+});
+
 describe("fresh packaged Dex inputs", () => {
-  it("uses real TLS, bcrypt, distinct registered clients, principal binding and no carried-over funding", async () => {
+  it.each([
+    { includeBridge: true, ports: { https: 8443, bridge: 3000, headlamp: 4466 } },
+    { includeBridge: false, ports: { https: 8443, bridge: 3000, headlamp: 4466 } },
+    { includeBridge: true, ports: { https: 9443, bridge: 3100, headlamp: 4566 } },
+    { includeBridge: false, ports: { https: 9443, bridge: 3100, headlamp: 4566 } },
+    { includeBridge: true, ports: { https: 8443, bridge: 3000, headlamp: 4466 }, apiFailure: "transient" },
+    { includeBridge: true, ports: { https: 8443, bridge: 3000, headlamp: 4466 }, apiFailure: "persistent" },
+  ])("propagates selected ports through secure local identity: %j", async ({ includeBridge, ports, apiFailure }) => {
     const { directory, state } = stateFixture();
-    const charts = path.join(root, "charts"); mkdirSync(charts);
+    const charts = path.join(directory, "charts"); mkdirSync(charts);
     const asset = (relative: string) => path.join(charts, relative.includes("kars-bridge") ? "bridge" : "core");
     for (const name of ["deploy/helm/kars", "bridge/deploy/helm/kars-bridge"]) {
       mkdirSync(asset(name));
@@ -119,7 +203,11 @@ describe("fresh packaged Dex inputs", () => {
       writeFileSync(path.join(asset(name), "values.yaml"), stringify(defaults));
     }
     const account = { email: "local@example.test", password: "test-password-strong" };
-    const plan = await prepareLocalBeta(directory, state, account, execute, asset);
+    const plan = await prepareLocalBeta(directory, state, account, execute, asset, includeBridge, ports);
+    expect(plan.includeBridge).toBe(includeBridge);
+    expect(plan.issuer).toBe(`https://${state.trust!.hostname}:${ports.https}`);
+    expect(plan.web.origin).toBe(`http://localhost:${includeBridge ? ports.bridge : ports.headlamp}`);
+    expect(plan.core.headlamp.oidc.callbackURL).toBe(`http://localhost:${ports.headlamp}/oidc-callback`);
     const dex = parse(readFileSync(path.join(directory, "dex-values.yaml"), "utf8"));
     expect(await compare(account.password, dex.idp.dex.staticPasswords[0].hash)).toBe(true);
     expect(dex.idp.dex.staticPasswords[0].groups).toBeUndefined();
@@ -134,31 +222,67 @@ describe("fresh packaged Dex inputs", () => {
     expect(plan.core.inferenceBudget.unboundedTokenAllowances).toBeUndefined();
     expect(new X509Certificate(plan.ca!).ca).toBe(true);
     expect(readdirSync(path.join(directory, "oidc-issuer"))).toEqual([".gitignore"]);
-    expect(kindBetaClusterConfig(plan).nodes[0].extraPortMappings).toEqual([{ containerPort: 30443, hostPort: 443, listenAddress: "127.0.0.1", protocol: "TCP" }]);
+    expect(kindBetaClusterConfig(plan).nodes[0].extraPortMappings).toEqual([{ containerPort: 30443, hostPort: ports.https, listenAddress: "127.0.0.1", protocol: "TCP" }]);
     expect(kindBetaClusterConfig({ ...plan, localDex: false }).nodes[0].extraPortMappings).toBeUndefined();
-    const bridge = parse(readFileSync(plan.bridgeValues, "utf8"));
-    expect(bridge.web.extraEnv.find((entry: any) => entry.name === "BRIDGE_OIDC_ROLE_MAP").value).toBe('{"local@example.test":"admin"}');
+    if (includeBridge) {
+      const bridge = parse(readFileSync(plan.bridgeValues, "utf8"));
+      expect(bridge.web.extraEnv.find((entry: any) => entry.name === "BRIDGE_OIDC_ROLE_MAP").value).toBe('{"local@example.test":"admin"}');
+    } else {
+      expect(plan.bridgeValues).toBe("");
+      expect(plan.web.origin).toBe(`http://localhost:${ports.headlamp}`);
+      expect(existsSync(path.join(directory, "bridge-input.yaml"))).toBe(false);
+      expect(plan.resources.some(resource => resource.metadata.name.includes("bridge"))).toBe(false);
+      expect(readFileSync(path.join(directory, "dex-secrets.yaml"), "utf8")).not.toContain("kars-bridge");
+      expect(dex.idp.headlampClient.enabled).toBe(false);
+    }
     const chart = asset("bridge/deploy/helm/kars-bridge");
     cpSync(path.join(repo, "bridge/deploy/helm/kars-bridge/Chart.yaml"), path.join(chart, "Chart.yaml"));
     mkdirSync(path.join(chart, "templates"));
     cpSync(path.join(repo, "bridge/deploy/helm/kars-bridge/templates"), path.join(chart, "templates"), { recursive: true });
-    const rendered = execFileSync("helm", ["template", "kars-local-idp", chart, "--show-only", "templates/idp.yaml", "--api-versions", "cilium.io/v2/CiliumNetworkPolicy", "-f", path.join(directory, "dex-values.yaml"), "--set", "idp.dex.kindGatewayCIDR=172.18.0.1/32"], { encoding: "utf8", stdio: "pipe" });
+    const renderArgs = ["template", "kars-local-idp", chart, "--show-only", "templates/idp.yaml", "--api-versions", "cilium.io/v2/CiliumNetworkPolicy", "-f", path.join(directory, "dex-values.yaml"), "--set", "idp.dex.kindGatewayCIDR=172.18.0.1/32"];
+    const rendered = execFileSync("helm", [...renderArgs, ...(includeBridge ? ["--set", "idp.dex.kindHostGatewayCIDR=192.168.127.1/32"] : [])], { encoding: "utf8", stdio: "pipe" });
     const documents = parseAllDocuments(rendered).map(document => document.toJSON());
     const service = documents.find(doc => doc.kind === "Service");
-    expect(service.spec).toMatchObject({ type: "NodePort", externalTrafficPolicy: "Local", ports: [{ port: 443, targetPort: "https", nodePort: 30443 }] });
+    expect(service.spec).toMatchObject({ type: "NodePort", externalTrafficPolicy: "Local", ports: [{ port: ports.https, targetPort: "https", nodePort: 30443 }] });
     const pod = documents.find(doc => doc.kind === "Deployment").spec.template.spec;
     expect(pod.securityContext).toMatchObject({ runAsNonRoot: true, runAsUser: 1001, fsGroup: 1001 });
     expect(pod.volumes.find((volume: any) => volume.name === "storage").persistentVolumeClaim.claimName).toBe("dex-data");
     const config = parse(documents.find(doc => doc.kind === "ConfigMap").data["config.yaml"]);
     expect(config.web.http).toBeUndefined();
-    expect(config.staticClients.map((client: any) => client.id)).toEqual(["kars-bridge", "kars-headlamp"]);
+    expect(config.staticClients.map((client: any) => client.id)).toEqual(includeBridge ? ["kars-bridge", "kars-headlamp"] : ["kars-headlamp"]);
+    if (!includeBridge) {
+      expect(config.staticClients[0]).toMatchObject({ name: "kars-headlamp", redirectURIs: [`http://localhost:${ports.headlamp}/oidc-callback`] });
+      expect(pod.containers[0].env.find((entry: any) => entry.name === "DEX_CLIENT_SECRET").valueFrom.secretKeyRef.name).toBe("kars-headlamp-client");
+      expect(rendered).not.toContain('name: kars Bridge');
+    }
+    expect(config.staticClients.flatMap((client: any) => client.redirectURIs)).toEqual(includeBridge
+      ? [`http://localhost:${ports.bridge}/auth/callback`, `http://localhost:${ports.headlamp}/oidc-callback`]
+      : [`http://localhost:${ports.headlamp}/oidc-callback`]);
     expect(documents.find(doc => doc.kind === "NetworkPolicy").spec.egress).toEqual([]);
+    const ingress = documents.find(doc => doc.kind === "NetworkPolicy").spec.ingress;
+    expect(ingress[0].from.filter((peer: any) => peer.ipBlock).map((peer: any) => peer.ipBlock.cidr))
+      .toEqual(includeBridge ? ["172.18.0.1/32", "192.168.127.1/32"] : ["172.18.0.1/32"]);
+    expect(ingress[0].ports).toEqual([{ port: 5557, protocol: "TCP" }]);
+    if (includeBridge && ports.https === 8443) {
+      expect(() => execFileSync("helm", [...renderArgs, "--set", "idp.dex.kindHostGatewayCIDR=0.0.0.0/0"], { stdio: "pipe" }))
+        .toThrow(/host-forwarding IPv4 \/32/);
+    }
     const calls: string[] = [];
+    let serviceChecks = 0;
     const bootstrap = vi.fn<BetaExecute>(async (tool, args, options) => {
       calls.push(`${tool} ${args.join(" ")}`);
       if (tool === "helm") return { stdout: rendered };
       if (args[0] === "inspect") return { stdout: JSON.stringify([{ Id: nodeId, NetworkSettings: { Networks: { kind: { Gateway: "172.18.0.1" } } } }]) };
+      if (args.includes("service") && args.includes("kubernetes")) return { stdout: JSON.stringify({ spec: {
+        clusterIP: "10.96.0.1", ports: [{ port: 443, protocol: "TCP" }],
+      } }) };
       if (args.includes("service")) return { stdout: JSON.stringify({ spec: { clusterIP: "10.96.0.9" } }) };
+      if (args.includes("--server=https://10.96.0.1:443")) {
+        serviceChecks++;
+        expect(trust).not.toHaveBeenCalled();
+        if (apiFailure === "persistent" || (apiFailure === "transient" && serviceChecks === 1)) throw new Error("connection refused");
+        return { stdout: "ok" };
+      }
       if (args.includes("configmap")) return { stdout: JSON.stringify({ data: { Corefile: ".:53 { forward . /etc/resolv.conf }" } }) };
       if (args.includes("cat")) return { stdout: stringify({ kind: "Pod", metadata: { name: "kube-apiserver" }, spec: { hostNetwork: true } }) };
       if (args.includes("pods")) return { stdout: JSON.stringify({ items: [{ spec: { hostAliases: [{ ip: "10.96.0.9", hostnames: [state.trust!.hostname] }] }, status: { conditions: [{ type: "Ready", status: "True" }] } }] }) };
@@ -166,9 +290,32 @@ describe("fresh packaged Dex inputs", () => {
       return { stdout: "" };
     });
     const trust = vi.fn(async () => {}), verify = vi.fn(async () => {});
-    await installLocalDex(plan, directory, state, tools, bootstrap, { trust, verify });
+    if (apiFailure) vi.useFakeTimers();
+    try {
+      const installation = installLocalDex(plan, directory, state, tools, bootstrap, { trust, verify });
+      const outcome = apiFailure === "persistent"
+        ? expect(installation).rejects.toThrow("in-cluster Service did not recover")
+        : expect(installation).resolves.toBeUndefined();
+      if (apiFailure) await vi.runAllTimersAsync();
+      await outcome;
+    } finally {
+      if (apiFailure) vi.useRealTimers();
+    }
+    if (apiFailure === "persistent") {
+      expect(serviceChecks).toBe(60);
+      expect(trust).not.toHaveBeenCalled();
+      expect(verify).not.toHaveBeenCalled();
+      expect(readBetaState(directory)?.trust?.installed).toBe(false);
+      return;
+    }
+    expect(serviceChecks).toBe(apiFailure === "transient" ? 2 : 1);
+    expect(bootstrap.mock.calls.find(call => call[1].includes("--server=https://10.96.0.1:443")))
+      .toEqual([tools.runtime, ["exec", nodeId, "kubectl", "--kubeconfig=/etc/kubernetes/admin.conf",
+        "--server=https://10.96.0.1:443", "--request-timeout=3s", "get", "--raw", "/readyz"], { env: tools.env }]);
     expect(bootstrap.mock.calls.find(call => call[1].includes("install"))?.[1]).toEqual(["exec", nodeId, "install", "-d", "-m", "0700", "-o", "1001", "-g", "1001", `/var/local/kars-dex-${owner}`]);
     expect(calls.findIndex(call => call.includes("mv /etc/kubernetes/kars-oidc"))).toBeLessThan(calls.findIndex(call => call.includes("--raw /readyz")));
+    expect(calls.findIndex(call => call.includes("--for=condition=Valid=True")))
+      .toBeLessThan(calls.findIndex(call => call.includes("rollout status deployment/dex")));
     expect(trust).toHaveBeenCalledWith(state, true, bootstrap);
     expect(verify).toHaveBeenCalledWith(plan);
     expect(readBetaState(directory)?.trust?.installed).toBe(true);

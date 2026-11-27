@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { prepareKindBetaInference, type KindBetaProviderConnection } from "../commands/dev/kind-beta-inference.js";
 
 const root = fileURLToPath(new URL("../../../", import.meta.url));
 const digest = `sha256:${"a".repeat(64)}`;
@@ -57,6 +58,22 @@ function render(values: any, timeZone?: string, upgrade = false, receipts = fals
   } finally { rmSync(directory, { recursive: true, force: true }); }
 }
 describe("Kind beta runtime pull coverage", () => {
+  it("permits unprivileged managed local issuers only with the local namespace and CA binding", () => {
+    const values = fixture();
+    const oidc = values.headlamp.oidc;
+    oidc.issuerURL = "https://chosen-12345678.kars.test:9443";
+    oidc.localDexNamespace = "kars-local-idp"; oidc.caConfigMap = "local-ca";
+    expect(() => render(values)).not.toThrow();
+    for (const fault of ["namespace", "ca", "external", "privileged", "overflow"]) {
+      const changed = structuredClone(values), settings = changed.headlamp.oidc;
+      if (fault === "namespace") settings.localDexNamespace = "other";
+      if (fault === "ca") delete settings.caConfigMap;
+      if (fault === "external") settings.issuerURL = "https://identity.example:9443";
+      if (fault === "privileged") settings.issuerURL = "https://chosen-12345678.kars.test:1023";
+      if (fault === "overflow") settings.issuerURL = "https://chosen-12345678.kars.test:65536";
+      expect(() => render(changed)).toThrow(/OIDC/);
+    }
+  });
   it("accepts an explicitly empty catalogue only for record-only unbounded funding", () => {
     const values = fixture();
     values.inferenceBudget.contracts = [];
@@ -147,6 +164,40 @@ describe("Kind beta runtime pull coverage", () => {
     };
     return { values, secret, authority };
   }
+  it.each([
+    ["openai", "https://api.openai.com/v1"], ["anthropic", "https://api.anthropic.com/v1"],
+    ["github-copilot", "https://api.githubcopilot.com"], ["openai-compatible", "https://models.example.com/v1"],
+  ] as const)("renders the actual %s installer output before and after governed enrollment", async (kind, endpoint) => {
+    const f = enrolledProviders(), resources: any[] = [];
+    f.values.schemaHook.enabled = true;
+    f.values.foundry.endpoint = "";
+    f.values.inferenceRouter.azure.openai.credentials = {};
+    f.values.sre.provider = "";
+    f.values.controller.inferenceDefaults = {};
+    const connection: KindBetaProviderConnection = { kind, endpoint, model: "test-model", apiKey: "private-bootstrap-fixture" };
+    const overlay = await prepareKindBetaInference(f.values, resources, {
+      load: () => null, interactive: false, prompt: async () => { throw new Error("Unexpected prompt"); },
+      resolveAddresses: async () => ["8.8.8.8"],
+    }, false, connection);
+    f.values.controller.inferenceDefaults = overlay.controller.inferenceDefaults;
+    Object.assign(f.values.kindBeta, overlay.kindBeta);
+    expect(() => render(f.values)).not.toThrow();
+    expect(() => render(f.values, undefined, false, false, resources[0])).toThrow(/must not be shadowed/);
+    f.values.schemaHook.enabled = false;
+    expect(() => render(f.values, undefined, true, true, {})).not.toThrow();
+    delete f.secret.data;
+    f.secret.stringData = resources[0].stringData;
+    expect(render(f.values, undefined, true, true, f.secret, f.authority)).not.toContain(connection.apiKey);
+    const prefix = `KARS_PROVIDER_${kind.toUpperCase().replaceAll("-", "_")}_`;
+    delete f.secret.stringData[`${prefix}API_KEY`];
+    delete f.secret.stringData[`${prefix}TOKEN`];
+    expect(() => render(f.values, undefined, true, true, f.secret, f.authority)).toThrow(/sealed endpoint and enrolled credential/);
+    f.secret.stringData = { COPILOT_GITHUB_TOKEN: "unrelated" };
+    expect(() => render(f.values, undefined, true, true, f.secret, f.authority)).toThrow(/sealed endpoint and enrolled credential/);
+    f.values.kindBeta.providerEndpoint = "http://insecure.example";
+    f.values.schemaHook.enabled = true;
+    expect(() => render(f.values)).toThrow(/official provider endpoint|HTTPS provider endpoint/);
+  });
   it("retains enrolled additional routes on adopted upgrades without publishing credential values", () => {
     const f = enrolledProviders();
     const before = structuredClone(f);

@@ -7,6 +7,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -77,5 +78,52 @@ func TestPinnedBackendSource(t *testing.T) {
 	}
 	if strings.Contains(string(patched), `os.MkdirTemp(os.TempDir(), ".headlamp")`) {
 		t.Fatal("unbounded static-copy path remains")
+	}
+	tracingFile := filepath.Join(filepath.Dir(file), "..", "pkg", "telemetry", "tracing.go")
+	tracing, err := os.ReadFile(tracingFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracing, err = patchTracing(tracing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parser.ParseFile(token.NewFileSet(), tracingFile, tracing, parser.AllErrors); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPatchTracingPreservesServiceSpanName(t *testing.T) {
+	original := []byte(`package telemetry
+func TracingMiddleware(serviceName string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return otelhttp.NewHandler(next, serviceName,
+			otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),
+		)
+	}
+}
+`)
+	patched, err := patchTracing(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parser.ParseFile(token.NewFileSet(), "tracing.go", patched, parser.AllErrors); err != nil {
+		t.Fatal(err)
+	}
+	addition := `			otelhttp.WithSpanNameFormatter(func(operation string, _ *http.Request) string {
+				return operation
+			}),
+`
+	if strings.Replace(string(patched), addition, "", 1) != string(original) {
+		t.Fatal("tracing patch changed bytes beyond the span-name formatter")
+	}
+	for _, invalid := range [][]byte{
+		patched,
+		[]byte(strings.Replace(string(original), "serviceName,", "changedName,", 1)),
+		append(append([]byte{}, original...), original...),
+	} {
+		if _, err := patchTracing(invalid); err == nil {
+			t.Fatal("tracing patch must reject already-patched, drifted or duplicate source")
+		}
 	}
 }

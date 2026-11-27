@@ -178,7 +178,7 @@ type MeshProvider = keyof typeof MESH_PORTS;
 const DEFAULT_AGT_REPO = path.join(os.homedir(), "agent-governance-toolkit");
 
 export function devCommand(): Command {
-  const cmd = new Command("dev");
+  const cmd = new Command("dev").enablePositionalOptions();
 
   cmd
     .description(
@@ -1870,7 +1870,13 @@ Notes:
       "Stop the port-forward and uninstall Headlamp, but keep the kind cluster running",
       false,
     )
-    .action(async (options: { target: string; clusterName: string; keepCluster: boolean }) => {
+    .action(async (options: { target: string; clusterName: string; keepCluster: boolean }, command: Command) => {
+      // Honor explicit parent options too, without overriding options supplied after `down`.
+      for (const key of ["target", "clusterName"] as const) {
+        if (command.getOptionValueSource(key) !== "cli" && cmd.getOptionValueSource(key) === "cli") {
+          options[key] = cmd.getOptionValue(key);
+        }
+      }
       if (options.target !== "local-k8s") {
         console.error(
           chalk.red(`  --target ${options.target} is not supported by 'dev down'.`),

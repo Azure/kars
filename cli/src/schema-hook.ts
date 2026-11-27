@@ -9,6 +9,8 @@ import { pathToFileURL } from "node:url";
 import { preparePendingCoreHelmSchemas, type CoreSchemaHookOptions } from "./lib/core-helm-schema-hook.js";
 import { completePendingCoreSre } from "./lib/core-helm-sre-hook.js";
 import type { SchemaExecute } from "./lib/schema-documents.js";
+import { coreHookFailureCode, coreHookFailureMessage } from "./lib/core-hook-diagnostics.js";
+import { privateCommandFailure } from "./lib/private-activation-command-diagnostics.js";
 
 async function inClusterExecute(namespace: string) {
   const host = process.env.KUBERNETES_SERVICE_HOST ?? "";
@@ -19,7 +21,7 @@ async function inClusterExecute(namespace: string) {
   const account = "/var/run/secrets/kubernetes.io/serviceaccount";
   const [actualNamespace, token, ca] = await Promise.all([
     readFile(`${account}/namespace`, "utf8"), readFile(`${account}/token`, "utf8"), readFile(`${account}/ca.crt`, "utf8"),
-  ]);
+  ]).catch(() => { throw new Error("Schema hook requires its own projected service-account credentials"); });
   if (actualNamespace.trim() !== namespace || !token.trim() || !ca.trim()) {
     throw new Error("Schema hook requires its own projected service-account credentials");
   }
@@ -44,7 +46,7 @@ async function inClusterExecute(namespace: string) {
     const child = execFile(file, ["--kubeconfig", config, ...args], { encoding: "utf8", timeout: options.timeout,
       env: { PATH: process.env.PATH, HOME: "/tmp", XDG_CACHE_HOME: "/tmp/cache", HELM_DRIVER: "secret" },
       maxBuffer: 8 * 1024 * 1024, killSignal: "SIGKILL", windowsHide: true }, (error, stdout, stderr) => {
-      if (error) reject(Object.assign(error, { stderr, exitCode: typeof error.code === "number" ? error.code : undefined }));
+      if (error) reject(privateCommandFailure({ stderr, exitCode: typeof error.code === "number" ? error.code : undefined }, args));
       else resolve({ stdout });
     });
     child.stdin?.on("error", error => { child.kill("SIGKILL"); reject(error); });
@@ -88,9 +90,12 @@ export async function runSchemaHook(args: readonly string[], execute?: SchemaExe
 // Node resolves the entrypoint but leaves argv[1] at the projected ConfigMap symlink.
 if (process.argv[1] && existsSync(process.argv[1])
   && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
-  runSchemaHook(process.argv.slice(2)).then(result => console.log(JSON.stringify(result))).catch(() => {
+  runSchemaHook(process.argv.slice(2)).then(result => console.log(JSON.stringify(result))).catch(error => {
     // Never echo Helm manifests, subprocess output, credentials or command arguments into Job logs.
-    console.error("Core schema staging failed. Helm must not proceed; no cluster cleanup, force or automatic write retry was attempted.");
+    const code = coreHookFailureCode(error);
+    console.error(`KARS_CORE_HOOK_FAILURE ${code}`);
+    console.error(`Core installation hook failed: ${coreHookFailureMessage(code)}`);
+    console.error("Helm must not proceed; no cluster cleanup, force or automatic write retry was attempted.");
     process.exitCode = 1;
   });
 }

@@ -13,12 +13,14 @@ const stores = [
 ] as const;
 
 type ObjectMap = Record<string, any>;
-export interface ProviderSetupOptions {
+export type ProviderSetupOptions = {
   namespace: string;
-  bridgeNamespace: string;
   controllerProfile: PrivateActivation["profile"];
   consumers?: string[];
-}
+} & (
+  | { bridgeNamespace: string; installerWriter?: never }
+  | { bridgeNamespace?: never; installerWriter: { name: string; uid: string } }
+);
 
 async function optional(execute: Execute, kind: string, name: string, namespace: string): Promise<ObjectMap | undefined> {
   const text = await execute(["get", kind, name, "-n", namespace, "--ignore-not-found", "-o", "json"]);
@@ -43,22 +45,33 @@ export async function prepareWorkspaceProviderGrant(execute: Execute, options: P
   const namespace = reviewed(await read(execute, "namespace", ns));
   const existing = await optional(execute, resource, "workspace", ns);
   compatibleGrant(existing, namespace.uid);
-  const bff = await read(execute, "deployment", "kars-bridge-bff", options.bridgeNamespace) as ObjectMap;
-  const accountName = bff.spec?.template?.spec?.serviceAccountName;
-  if (typeof accountName !== "string" || !accountName || accountName === "default") {
-    throw new Error("Provider setup requires Bridge's dedicated installed ServiceAccount");
+  if (Boolean(options.bridgeNamespace) === Boolean(options.installerWriter)) {
+    throw new Error("Provider setup requires exactly one reviewed Bridge or installer writer");
   }
-  const account = reviewed(await read(execute, "serviceaccount", accountName, options.bridgeNamespace));
+  const writerNamespace = options.bridgeNamespace ?? ns;
+  const bff = options.bridgeNamespace
+    ? await read(execute, "deployment", "kars-bridge-bff", options.bridgeNamespace) as ObjectMap : undefined;
+  const accountName = options.installerWriter?.name ?? bff?.spec?.template?.spec?.serviceAccountName;
+  if (typeof accountName !== "string" || !accountName || accountName === "default") {
+    throw new Error("Provider setup requires a dedicated installed ServiceAccount");
+  }
+  const serviceAccount = await read(execute, "serviceaccount", accountName, writerNamespace);
+  const account = reviewed(serviceAccount);
+  if (options.installerWriter && (accountName !== "kars-provider-installer"
+    || !options.installerWriter.uid || account.uid !== options.installerWriter.uid
+    || serviceAccount.automountServiceAccountToken !== false)) {
+    throw new Error("Core-only installer writer identity or token policy changed; existing authority was preserved");
+  }
   const controller = reviewed(await read(execute, "deployment", "kars-controller", ns));
   const writers = structuredClone(existing?.spec.writers ?? []) as { namespace: string; name: string; uid: string }[];
-  const writer = writers.find(value => value.namespace === options.bridgeNamespace && value.name === accountName);
-  if (writer && writer.uid !== account.uid) throw new Error("Enrolled Bridge writer identity changed; existing authority was preserved");
-  if (!writer) writers.push({ namespace: options.bridgeNamespace, name: accountName, uid: account.uid });
+  const writer = writers.find(value => value.namespace === writerNamespace && value.name === accountName);
+  if (writer && writer.uid !== account.uid) throw new Error("Enrolled provider writer identity changed; existing authority was preserved");
+  if (!writer) writers.push({ namespace: writerNamespace, name: accountName, uid: account.uid });
   if (existing?.spec.controller && (existing.spec.controller.name !== controller.name || existing.spec.controller.uid !== controller.uid)) {
     throw new Error("Enrolled Core controller identity changed; existing authority was preserved");
   }
   const integrationStores = structuredClone(existing?.spec.integrationStores ?? []) as ObjectMap[];
-  for (const selected of stores) {
+  for (const selected of options.installerWriter ? stores.filter(store => store.purpose === "providers") : stores) {
     let store = await optional(execute, "secret", selected.name, ns);
     const enrolled = integrationStores.find(value => value.secret?.name === selected.name);
     if (enrolled && (!store || enrolled.secret.uid !== store.metadata.uid || enrolled.purpose !== selected.purpose)) {
@@ -76,7 +89,7 @@ export async function prepareWorkspaceProviderGrant(execute: Execute, options: P
   const consumers = [...new Set([
     ...(existing?.spec.privateActivation?.namespaces ?? []).flatMap((scope: ObjectMap) =>
       (scope.consumers ?? []).map((consumer: ObjectMap) => `${scope.namespace.name}/${consumer.kind}/${consumer.object.name}`)),
-    `${options.bridgeNamespace}/Deployment/kars-bridge-bff`, ...(options.consumers ?? []),
+    ...(options.bridgeNamespace ? [`${options.bridgeNamespace}/Deployment/kars-bridge-bff`] : []), ...(options.consumers ?? []),
   ])] as string[];
   const privateActivation = await previewPrivateActivation(execute, ns, writers, existing?.spec.observationTargets ?? [],
     ns, options.controllerProfile, consumers);

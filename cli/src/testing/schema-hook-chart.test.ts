@@ -78,6 +78,7 @@ describe('Core first-install schema stage', () => {
     expect(job.spec.backoffLimit).toBe(0);
     expect(job.spec.activeDeadlineSeconds).toBe(180);
     expect(job.spec.template.spec.restartPolicy).toBe('Never');
+    expect(job.spec.template.spec.containers[0].terminationMessagePolicy).toBe('FallbackToLogsOnError');
     expect(job.spec.ttlSecondsAfterFinished).toBeUndefined();
     expect(schemaHooks(render(enabled))[0].metadata.name).not.toBe(identity);
   });
@@ -253,6 +254,7 @@ describe('Core atomic first-install SRE phase', () => {
     expect(job.spec.activeDeadlineSeconds).toBe(660);
     expect(JSON.stringify(job.spec.template.spec.containers[0])).toContain('--phase');
     expect(JSON.stringify(job.spec.template.spec.containers[0])).toContain('sre');
+    expect(job.spec.template.spec.containers[0].terminationMessagePolicy).toBe('FallbackToLogsOnError');
     expect(post.some(doc => doc.kind === 'NetworkPolicy')).toBe(true);
     for (const role of post.filter(doc => ['Role', 'ClusterRole'].includes(doc.kind))) {
       for (const rule of role.rules) {

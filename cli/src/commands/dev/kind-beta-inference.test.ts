@@ -3,7 +3,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 import type { KarsConfig } from "../../config.js";
-import { prepareKindBetaInference } from "./kind-beta-inference.js";
+import { prepareKindBetaInference, type KindBetaProviderConnection } from "./kind-beta-inference.js";
 
 const selected: KarsConfig = { provider: "foundry", endpoint: "https://models.example.test", model: "chosen-model", apiKey: "private-test-key" };
 function dependencies(saved: KarsConfig | null = null, interactive = true) {
@@ -106,5 +106,72 @@ describe("Kind Day-0 Core inference", () => {
     const resources: any[] = [];
     await expect(prepareKindBetaInference({}, resources, dependencies({ ...selected, endpoint }))).rejects.toThrow(/HTTPS/);
     expect(resources).toEqual([]);
+  });
+});
+
+const connections: KindBetaProviderConnection[] = [
+  { kind: "openai", endpoint: "https://api.openai.com/v1", model: "gpt-5", apiKey: "openai-fixture" },
+  { kind: "anthropic", endpoint: "https://api.anthropic.com/v1", model: "claude-sonnet-4-5", apiKey: "anthropic-fixture" },
+  { kind: "github-copilot", endpoint: "https://api.githubcopilot.com", model: "gpt-5", apiKey: "copilot-fixture" },
+  { kind: "openai-compatible", endpoint: "https://models.example.com/v1", model: "org/model:latest", apiKey: "server-fixture" },
+];
+const namedDeps = () => ({ ...dependencies(null, false), resolveAddresses: vi.fn(async () => ["8.8.8.8"]) });
+describe("explicit Kind provider connections", () => {
+  it.each(connections)("binds $kind to the governed source store without fake Azure values", async connection => {
+    const resources: any[] = [], deps = namedDeps();
+    const result = await prepareKindBetaInference({}, resources, deps, false, connection);
+    expect(result).toEqual({ controller: { inferenceDefaults: { provider: connection.kind, model: connection.model } }, kindBeta: { providerEndpoint: connection.endpoint } });
+    expect(resources).toHaveLength(1);
+    expect(resources[0]).toMatchObject({ apiVersion: "v1", kind: "Secret", type: "Opaque", metadata: { name: "kars-inference-providers", namespace: "kars-system" } });
+    const prefix = `KARS_PROVIDER_${connection.kind.toUpperCase().replaceAll("-", "_")}_`;
+    expect(resources[0].stringData).toEqual(connection.kind === "github-copilot"
+      ? { [`${prefix}ENDPOINT`]: connection.endpoint, [`${prefix}TOKEN`]: connection.apiKey, COPILOT_GITHUB_TOKEN: connection.apiKey }
+      : { [`${prefix}ENDPOINT`]: connection.endpoint, [`${prefix}API_KEY`]: connection.apiKey });
+    expect(JSON.stringify(result)).not.toContain(connection.apiKey);
+    expect(deps.load).not.toHaveBeenCalled(); expect(deps.prompt).not.toHaveBeenCalled();
+  });
+  it("retains an exactly matching prepared store and its unrelated provider entries", async () => {
+    const resources: any[] = [], connection = connections[0];
+    await prepareKindBetaInference({}, resources, namedDeps(), false, connection);
+    resources[0].stringData.KARS_PROVIDER_OTHER_ENDPOINT = "https://other.example.com/v1";
+    const before = structuredClone(resources);
+    await prepareKindBetaInference({}, resources, namedDeps(), false, connection);
+    expect(resources).toEqual(before);
+  });
+  it.each([
+    { controller: { inferenceDefaults: { provider: "azure-openai" } } },
+    { controller: { inferenceDefaults: { model: "different" } } },
+    { sre: { provider: "foundry" } },
+    { foundry: { endpoint: "https://existing.services.ai.azure.com" } },
+    { controller: { extraEnv: [{ name: "KARS_PROVIDER_OPENAI_API_KEY", value: "different" }] } },
+  ])("preserves incompatible reviewed Core settings", async core => {
+    const resources: any[] = [], before = structuredClone(core);
+    await expect(prepareKindBetaInference(core, resources, namedDeps(), false, connections[0])).rejects.toThrow();
+    expect(core).toEqual(before); expect(resources).toEqual([]);
+  });
+  it.each(["uid", "resourceVersion", "ownerReferences"])("refuses to adopt a store carrying %s", async field => {
+    const resources: any[] = [];
+    await prepareKindBetaInference({}, resources, namedDeps(), false, connections[0]);
+    resources[0].metadata[field] = "existing";
+    const before = structuredClone(resources);
+    await expect(prepareKindBetaInference({}, resources, namedDeps(), false, connections[0])).rejects.toThrow("source identity");
+    expect(resources).toEqual(before);
+  });
+  it("refuses mismatched credentials and duplicate source stores", async () => {
+    const resources: any[] = [];
+    await prepareKindBetaInference({}, resources, namedDeps(), false, connections[0]);
+    const before = structuredClone(resources);
+    await expect(prepareKindBetaInference({}, resources, namedDeps(), false, { ...connections[0], apiKey: "different" })).rejects.toThrow("exactly");
+    expect(resources).toEqual(before);
+    await expect(prepareKindBetaInference({}, [...resources, ...resources], namedDeps(), false, connections[0])).rejects.toThrow("Duplicate");
+  });
+  it.each(["127.0.0.1", "10.0.0.1", "169.254.169.254", "::1", "fd00::1", "::ffff:127.0.0.1"])("rejects private DNS answer %s before creating a credential", async address => {
+    const resources: any[] = [];
+    await expect(prepareKindBetaInference({}, resources, { ...namedDeps(), resolveAddresses: async () => [address] }, false, connections[3])).rejects.toThrow("public remote");
+    expect(resources).toEqual([]);
+  });
+  it("requires a credential and fixed endpoint for hosted connections", async () => {
+    await expect(prepareKindBetaInference({}, [], namedDeps(), false, { ...connections[0], apiKey: undefined })).rejects.toThrow("credential");
+    await expect(prepareKindBetaInference({}, [], namedDeps(), false, { ...connections[0], endpoint: "https://other.example.com/v1" })).rejects.toThrow("official");
   });
 });

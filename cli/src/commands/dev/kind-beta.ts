@@ -1,10 +1,11 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+import { KindInventoryError, listKindClusters } from "./kind-inventory.js";
 import { createPrivateKey, randomBytes, X509Certificate } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { get as httpsGet } from "node:https";
-import { createConnection, createServer, isIPv4 } from "node:net";
+import { createServer, isIPv4 } from "node:net";
 import * as path from "node:path";
 import { execa } from "execa";
 import { parse, parseAllDocuments, stringify } from "yaml";
@@ -14,13 +15,14 @@ import { beginBetaState, betaDirectory, captureBetaNode, pinnedBetaTools, writeB
 import { kindBetaKubeletTrust } from "../../lib/kind-kubelet-trust.js";
 export { kindBetaKubeletTrust } from "../../lib/kind-kubelet-trust.js";
 import type { ensureCluster, installLocalCoreChart } from "./local-k8s.js";
-import { prepareKindBetaInference } from "./kind-beta-inference.js";
+import { prepareKindBetaInference, type KindBetaProviderConnection } from "./kind-beta-inference.js";
 
 type ObjectMap = Record<string, any>;
-export type BetaExecute = (file: string, args: string[], options?: { input?: string; stdio?: "pipe" | "inherit"; env?: NodeJS.ProcessEnv }) => Promise<{ stdout: string }>;
+export type BetaExecute = (file: string, args: string[], options?: { input?: string; stdio?: "pipe" | "inherit"; env?: NodeJS.ProcessEnv; cancelSignal?: AbortSignal }) => Promise<{ stdout: string }>;
 export interface BetaTools { kind: string; kubectl: string; helm: string; runtime: string; env: NodeJS.ProcessEnv }
+export type KindBetaStage = "identity" | "cluster" | "network" | "dex" | "core" | "bridge" | "providers" | "access";
 interface Hooks { ensureCluster: typeof ensureCluster; installLocalCoreChart: typeof installLocalCoreChart; openBrowser?: (url: string) => Promise<void>;
-  afterCluster?: () => Promise<void>; beforeCore?: () => Promise<void> }
+  afterCluster?: () => Promise<void>; beforeCore?: () => Promise<void>; progress?: (stage: KindBetaStage, detail?: string) => void }
 const object = (value: any, label: string): ObjectMap => {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be a YAML object`);
   return value;
@@ -71,18 +73,52 @@ function documents(file: string): ObjectMap[] {
   });
 }
 
-export function loadKindBetaPlan(file: string, cluster: string, asset = requireBundledAsset) {
+export async function verifyKindBetaSchemaArchitecture(architecture: unknown, coreChart: string, core: ObjectMap,
+  tools: BetaTools, execute: BetaExecute): Promise<"amd64" | "arm64"> {
+  if (architecture !== "amd64" && architecture !== "arm64") throw new Error("Cannot determine a supported Kind node architecture");
+  if (core.schemaHook?.architecture !== undefined && core.schemaHook.architecture !== architecture) {
+    throw new Error(`Reviewed schemaHook.architecture does not match the ${architecture} node`);
+  }
+  let image: ObjectMap = {};
+  for (const values of [...["values.yaml", "values-generic.yaml", "values-kind-beta.yaml"]
+    .map(file => object(parse(readFileSync(path.join(coreChart, file), "utf8")), "Core values")), core]) {
+    if (values.schemaHook === undefined) continue;
+    const settings = object(values.schemaHook, "Schema hook settings");
+    if (settings.image !== undefined) image = { ...image, ...object(settings.image, "Schema helper image") };
+  }
+  if (typeof image.repository !== "string" || !/^([a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?\/)?[a-z0-9]+([._-][a-z0-9]+)*(\/[a-z0-9]+([._-][a-z0-9]+)*)*$/.test(image.repository)
+    || typeof image.digest !== "string" || !/^sha256:[a-f0-9]{64}$/.test(image.digest)
+    || (image.tag !== undefined && image.tag !== "latest")) throw new Error("Schema helper requires a digest-bound qualified image");
+  const result = await execute(tools.runtime, ["manifest", "inspect", `${image.repository}@${image.digest}`],
+    { env: tools.env, stdio: "pipe", cancelSignal: AbortSignal.timeout(30_000) });
+  let manifest: unknown;
+  try { manifest = JSON.parse(result.stdout); }
+  catch { throw new Error("Schema image platform metadata is invalid; no architecture selection was changed"); }
+  if (!manifest || typeof manifest !== "object" || !("manifests" in manifest) || !Array.isArray(manifest.manifests)
+    || !manifest.manifests.some(entry => entry?.platform?.os === "linux" && entry.platform.architecture === architecture
+      && entry.annotations?.["vnd.docker.reference.type"] !== "attestation-manifest"
+      && typeof entry.digest === "string" && /^sha256:[a-f0-9]{64}$/.test(entry.digest))) {
+    throw new Error(`The pinned schema image does not advertise linux/${architecture}; use matching qualified images and nodes`);
+  }
+  return architecture;
+}
+
+export function loadKindBetaPlan(file: string, cluster: string, asset = requireBundledAsset, localIssuer?: { hostname: string; port: number }) {
   if (!/^[a-z0-9][a-z0-9-]{0,39}$/.test(cluster)) throw new Error("Use an explicit lowercase Kind cluster name (1–40 characters)");
   const configPath = path.resolve(file);
   const config = object(parse(readFileSync(configPath, "utf8")), "Kind beta config");
-  const allowed = ["version", "nodeImage", "ciliumVersion", "coreValues", "bridgeValues", "resources", "oidc"];
+  const allowed = ["version", "nodeImage", "ciliumVersion", "coreValues", "bridge", "bridgeValues", "resources", "oidc"];
+  if (config.bridge !== undefined && typeof config.bridge !== "boolean") throw new Error("bridge must be a boolean");
+  const includeBridge = config.bridge !== false;
+  if (!includeBridge && config.bridgeValues !== undefined) throw new Error("Core-only setup cannot contain Bridge values");
   if (config.version !== 1 || Object.keys(config).some(key => !allowed.includes(key))) throw new Error("Unknown Kind beta config version or field");
   if (!/^kindest\/node(?::[^@\s]+)?@sha256:[a-f0-9]{64}$/.test(config.nodeImage ?? "")) throw new Error("nodeImage must identify a qualified Kubernetes 1.35 Kind node by digest");
   if (!/^\d+\.\d+\.\d+$/.test(config.ciliumVersion ?? "")) throw new Error("Supply a reviewed exact ciliumVersion");
   const resolve = (value: any) => path.resolve(path.dirname(configPath), text(value, "Input file"));
-  const coreValues = resolve(config.coreValues), bridgeValues = resolve(config.bridgeValues);
+  const coreValues = resolve(config.coreValues), bridgeValues = includeBridge ? resolve(config.bridgeValues) : "";
   const core = object(parse(readFileSync(coreValues, "utf8")), "Core values");
-  const bridge = object(parse(readFileSync(bridgeValues, "utf8")), "Bridge values");
+  const bridge = includeBridge ? object(parse(readFileSync(bridgeValues, "utf8")), "Bridge values") : {};
+  if (core.headlamp?.enabled === false || core.headlamp?.oidc?.enabled === false) throw new Error("Kind setup requires Headlamp with secure OIDC sign-in");
   if (core.schemaHook?.enabled !== undefined && core.schemaHook.enabled !== true) {
     throw new Error("A fresh Kind beta install requires schemaHook.enabled=true; do not reuse upgrade-only schema staging settings");
   }
@@ -106,7 +142,11 @@ export function loadKindBetaPlan(file: string, cluster: string, asset = requireB
   for (const key of ["usernameClaim", "usernamePrefix", "groupsClaim", "groupsPrefix"]) text(oidc[key], `oidc.${key}`);
   if ([oidc.usernamePrefix, oidc.groupsPrefix].some(prefix => prefix === "-" || prefix.startsWith("system:"))) throw new Error("OIDC principals require explicit non-system prefixes");
   const issuer = text(core.headlamp?.oidc?.issuerURL, "Core Headlamp issuerURL");
-  if (!/^https:\/\/[A-Za-z0-9][A-Za-z0-9.-]*(?::443)?(?:\/[^\s?#]*)?$/.test(issuer)
+  const managedIssuer = localIssuer && /^[a-z0-9][a-z0-9-]*\.kars\.test$/.test(localIssuer.hostname)
+    && Number.isInteger(localIssuer.port) && localIssuer.port >= 1024 && localIssuer.port <= 65535
+    && issuer === `https://${localIssuer.hostname}:${localIssuer.port}`
+    && core.headlamp?.oidc?.localDexNamespace === "kars-local-idp" && oidc.caFile;
+  if ((!managedIssuer && !/^https:\/\/[A-Za-z0-9][A-Za-z0-9.-]*(?::443)?(?:\/[^\s?#]*)?$/.test(issuer))
     || ["localhost", "127.0.0.1"].includes(new URL(issuer).hostname)) throw new Error("OIDC must be externally reachable over verified HTTPS on port 443 before Kind creation");
   const clientID = text(core.headlamp?.oidc?.clientID, "Core Headlamp clientID");
   const headlamp = origin(core.headlamp?.oidc?.callbackURL, "/oidc-callback");
@@ -115,9 +155,9 @@ export function loadKindBetaPlan(file: string, cluster: string, asset = requireB
     if (env[entry.name]) throw new Error("Duplicate Bridge environment setting");
     env[entry.name] = entry;
   }
-  if (env.BRIDGE_OIDC_ISSUER?.value !== issuer) throw new Error("Bridge and Headlamp must use the same external issuer");
-  const web = origin(env.BRIDGE_OIDC_REDIRECT_URI?.value, "/auth/callback");
-  if (web.port === headlamp.port || bridge.headlamp?.url !== headlamp.origin) throw new Error("Bridge/Headlamp access URLs must match their callbacks and use different ports");
+  if (includeBridge && env.BRIDGE_OIDC_ISSUER?.value !== issuer) throw new Error("Bridge and Headlamp must use the same external issuer");
+  const web = includeBridge ? origin(env.BRIDGE_OIDC_REDIRECT_URI?.value, "/auth/callback") : headlamp;
+  if (includeBridge && (web.port === headlamp.port || bridge.headlamp?.url !== headlamp.origin)) throw new Error("Bridge/Headlamp access URLs must match their callbacks and use different ports");
   if (!Array.isArray(config.resources) || !config.resources.length) throw new Error("Supply credential/TLS and reviewed OIDC RBAC resource files");
   const resources = config.resources.flatMap((entry: any) => documents(resolve(entry)));
   const identities = new Set<string>();
@@ -172,12 +212,14 @@ export function loadKindBetaPlan(file: string, cluster: string, asset = requireB
   }
   verifyBudgetTls(budgetTls, core.inferenceBudget?.caBundle);
   secret(core.headlamp?.oidc?.clientSecret?.sourceName, core.headlamp?.oidc?.clientSecret?.key ?? "client-secret");
-  const client = env.BRIDGE_OIDC_CLIENT_SECRET?.valueFrom?.secretKeyRef;
-  secret(client?.name, client?.key);
-  const principalName = text(bridge.auth?.principalSecretName, "Bridge auth.principalSecretName");
-  const principalKey = bridge.auth?.principalSecretKey ?? "session-secret";
-  if (resources.some(resource => resource.kind === "Secret" && resource.metadata.name === principalName)) secret(principalName, principalKey);
-  else resources.push({ apiVersion: "v1", kind: "Secret", metadata: { name: principalName, namespace: "kars-system" }, type: "Opaque", stringData: { [principalKey]: randomBytes(48).toString("base64url") } });
+  if (includeBridge) {
+    const client = env.BRIDGE_OIDC_CLIENT_SECRET?.valueFrom?.secretKeyRef;
+    secret(client?.name, client?.key);
+    const principalName = text(bridge.auth?.principalSecretName, "Bridge auth.principalSecretName");
+    const principalKey = bridge.auth?.principalSecretKey ?? "session-secret";
+    if (resources.some(resource => resource.kind === "Secret" && resource.metadata.name === principalName)) secret(principalName, principalKey);
+    else resources.push({ apiVersion: "v1", kind: "Secret", metadata: { name: principalName, namespace: "kars-system" }, type: "Opaque", stringData: { [principalKey]: randomBytes(48).toString("base64url") } });
+  }
   const caRefs = [core.headlamp?.oidc?.caConfigMap, core.headlamp?.oidc?.caSourceConfigMap, bridge.web?.oidc?.caConfigMap];
   if (caRefs.some(ref => ref && (!oidc.caFile || ref !== "kars-kind-oidc-ca"))) {
     throw new Error("Use oidc.caFile for shared API-server, Headlamp and Bridge trust; omit custom CA references or use kars-kind-oidc-ca");
@@ -191,7 +233,7 @@ export function loadKindBetaPlan(file: string, cluster: string, asset = requireB
     if (identities.has("ConfigMap/kars-kind-oidc-ca")) throw new Error("kars-kind-oidc-ca is managed from oidc.caFile");
     resources.push({ apiVersion: "v1", kind: "ConfigMap", metadata: { name: "kars-kind-oidc-ca", namespace: "kars-system" }, data: { "ca.crt": ca } });
   }
-  return { cluster, nodeImage: config.nodeImage as string, ciliumVersion: config.ciliumVersion as string, coreValues, bridgeValues,
+  return { cluster, includeBridge, nodeImage: config.nodeImage as string, ciliumVersion: config.ciliumVersion as string, coreValues, bridgeValues,
     coreChart: asset("deploy/helm/kars"), bridgeChart: asset("bridge/deploy/helm/kars-bridge"),
     issuer, clientID, oidc, ca, resources, web, headlamp, core, inference: {} as ObjectMap };
 }
@@ -203,7 +245,7 @@ export function kindBetaClusterConfig(plan: KindBetaPlan, caPath?: string) {
     "oidc-groups-claim": plan.oidc.groupsClaim, "oidc-groups-prefix": plan.oidc.groupsPrefix };
   if (caPath) args["oidc-ca-file"] = "/etc/kars/oidc-ca.crt";
   return { kind: "Cluster", apiVersion: "kind.x-k8s.io/v1alpha4", networking: { disableDefaultCNI: true },
-    nodes: [{ role: "control-plane", ...(plan.localDex ? { extraPortMappings: [{ containerPort: 30443, hostPort: 443, listenAddress: "127.0.0.1", protocol: "TCP" }] } : {}), ...(caPath ? { extraMounts: [{ hostPath: caPath, containerPath: "/etc/kars/oidc-ca.crt", readOnly: true }] } : {}),
+    nodes: [{ role: "control-plane", ...(plan.localDex ? { extraPortMappings: [{ containerPort: 30443, hostPort: Number(new URL(plan.issuer).port || 443), listenAddress: "127.0.0.1", protocol: "TCP" }] } : {}), ...(caPath ? { extraMounts: [{ hostPath: caPath, containerPath: "/etc/kars/oidc-ca.crt", readOnly: true }] } : {}),
       // Kind patches its v1beta3 template before kubeadm performs any API conversion.
       kubeadmConfigPatches: [stringify({ apiVersion: "kubeadm.k8s.io/v1beta3", kind: "ClusterConfiguration", apiServer: { extraArgs: args,
         ...(caPath ? { extraVolumes: [{ name: "kars-oidc-ca", hostPath: "/etc/kars/oidc-ca.crt", mountPath: "/etc/kars/oidc-ca.crt", readOnly: true, pathType: "File" }] } : {}) } })] }] };
@@ -249,6 +291,9 @@ export function kindBetaApiDestinations(service: ObjectMap, slices: ObjectMap) {
 }
 
 export async function installKindBeta(plan: KindBetaPlan, tools: BetaTools, hooks: Hooks, execute: BetaExecute, directory: string) {
+  const providerInput = plan.inference.kindBeta?.providerEndpoint
+    ? plan.resources.find(resource => resource.kind === "Secret" && resource.metadata?.name === "kars-inference-providers") : undefined;
+  if (plan.inference.kindBeta?.providerEndpoint && !providerInput) throw new Error("Named bootstrap provider inputs are missing");
   const ignore = path.join(directory, ".gitignore");
   try { writeFileSync(ignore, "*\n", { mode: 0o600, flag: "wx" }); }
   catch (error) {
@@ -269,6 +314,7 @@ export async function installKindBeta(plan: KindBetaPlan, tools: BetaTools, hook
   if (caPath) writeFileSync(caPath, plan.ca!, { mode: 0o600, flag: "wx" });
   const config = path.join(directory, "kind.yaml");
   writeFileSync(config, stringify(kindBetaClusterConfig(plan, caPath)), { mode: 0o600, flag: "wx" });
+  hooks.progress?.("cluster");
   await hooks.ensureCluster(tools.kind, plan.cluster, tools.env, tools.runtime, { config, kubeconfig, image: plan.nodeImage,
     ...(hooks.afterCluster ? { onCreated: hooks.afterCluster } : {}) });
   const server = JSON.parse((await kube(["version", "-o", "json"])).stdout);
@@ -285,8 +331,20 @@ export async function installKindBeta(plan: KindBetaPlan, tools: BetaTools, hook
     && apiServerPod?.spec?.volumes?.some((volume: ObjectMap) =>
       volume.name === "kars-oidc-ca" && volume.hostPath?.path === "/etc/kars/oidc-ca.crt" && volume.hostPath?.type === "File"));
   if (!apiServer || !argumentsMatch || !caMatches) throw new Error("Kind API server did not apply the reviewed OIDC arguments and CA mount; retained the cluster for inspection before installing workloads");
+  const nodeName = `${plan.cluster}-control-plane`;
+  const kindNodes = (await execute(tools.kind, ["get", "nodes", "--name", plan.cluster], { env: tools.env, stdio: "pipe" })).stdout.trim().split(/\s+/);
+  if (kindNodes.length !== 1 || kindNodes[0] !== nodeName) throw new Error("Kind beta requires its single owned control-plane node");
+  const node = JSON.parse((await kube(["get", "node", nodeName, "-o", "json"])).stdout);
+  if (node.metadata?.name !== nodeName || node.status?.nodeInfo?.operatingSystem !== "linux"
+    || node.metadata?.labels?.["kubernetes.io/arch"] !== node.status?.nodeInfo?.architecture) {
+    throw new Error("Kind node architecture labels and runtime status disagree; no labels were changed");
+  }
+  hooks.progress?.("cluster", "Verifying the pinned schema image supports the actual node architecture before installing workloads.");
+  const architecture = await verifyKindBetaSchemaArchitecture(node.status.nodeInfo.architecture, plan.coreChart, plan.core, tools, execute);
+  hooks.progress?.("network");
   await helm(["install", "cilium", "cilium", "--repo", "https://helm.cilium.io/", "--version", plan.ciliumVersion,
-    "--namespace", "kube-system", "--set", "ipam.mode=kubernetes", "--set", "operator.replicas=1", "--set", "kubeProxyReplacement=false", "--wait", "--wait-for-jobs", "--timeout", "10m"]);
+    "--namespace", "kube-system", "--set", "ipam.mode=kubernetes", "--set", "operator.replicas=1", "--set", "kubeProxyReplacement=false",
+    "--set", "nodeSelectorLabels=true", "--wait", "--wait-for-jobs", "--timeout", "10m"]);
   await kube(["-n", "kube-system", "rollout", "status", "daemonset/cilium", "--timeout=300s"]);
   await kube(["wait", "--for=condition=Established", "crd/ciliumnetworkpolicies.cilium.io", "--timeout=300s"]);
   await kube(["wait", "--for=condition=Ready", "nodes", "--all", "--timeout=300s"]);
@@ -294,56 +352,72 @@ export async function installKindBeta(plan: KindBetaPlan, tools: BetaTools, hook
   const apiService = JSON.parse((await kube(["-n", "default", "get", "service", "kubernetes", "-o", "json"])).stdout);
   const apiEndpoints = JSON.parse((await kube(["-n", "default", "get", "endpointslices", "-l", "kubernetes.io/service-name=kubernetes", "-o", "json"])).stdout);
   const apiDestinations = kindBetaApiDestinations(apiService, apiEndpoints);
-  const nodeName = `${plan.cluster}-control-plane`;
-  const kindNodes = (await execute(tools.kind, ["get", "nodes", "--name", plan.cluster], { env: tools.env, stdio: "pipe" })).stdout.trim().split(/\s+/);
-  if (kindNodes.length !== 1 || kindNodes[0] !== nodeName) throw new Error("Kind beta requires its single owned control-plane node");
-  const node = JSON.parse((await kube(["get", "node", nodeName, "-o", "json"])).stdout);
   const containers = JSON.parse((await execute(tools.runtime, ["inspect", nodeName], { env: tools.env, stdio: "pipe" })).stdout);
   if (!Array.isArray(containers) || containers.length !== 1) throw new Error("Missing Kind control-plane container");
   // Read only public certificates from the node we just created; never disable kubelet TLS verification.
   const chain = (await execute(tools.runtime, ["exec", nodeName, "cat", "/var/lib/kubelet/pki/kubelet.crt"], { env: tools.env, stdio: "pipe" })).stdout;
   const metricsServer = kindBetaKubeletTrust(plan.cluster, node, containers[0], chain);
-  await hooks.beforeCore?.();
+  if (hooks.beforeCore) { hooks.progress?.("dex"); await hooks.beforeCore(); }
+  hooks.progress?.("core", "Creating Core namespace, governed credentials and the reviewed installation overlay.");
   await kube(["create", "--validate=strict", "-f", "-"], namespace.stdout);
   // CREATE only: no adoption, overwrite, rollback or credential logging.
-  for (const resource of plan.resources) await kube(["create", "--validate=strict", "-f", "-"], JSON.stringify(resource));
+  for (const resource of plan.resources) {
+    if (resource !== providerInput) await kube(["create", "--validate=strict", "-f", "-"], JSON.stringify(resource));
+  }
   const coreOverlay = path.join(directory, "core-kind.yaml"), bridgeOverlay = path.join(directory, "bridge-kind.yaml");
-  writeFileSync(coreOverlay, stringify({ ...plan.inference, global: { installationProfile: "kind-beta" }, kindBeta: { cni: "cilium" }, cilium: { enabled: true },
-    schemaHook: { apiDestinations }, metricsServer,
+  writeFileSync(coreOverlay, stringify({ ...plan.inference, global: { installationProfile: "kind-beta" }, kindBeta: { ...plan.inference.kindBeta, cni: "cilium" }, cilium: { enabled: true },
+    schemaHook: { apiDestinations, architecture }, metricsServer,
     datapathWitness: { nodes: [`${plan.cluster}-control-plane`] }, sandbox: { nodeSelector: { "kubernetes.io/hostname": `${plan.cluster}-control-plane` } },
     ...(plan.ca ? { headlamp: { oidc: { caConfigMap: "kars-kind-oidc-ca", caSourceConfigMap: "kars-kind-oidc-ca" } } } : {}) }), { mode: 0o600, flag: "wx" });
-  writeFileSync(bridgeOverlay, stringify({ global: { installationProfile: "kind-beta" }, networkPolicy: { routerApiServerIngress: true },
+  if (plan.includeBridge) writeFileSync(bridgeOverlay, stringify({ global: { installationProfile: "kind-beta" }, networkPolicy: { routerApiServerIngress: true },
     ...(plan.ca ? { web: { oidc: { caConfigMap: "kars-kind-oidc-ca" } } } : {}) }), { mode: 0o600, flag: "wx" });
+  hooks.progress?.("core", "Helm is installing Core: pre-install schema hooks, workloads, then post-install enrollment hooks. Helm timeout: 20 minutes. Live resources below show what is waiting.");
   await hooks.installLocalCoreChart(tools.helm, tools.kubectl, plan.cluster, "kars", plan.coreChart,
     [path.join(plan.coreChart, "values-generic.yaml"), path.join(plan.coreChart, "values-kind-beta.yaml"), plan.coreValues, coreOverlay], [], undefined, { kubeconfig });
   // The enrollment hook can finish before its controller-created SRE consumer converges.
+  hooks.progress?.("core", "Core Helm release completed. Reading the canonical SRE registration.");
   const registration = JSON.parse((await kube(["get", "karssreregistration", "canonical", "-o", "json"])).stdout);
   const sreName = text(registration.spec?.sandbox?.name, "Core SRE sandbox name");
   const sreNamespace = text(registration.spec?.runtimeNamespace?.name, "Core SRE runtime namespace");
+  hooks.progress?.("core", "Waiting for the controller to create the SRE runtime deployment. Timeout: 15 minutes.");
   await kube(["-n", sreNamespace, "wait", "--for=create", `deployment/${sreName}`, "--timeout=15m"]);
+  hooks.progress?.("core", "Waiting for the SRE runtime deployment to become ready. Timeout: 15 minutes.");
   await kube(["-n", sreNamespace, "rollout", "status", `deployment/${sreName}`, "--timeout=15m"]);
+  hooks.progress?.("core", "Waiting for canonical SRE registration to report Ready. Timeout: 15 minutes.");
   await kube(["wait", "--for=condition=Ready", "karssreregistration/canonical", "--timeout=15m"]);
-  await helm(["install", "kars-bridge", plan.bridgeChart, "--namespace", "kars-system", "-f", path.join(plan.bridgeChart, "values-kind-beta.yaml"),
-    "-f", plan.bridgeValues, "-f", bridgeOverlay, "--wait", "--wait-for-jobs", "--timeout", "15m"]);
-  const { setupInstalledKindBetaProviders } = await import("./kind-beta-providers.js");
-  await setupInstalledKindBetaProviders(plan.cluster, kubeconfig, path.join(directory, "provider-setup"),
-    plan.coreChart, tools, execute, hooks.installLocalCoreChart);
+  if (plan.includeBridge) {
+    hooks.progress?.("bridge");
+    await helm(["install", "kars-bridge", plan.bridgeChart, "--namespace", "kars-system", "-f", path.join(plan.bridgeChart, "values-kind-beta.yaml"),
+      "-f", plan.bridgeValues, "-f", bridgeOverlay, "--wait", "--wait-for-jobs", "--timeout", "15m"]);
+  }
+  const operator = async (args: string[], input?: string) => (await kube(args, input)).stdout;
+  hooks.progress?.("providers");
+  let installerWriter: { name: string; uid: string } | undefined;
+  if (providerInput && !plan.includeBridge) {
+    const { createKindBetaInstallerWriter } = await import("./kind-beta-installer-writer.js");
+    installerWriter = await createKindBetaInstallerWriter(operator);
+  }
+  if (plan.includeBridge || providerInput) {
+    const { setupInstalledKindBetaProviders } = await import("./kind-beta-providers.js");
+    await setupInstalledKindBetaProviders(plan.cluster, kubeconfig, path.join(directory, "provider-setup"),
+      plan.coreChart, tools, execute, hooks.installLocalCoreChart, installerWriter);
+  }
+  if (providerInput) {
+    const { publishKindBetaProviderInput } = await import("./kind-beta-provider-input.js");
+    if (installerWriter) {
+      const { withKindBetaInstallerWriter } = await import("./kind-beta-installer-writer.js");
+      await withKindBetaInstallerWriter(operator, installerWriter, directory, tools, execute,
+        write => publishKindBetaProviderInput(providerInput, operator, write));
+    } else await publishKindBetaProviderInput(providerInput, operator);
+  }
   return { kubeconfig, context };
 }
 
-async function assertPortAvailable(port: number) {
-  if (port === 443) {
-    // The runtime publishes this privileged port, not the unprivileged CLI.
-    await new Promise<void>((resolve, reject) => {
-      const socket = createConnection({ host: "127.0.0.1", port });
-      socket.once("connect", () => { socket.destroy(); reject(new Error("Local HTTPS port 443 is already in use")); });
-      socket.once("error", (error: NodeJS.ErrnoException) => { socket.destroy(); error.code === "ECONNREFUSED" ? resolve() : reject(error); });
-      socket.setTimeout(3000, () => { socket.destroy(); reject(new Error("Cannot verify local HTTPS port 443 availability")); });
-    });
-    return;
-  }
+export async function assertPortAvailable(port: number) {
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error("Local access requires an unprivileged port from 1024 to 65535");
   await new Promise<void>((resolve, reject) => {
-    const server = createServer(); server.once("error", reject);
+    const server = createServer();
+    server.once("error", () => reject(new Error(`Cannot bind loopback port ${port}; choose a different local port`)));
     server.listen(port, "127.0.0.1", () => server.close(error => error ? reject(error) : resolve()));
   });
 }
@@ -364,7 +438,7 @@ export async function kindBetaAccess(plan: KindBetaPlan, tools: BetaTools, insta
   dependencies: { spawn: typeof execa; probe: (url: URL) => Promise<void>; open?: (url: string) => Promise<void> } = { spawn: execa, probe: probeKindBetaUI }) {
   const children = new Set<ReturnType<typeof execa>>();
   const targets = [
-    { namespace: "kars-system", service: "kars-bridge-web", url: plan.web, remote: "3000" },
+    ...(plan.includeBridge === false ? [] : [{ namespace: "kars-system", service: "kars-bridge-web", url: plan.web, remote: "3000" }]),
     { namespace: "headlamp", service: "headlamp", url: plan.headlamp, remote: "80" },
   ];
   let stopped = false;
@@ -422,7 +496,7 @@ export async function kindBetaAccess(plan: KindBetaPlan, tools: BetaTools, insta
     }
     await Promise.race([Promise.all(targets.map(target => dependencies.probe(target.url))), interrupt]);
     if (stopped) return;
-    console.log(`Bridge: ${plan.web.origin}\nHeadlamp: ${plan.headlamp.origin}\nAuthenticate with your OIDC account. Ctrl+C closes these tunnels; the cluster and failure evidence are retained.`);
+    console.log(`${plan.includeBridge === false ? "" : `Bridge: ${plan.web.origin}\n`}Headlamp: ${plan.headlamp.origin}\nAuthenticate with your OIDC account. Ctrl+C closes these tunnels; the cluster and failure evidence are retained.`);
     await Promise.race([dependencies.open?.(plan.web.origin), interrupt]);
     while (!stopped) {
       const failure = await Promise.race([interrupt, ...tunnels.map((tunnel, index) => tunnel.ended.then(detail => ({ index, detail })))]);
@@ -463,16 +537,9 @@ export async function kindBetaAccess(plan: KindBetaPlan, tools: BetaTools, insta
 }
 
 export async function assertFreshKindBetaCluster(cluster: string, tools: BetaTools, execute: BetaExecute): Promise<void> {
-  let names: string[];
-  try {
-    const { stdout } = await execute(tools.kind, ["get", "clusters"], { env: tools.env, stdio: "pipe" });
-    names = stdout.split(/\r?\n/).map(name => name.trim()).filter(Boolean);
-    if (names.some(name => !/^[a-z0-9][a-z0-9-]*$/.test(name))) throw new Error("Invalid cluster inventory");
-  } catch {
-    throw new Error("Kind cluster discovery failed; absence was not established. No inference settings or cluster resources were changed");
-  }
+  const names = await listKindClusters(tools, execute);
   if (names.includes(cluster)) {
-    throw new Error(`Kind beta requires a fresh cluster; ${cluster} already exists. To add Bridge to existing Core, install only the separate Bridge Helm release; do not rerun Core installation`);
+    throw new KindInventoryError(`Kind beta requires a fresh cluster; ${cluster} already exists (including stopped nodes). Choose a fresh name. To add Bridge to existing Core, install only the separate Bridge Helm release; do not rerun Core installation`);
   }
 }
 
@@ -485,7 +552,7 @@ export async function runKindBeta(file: string | boolean, cluster: string, tools
   await assertFreshKindBetaCluster(cluster, tools, async (tool, args, options) => {
     const result = await execa(tool, args, options); return { stdout: result.stdout ?? "" };
   });
-  await Promise.all([assertPortAvailable(Number(plan.web.port)), assertPortAvailable(Number(plan.headlamp.port)), verifyKindBetaIssuer(plan)]);
+  await Promise.all([...new Set([Number(plan.web.port), Number(plan.headlamp.port)])].map(assertPortAvailable).concat(verifyKindBetaIssuer(plan)));
   plan.inference = await prepareKindBetaInference(plan.core, plan.resources);
   mkdirSync(directory, { mode: 0o700 });
   const installed = await installKindBeta(plan, tools, hooks, async (tool, args, options) => {
@@ -495,36 +562,58 @@ export async function runKindBeta(file: string | boolean, cluster: string, tools
   await kindBetaAccess(plan, tools, installed, { spawn: execa, probe: probeKindBetaUI, open: hooks.openBrowser });
 }
 
-async function runManagedKindBeta(cluster: string, tools: BetaTools, hooks: Hooks) {
-  const { prepareLocalBeta, promptLocalBetaAccount, installLocalDex } = await import("./kind-beta-local.js");
+export interface ManagedKindBetaInput {
+  includeBridge?: boolean;
+  ports?: import("./kind-beta-local.js").LocalBetaPorts;
+  account: import("./kind-beta-local.js").LocalBetaAccount;
+  inference: Parameters<typeof prepareKindBetaInference>[2];
+  provider: "foundry" | "azure-openai" | KindBetaProviderConnection["kind"];
+  providerConnection?: KindBetaProviderConnection;
+  execute: BetaExecute;
+  expectedRuntime: { endpoint: string; sshKey?: string };
+  progress?: (stage: KindBetaStage, detail?: string) => void;
+}
+
+/** Browser input replaces prompts, never the maintained ownership/install path. */
+export async function runManagedKindBeta(cluster: string, tools: BetaTools, hooks: Hooks, input?: ManagedKindBetaInput) {
+  const { prepareLocalBeta, promptLocalBetaAccount, installLocalDex, localBetaPorts } = await import("./kind-beta-local.js");
+  const includeBridge = input?.includeBridge !== false;
+  const ports = localBetaPorts(input?.ports, includeBridge);
   // Resolve both packaged charts before asking for credentials or changing the host.
   requirePackagedAsset("deploy/helm/kars"); requirePackagedAsset("bridge/deploy/helm/kars-bridge");
   const directory = betaDirectory(cluster);
   if (existsSync(directory)) throw new Error(`Retained attempt exists at ${directory}; no identities will be replayed`);
-  const execute: BetaExecute = async (tool, args, options) => {
+  const execute: BetaExecute = input?.execute ?? (async (tool, args, options) => {
     try { const result = await execa(tool, args, options); return { stdout: result.stdout ?? "" }; }
     catch { throw new Error(`${path.basename(tool)} local beta operation failed; inspect retained private state. Credentials are not echoed.`); }
-  };
+  });
   const state = await beginBetaState(cluster, tools, execute);
+  if (input && (state.endpoint !== input.expectedRuntime.endpoint || state.sshKey !== input.expectedRuntime.sshKey)) {
+    throw new Error("Podman connection changed since preflight; no setup was started");
+  }
   tools = pinnedBetaTools(tools, state);
   await assertFreshKindBetaCluster(cluster, tools, execute);
-  await Promise.all([443, 3000, 4466].map(assertPortAvailable));
-  const account = await promptLocalBetaAccount(`${cluster}-${state.owner.slice(0, 8)}.kars.test`);
+  await Promise.all((includeBridge ? Object.values(ports) : [ports.https, ports.headlamp]).map(assertPortAvailable));
+  const account = input ? { ...input.account } : await promptLocalBetaAccount(`${cluster}-${state.owner.slice(0, 8)}.kars.test`, ports.https);
   mkdirSync(directory, { mode: 0o700 });
   writeFileSync(path.join(directory, ".gitignore"), "*\n", { mode: 0o600, flag: "wx" });
   writeBetaState(directory, state);
   try {
-    const plan = await prepareLocalBeta(directory, state, account, execute);
+    input?.progress?.("identity");
+    const plan = await prepareLocalBeta(directory, state, account, execute, requirePackagedAsset, includeBridge, ports);
     account.password = "";
-    plan.inference = await prepareKindBetaInference(plan.core, plan.resources, undefined, true);
+    if (input) plan.core.controller = { ...plan.core.controller, inferenceDefaults: { provider: input.provider } };
+    plan.inference = await prepareKindBetaInference(plan.core, plan.resources, input?.inference, !input, input?.providerConnection);
     writeFileSync(path.join(directory, "installed-resources.yaml"), plan.resources.map(resource => stringify(resource)).join("---\n"), { mode: 0o600, flag: "wx" });
     state.phase = "installing"; writeBetaState(directory, state);
     const installed = await installKindBeta(plan, tools, { ...hooks,
+      progress: input?.progress ?? hooks.progress,
       afterCluster: async () => { await captureBetaNode(state, tools, execute); writeBetaState(directory, state); },
       beforeCore: () => installLocalDex(plan, directory, state, tools, execute),
     }, execute, directory);
     state.phase = "ready"; writeBetaState(directory, state);
-    console.log(`Owned local beta: ${cluster}. To delete this cluster and its local trust: kars dev down --cluster-name ${cluster}. Private receipts are retained at ${directory}.`);
+    console.log(`Owned local beta: ${cluster}. To delete this cluster and its local trust: kars dev down --target local-k8s --cluster-name ${cluster}. Private receipts are retained at ${directory}.`);
+    input?.progress?.("access");
     await kindBetaAccess(plan, tools, installed, { spawn: execa, probe: probeKindBetaUI, open: hooks.openBrowser });
   } catch (error) {
     const { readBetaState } = await import("./kind-beta-state.js");

@@ -27,10 +27,10 @@ go mod edit \
     -require=github.com/go-jose/go-jose/v4@v4.1.6 \
     -require=github.com/klauspost/compress@v1.18.7 \
     -require=github.com/moby/spdystream@v0.5.1 \
-    -require=go.opentelemetry.io/otel/sdk@v1.45.0 \
-    -require=go.opentelemetry.io/otel/exporters/otlp/otlptrace@v1.45.0 \
-    -require=go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc@v1.45.0 \
-    -require=go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp@v1.45.0 \
+    -require=go.opentelemetry.io/otel/sdk@v1.47.0 \
+    -require=go.opentelemetry.io/otel/exporters/otlp/otlptrace@v1.47.0 \
+    -require=go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc@v1.47.0 \
+    -require=go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp@v1.47.0 \
     -require=golang.org/x/crypto@v0.58.1-0.20261009181718-2f1f834330b2 \
     -require=golang.org/x/net@v0.62.0 \
     -require=golang.org/x/text@v0.39.0 \
