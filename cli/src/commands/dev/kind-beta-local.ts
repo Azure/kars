@@ -206,6 +206,12 @@ export async function installLocalDex(plan: KindBetaPlan, directory: string, sta
   await kube(["-n", "kube-system", "rollout", "status", "deployment/coredns", "--timeout=180s"]);
   // Static host-network pods do not use cluster DNS. Give only the owned API server this Service mapping.
   const manifestPath = "/etc/kubernetes/manifests/kube-apiserver.yaml";
+  const apiService = JSON.parse((await kube(["-n", "default", "get", "service", "kubernetes", "-o", "json"])).stdout);
+  const apiIP = apiService.spec?.clusterIP;
+  if (!isIPv4(apiIP) || apiIP === "0.0.0.0"
+    || !apiService.spec?.ports?.some((port: { port: number; protocol: string }) => port.port === 443 && port.protocol === "TCP")) {
+    throw new Error("Owned Kubernetes API Service requires an IPv4 address and TCP port 443");
+  }
   const manifest = parse((await execute(tools.runtime, ["exec", nodeId, "cat", manifestPath], { env: tools.env })).stdout);
   if (manifest.kind !== "Pod" || manifest.metadata?.name !== "kube-apiserver" || !manifest.spec?.hostNetwork || manifest.spec.hostAliases) throw new Error("Unexpected owned API-server static pod manifest");
   manifest.spec.hostAliases = [{ ip, hostnames: [hostname] }];
@@ -220,11 +226,15 @@ export async function installLocalDex(plan: KindBetaPlan, directory: string, sta
       if (!pod?.spec?.hostAliases?.some((alias: any) => alias.ip === ip && alias.hostnames?.includes(hostname))
         || !pod.status?.conditions?.some((condition: any) => condition.type === "Ready" && condition.status === "True")) throw new Error("Waiting for the updated API-server pod");
       await kube(["get", "--raw", "/readyz", "--request-timeout=3s"]);
+      // The host-forwarded API can recover while the Service path used by hooks and Cilium is still broken.
+      const serviceReady = await execute(tools.runtime, ["exec", nodeId, "kubectl", "--kubeconfig=/etc/kubernetes/admin.conf",
+        `--server=https://${apiIP}:443`, "--request-timeout=3s", "get", "--raw", "/readyz"], { env: tools.env });
+      if (serviceReady.stdout.trim() !== "ok") throw new Error("Waiting for the in-cluster API Service");
       ready = true; break;
     }
     catch { await new Promise(resolve => setTimeout(resolve, 2000)); }
   }
-  if (!ready) throw new Error("Owned API server did not recover after local issuer routing; retained cluster");
+  if (!ready) throw new Error("Owned API server and in-cluster Service did not recover after local issuer routing; retained cluster");
   state.trust.installed = true; writeBetaState(directory, state);
   await operations.trust(state, true, execute);
   await operations.verify(plan);

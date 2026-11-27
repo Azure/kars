@@ -34,12 +34,19 @@ on:
       - 'Cargo.lock'
       - '.github/workflows/image-cache-publish.yml'
   workflow_dispatch:
+    inputs:
+      controller_arm64_only:
+        description: 'Build only an attested ARM64 controller candidate for local qualification; do not update image tags.'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
 
 jobs:
   build-binaries:
+    if: ${{ !inputs.controller_arm64_only }}
     name: Build Rust binaries (host glibc, build-once)
     # Pinned to ubuntu-22.04 (glibc 2.35) so the binary runs on
     # AL3 distroless (glibc 2.38). Newer runners would emit glibc
@@ -163,3 +170,85 @@ jobs:
           # needed.
           cache-from: ${{ matrix.image.needs_binaries && '' || format('type=gha,scope=image-{0}', matrix.image.name) }}
           cache-to: ${{ matrix.image.needs_binaries && '' || format('type=gha,scope=image-{0},mode=max', matrix.image.name) }}
+
+  controller-arm64-candidate:
+    name: ARM64 controller candidate (AL3, digest only)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.controller_arm64_only }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: rust-glibc-release-multiarch
+          save-if: false
+      - name: Install the release ARM64 cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu libc6-dev-arm64-cross linux-libc-dev-arm64-cross
+      - name: Build the exact candidate controller
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: |
+          cargo build --locked --release --package kars-controller --target aarch64-unknown-linux-gnu
+          mkdir -p bin/arm64
+          cp target/aarch64-unknown-linux-gnu/release/kars-controller bin/arm64/
+          chmod +x bin/arm64/kars-controller
+          file bin/arm64/kars-controller
+          (cd bin && sha256sum arm64/kars-controller > SHA256SUMS)
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - name: Log in to GHCR
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build the AL3 image without replacing any tag
+        id: push
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v6
+        with:
+          context: .
+          file: controller/Dockerfile
+          platforms: linux/arm64
+          outputs: type=image,name=ghcr.io/azure/kars-controller,push-by-digest=true,name-canonical=true,push=true
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+          build-args: |
+            VERSION=candidate-${{ github.sha }}
+          sbom: true
+          provenance: true
+      - name: Attest candidate image provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/azure/kars-controller
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+      - name: Record the candidate image receipt
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          [[ "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          mkdir -p image-receipts
+          jq -n --arg digest "$DIGEST" --arg source "$GITHUB_SHA" --arg run "$GITHUB_RUN_ID" \
+            '{name: "kars-controller", repository: "ghcr.io/azure/kars-controller",
+              digest: $digest, source: $source, runId: $run, platform: "linux/arm64"}' \
+            > image-receipts/kars-controller.json
+      - name: Upload the candidate receipt and binary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: controller-arm64-candidate-${{ github.sha }}
+          path: |
+            image-receipts/kars-controller.json
+            bin/
+          retention-days: 14
+          if-no-files-found: error

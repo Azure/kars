@@ -189,7 +189,9 @@ describe("fresh packaged Dex inputs", () => {
     { includeBridge: false, ports: { https: 8443, bridge: 3000, headlamp: 4466 } },
     { includeBridge: true, ports: { https: 9443, bridge: 3100, headlamp: 4566 } },
     { includeBridge: false, ports: { https: 9443, bridge: 3100, headlamp: 4566 } },
-  ])("propagates selected ports through secure local identity: %j", async ({ includeBridge, ports }) => {
+    { includeBridge: true, ports: { https: 8443, bridge: 3000, headlamp: 4466 }, apiFailure: "transient" },
+    { includeBridge: true, ports: { https: 8443, bridge: 3000, headlamp: 4466 }, apiFailure: "persistent" },
+  ])("propagates selected ports through secure local identity: %j", async ({ includeBridge, ports, apiFailure }) => {
     const { directory, state } = stateFixture();
     const charts = path.join(directory, "charts"); mkdirSync(charts);
     const asset = (relative: string) => path.join(charts, relative.includes("kars-bridge") ? "bridge" : "core");
@@ -266,11 +268,21 @@ describe("fresh packaged Dex inputs", () => {
         .toThrow(/host-forwarding IPv4 \/32/);
     }
     const calls: string[] = [];
+    let serviceChecks = 0;
     const bootstrap = vi.fn<BetaExecute>(async (tool, args, options) => {
       calls.push(`${tool} ${args.join(" ")}`);
       if (tool === "helm") return { stdout: rendered };
       if (args[0] === "inspect") return { stdout: JSON.stringify([{ Id: nodeId, NetworkSettings: { Networks: { kind: { Gateway: "172.18.0.1" } } } }]) };
+      if (args.includes("service") && args.includes("kubernetes")) return { stdout: JSON.stringify({ spec: {
+        clusterIP: "10.96.0.1", ports: [{ port: 443, protocol: "TCP" }],
+      } }) };
       if (args.includes("service")) return { stdout: JSON.stringify({ spec: { clusterIP: "10.96.0.9" } }) };
+      if (args.includes("--server=https://10.96.0.1:443")) {
+        serviceChecks++;
+        expect(trust).not.toHaveBeenCalled();
+        if (apiFailure === "persistent" || (apiFailure === "transient" && serviceChecks === 1)) throw new Error("connection refused");
+        return { stdout: "ok" };
+      }
       if (args.includes("configmap")) return { stdout: JSON.stringify({ data: { Corefile: ".:53 { forward . /etc/resolv.conf }" } }) };
       if (args.includes("cat")) return { stdout: stringify({ kind: "Pod", metadata: { name: "kube-apiserver" }, spec: { hostNetwork: true } }) };
       if (args.includes("pods")) return { stdout: JSON.stringify({ items: [{ spec: { hostAliases: [{ ip: "10.96.0.9", hostnames: [state.trust!.hostname] }] }, status: { conditions: [{ type: "Ready", status: "True" }] } }] }) };
@@ -278,7 +290,28 @@ describe("fresh packaged Dex inputs", () => {
       return { stdout: "" };
     });
     const trust = vi.fn(async () => {}), verify = vi.fn(async () => {});
-    await installLocalDex(plan, directory, state, tools, bootstrap, { trust, verify });
+    if (apiFailure) vi.useFakeTimers();
+    try {
+      const installation = installLocalDex(plan, directory, state, tools, bootstrap, { trust, verify });
+      const outcome = apiFailure === "persistent"
+        ? expect(installation).rejects.toThrow("in-cluster Service did not recover")
+        : expect(installation).resolves.toBeUndefined();
+      if (apiFailure) await vi.runAllTimersAsync();
+      await outcome;
+    } finally {
+      if (apiFailure) vi.useRealTimers();
+    }
+    if (apiFailure === "persistent") {
+      expect(serviceChecks).toBe(60);
+      expect(trust).not.toHaveBeenCalled();
+      expect(verify).not.toHaveBeenCalled();
+      expect(readBetaState(directory)?.trust?.installed).toBe(false);
+      return;
+    }
+    expect(serviceChecks).toBe(apiFailure === "transient" ? 2 : 1);
+    expect(bootstrap.mock.calls.find(call => call[1].includes("--server=https://10.96.0.1:443")))
+      .toEqual([tools.runtime, ["exec", nodeId, "kubectl", "--kubeconfig=/etc/kubernetes/admin.conf",
+        "--server=https://10.96.0.1:443", "--request-timeout=3s", "get", "--raw", "/readyz"], { env: tools.env }]);
     expect(bootstrap.mock.calls.find(call => call[1].includes("install"))?.[1]).toEqual(["exec", nodeId, "install", "-d", "-m", "0700", "-o", "1001", "-g", "1001", `/var/local/kars-dex-${owner}`]);
     expect(calls.findIndex(call => call.includes("mv /etc/kubernetes/kars-oidc"))).toBeLessThan(calls.findIndex(call => call.includes("--raw /readyz")));
     expect(calls.findIndex(call => call.includes("--for=condition=Valid=True")))

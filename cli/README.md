@@ -126,6 +126,16 @@ so known enrollment checks and API refusals appear beside the failed pod without
 raw exception text. The installer saves these codes in its private ownership
 receipt before enabling cleanup; they survive node deletion. Unknown failures
 still require inspection of the retained node before cleanup.
+After local Dex routing restarts the API server, setup checks both the host API
+and the TLS-verified in-cluster API Service before advancing to Core. If either
+path does not recover within the bounded readiness wait, setup retains the
+cluster and stops before host-trust changes or schema-hook execution.
+Named-provider qualification also requires a controller image containing the
+named-provider endpoint guard; the published beta.6 controller predates it.
+The existing Image Cache Publish workflow has an opt-in `controller_arm64_only`
+dispatch for an attested AL3 candidate and image receipt without updating tags
+or publishing a release. Bind its verified receipt with the maintained chart
+packaging helper before a fresh installation; do not replay failed hooks.
 Fresh Kind beta setup can enroll SRE with an explicitly empty model-contract
 catalogue only under its record-only accounting and unbounded token-only funding.
 The enrollment hook checks the sealed and live Kind profile and accounting policy;
